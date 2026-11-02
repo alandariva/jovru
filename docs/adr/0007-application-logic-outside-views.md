@@ -25,8 +25,8 @@ interface (a CLI, an automated check) would have to repeat it.
     statuses and the batch of results, driven by `backend`.
 - Identifier quoting for previews moves from `backend::preview_sql` to the
   drivers' dialect, removing the `match` on `DriverKind`.
-- The result grid becomes its own entity (`ResultGrid`), embedded in the
-  workspace with `.cached(...)`.
+- The result grid becomes its own cached entity, as decided in
+  [ADR-0012](0012-result-grid-as-a-cached-entity.md).
 
 ## Alternatives considered
 

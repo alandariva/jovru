@@ -103,7 +103,7 @@ A change that introduces one of these is rejected in review:
 | A reusable frame probe and heartbeat in the repository | The 2026-11-02 measurements used a temporary harness that was not committed |
 | Benchmarks for hot paths | None yet ([ADR-0010](adr/0010-benchmarks-with-criterion.md), proposed) |
 | Long collections are virtualized | The explorer tree, saved queries and history build all their children |
-| Frequently changing regions are cached entities | The result grid renders inside `Workspace` ([UI guidelines](ui-guidelines.md#known-deviations)) |
+| Frequently changing regions are cached entities | The result grid renders inside `Workspace`; [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md) (accepted) moves it to its own cached entity |
 | Filters are debounced | The result filter rebuilds the grid view on every keystroke |
 | Compact result storage | Results are `Vec<Vec<String>>` plus a `HashSet` of NULL positions ([ADR-0008](adr/0008-compact-result-storage.md), proposed) |
 | Large data dropped off the UI thread | Replacing a result drops the previous one on the UI thread (negligible at the 1,000-row limit) |
