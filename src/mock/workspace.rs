@@ -14,6 +14,7 @@ use jykre::{
     cell_format::{self, ValueFamily},
     drivers::*,
 };
+use std::{cell::RefCell, ops::Range, rc::Rc};
 
 #[derive(Clone, Copy, PartialEq)]
 enum ResultView {
@@ -59,6 +60,92 @@ fn selection_block(
     ))
 }
 
+/// What the grid shows for one result, filter, sort and number format. It is
+/// rebuilt only when one of them changes, not on every frame, so scrolling,
+/// hovering and selecting cost only the rows on screen.
+struct GridView {
+    key: GridKey,
+    /// Data rows in display order, after the open filter and the sort.
+    rows: Vec<usize>,
+    widths: Vec<f32>,
+    families: Vec<ValueFamily>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GridKey {
+    /// Changes with every new result.
+    result: u64,
+    /// Lowercase text of the open filter; empty when the bar is closed.
+    filter: String,
+    descending: bool,
+    numbers_pt_br: bool,
+}
+
+impl GridView {
+    fn new(result: &ResultData, key: GridKey) -> Self {
+        let mut rows: Vec<_> = result
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, cells)| {
+                key.filter.is_empty()
+                    || cells
+                        .iter()
+                        .any(|cell| cell.to_lowercase().contains(&key.filter))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if !key.descending {
+            rows.reverse();
+        }
+        let families: Vec<_> = result
+            .columns
+            .iter()
+            .map(|(_, kind)| cell_format::family(kind))
+            .collect();
+        // Widths follow the first rows only, so a long result sizes as fast
+        // as a short one.
+        let widths = result
+            .columns
+            .iter()
+            .zip(&families)
+            .enumerate()
+            .map(|(column, ((name, kind), family))| {
+                let content = (0..result.rows.len().min(200))
+                    .map(|row| {
+                        cell_format::display(result.value(row, column), *family, key.numbers_pt_br)
+                            .chars()
+                            .count()
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let header = name.chars().count() + 3 + kind.chars().count();
+                ((content.max(header) as f32 * 8.) + 32.).clamp(110., 360.)
+            })
+            .collect();
+        Self {
+            key,
+            rows,
+            widths,
+            families,
+        }
+    }
+}
+
+/// The last [`GridView`], reused while its key is unchanged.
+#[derive(Default)]
+struct GridCache(RefCell<Option<Rc<GridView>>>);
+
+impl GridCache {
+    fn get(&self, result: &ResultData, key: GridKey) -> Rc<GridView> {
+        let mut cached = self.0.borrow_mut();
+        match cached.as_ref() {
+            Some(grid) if grid.key == key => grid.clone(),
+            _ => cached.insert(Rc::new(GridView::new(result, key))).clone(),
+        }
+    }
+}
+
 struct Message {
     user: bool,
     text: String,
@@ -81,6 +168,9 @@ pub struct Workspace {
     connection_color: u32,
     title: SharedString,
     result: ResultData,
+    /// Bumped by [`Workspace::set_result`] so the grid knows to rebuild.
+    result_version: u64,
+    grid: GridCache,
     result_view: ResultView,
     assistant_open: bool,
     messages: Vec<Message>,
@@ -106,7 +196,7 @@ pub struct Workspace {
     filter_open: bool,
     filter: Entity<InputState>,
     chat_scroll: ScrollHandle,
-    result_scroll: ScrollHandle,
+    result_scroll: UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -197,6 +287,8 @@ impl Workspace {
             },
             title: title.to_string().into(),
             result: sample_result(sql),
+            result_version: 0,
+            grid: GridCache::default(),
             result_view: ResultView::Table,
             assistant_open: true,
             messages: if sql == SALES_SQL {
@@ -236,7 +328,7 @@ impl Workspace {
             descending: true,
             filter_open: false,
             chat_scroll: ScrollHandle::new(),
-            result_scroll: ScrollHandle::new(),
+            result_scroll: UniformListScrollHandle::new(),
             _subscriptions: vec![
                 prompt_subscription,
                 filter_subscription,
@@ -331,24 +423,25 @@ impl Workspace {
             }
             cx.spawn(async move |weak, cx| {
                 let requests = queries.iter().map(|(_, sql)| QueryRequest { sql: sql.clone(), options: ExecutionOptions::default() }).collect();
-                let result = backend::run(backend::query(input, requests, cancel)).await;
+                // Rows become display text on the database runtime: that work,
+                // and dropping the driver cells, grows with the result.
+                let result = backend::run(async move {
+                    let mut batch = backend::query(input, requests, cancel).await?;
+                    let data: Vec<_> = batch.completed.iter_mut().map(result_data).collect();
+                    Ok((batch, data))
+                }).await;
                 let _ = weak.update(cx, |this, cx| {
                     if this.execution_id != execution_id { return; }
                     this.running = false;
                     match result {
-                        Ok(batch) => {
+                        Ok((batch, data)) => {
                             this.elapsed_ms = batch.completed.iter().map(|result| result.elapsed_ms).sum();
                             let completed = batch.completed.len();
-                            for ((index, sql), result) in queries.iter().zip(batch.completed) {
+                            for (((index, sql), result), data) in queries.iter().zip(batch.completed).zip(data) {
                                 this.set_status(*index, QueryStatus::Success);
                                 this.rows_affected = result.outcome.rows_affected;
                                 this.limited = result.limited;
-                                this.result = ResultData {
-                                    columns: result.columns.into_iter().map(|column| (column.name, column.data_type)).collect(),
-                                    rows: result.rows.iter().map(|row| row.iter().map(backend::cell_text).collect()).collect(),
-                                    sales: false,
-                                    nulls: result.rows.iter().enumerate().flat_map(|(row_index, row)| row.iter().enumerate().filter_map(move |(column, cell)| matches!(cell, Cell::Null).then_some((row_index, column)))).collect(),
-                                };
+                                this.set_result(data);
                                 this.executed = true;
                                 this.executions += 1;
                                 this.selection = None;
@@ -416,7 +509,7 @@ impl Workspace {
                             return false;
                         }
                         this.set_status(index, QueryStatus::Success);
-                        this.result = sample_result(&sql);
+                        this.set_result(sample_result(&sql));
                         this.limited = false;
                         this.rows_affected = None;
                         this.selection = None;
@@ -1075,31 +1168,20 @@ impl Workspace {
             )
     }
 
-    /// Data rows in display order, after the open filter and the sort.
-    fn visible_rows(&self, cx: &App) -> Vec<usize> {
-        // A closed filter bar must not keep hiding rows.
-        let query = if self.filter_open {
-            self.filter.read(cx).value().to_lowercase()
-        } else {
-            String::new()
+    /// The grid for the current result, filter, sort and number format.
+    fn grid(&self, cx: &App) -> Rc<GridView> {
+        let key = GridKey {
+            result: self.result_version,
+            // A closed filter bar must not keep hiding rows.
+            filter: if self.filter_open {
+                self.filter.read(cx).value().to_lowercase()
+            } else {
+                String::new()
+            },
+            descending: self.descending,
+            numbers_pt_br: self.numbers_pt_br,
         };
-        let mut rows: Vec<_> = self
-            .result
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, cells)| {
-                query.is_empty()
-                    || cells
-                        .iter()
-                        .any(|cell| cell.to_lowercase().contains(&query))
-            })
-            .map(|(index, _)| index)
-            .collect();
-        if !self.descending {
-            rows.reverse();
-        }
-        rows
+        self.grid.get(&self.result, key)
     }
 
     fn select_cell(&mut self, row: usize, col: usize, extend: bool) {
@@ -1116,7 +1198,8 @@ impl Workspace {
     }
 
     fn select_all(&mut self, cx: &App) {
-        let visible = self.visible_rows(cx);
+        let grid = self.grid(cx);
+        let visible = &grid.rows;
         let columns = self.result.columns.len();
         if let (Some(first), Some(last)) = (visible.first(), visible.last())
             && columns > 0
@@ -1130,7 +1213,8 @@ impl Workspace {
 
     /// Arrow-key navigation; with Shift the block grows from the anchor.
     fn move_selection(&mut self, rows: isize, cols: isize, extend: bool, cx: &App) {
-        let visible = self.visible_rows(cx);
+        let grid = self.grid(cx);
+        let visible = &grid.rows;
         let columns = self.result.columns.len();
         if visible.is_empty() || columns == 0 {
             return;
@@ -1145,23 +1229,25 @@ impl Workspace {
         let position = position.saturating_add_signed(rows).min(visible.len() - 1);
         let col = col.saturating_add_signed(cols).min(columns - 1);
         self.select_cell(visible[position], col, extend && self.selection.is_some());
-        self.result_scroll.scroll_to_item(position);
+        self.result_scroll
+            .scroll_to_item(position, ScrollStrategy::Nearest);
     }
 
     fn selected_count(&self, cx: &App) -> usize {
-        let visible = self.visible_rows(cx);
+        let grid = self.grid(cx);
         self.selection
-            .and_then(|selection| selection_block(selection, &visible))
+            .and_then(|selection| selection_block(selection, &grid.rows))
             .map_or(0, |(rows, cols)| rows.count() * cols.count())
     }
 
     /// Copies the selected block as tab-separated text (a single cell as its
     /// exact value), optionally with the column names first.
     fn copy_selection(&mut self, headers: bool, cx: &mut Context<Self>) {
-        let visible = self.visible_rows(cx);
+        let grid = self.grid(cx);
+        let visible = &grid.rows;
         let Some((rows, cols)) = self
             .selection
-            .and_then(|selection| selection_block(selection, &visible))
+            .and_then(|selection| selection_block(selection, visible))
         else {
             self.notice = Some(Feedback::new(Tone::Info, tr!("Select cells to copy.")));
             cx.notify();
@@ -1226,45 +1312,11 @@ impl Workspace {
     }
 
     fn result_table(&self, cx: &mut Context<Self>) -> AnyElement {
-        let visible = self.visible_rows(cx);
-        let block = self
-            .selection
-            .and_then(|selection| selection_block(selection, &visible));
-        let focus = self.selection.map(|selection| selection.focus);
-        let empty = visible.is_empty();
-        let numeric = |kind: &str| cell_format::family(kind) == ValueFamily::Number;
-        let widths: Vec<_> = self
-            .result
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(column, (name, kind))| {
-                let family = cell_format::family(kind);
-                let content = self
-                    .result
-                    .rows
-                    .iter()
-                    .take(200)
-                    .enumerate()
-                    .map(|(row, _)| {
-                        cell_format::display(
-                            self.result.value(row, column),
-                            family,
-                            self.numbers_pt_br,
-                        )
-                        .chars()
-                        .count()
-                    })
-                    .max()
-                    .unwrap_or(0);
-                let header = name.chars().count() + 3 + kind.chars().count();
-                ((content.max(header) as f32 * 8.) + 32.).clamp(110., 360.)
-            })
-            .collect();
+        let grid = self.grid(cx);
+        let widths = &grid.widths;
         let grid_width = widths.iter().sum::<f32>() + 35.;
-        let last_column = self.result.columns.len().saturating_sub(1);
         let weak = cx.weak_entity();
-        let grid = div()
+        let table = div()
             .id("result-table-scroll")
             .size_full()
             .bg(rgb(0x13171d))
@@ -1346,184 +1398,43 @@ impl Workspace {
                                 },
                             )),
                     )
-                    .child(
+                    .child(if grid.rows.is_empty() {
                         column()
-                            .id("result-rows")
+                            .p_6()
+                            .gap_2()
+                            .child(label(tr!("No results for this selection.")))
+                            .child(label(tr!(
+                                "The query or the current filter returned no rows."
+                            )))
+                            .into_any_element()
+                    } else {
+                        // Only the rows on screen are built, so a frame costs
+                        // the same for 30 rows or 100,000.
+                        div()
+                            .relative()
                             .flex_1()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.result_scroll)
-                            .vertical_scrollbar(&self.result_scroll)
-                            .children(visible.iter().enumerate().map(|(position, &index)| {
-                                let cells = &self.result.rows[index];
-                                let row_selected = block.as_ref().is_some_and(|(rows, cols)| {
-                                    rows.contains(&position)
-                                        && *cols.start() == 0
-                                        && *cols.end() == last_column
-                                });
-                                row()
-                                    .id(("data-row", index))
-                                    .role(Role::Row)
-                                    .aria_label(cells.join(", "))
-                                    .h(px(34.))
-                                    .flex_none()
-                                    .gap_0()
-                                    .child(
-                                        div()
-                                            .id(("row-number", index))
-                                            .w(px(35.))
-                                            .flex_none()
-                                            .h_full()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .bg(rgb(if row_selected { 0x283e65 } else { 0x1b2028 }))
-                                            .hover(|s| s.bg(rgb(0x222a36)))
-                                            .border_b_1()
-                                            .border_color(rgb(0x2a303b))
-                                            .text_center()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(FAINT))
-                                            .on_click(cx.listener(
-                                                move |this, event: &ClickEvent, window, cx| {
-                                                    let extend = event.modifiers().shift;
-                                                    if !extend || this.selection.is_none() {
-                                                        this.select_cell(index, 0, false);
-                                                    } else if let Some(selection) =
-                                                        &mut this.selection
-                                                    {
-                                                        selection.anchor.1 = 0;
-                                                    }
-                                                    this.select_cell(index, last_column, true);
-                                                    window.focus(&this.grid_focus, cx);
-                                                    cx.notify();
-                                                },
-                                            ))
-                                            .child((index + 1).to_string()),
-                                    )
-                                    .children(cells.iter().enumerate().map(|(col, value)| {
-                                        let family =
-                                            cell_format::family(&self.result.columns[col].1);
-                                        let raw = self.result.value(index, col);
-                                        // A cell is one line: line breaks show as ↵ and the
-                                        // full value stays in the tooltip and in copies.
-                                        let displayed =
-                                            cell_format::display(raw, family, self.numbers_pt_br)
-                                                .replace("\r\n", "↵")
-                                                .replace(['\n', '\r'], "↵");
-                                        let is_null = raw.is_none();
-                                        // Only values that do not fit get a tooltip, so it
-                                        // does not cover the context menu or neighbours.
-                                        let tooltip = raw
-                                            .filter(|value| {
-                                                value.contains(['\n', '\r'])
-                                                    || displayed.chars().count() as f32 * 7.8
-                                                        > widths[col] - 18.
-                                            })
-                                            .map(str::to_owned);
-                                        let selected =
-                                            block.as_ref().is_some_and(|(rows, cols)| {
-                                                rows.contains(&position) && cols.contains(&col)
-                                            });
-                                        let focused = focus == Some((index, col));
-                                        div()
-                                            .id(ElementId::Name(
-                                                format!("result-cell-{index}-{col}").into(),
-                                            ))
-                                            .role(Role::GridCell)
-                                            .aria_selected(selected)
-                                            .aria_label(tr!(
-                                                "Row {0}, {1}: {2}",
-                                                index + 1,
-                                                self.result.columns[col].0,
-                                                value
-                                            ))
-                                            .cursor_pointer()
-                                            .w(px(widths[col]))
-                                            .flex_none()
-                                            .min_w_0()
-                                            .h_full()
-                                            .flex()
-                                            .items_center()
-                                            .px(px(8.))
-                                            .border_1()
-                                            .border_color(rgb(0x2a303b))
-                                            .when(!selected, |s| s.hover(|s| s.bg(rgb(0x222a36))))
-                                            .when(selected, |s| s.bg(rgb(0x283e65)))
-                                            .when(focused, |s| s.border_color(rgb(0x7fa8fa)))
-                                            .on_click(cx.listener(
-                                                move |this, event: &ClickEvent, window, cx| {
-                                                    this.select_cell(
-                                                        index,
-                                                        col,
-                                                        event.modifiers().shift,
-                                                    );
-                                                    window.focus(&this.grid_focus, cx);
-                                                    cx.notify();
-                                                },
-                                            ))
-                                            // A right click outside the selection selects the
-                                            // cell first, so the menu acts on what is under it.
-                                            .on_mouse_down(
-                                                MouseButton::Right,
-                                                cx.listener(move |this, _, window, cx| {
-                                                    if !selected {
-                                                        this.select_cell(index, col, false);
-                                                    }
-                                                    window.focus(&this.grid_focus, cx);
-                                                    cx.notify();
-                                                }),
-                                            )
-                                            .when(self.result.sales, |s| {
-                                                s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col])
-                                            })
-                                            .font_family("Cascadia Mono")
-                                            .text_size(px(13.))
-                                            .when(is_null, |s| s.italic())
-                                            .when(family == ValueFamily::Boolean, |s| {
-                                                s.justify_center()
-                                            })
-                                            .when_some(tooltip, |s, tooltip| {
-                                                s.tooltip(move |window, cx| {
-                                                    Tooltip::new(tooltip.clone()).build(window, cx)
-                                                })
-                                            })
-                                            .when(numeric(&self.result.columns[col].1), |s| {
-                                                s.justify_end()
-                                            })
-                                            .text_color(rgb(if is_null {
-                                                0x64748b
-                                            } else if numeric(&self.result.columns[col].1) {
-                                                0x60a5fa
-                                            } else if family == ValueFamily::Temporal {
-                                                0xc4b5fd
-                                            } else if family == ValueFamily::Binary {
-                                                0x94a3b8
-                                            } else {
-                                                0xe2e8f0
-                                            }))
-                                            .child(div().truncate().child(displayed))
-                                    }))
-                            }))
-                            .when(empty, |s| {
-                                s.child(
-                                    column()
-                                        .p_6()
-                                        .gap_2()
-                                        .child(label(tr!("No results for this selection.")))
-                                        .child(label(tr!(
-                                            "The query or the current filter returned no rows."
-                                        ))),
+                            .min_h_0()
+                            .child(
+                                uniform_list(
+                                    "result-rows",
+                                    grid.rows.len(),
+                                    cx.processor(|this, range: Range<usize>, _, cx| {
+                                        this.result_rows(range, cx)
+                                    }),
                                 )
-                            }),
-                    ),
+                                .size_full()
+                                .track_scroll(&self.result_scroll),
+                            )
+                            .vertical_scrollbar(&self.result_scroll)
+                            .into_any_element()
+                    }),
             );
         div()
             .id("result-grid")
             .size_full()
             .track_focus(&self.grid_focus)
             .on_key_down(cx.listener(Self::grid_key_down))
-            .child(grid)
+            .child(table)
             .context_menu(move |menu, _, cx| {
                 let has_selection = weak
                     .upgrade()
@@ -1559,6 +1470,151 @@ impl Workspace {
                 )
             })
             .into_any_element()
+    }
+
+    /// The data rows at `range` of the displayed order.
+    fn result_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        let grid = self.grid(cx);
+        let widths = &grid.widths;
+        let block = self
+            .selection
+            .and_then(|selection| selection_block(selection, &grid.rows));
+        let focus = self.selection.map(|selection| selection.focus);
+        let last_column = self.result.columns.len().saturating_sub(1);
+        range
+            .filter_map(|position| Some((position, *grid.rows.get(position)?)))
+            .map(|(position, index)| {
+                let cells = &self.result.rows[index];
+                let row_selected = block.as_ref().is_some_and(|(rows, cols)| {
+                    rows.contains(&position) && *cols.start() == 0 && *cols.end() == last_column
+                });
+                row()
+                    .id(("data-row", index))
+                    .role(Role::Row)
+                    .aria_label(cells.join(", "))
+                    .w_full()
+                    .h(px(34.))
+                    .flex_none()
+                    .gap_0()
+                    .child(
+                        div()
+                            .id(("row-number", index))
+                            .w(px(35.))
+                            .flex_none()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .bg(rgb(if row_selected { 0x283e65 } else { 0x1b2028 }))
+                            .hover(|s| s.bg(rgb(0x222a36)))
+                            .border_b_1()
+                            .border_color(rgb(0x2a303b))
+                            .text_center()
+                            .text_size(px(12.))
+                            .text_color(rgb(FAINT))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                let extend = event.modifiers().shift;
+                                if !extend || this.selection.is_none() {
+                                    this.select_cell(index, 0, false);
+                                } else if let Some(selection) = &mut this.selection {
+                                    selection.anchor.1 = 0;
+                                }
+                                this.select_cell(index, last_column, true);
+                                window.focus(&this.grid_focus, cx);
+                                cx.notify();
+                            }))
+                            .child((index + 1).to_string()),
+                    )
+                    .children(cells.iter().enumerate().map(|(col, value)| {
+                        let family = grid.families[col];
+                        let raw = self.result.value(index, col);
+                        // A cell is one line: line breaks show as ↵ and the
+                        // full value stays in the tooltip and in copies.
+                        let displayed = cell_format::display(raw, family, self.numbers_pt_br)
+                            .replace("\r\n", "↵")
+                            .replace(['\n', '\r'], "↵");
+                        let is_null = raw.is_none();
+                        // Only values that do not fit get a tooltip, so it
+                        // does not cover the context menu or neighbours.
+                        let tooltip = raw
+                            .filter(|value| {
+                                value.contains(['\n', '\r'])
+                                    || displayed.chars().count() as f32 * 7.8 > widths[col] - 18.
+                            })
+                            .map(str::to_owned);
+                        let selected = block.as_ref().is_some_and(|(rows, cols)| {
+                            rows.contains(&position) && cols.contains(&col)
+                        });
+                        let focused = focus == Some((index, col));
+                        div()
+                            .id(("result-cell", col))
+                            .role(Role::GridCell)
+                            .aria_selected(selected)
+                            .aria_label(tr!(
+                                "Row {0}, {1}: {2}",
+                                index + 1,
+                                self.result.columns[col].0,
+                                value
+                            ))
+                            .cursor_pointer()
+                            .w(px(widths[col]))
+                            .flex_none()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .px(px(8.))
+                            .border_1()
+                            .border_color(rgb(0x2a303b))
+                            .when(!selected, |s| s.hover(|s| s.bg(rgb(0x222a36))))
+                            .when(selected, |s| s.bg(rgb(0x283e65)))
+                            .when(focused, |s| s.border_color(rgb(0x7fa8fa)))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                this.select_cell(index, col, event.modifiers().shift);
+                                window.focus(&this.grid_focus, cx);
+                                cx.notify();
+                            }))
+                            // A right click outside the selection selects the
+                            // cell first, so the menu acts on what is under it.
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, _, window, cx| {
+                                    if !selected {
+                                        this.select_cell(index, col, false);
+                                    }
+                                    window.focus(&this.grid_focus, cx);
+                                    cx.notify();
+                                }),
+                            )
+                            .when(self.result.sales, |s| {
+                                s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col])
+                            })
+                            .font_family("Cascadia Mono")
+                            .text_size(px(13.))
+                            .when(is_null, |s| s.italic())
+                            .when(family == ValueFamily::Boolean, |s| s.justify_center())
+                            .when_some(tooltip, |s, tooltip| {
+                                s.tooltip(move |window, cx| {
+                                    Tooltip::new(tooltip.clone()).build(window, cx)
+                                })
+                            })
+                            .when(family == ValueFamily::Number, |s| s.justify_end())
+                            .text_color(rgb(if is_null {
+                                0x64748b
+                            } else if family == ValueFamily::Number {
+                                0x60a5fa
+                            } else if family == ValueFamily::Temporal {
+                                0xc4b5fd
+                            } else if family == ValueFamily::Binary {
+                                0x94a3b8
+                            } else {
+                                0xe2e8f0
+                            }))
+                            .child(div().truncate().child(displayed))
+                    }))
+            })
+            .collect()
     }
 
     fn result_chart(&self, _: &mut Context<Self>) -> AnyElement {
@@ -1725,6 +1781,32 @@ impl Workspace {
     }
 }
 
+/// Takes the columns and rows out of a driver result as display text. Its cost
+/// grows with the rows, so it runs off the UI thread.
+fn result_data(result: &mut backend::QueryResult) -> ResultData {
+    let rows = std::mem::take(&mut result.rows);
+    ResultData {
+        columns: std::mem::take(&mut result.columns)
+            .into_iter()
+            .map(|column| (column.name, column.data_type))
+            .collect(),
+        rows: rows
+            .iter()
+            .map(|row| row.iter().map(backend::cell_text).collect())
+            .collect(),
+        sales: false,
+        nulls: rows
+            .iter()
+            .enumerate()
+            .flat_map(|(row_index, row)| {
+                row.iter().enumerate().filter_map(move |(column, cell)| {
+                    matches!(cell, Cell::Null).then_some((row_index, column))
+                })
+            })
+            .collect(),
+    }
+}
+
 /// The status each statement should show after an edit: it is kept only when
 /// the statement at the same position still has the same text.
 fn carry_statuses(
@@ -1774,7 +1856,7 @@ impl Workspace {
         } else {
             self.input = None;
             self.executed = false;
-            self.result = sample_result("");
+            self.set_result(sample_result(""));
         }
         self.notice = Some(Feedback::new(
             Tone::Warning,
@@ -1826,13 +1908,18 @@ impl Workspace {
         self.execution_error = None;
         self.selection = None;
         self.limited = false;
-        self.result = ResultData {
+        self.set_result(ResultData {
             columns: Vec::new(),
             rows: Vec::new(),
             sales: false,
             nulls: Default::default(),
-        };
+        });
         self.messages.clear();
+    }
+
+    fn set_result(&mut self, result: ResultData) {
+        self.result = result;
+        self.result_version += 1;
     }
 
     pub fn toggle_assistant(&mut self, cx: &mut Context<Self>) {
@@ -1960,7 +2047,15 @@ impl Drop for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{CellSelection, QueryStatus, carry_statuses, selection_block};
+    use super::{
+        CellSelection, GridCache, GridKey, GridView, QueryStatus, ResultData, carry_statuses,
+        result_data, selection_block,
+    };
+    use jykre::backend;
+    use jykre::cell_format::ValueFamily;
+    use jykre::drivers::{Cell, ColumnInfo};
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn selection_follows_the_displayed_order_and_hides_with_its_rows() {
@@ -1996,5 +2091,136 @@ mod tests {
             [QueryStatus::Success, QueryStatus::Error, QueryStatus::Ready]
         );
         assert!(carry_statuses(&before, &statuses, &[]).is_empty());
+    }
+
+    /// Shaped like the `sales.event_log` seed, without a database.
+    fn event_log(rows: usize) -> ResultData {
+        ResultData {
+            columns: [
+                ("id", "int8"),
+                ("level", "text"),
+                ("message", "text"),
+                ("occurred_at", "timestamptz"),
+                ("payload", "jsonb"),
+            ]
+            .into_iter()
+            .map(|(name, kind)| (name.into(), kind.into()))
+            .collect(),
+            rows: (0..rows)
+                .map(|row| {
+                    vec![
+                        row.to_string(),
+                        ["debug", "info", "warn", "error"][row % 4].into(),
+                        format!("Synthetic event {row}"),
+                        format!("2026-01-01 00:{:02}:00+00", row % 60),
+                        format!("{{\"seq\": {row}}}"),
+                    ]
+                })
+                .collect(),
+            sales: false,
+            nulls: Default::default(),
+        }
+    }
+
+    fn key(result: u64, filter: &str, descending: bool) -> GridKey {
+        GridKey {
+            result,
+            filter: filter.into(),
+            descending,
+            numbers_pt_br: false,
+        }
+    }
+
+    #[test]
+    fn grid_view_filters_sorts_and_sizes_columns_from_the_first_rows() {
+        let mut result = event_log(300);
+        result.rows[1][1] = "ERROR".into();
+        let grid = GridView::new(&result, key(0, "", true));
+        assert_eq!(grid.rows, (0..300).collect::<Vec<_>>());
+        assert_eq!(
+            grid.families,
+            [
+                ValueFamily::Number,
+                ValueFamily::Text,
+                ValueFamily::Text,
+                ValueFamily::Temporal,
+                ValueFamily::Text,
+            ]
+        );
+        // The filter ignores case; ascending order reverses the rows.
+        let grid = GridView::new(&result, key(0, "error", false));
+        assert_eq!(grid.rows.len(), 76);
+        assert_eq!(grid.rows.first(), Some(&299));
+        assert_eq!(grid.rows.last(), Some(&1));
+        // Only the first 200 rows size a column, so the cost does not grow
+        // with the result.
+        let width = GridView::new(&result, key(0, "", true)).widths[2];
+        result.rows[250][2] = "x".repeat(80);
+        assert_eq!(GridView::new(&result, key(0, "", true)).widths[2], width);
+        result.rows[10][2] = "x".repeat(80);
+        assert!(GridView::new(&result, key(0, "", true)).widths[2] > width);
+    }
+
+    #[test]
+    fn grid_view_is_rebuilt_only_when_its_inputs_change() {
+        let result = event_log(10);
+        let cache = GridCache::default();
+        let first = cache.get(&result, key(1, "", true));
+        // Hover, scroll and selection frames change none of the inputs.
+        assert!(Rc::ptr_eq(&first, &cache.get(&result, key(1, "", true))));
+        for changed in [
+            key(2, "", true),
+            key(1, "info", true),
+            key(1, "", false),
+            GridKey {
+                numbers_pt_br: true,
+                ..key(1, "", true)
+            },
+        ] {
+            let rebuilt = cache.get(&result, changed.clone());
+            assert!(!Rc::ptr_eq(&first, &rebuilt));
+            assert_eq!(rebuilt.key, changed);
+        }
+    }
+
+    #[test]
+    fn a_large_result_builds_its_grid_view_within_budget() {
+        // A hundred times the default row limit, filtered and reversed: the
+        // slowest build, paid once per change rather than once per frame.
+        let result = event_log(100_000);
+        let cache = GridCache::default();
+        let start = Instant::now();
+        let grid = cache.get(&result, key(1, "error", false));
+        let elapsed = start.elapsed();
+        assert_eq!(grid.rows.len(), 25_000);
+        assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+    }
+
+    #[test]
+    fn driver_rows_leave_the_query_result_as_text() {
+        let column = |name: &str, data_type: &str| ColumnInfo {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable: Some(true),
+        };
+        let mut result = backend::QueryResult {
+            columns: vec![column("id", "int8"), column("note", "text")],
+            rows: vec![
+                vec![Cell::Integer(1), Cell::Text("NULL".into())],
+                vec![Cell::Integer(2), Cell::Null],
+            ],
+            ..Default::default()
+        };
+        let data = result_data(&mut result);
+        assert_eq!(
+            data.columns,
+            [("id".into(), "int8".into()), ("note".into(), "text".into())]
+        );
+        assert_eq!(data.value(1, 0), Some("2"));
+        // The text "NULL" stays a value; only a real NULL is marked.
+        assert_eq!(data.value(0, 1), Some("NULL"));
+        assert_eq!(data.value(1, 1), None);
+        // The driver cells moved out, so they are dropped where this ran.
+        assert!(result.columns.is_empty() && result.rows.is_empty());
     }
 }
