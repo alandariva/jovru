@@ -10,7 +10,7 @@ credentials live in UI-independent crates
 
 ```mermaid
 flowchart TB
-    subgraph Bin["Application binary (src/main.rs, src/mock)"]
+    subgraph Bin["Application binary (src/main.rs, src/app)"]
         Shell[App shell: explorer, tabs, dialogs]
         Workspace[Query workspace: editor, results, assistant]
     end
@@ -52,7 +52,7 @@ flowchart TB
 
 | Layer | Location | Does | Does not |
 | --- | --- | --- | --- |
-| **Views** | `src/mock/` (target: `src/app/`, see [deviations](#known-deviations)) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
+| **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), value presentation rules (`cell_format`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
@@ -86,7 +86,7 @@ checked in review.
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
 │   │                       # drivers, grouped_tabs, i18n
-│   └── mock/               # the application's GPUI views (name is historical)
+│   └── app/                # the application's GPUI views; demo/ holds the demo data
 ├── crates/
 │   ├── core/               # jykre-core
 │   ├── driver-postgres/    # jykre-driver-postgres
@@ -210,7 +210,6 @@ value, so they cannot disagree.
 
 | Standard | Current code | Plan |
 | --- | --- | --- |
-| Views live in an application module with a descriptive name | The real application lives in `src/mock/`, a name left over from the visual prototype; the demo data shares the folder | [ADR-0007](adr/0007-application-logic-outside-views.md) (proposed) |
-| Logic that does not need GPUI lives outside views | Statement splitting and SQL preview checks live in `src/mock/sql.rs`; query orchestration lives in `Workspace` | [ADR-0007](adr/0007-application-logic-outside-views.md) (proposed) |
+| Logic that does not need GPUI lives outside views | Statement splitting and SQL preview checks live in `src/app/sql.rs`; query orchestration lives in `Workspace` | [ADR-0007](adr/0007-application-logic-outside-views.md) (proposed) |
 | Operation state is one enum | `Workspace` tracks a run with `running`, `executed`, `cancelled` and `execution_error` | Migrate with ADR-0007 |
 | No `match` on `DriverKind` outside drivers | `backend::preview_sql` picks the identifier quote by kind; `Workspace` picks the dialect label by kind | Move quoting to the driver's dialect; use the descriptor's display name |

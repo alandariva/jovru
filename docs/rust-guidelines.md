@@ -149,5 +149,5 @@ needs the maintainer's approval and a comment.
 | Standard | Current code |
 | --- | --- |
 | Lints enforce the panic and print rules | No `[workspace.lints]` yet ([ADR-0011](adr/0011-workspace-lints.md), proposed) |
-| No `unwrap`/`expect` outside tests, except commented invariants | A few uncommented invariant `unwrap`/`expect` calls remain in `src/mock/mod.rs`, `src/mock/sql.rs` and `src/grouped_tabs/mod.rs` |
+| No `unwrap`/`expect` outside tests, except commented invariants | A few uncommented invariant `unwrap`/`expect` calls remain in `src/app/mod.rs`, `src/app/sql.rs` and `src/grouped_tabs/mod.rs` |
 | Operation state is an enum | `Workspace` uses several booleans for a run ([Architecture](architecture.md#known-deviations)) |

@@ -1,4 +1,4 @@
-use super::data::{OPTIMIZED_SQL, ResultData, SALES, SALES_SQL, sample_result};
+use super::demo::{OPTIMIZED_SQL, ResultData, SALES, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
@@ -2069,7 +2069,7 @@ mod tests {
         // A filter that hides an end of the block hides the selection.
         assert_eq!(selection_block(selection, &[5, 4, 3]), None);
     }
-    use crate::mock::sql::normalized_statements;
+    use crate::app::sql::normalized_statements;
 
     #[test]
     fn edits_keep_the_status_of_unchanged_statements() {

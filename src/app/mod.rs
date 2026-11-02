@@ -1,12 +1,12 @@
 use jykre::tr;
 mod connections;
-mod data;
+mod demo;
 mod layout;
 mod sql;
 mod ui;
 mod workspace;
 
-use data::{ORDER_COLUMNS, SALES_SQL, TABLES, table_sql};
+use demo::{ORDER_COLUMNS, SALES_SQL, TABLES, table_sql};
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::{
     ActiveTheme, Sizable, Theme, ThemeMode, TitleBar,
