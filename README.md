@@ -82,10 +82,11 @@ Demo connections and results are labelled as such and never reach a server.
 
 ## Languages
 
-The interface is English-only for now, but every UI string goes through the
-`tr!` macro (`src/i18n.rs`), so adding a language needs no code changes beyond
-registering its catalog. The locale comes from `JYKRE_LOCALE` (for example
-`pt-BR`) or the OS language, falling back to English.
+The interface is available in English and Brazilian Portuguese (`pt-BR`).
+Every UI string goes through the `tr!` macro (`src/i18n.rs`), so adding a
+language needs no code changes beyond registering its catalog. The locale
+comes from `JYKRE_LOCALE` (for example `pt-BR`) or the OS language, falling
+back to English.
 
 To add a language:
 
@@ -216,12 +217,14 @@ See the [testing policy](docs/testing.md) for prerequisites, offline runs, the
 pre-commit hook and manual UI/Databricks checks. The same gate runs in GitHub
 Actions on every push and pull request.
 
+The [development documentation](docs/README.md) covers architecture, coding
+and UI guidelines, performance budgets, persistence, security, reliability,
+the workflow and the architecture decision records.
+
 ## Security
 
 Please report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE). The result type icons in `assets/result-types/` come from
-[Glide Data Grid](https://github.com/glideapps/glide-data-grid) under the MIT
-license; see `assets/result-types/LICENSE`.
+[MIT](LICENSE).

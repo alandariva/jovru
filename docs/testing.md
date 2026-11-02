@@ -150,6 +150,11 @@ Numeric coverage and blocking benchmarks come after measuring representative
 scenarios; for now, prioritize critical contracts, SQL, credentials and the
 tab model. Nextest can be evaluated when run time justifies it.
 
+Performance has budgets in [performance](performance.md). Algorithms whose
+cost grows with the data get a unit test with a generous time budget (ten
+times the measured time or more), so complexity regressions fail the gate; a
+change on a measured path reports before and after numbers.
+
 ## Lightweight hook
 
 The `.githooks/pre-commit` hook only checks formatting. Enable it per checkout:
