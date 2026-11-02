@@ -1,4 +1,5 @@
 //! Local persistence isolated from drivers and the GUI.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 mod config;
 mod metadata;
 pub use config::ConfigRepository;

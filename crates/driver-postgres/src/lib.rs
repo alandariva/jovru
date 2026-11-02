@@ -1,4 +1,5 @@
 //! PostgreSQL driver with dedicated SQL sessions and information_schema metadata.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod config;
 pub use config::{PostgresConfig, PostgresSslMode};

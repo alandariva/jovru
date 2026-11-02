@@ -657,10 +657,10 @@ mod tests {
         struct NoRows;
         impl RowSink for NoRows {
             fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
-                panic!("pending statement has no columns")
+                unreachable!("pending statement has no columns")
             }
             fn row(&mut self, _: Row) -> SinkControl {
-                panic!("pending statement has no rows")
+                unreachable!("pending statement has no rows")
             }
         }
         let mut session = DatabricksSession { client };

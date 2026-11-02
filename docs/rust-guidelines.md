@@ -112,8 +112,9 @@ and never prints to stdout or stderr. The rules in
 
 ## Lints
 
-[ADR-0011](adr/0011-workspace-lints.md) proposes enforcing these rules through
-workspace lints shared by every crate:
+These rules are enforced by workspace lints ([ADR-0011](adr/0011-workspace-lints.md))
+declared in the root `Cargo.toml`; every crate opts in with
+`[lints] workspace = true`, and Clippy in the gate fails on them:
 
 ```toml
 [workspace.lints.rust]
@@ -132,9 +133,12 @@ await_holding_refcell_ref = "deny"
 ```
 
 Tests opt out of `unwrap_used`/`expect_used` with
-`#[cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]`. A lint
-is never silenced in production code to make the gate pass; an exception
-needs the maintainer's approval and a comment.
+`#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` at each
+crate root and integration test file. Development tools allow only what their
+job needs, with a comment: `xtask` and the command-line examples may print,
+and the benchmarks may `expect` on their setup. A lint is never silenced in
+production code to make the gate pass; an exception needs the maintainer's
+approval and a comment.
 
 ## Checklist before reporting a task
 
@@ -147,7 +151,4 @@ needs the maintainer's approval and a comment.
 
 ## Known deviations
 
-| Standard | Current code |
-| --- | --- |
-| Lints enforce the panic and print rules | No `[workspace.lints]` yet ([ADR-0011](adr/0011-workspace-lints.md), proposed) |
-| No `unwrap`/`expect` outside tests, except commented invariants | A few uncommented invariant `unwrap`/`expect` calls remain in `src/app/mod.rs`, `src/app/sql.rs` and `src/grouped_tabs/mod.rs` |
+None at the moment.

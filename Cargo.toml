@@ -25,6 +25,23 @@ repository = "https://github.com/alandariva/jykre-studio"
 authors = ["Alan de Oliveira"]
 publish = false
 
+# Rules from the Rust guidelines that a tool can check (ADR-0011). Every crate
+# opts in with `[lints] workspace = true`; a new `allow` for these lints needs
+# the maintainer's approval and a comment.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+
 [workspace.dependencies]
 async-trait = "0.1"
 secrecy = "0.10"
@@ -57,6 +74,9 @@ dirs = "7"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+
+[lints]
+workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

@@ -154,7 +154,8 @@ mod tests {
     fn embedded_catalogs_parse_and_keep_placeholders() {
         for (tag, json) in CATALOGS {
             assert_ne!(*tag, SOURCE_LOCALE);
-            parse_catalog(json).unwrap_or_else(|error| panic!("{tag}: {error}"));
+            let parsed = parse_catalog(json);
+            assert!(parsed.is_ok(), "{tag}: {:?}", parsed.err());
         }
     }
 

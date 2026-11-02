@@ -1,4 +1,5 @@
 //! Native credential vault. There is deliberately no plaintext file fallback.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 use jykre_core::{
     ConnectionId, Credentials, DriverError, DriverResult, ErrorCode, SecretString, async_trait,
 };

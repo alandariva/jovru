@@ -1,5 +1,6 @@
 //! Databricks scaffold: CLI OAuth, SQL Warehouse Statement Execution, and
 //! independent Unity Catalog REST metadata.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod config;
 pub use config::DatabricksConfig;

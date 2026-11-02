@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 use jykre_core::*;
 use serde_json::json;
 use std::sync::{

@@ -315,10 +315,13 @@ impl AppView {
             app.add_query(second, tr!("Daily events"), "-- Events per day\nSELECT DATE(event_time) AS day,\n       COUNT(*) AS events\nFROM analytics.events\nGROUP BY DATE(event_time)\nORDER BY day DESC;", window, cx);
             let third = app.connections[2].group;
             app.add_query(third, tr!("Financial summary"), "-- Monthly financial summary\nSELECT DATE_FORMAT(created_at, '%Y-%m') AS month,\n       SUM(amount) AS total\nFROM transactions\nGROUP BY month\nORDER BY month DESC;", window, cx);
-            let first_tab = app.tabs.read(cx).tab_ids().next().unwrap();
-            app.tabs
-                .update(cx, |tabs, cx| tabs.select_tab(first_tab, cx))
-                .unwrap();
+            let first_tab = app.tabs.read(cx).tab_ids().next();
+            if let Some(first_tab) = first_tab {
+                // The tab was added just above, so selecting it cannot fail.
+                let _ = app
+                    .tabs
+                    .update(cx, |tabs, cx| tabs.select_tab(first_tab, cx));
+            }
         } else {
             app.saved_queries.clear();
             app.history.clear();
@@ -407,12 +410,13 @@ impl AppView {
             cx.notify();
         });
         self._subscriptions.push(subscription);
-        let tab = self
-            .tabs
-            .update(cx, |tabs, cx| {
-                tabs.add_tab(group, title.to_string(), panel.clone(), cx)
-            })
-            .expect("existing connection group");
+        // The group exists: it was recreated above when it had been closed.
+        let Ok(tab) = self.tabs.update(cx, |tabs, cx| {
+            tabs.add_tab(group, title.to_string(), panel.clone(), cx)
+        }) else {
+            tracing::error!("could not add a query tab: its group does not exist");
+            return;
+        };
         self.panels.insert(tab, panel);
         cx.notify();
     }
@@ -1338,11 +1342,13 @@ pub fn run() {
             window_min_size: Some(size(px(1100.), px(700.))),
             ..TitleBar::window_options()
         };
-        let (window, _) = open_window(options, cx, |window, cx| {
+        let opened = open_window(options, cx, |window, cx| {
             window.set_window_title("Jykre Studio · Workspace");
             cx.new(|cx| AppView::new(window, cx))
-        })
-        .expect(tr!("Could not open Jykre Studio"));
-        let _ = window;
+        });
+        if opened.is_err() {
+            tracing::error!("could not open the main window");
+            cx.quit();
+        }
     });
 }

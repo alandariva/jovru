@@ -8,6 +8,8 @@
 //! ```
 //!
 //! All data is synthetic and built in memory or in a temporary folder.
+// A development tool, like the tests: a setup that fails must stop the run.
+#![allow(clippy::expect_used)]
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use jykre::drivers::{
     CancellationToken, Cell, ColumnInfo, ConnectionConfig, ConnectionId, DriverKind,

@@ -275,7 +275,7 @@ impl GroupedTabs {
     ) -> Result<(), TabsError> {
         let previous = self.model.active;
         if let Some((from, _)) = self.model.move_tab(tab, group, index)? {
-            let (_, actual_index) = self.model.location(tab).expect("moved tab exists");
+            let (_, actual_index) = self.model.location(tab).ok_or(TabsError::TabNotFound)?;
             cx.emit(GroupedTabsEvent::TabMoved {
                 tab,
                 from,

@@ -445,8 +445,9 @@ mod tests {
         };
         assert!(run.finish(plan.id, outcome));
         assert_eq!(run.statuses(), [Success, Error, Ready]);
-        let RunState::Failed { error } = run.state() else {
-            panic!("expected a failure, got {:?}", run.state());
+        let error = match run.state() {
+            RunState::Failed { error } => error.as_str(),
+            _ => "",
         };
         assert!(error.contains("1 statement(s) completed"), "{error}");
         assert!(error.contains("not rolled back"), "{error}");

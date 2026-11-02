@@ -69,8 +69,9 @@ Never:
 
 - [ ] Logic is in the right place, and crate dependency rules hold
       ([Architecture](architecture.md)).
-- [ ] No new `unwrap`/`expect`/`panic` on production paths; errors carry the
-      right `ErrorCode`.
+- [ ] No new `unwrap`/`expect`/`panic` on production paths (the workspace
+      lints catch them) and no new `#[allow]` for those lints without
+      approval; errors carry the right `ErrorCode`.
 - [ ] Long operations are cancellable, time-limited and show progress.
 - [ ] No pattern from [Rejected patterns](performance.md#rejected-patterns),
       and budgets in the touched areas still hold.
