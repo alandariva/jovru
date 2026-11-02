@@ -269,7 +269,9 @@ pub struct ResultBuilder {
 }
 
 impl ResultBuilder {
-    /// `max_bytes` is capped at 4 GiB minus one, the most one result can index.
+    /// Keeps at most `max_rows` rows; a row beyond them marks the row limit as
+    /// reached and stops reading. `max_bytes` is capped at 4 GiB minus one,
+    /// the most one result can index.
     pub fn new(max_rows: u32, max_bytes: usize) -> Self {
         Self {
             data: ResultData::default(),
@@ -279,13 +281,12 @@ impl ResultBuilder {
         }
     }
 
-    /// The result and the limit that stopped it, if any.
+    /// The result and the limit that stopped it, if any. A result with
+    /// exactly `max_rows` rows did not hit the row limit; only a row beyond
+    /// it does, so ask the driver for `max_rows + 1` rows.
     pub fn finish(mut self) -> (ResultData, Option<ResultLimit>) {
-        let limit = self.limit.or_else(|| {
-            (self.data.rows >= self.max_rows as usize).then_some(ResultLimit::Rows(self.max_rows))
-        });
         self.data.shrink_to_fit();
-        (self.data, limit)
+        (self.data, self.limit)
     }
 }
 
@@ -467,17 +468,24 @@ mod tests {
         );
         assert_eq!(builder.row(vec![Cell::Integer(1)]), SinkControl::Continue);
         assert_eq!(builder.row(vec![Cell::Integer(2)]), SinkControl::Continue);
-        // A driver that sends more than the limit is stopped.
+        // A row beyond the limit is not kept and stops reading.
         assert_eq!(builder.row(vec![Cell::Integer(3)]), SinkControl::Stop);
         let (data, limit) = builder.finish();
         assert_eq!(data.row_count(), 2);
+        assert_eq!(data.value(1, 0), Some("2"));
         assert_eq!(data.columns(), [ResultColumn::new("id", "int8")]);
         assert_eq!(limit, Some(ResultLimit::Rows(2)));
 
-        let mut builder = ResultBuilder::new(5, DEFAULT_MEMORY_CEILING);
-        builder.columns(vec![info("id", "int8")]);
-        builder.row(vec![Cell::Integer(1)]);
-        assert_eq!(builder.finish().1, None);
+        // Exactly the limit, or fewer rows, did not hit it.
+        for rows in [1, 2] {
+            let mut builder = ResultBuilder::new(2, DEFAULT_MEMORY_CEILING);
+            builder.columns(vec![info("id", "int8")]);
+            for row in 0..rows {
+                assert_eq!(builder.row(vec![Cell::Integer(row)]), SinkControl::Continue);
+            }
+            let (data, limit) = builder.finish();
+            assert_eq!((data.row_count(), limit), (rows as usize, None));
+        }
     }
 
     #[test]

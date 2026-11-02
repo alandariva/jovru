@@ -369,10 +369,13 @@ async fn run_statements(
     let mut session = driver.open_session(&input, cancel.clone()).await?;
     let mut results = Vec::new();
     let mut failure = None;
-    for (index, request) in requests.into_iter().enumerate() {
+    for (index, mut request) in requests.into_iter().enumerate() {
         tracing::trace!(statement = index, sql = %request.sql, "statement");
         let start = Instant::now();
         let mut builder = ResultBuilder::new(request.options.max_rows, memory_ceiling);
+        // One row beyond the limit tells a result of exactly the limit from a
+        // longer one; the builder does not keep that row.
+        request.options.max_rows = request.options.max_rows.saturating_add(1);
         match session
             .execute(&request, &mut builder, cancel.clone())
             .await
@@ -561,18 +564,23 @@ mod tests {
         );
     }
 
-    /// Answers every statement with one row, without a database.
+    /// Answers every statement with `rows` rows, honouring the row limit and
+    /// the sink like a driver, without a database.
     #[derive(Debug)]
-    struct EchoDriver;
+    struct EchoDriver {
+        rows: u32,
+    }
 
     #[derive(Debug)]
-    struct EchoSession;
+    struct EchoSession {
+        rows: u32,
+    }
 
     #[async_trait]
     impl Session for EchoSession {
         async fn execute(
             &mut self,
-            _: &QueryRequest,
+            request: &QueryRequest,
             sink: &mut dyn RowSink,
             _: CancellationToken,
         ) -> DriverResult<DriverOutcome> {
@@ -581,7 +589,11 @@ mod tests {
                 data_type: "text".into(),
                 nullable: Some(false),
             }]);
-            sink.row(vec![Cell::Text("synthetic-cell-value".into())]);
+            for _ in 0..self.rows.min(request.options.max_rows) {
+                if sink.row(vec![Cell::Text("synthetic-cell-value".into())]) == SinkControl::Stop {
+                    break;
+                }
+            }
             Ok(DriverOutcome::default())
         }
 
@@ -610,7 +622,7 @@ mod tests {
             _: &ResolvedConnection,
             _: CancellationToken,
         ) -> DriverResult<Box<dyn Session>> {
-            Ok(Box::new(EchoSession))
+            Ok(Box::new(EchoSession { rows: self.rows }))
         }
         async fn introspect(
             &self,
@@ -642,7 +654,7 @@ mod tests {
             })
             .collect();
         let batch = query_with(
-            Arc::new(EchoDriver),
+            Arc::new(EchoDriver { rows: 1 }),
             input,
             requests,
             crate::result::DEFAULT_MEMORY_CEILING,
@@ -672,5 +684,41 @@ mod tests {
         assert!(text.contains("synthetic-sql-marker"), "{text}");
         assert!(!text.contains("synthetic-password-1234"), "{text}");
         assert!(!text.contains("synthetic-cell-value"), "{text}");
+    }
+
+    async fn rows_and_limit(available: u32, max_rows: u32) -> (usize, Option<ResultLimit>) {
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({}),
+            },
+            credentials: Credentials::default(),
+        };
+        let request = QueryRequest {
+            sql: "SELECT 1".into(),
+            options: ExecutionOptions {
+                max_rows,
+                ..ExecutionOptions::default()
+            },
+        };
+        let mut batch = query_with(
+            Arc::new(EchoDriver { rows: available }),
+            input,
+            vec![request],
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let result = batch.completed.remove(0);
+        (result.data.row_count(), result.limit)
+    }
+
+    #[tokio::test]
+    async fn only_rows_beyond_the_limit_mark_it_as_reached() {
+        assert_eq!(rows_and_limit(2, 3).await, (2, None));
+        assert_eq!(rows_and_limit(3, 3).await, (3, None));
+        assert_eq!(rows_and_limit(4, 3).await, (3, Some(ResultLimit::Rows(3))));
+        assert_eq!(rows_and_limit(50, 3).await, (3, Some(ResultLimit::Rows(3))));
     }
 }

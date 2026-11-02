@@ -85,7 +85,7 @@ alignment only; the value itself is never converted.
 
 | Limit | Value |
 | --- | --- |
-| Rows per statement | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`); the driver stops reading at the limit |
+| Rows per statement | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`). The backend asks the driver for one row more and does not keep it: only that row marks the limit as reached, so a result with exactly the limit is complete |
 | Memory per result | 256 MB (`DEFAULT_MEMORY_CEILING`); `ResultBuilder` stops reading even below the row limit |
 | Statement timeout | 300 s (`ExecutionOptions.timeout`) |
 | Column width | 110 to 360 px, from the header and the first 200 rows |
