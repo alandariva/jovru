@@ -2,6 +2,7 @@ use jykre::tr;
 mod connections;
 mod demo;
 mod layout;
+mod probe;
 mod result_grid;
 mod sql;
 mod ui;
@@ -1122,6 +1123,8 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        probe::frame_started();
+        probe::rendered("AppView");
         column()
             .id("jykre")
             .relative()
@@ -1292,12 +1295,15 @@ impl Render for AppView {
             .when(self.connection_open, |s| {
                 s.child(self.connection_dialog(cx))
             })
+            // Painted last, so it closes the frame for the probe.
+            .child(probe::frame_end())
     }
 }
 
 pub fn run() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
+        probe::start(cx);
         cx.bind_keys([KeyBinding::new("ctrl-enter", ExecuteActiveQuery, None)]);
         Theme::change(ThemeMode::Dark, None, cx);
         Theme::update(cx, |theme| {

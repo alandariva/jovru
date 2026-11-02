@@ -511,6 +511,7 @@ impl ResultGrid {
 
 impl Render for ResultGrid {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        super::probe::rendered("ResultGrid");
         self.table(cx)
     }
 }

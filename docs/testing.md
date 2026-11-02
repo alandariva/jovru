@@ -55,8 +55,10 @@ Requires `cargo-deny` (`cargo install cargo-deny --locked`), Docker with
 Compose v2 and access to the advisory database and the images (or suitable
 caches).
 
-After the basic gate and the real integration tests, it runs the
-vulnerability, license and source audit configured in `deny.toml`. An alert
+After the basic gate and the real integration tests, it runs the benchmarks
+in `benches/` in quick mode (`cargo bench --bench hot_paths -- --quick`), only
+to prove they still work, and then the vulnerability, license and source
+audit configured in `deny.toml`. An alert
 that blocks the gate must be fixed or receive a documented decision with a
 reason and a review date in `deny.toml`, never a silent suppression.
 
@@ -146,8 +148,8 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   ignored tests, visual checks, deviations and pending items. Reviewing the
   diff is still required. Do not present a partial run as a passed gate.
 
-Numeric coverage and blocking benchmarks come after measuring representative
-scenarios; for now, prioritize critical contracts, SQL, credentials and the
+Numeric coverage and benchmarks that block on their numbers come after
+measuring representative scenarios; for now, prioritize critical contracts, SQL, credentials and the
 tab model. Nextest can be evaluated when run time justifies it.
 
 Performance has budgets in [performance](performance.md). Algorithms whose

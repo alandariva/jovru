@@ -1382,6 +1382,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        super::probe::rendered("Workspace");
         let query = self.query_area(cx);
         let content = if self.assistant_open {
             h_resizable("assistant-layout")

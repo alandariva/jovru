@@ -1,3 +1,6 @@
+// xtask is a command-line tool: printing its progress is its job (ADR-0011).
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeSet,
@@ -14,9 +17,10 @@ enum Task {
 
 fn main() -> ExitCode {
     let args: Vec<_> = env::args().skip(1).collect();
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask lives inside the workspace");
+    let Some(root) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() else {
+        eprintln!("xtask must live inside the workspace.");
+        return ExitCode::FAILURE;
+    };
     match options(&args) {
         Ok(Task::Check { full }) => match run(root, full) {
             Ok(()) => {
@@ -79,9 +83,16 @@ fn run(root: &Path, full: bool) -> Result<(), String> {
     command(root, "cargo", &["test", "--workspace", "--locked"])?;
     if full {
         live(root)?;
+        // Quick mode only proves the benchmarks still run; comparing numbers
+        // is done by hand against a saved baseline.
+        command(
+            root,
+            "cargo",
+            &["bench", "--locked", "--bench", "hot_paths", "--", "--quick"],
+        )?;
         command(root, "cargo", &["deny", "--locked", "check"])?;
     } else {
-        println!("[NOT RUN] Audit and real integration: use --full.");
+        println!("[NOT RUN] Audit, benchmarks and real integration: use --full.");
     }
     Ok(())
 }

@@ -75,13 +75,19 @@ A change that introduces one of these is rejected in review:
 
 ## How to measure
 
-- **Frame probe.** Record an `Instant` at the start of the root view's
-  `render` and read it in a `canvas` painted last; that is render, layout and
-  paint for the frame. Drive the scenario (scroll offsets, hover, selection
-  changes) programmatically and report median, p95 and maximum.
-- **Heartbeat.** A foreground task that sleeps 5 ms in a loop; any extra delay
-  is time the UI thread was busy. On Windows the timer resolution sets a floor
-  of about 10–15 ms.
+- **Frame probe.** Run the application with `JYKRE_PROBE=1` (a release build
+  for budgets: `JYKRE_PROBE=1 cargo run --release`). `src/app/probe.rs`
+  records an `Instant` at the start of the root view's `render` and reads it
+  in a `canvas` painted last; that is render, layout and paint for the frame.
+  Every 5 s the log gets a `frame probe` line (target `jykre::probe`) with the
+  frame count, median, p95 and maximum, and how many times each view rendered
+  (`AppView`, `Workspace`, `ResultGrid`), which shows whether a cached entity
+  was redrawn. Drive the scenario (scroll, hover, selection) and read the
+  lines in the log file or, in debug builds, the console.
+- **Heartbeat.** With the probe on, a UI-thread task sleeps 5 ms in a loop;
+  any extra delay is time the UI thread was busy, reported as `stall_max_ms`
+  in the same line. On Windows the timer resolution sets a floor of about
+  10–15 ms.
 - **Data.** Use the dev databases (`sales.event_log` has 100,000 rows; see
   [Testing](testing.md#local-databases-for-manual-testing)). Raise the row
   limit only in the measurement build, never in a shipped default.
@@ -89,10 +95,20 @@ A change that introduces one of these is rejected in review:
   budget (ten times the measured time or more), such as
   `a_large_result_builds_its_grid_view_within_budget`. They catch complexity
   regressions, not small slowdowns.
-- **Benchmarks.** [ADR-0010](adr/0010-benchmarks-with-criterion.md) proposes
-  `criterion` benchmarks for the grid view, result conversion, statement
-  splitting and metadata paging, run in quick mode by
-  `cargo xtask check --full`.
+- **Benchmarks.** `benches/hot_paths.rs` ([ADR-0010](adr/0010-benchmarks-with-criterion.md))
+  measures building the grid view at 100,000 rows, converting 100,000 × 30
+  driver rows to result data, splitting a 10,000-statement script and paging
+  children from a cache of 500,000 objects. `cargo xtask check --full` runs
+  them in quick mode, only to prove they work. A task that touches one of
+  these paths compares against a baseline and reports the result:
+
+  ```bash
+  cargo bench --bench hot_paths -- --save-baseline main
+  ```
+
+  ```bash
+  cargo bench --bench hot_paths -- --baseline main
+  ```
 - **Report.** A task that touches a measured path reports before and after
   numbers and the build profile in its report ([Workflow](workflow.md#task-report)).
 
@@ -100,8 +116,6 @@ A change that introduces one of these is rejected in review:
 
 | Standard | Current code |
 | --- | --- |
-| A reusable frame probe and heartbeat in the repository | The 2026-11-02 measurements used a temporary harness that was not committed |
-| Benchmarks for hot paths | None yet ([ADR-0010](adr/0010-benchmarks-with-criterion.md), proposed) |
 | Long collections are virtualized | The explorer tree, saved queries and history build all their children |
 | Frequently changing regions are cached entities | The result grid is (`ResultGrid`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); the editor and the assistant still render inside `Workspace` |
 | Filters are debounced | The result filter rebuilds the grid view on every keystroke |

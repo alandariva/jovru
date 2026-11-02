@@ -40,6 +40,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "json", "tracing-log"] }
 tracing-appender = "0.2"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [dependencies]
 gpui-kit = "0.9.0"
@@ -56,3 +57,12 @@ dirs = "7"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+# Hot paths with criterion (ADR-0010). `cargo xtask check --full` runs them in
+# quick mode; compare a change with `--save-baseline main` / `--baseline main`.
+[[bench]]
+name = "hot_paths"
+harness = false

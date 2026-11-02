@@ -16,7 +16,8 @@
 | Logs | `tracing`, `tracing-subscriber` (`env-filter`, `json`), `tracing-appender` | [ADR-0009](adr/0009-structured-logging-and-timings.md). Used by the `jykre` crate |
 | Platform | `dirs` (data folder), `sys-locale` (UI language) | |
 
-Development tools: `cargo xtask` (gate and catalogs), `cargo-deny` (audit),
+Development tools: `criterion` 0.8 without default features (benchmarks,
+[ADR-0010](adr/0010-benchmarks-with-criterion.md)), `cargo xtask` (gate and catalogs), `cargo-deny` (audit),
 Docker with Compose v2 (gate fixtures and local databases), and optionally the
 Databricks CLI.
 

@@ -55,7 +55,7 @@ Never:
 | Command | Content | When |
 | --- | --- | --- |
 | `cargo xtask check` | Architecture check, `cargo fmt --check`, Clippy with `-D warnings` (examples included), `cargo test --workspace` with doctests | Before committing code changes |
-| `cargo xtask check --full` | The above, plus live tests against PostgreSQL 14/18 and MySQL 8.4/9.7 in Docker, plus `cargo deny --locked check` | When the batch touches drivers, execution contracts or dependencies, and before a release |
+| `cargo xtask check --full` | The above, plus live tests against PostgreSQL 14/18 and MySQL 8.4/9.7 in Docker, the benchmarks in quick mode and `cargo deny --locked check` | When the batch touches drivers, execution contracts or dependencies, and before a release |
 
 - CI runs the basic gate on Windows, the full gate on Linux and a build with
   the minimum Rust version on every push to `main` and every pull request; the
