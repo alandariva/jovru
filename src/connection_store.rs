@@ -3,6 +3,7 @@ use crate::tr;
 use crate::{
     backend::{self, MetadataSnapshot},
     drivers::*,
+    result::{DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT},
 };
 use jykre_secrets::SecretStore;
 use jykre_storage::{ConfigRepository, MetadataRepository};
@@ -41,6 +42,8 @@ pub fn default_path() -> PathBuf {
 pub struct LoadedConnection {
     pub profile: ConnectionProfile,
     pub input: ResolvedConnection,
+    /// Rows kept per statement, between 1 and [`MAX_ROW_LIMIT`].
+    pub row_limit: u32,
     pub cache: Option<MetadataSnapshot>,
     pub warning: Option<String>,
 }
@@ -160,9 +163,11 @@ async fn load_from(
             config: profile.config.clone(),
             credentials,
         };
+        let row_limit = stored_row_limit(repository, profile.id).await?;
         loaded.push(LoadedConnection {
             profile,
             input,
+            row_limit,
             cache,
             warning,
         });
@@ -170,17 +175,21 @@ async fn load_from(
     Ok(loaded)
 }
 
+/// Saves a profile, its row limit and, when asked to remember it, its
+/// password. The row limit must be between 1 and [`MAX_ROW_LIMIT`].
 pub async fn save(
     dir: &Path,
     profile: ConnectionProfile,
     credentials: Credentials,
+    row_limit: u32,
     secrets: &dyn SecretStore,
 ) -> DriverResult<LoadedConnection> {
     builtin_registry()?
         .get(profile.config.driver)?
         .validate_connection(&profile.config)?;
+    validate_row_limit(row_limit)?;
     let repository = ConfigRepository::open(dir).await?;
-    let result = save_to(dir, profile, credentials, secrets, &repository).await;
+    let result = save_to(dir, profile, credentials, row_limit, secrets, &repository).await;
     repository.close().await;
     result
 }
@@ -188,6 +197,7 @@ async fn save_to(
     dir: &Path,
     profile: ConnectionProfile,
     credentials: Credentials,
+    row_limit: u32,
     secrets: &dyn SecretStore,
     repository: &ConfigRepository,
 ) -> DriverResult<LoadedConnection> {
@@ -197,6 +207,7 @@ async fn save_to(
         .into_iter()
         .find(|value| value.id == profile.id);
     let profile = repository.save(&profile).await?;
+    repository.set_row_limit(profile.id, row_limit).await?;
     let mut warning = None;
     if profile.config.driver != DriverKind::Databricks && profile.remember_password {
         if let Some(password) = credentials.password.clone() {
@@ -233,9 +244,32 @@ async fn save_to(
     Ok(LoadedConnection {
         profile,
         input,
+        row_limit,
         cache,
         warning,
     })
+}
+
+/// Checks a row limit typed by the user.
+pub fn validate_row_limit(row_limit: u32) -> DriverResult<()> {
+    if (1..=MAX_ROW_LIMIT).contains(&row_limit) {
+        Ok(())
+    } else {
+        Err(DriverError::validation(tr!(
+            "Enter a row limit between 1 and {0}.",
+            crate::cell_format::count(MAX_ROW_LIMIT as usize)
+        )))
+    }
+}
+
+/// The saved row limit, or the default when none was saved or it is out of
+/// range (for example, written by a newer version with a higher maximum).
+async fn stored_row_limit(repository: &ConfigRepository, id: ConnectionId) -> DriverResult<u32> {
+    Ok(repository
+        .row_limit(id)
+        .await?
+        .filter(|limit| *limit <= MAX_ROW_LIMIT)
+        .unwrap_or(DEFAULT_ROW_LIMIT))
 }
 
 async fn prepare_cache(

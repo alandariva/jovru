@@ -1,7 +1,8 @@
 use super::*;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use jykre::tr;
+use jykre::result::{DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT};
+use jykre::{cell_format, tr};
 
 /// A context-menu command run against the app view.
 type MenuAction = Box<dyn Fn(&mut AppView, &mut Window, &mut Context<AppView>)>;
@@ -88,6 +89,12 @@ impl AppView {
                 config.options["warehouseId"].as_str().unwrap_or("").into(),
             ),
             (&self.connection_password, String::new()),
+            (
+                &self.connection_row_limit,
+                index
+                    .map_or(DEFAULT_ROW_LIMIT, |index| self.connections[index].row_limit)
+                    .to_string(),
+            ),
         ] {
             field.update(cx, |input, cx| input.set_value(value, window, cx));
         }
@@ -162,6 +169,25 @@ impl AppView {
                 credentials,
             },
         ))
+    }
+
+    /// The row limit typed in the form, between 1 and the maximum.
+    fn form_row_limit(&self, cx: &App) -> DriverResult<u32> {
+        let typed: String = self
+            .connection_row_limit
+            .read(cx)
+            .value()
+            .chars()
+            .filter(|ch| !matches!(ch, ',' | '.' | '_' | ' '))
+            .collect();
+        let limit = typed.parse().map_err(|_| {
+            DriverError::validation(tr!(
+                "Enter a row limit between 1 and {0}.",
+                cell_format::count(MAX_ROW_LIMIT as usize)
+            ))
+        })?;
+        connection_store::validate_row_limit(limit)?;
+        Ok(limit)
     }
 
     fn test_connection(&mut self, cx: &mut Context<Self>) {
@@ -317,6 +343,7 @@ impl AppView {
         let connection_store::LoadedConnection {
             profile,
             input,
+            row_limit,
             cache,
             warning,
         } = loaded;
@@ -337,6 +364,7 @@ impl AppView {
             name: profile.name.clone(),
             profile: Some(profile),
             input: Some(input),
+            row_limit,
             detail,
             color,
             group,
@@ -377,7 +405,10 @@ impl AppView {
         if self.connection_saving {
             return;
         }
-        let (name, input) = match self.form_connection(cx) {
+        let form = self
+            .form_connection(cx)
+            .and_then(|(name, input)| Ok((name, input, self.form_row_limit(cx)?)));
+        let (name, input, row_limit) = match form {
             Ok(value) => value,
             Err(error) => {
                 self.connection_status = Some(Feedback::new(Tone::Error, error.to_string()));
@@ -414,7 +445,14 @@ impl AppView {
         let dir = connection_store::data_dir();
         cx.spawn_in(window, async move |weak, cx| {
             let result = backend::run(async move {
-                connection_store::save(&dir, profile, input.credentials, &SystemSecretStore).await
+                connection_store::save(
+                    &dir,
+                    profile,
+                    input.credentials,
+                    row_limit,
+                    &SystemSecretStore,
+                )
+                .await
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
@@ -444,6 +482,7 @@ impl AppView {
                             connection.name = loaded.profile.name.clone();
                             connection.profile = Some(loaded.profile);
                             connection.input = Some(loaded.input.clone());
+                            connection.row_limit = loaded.row_limit;
                             connection.detail = loaded.input.config.options["host"]
                                 .as_str()
                                 .or(loaded.input.config.options["profile"].as_str())
@@ -471,6 +510,7 @@ impl AppView {
                                         panel.update_connection(
                                             connection.name.clone(),
                                             loaded.input.clone(),
+                                            loaded.row_limit,
                                             cx,
                                         );
                                     }
@@ -1263,6 +1303,8 @@ impl AppView {
                     .child(field(tr!("Authenticated Databricks CLI profile"), &self.connection_profile))
                     .child(field(tr!("SQL Warehouse ID"), &self.connection_warehouse))
                     .child(label(tr!("A warehouse is required only for queries. Metadata uses Unity Catalog."))))
+                .child(field(tr!("Row limit per statement"), &self.connection_row_limit))
+                .child(label(tr!("Up to {0} rows. Reading also stops when a result reaches {1} MB.", cell_format::count(MAX_ROW_LIMIT as usize), DEFAULT_MEMORY_CEILING / (1024 * 1024))))
                 .child(label(if self.editing_connection.is_some() { tr!("An empty password keeps the one already available. Passwords are never written to SQLite.") } else { tr!("Without remember password, the password stays only in this session.") }))
                 .when_some(self.connection_status.as_ref(), |s, status| s.child(feedback_line(status).id("connection-status").role(if status.tone == Tone::Error { Role::Alert } else { Role::Status }).aria_label(status.text.clone())))
                 .child(row().justify_between()

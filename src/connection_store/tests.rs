@@ -56,12 +56,12 @@ async fn profiles_round_trip_and_reject_embedded_credentials() {
     let (dir, mut profile) = fixture();
     let vault = MemoryVault::default();
     assert!(load(&dir, &vault).await.unwrap().is_empty());
-    let saved = save(&dir, profile.clone(), Credentials::default(), &vault)
+    let saved = save(&dir, profile.clone(), Credentials::default(), 1_000, &vault)
         .await
         .unwrap();
     profile = saved.profile;
     profile.name = "Renamed fixture".into();
-    let saved = save(&dir, profile.clone(), Credentials::default(), &vault)
+    let saved = save(&dir, profile.clone(), Credentials::default(), 1_000, &vault)
         .await
         .unwrap();
     let loaded = load(&dir, &vault).await.unwrap();
@@ -70,7 +70,7 @@ async fn profiles_round_trip_and_reject_embedded_credentials() {
     profile = saved.profile;
     profile.config.options["password"] = serde_json::json!("synthetic-secret");
     assert!(
-        save(&dir, profile, Credentials::default(), &vault)
+        save(&dir, profile, Credentials::default(), 1_000, &vault)
             .await
             .is_err()
     );
@@ -116,7 +116,7 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     let credentials = Credentials {
         password: Some(SecretString::from("synthetic-vault-password".to_owned())),
     };
-    let saved = save(&dir, profile.clone(), credentials.clone(), &vault)
+    let saved = save(&dir, profile.clone(), credentials.clone(), 1_000, &vault)
         .await
         .unwrap();
     assert!(vault.passwords.lock().unwrap().is_empty());
@@ -129,7 +129,7 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     );
     profile = saved.profile;
     profile.remember_password = true;
-    let saved = save(&dir, profile, credentials.clone(), &vault)
+    let saved = save(&dir, profile, credentials.clone(), 1_000, &vault)
         .await
         .unwrap();
     assert!(
@@ -141,7 +141,7 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     );
     let mut profile = saved.profile;
     profile.remember_password = false;
-    save(&dir, profile, credentials.clone(), &vault)
+    save(&dir, profile, credentials.clone(), 1_000, &vault)
         .await
         .unwrap();
     assert!(vault.passwords.lock().unwrap().is_empty());
@@ -151,7 +151,7 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     };
     let mut profile = load(&dir, &vault).await.unwrap().remove(0).profile;
     profile.remember_password = true;
-    let saved = save(&dir, profile, credentials, &unavailable)
+    let saved = save(&dir, profile, credentials, 1_000, &unavailable)
         .await
         .unwrap();
     assert!(saved.input.credentials.password.is_some());
@@ -186,4 +186,45 @@ fn data_dir_prefers_override_then_platform_folder() {
         PathBuf::from("base").join(APP_DIR)
     );
     assert_eq!(resolve_data_dir(None, None), PathBuf::from(".jykre"));
+}
+
+#[tokio::test]
+async fn row_limits_are_saved_per_connection_and_validated() {
+    let (dir, profile) = fixture();
+    let vault = MemoryVault::default();
+    for invalid in [0, MAX_ROW_LIMIT + 1] {
+        assert!(
+            save(
+                &dir,
+                profile.clone(),
+                Credentials::default(),
+                invalid,
+                &vault
+            )
+            .await
+            .is_err()
+        );
+    }
+    let saved = save(&dir, profile, Credentials::default(), 25_000, &vault)
+        .await
+        .unwrap();
+    assert_eq!(saved.row_limit, 25_000);
+    assert_eq!(load(&dir, &vault).await.unwrap()[0].row_limit, 25_000);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn connections_without_a_saved_row_limit_use_the_default() {
+    let (dir, profile) = fixture();
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    repository.save(&profile).await.unwrap();
+    // Written by a newer version with a higher maximum.
+    repository
+        .set_row_limit(profile.id, MAX_ROW_LIMIT + 1)
+        .await
+        .unwrap();
+    repository.close().await;
+    let loaded = load(&dir, &MemoryVault::default()).await.unwrap();
+    assert_eq!(loaded[0].row_limit, DEFAULT_ROW_LIMIT);
+    std::fs::remove_dir_all(dir).unwrap();
 }

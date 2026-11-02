@@ -37,7 +37,7 @@ touches that path.
 | Saved connections | 200 |
 | Metadata objects per connection | 500,000 (paged from the local cache) |
 | Open query tabs | 50 |
-| Rows per result | The row limit (1,000 today; up to 100,000 once configurable, within the memory ceiling in [Results](results.md#limits)) |
+| Rows per result | The connection's row limit (up to 100,000), within the memory ceiling in [Results](results.md#limits) |
 
 ## Principles
 
@@ -52,8 +52,8 @@ touches that path.
    derived data is cached by its inputs ([UI guidelines](ui-guidelines.md#how-gpui-renders-and-what-follows-from-it)).
 5. **The UI thread only does UI.** Network, disk, conversion and dropping of
    large data happen on the Tokio runtime or a background executor.
-6. **Compact data in memory.** Large results use a compact representation
-   ([ADR-0008](adr/0008-compact-result-storage.md), proposed).
+6. **Compact data in memory.** Results use a compact representation
+   ([ADR-0008](adr/0008-compact-result-storage.md)).
 
 ## Rejected patterns
 
@@ -105,5 +105,3 @@ A change that introduces one of these is rejected in review:
 | Long collections are virtualized | The explorer tree, saved queries and history build all their children |
 | Frequently changing regions are cached entities | The result grid renders inside `Workspace`; [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md) (accepted) moves it to its own cached entity |
 | Filters are debounced | The result filter rebuilds the grid view on every keystroke |
-| Compact result storage | Results are `Vec<Vec<String>>` plus a `HashSet` of NULL positions ([ADR-0008](adr/0008-compact-result-storage.md), proposed) |
-| Large data dropped off the UI thread | Replacing a result drops the previous one on the UI thread (negligible at the 1,000-row limit) |

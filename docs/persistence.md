@@ -36,6 +36,10 @@ Every file is opened by `open_pool`:
 | `connections` | `id` (primary key), `name` (unique), `config_json`, `remember_password`, `revision`, `updated_at` |
 | `settings` | `key` (primary key), `value_json` |
 
+Preferences live in `settings` as JSON values: `editor.font_size`, and
+`connection.<connection-id>.row_limit` for each connection's row limit (a
+missing or out-of-range value reads as the default, 1,000).
+
 `config_json` holds the driver's non-sensitive options; drivers reject
 password and token fields there. `revision` provides optimistic concurrency:
 a save names the revision it edited, so a change made in another window is

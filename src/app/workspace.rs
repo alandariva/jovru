@@ -1,4 +1,4 @@
-use super::demo::{self, OPTIMIZED_SQL, ResultData, SALES, SALES_SQL, sample_result};
+use super::demo::{self, OPTIMIZED_SQL, SALES, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
@@ -14,6 +14,7 @@ use jykre::{
     cell_format::{self, ValueFamily},
     drivers::*,
     query::{Outcome, QueryRun, RunState, StatementStatus},
+    result::{DEFAULT_MEMORY_CEILING, DEFAULT_ROW_LIMIT, ResultData, ResultLimit},
 };
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
@@ -74,35 +75,33 @@ struct GridKey {
 
 impl GridView {
     fn new(result: &ResultData, key: GridKey) -> Self {
-        let mut rows: Vec<_> = result
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, cells)| {
+        // NULL matches as the text it shows, so a filter for "null" finds it.
+        let mut rows: Vec<_> = (0..result.row_count())
+            .filter(|row| {
                 key.filter.is_empty()
-                    || cells
-                        .iter()
-                        .any(|cell| cell.to_lowercase().contains(&key.filter))
+                    || result
+                        .row(*row)
+                        .any(|cell| cell.unwrap_or("NULL").to_lowercase().contains(&key.filter))
             })
-            .map(|(index, _)| index)
             .collect();
         if !key.descending {
             rows.reverse();
         }
         let families: Vec<_> = result
-            .columns
+            .columns()
             .iter()
-            .map(|(_, kind)| cell_format::family(kind))
+            .map(|column| cell_format::family(&column.data_type))
             .collect();
         // Widths follow the first rows only, so a long result sizes as fast
         // as a short one.
         let widths = result
-            .columns
+            .columns()
             .iter()
             .zip(&families)
             .enumerate()
-            .map(|(column, ((name, kind), family))| {
-                let content = (0..result.rows.len().min(200))
+            .map(|(column, (info, family))| {
+                let (name, kind) = (&info.name, &info.data_type);
+                let content = (0..result.row_count().min(200))
                     .map(|row| {
                         cell_format::display(result.value(row, column), *family, key.numbers_pt_br)
                             .chars()
@@ -158,7 +157,12 @@ pub struct Workspace {
     database: String,
     connection_color: u32,
     title: SharedString,
-    result: ResultData,
+    /// Shared with the views that read it; replaced, never copied.
+    result: Rc<ResultData>,
+    /// The demo result has a chart and an assistant analysis.
+    sales: bool,
+    /// Rows kept per statement, from the connection.
+    row_limit: u32,
     /// Bumped by [`Workspace::set_result`] so the grid knows to rebuild.
     result_version: u64,
     grid: GridCache,
@@ -173,8 +177,8 @@ pub struct Workspace {
     /// SQL as last saved to the library, if this tab is saved.
     saved_sql: Option<String>,
     notice: Option<Feedback>,
-    /// The last statement hit the row limit.
-    limited: bool,
+    /// The limit that stopped the last statement's result, if any.
+    limit: Option<ResultLimit>,
     selection: Option<CellSelection>,
     grid_focus: FocusHandle,
     descending: bool,
@@ -265,7 +269,9 @@ impl Workspace {
                 MINT
             },
             title: title.to_string().into(),
-            result: sample_result(sql),
+            result: Rc::new(sample_result(sql)),
+            sales: demo::is_sales(sql),
+            row_limit: DEFAULT_ROW_LIMIT,
             result_version: 0,
             grid: GridCache::default(),
             result_view: ResultView::Table,
@@ -295,7 +301,7 @@ impl Workspace {
             editor_sql: sql.to_string(),
             saved_sql: None,
             notice: None,
-            limited: false,
+            limit: None,
             selection: None,
             grid_focus: cx.focus_handle(),
             descending: true,
@@ -348,6 +354,11 @@ impl Workspace {
         };
         let id = plan.id;
         let queries = plan.statements;
+        // A new run releases the previous result before the next one arrives.
+        self.set_result(ResultData::default());
+        self.has_result = false;
+        self.sales = false;
+        self.limit = None;
         self.notice = None;
         cx.notify();
         if let Some(input) = self.input.clone() {
@@ -355,31 +366,51 @@ impl Workspace {
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
             self.run.begin_all(id);
+            let options = ExecutionOptions {
+                max_rows: self.row_limit,
+                ..ExecutionOptions::default()
+            };
             cx.spawn(async move |weak, cx| {
-                let requests = queries.iter().map(|(_, sql)| QueryRequest { sql: sql.clone(), options: ExecutionOptions::default() }).collect();
-                // Rows become display text on the database runtime: that work,
-                // and dropping the driver cells, grows with the result.
-                let result = backend::run(async move {
-                    let mut batch = backend::query(input, requests, cancel).await?;
-                    let data: Vec<_> = batch.completed.iter_mut().map(result_data).collect();
-                    Ok((batch, data))
-                }).await;
+                let requests = queries
+                    .iter()
+                    .map(|(_, sql)| QueryRequest {
+                        sql: sql.clone(),
+                        options: options.clone(),
+                    })
+                    .collect();
+                // Rows become compact display text on the database runtime, row
+                // by row, and the driver cells are dropped there.
+                let result = backend::run(backend::query(
+                    input,
+                    requests,
+                    DEFAULT_MEMORY_CEILING,
+                    cancel,
+                ))
+                .await;
                 let _ = weak.update(cx, |this, cx| {
                     match result {
-                        Ok((batch, data)) => {
+                        Ok(batch) => {
                             let completed = batch.completed.len();
-                            let elapsed_ms = batch.completed.iter().map(|result| result.elapsed_ms).sum();
-                            let outcome = Outcome::Batch { completed, error: batch.error };
+                            let elapsed_ms =
+                                batch.completed.iter().map(|result| result.elapsed_ms).sum();
+                            let outcome = Outcome::Batch {
+                                completed,
+                                error: batch.error,
+                            };
                             if this.run.finish(id, outcome) {
                                 this.elapsed_ms = elapsed_ms;
-                                for (((_, sql), result), data) in queries.iter().zip(batch.completed).zip(data) {
+                                for ((_, sql), result) in queries.iter().zip(batch.completed) {
                                     this.rows_affected = result.outcome.rows_affected;
-                                    this.limited = result.limited;
-                                    this.set_result(data);
+                                    this.limit = result.limit;
+                                    this.set_result(result.data);
                                     this.has_result = true;
                                     this.selection = None;
                                     this.result_view = ResultView::Table;
-                                    cx.emit(WorkspaceEvent::Executed { title: this.title.to_string(), connection: this.connection.to_string(), sql: sql.clone() });
+                                    cx.emit(WorkspaceEvent::Executed {
+                                        title: this.title.to_string(),
+                                        connection: this.connection.to_string(),
+                                        sql: sql.clone(),
+                                    });
                                 }
                             }
                         }
@@ -389,7 +420,8 @@ impl Workspace {
                     }
                     cx.notify();
                 });
-            }).detach();
+            })
+            .detach();
             return;
         }
         cx.spawn(async move |weak, cx| {
@@ -417,7 +449,8 @@ impl Workspace {
                             return false;
                         }
                         this.set_result(sample_result(&sql));
-                        this.limited = false;
+                        this.sales = demo::is_sales(&sql);
+                        this.limit = None;
                         this.rows_affected = None;
                         this.selection = None;
                         this.has_result = true;
@@ -498,8 +531,8 @@ impl Workspace {
         });
         self.messages.push(Message {
             user: false,
-            text: if self.result.sales { answer.into() } else { tr!("The query runs in the context of {0}. The sample preview has {1} columns and {2} rows. Use the editor to adjust the filters and run it to see the sample. This demo's assistant has a complete analysis flow in the Revenue by category tab.", self.connection, self.result.columns.len(), self.result.rows.len()) },
-            sql: if self.result.sales { sql } else { None },
+            text: if self.sales { answer.into() } else { tr!("The query runs in the context of {0}. The sample preview has {1} columns and {2} rows. Use the editor to adjust the filters and run it to see the sample. This demo's assistant has a complete analysis flow in the Revenue by category tab.", self.connection, self.result.column_count(), self.result.row_count()) },
+            sql: if self.sales { sql } else { None },
         });
         self.assistant_open = true;
         self.chat_scroll.scroll_to_bottom();
@@ -520,7 +553,11 @@ impl Workspace {
                     .child(
                         primary_button(
                             "execute",
-                            if self.run.is_running() { I::Square } else { I::Play },
+                            if self.run.is_running() {
+                                I::Square
+                            } else {
+                                I::Play
+                            },
                             if self.run.is_running() {
                                 tr!("Stop")
                             } else {
@@ -824,7 +861,7 @@ impl Workspace {
                                     view == ResultView::Table
                                         && self.has_results()
                                         && !self.run.is_running(),
-                                    |s| s.child(badge(self.result.rows.len().to_string(), MINT)),
+                                    |s| s.child(badge(self.result.row_count().to_string(), MINT)),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.result_view = view;
@@ -874,30 +911,7 @@ impl Workspace {
                                             cx.notify();
                                             return;
                                         }
-                                        let mut csv = this
-                                            .result
-                                            .columns
-                                            .iter()
-                                            .map(|(name, _)| {
-                                                format!("\"{}\"", name.replace('"', "\"\""))
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(";");
-                                        for (row_index, row) in this.result.rows.iter().enumerate()
-                                        {
-                                            csv.push('\n');
-                                            csv.push_str(
-                                                &row.iter()
-                                                    .enumerate()
-                                                    .map(|(column, _)| {
-                                                        cell_format::csv_field(
-                                                            this.result.value(row_index, column),
-                                                        )
-                                                    })
-                                                    .collect::<Vec<_>>()
-                                                    .join(";"),
-                                            );
-                                        }
+                                        let csv = cell_format::result_csv(&this.result);
                                         cx.write_to_clipboard(ClipboardItem::new_string(csv));
                                         this.notice = Some(Feedback::new(
                                             Tone::Success,
@@ -989,14 +1003,14 @@ impl Workspace {
                     .border_color(rgb(BORDER))
                     .justify_between()
                     .child({
-                        let rows = match self.result.rows.len() {
+                        let rows = match self.result.row_count() {
                             1 => tr!("1 row").to_string(),
                             count => tr!("{0} rows", count),
                         };
                         // The footer is the single place that reports how the last run
                         // ended; errors also fill the results area with their message.
                         let state = self.run.state();
-                        let (symbol, color, text, detail): (I, u32, String, Option<&str>) = if let RunState::Running { .. } = state
+                        let (symbol, color, text, detail): (I, u32, String, Option<String>) = if let RunState::Running { .. } = state
                         {
                             (I::LoaderCircle, AMBER, tr!("Running…").into(), None)
                         } else if *state == RunState::Cancelling {
@@ -1005,15 +1019,25 @@ impl Workspace {
                             (I::CircleX, RED, tr!("Query error").into(), None)
                         } else if *state == RunState::Cancelled {
                             (I::Ban, AMBER, tr!("Execution cancelled").into(), None)
-                        } else if self.has_result && self.limited {
-                            (
-                                I::TriangleAlert,
-                                AMBER,
-                                tr!("{0} · row limit reached", rows),
-                                Some(tr!(
-                                    "Limit of 1,000 rows reached. Refine the SQL to get other rows."
-                                )),
-                            )
+                        } else if let (true, Some(limit)) = (self.has_result, self.limit) {
+                            // The footer says which limit stopped reading.
+                            let (text, detail) = match limit {
+                                ResultLimit::Rows(rows_limit) => (
+                                    tr!("{0} · row limit reached", rows),
+                                    tr!(
+                                        "Limit of {0} rows reached. Refine the SQL to get other rows.",
+                                        cell_format::count(rows_limit as usize)
+                                    ),
+                                ),
+                                ResultLimit::Memory(bytes) => (
+                                    tr!("{0} · memory limit reached", rows),
+                                    tr!(
+                                        "The result reached the memory limit of {0} MB before the row limit. Refine the SQL to get other rows.",
+                                        bytes / (1024 * 1024)
+                                    ),
+                                ),
+                            };
+                            (I::TriangleAlert, AMBER, text, Some(detail))
                         } else if self.has_result {
                             let text = match self.rows_affected {
                                 Some(affected) => {
@@ -1031,7 +1055,9 @@ impl Workspace {
                             .aria_label(text.clone())
                             .gap_2()
                             .when_some(detail, |s, detail| {
-                                s.tooltip(move |window, cx| Tooltip::new(detail).build(window, cx))
+                                s.tooltip(move |window, cx| {
+                                    Tooltip::new(detail.clone()).build(window, cx)
+                                })
                             })
                             .map(|s| {
                                 if self.run.is_active() {
@@ -1103,7 +1129,7 @@ impl Workspace {
     fn select_all(&mut self, cx: &App) {
         let grid = self.grid(cx);
         let visible = &grid.rows;
-        let columns = self.result.columns.len();
+        let columns = self.result.column_count();
         if let (Some(first), Some(last)) = (visible.first(), visible.last())
             && columns > 0
         {
@@ -1118,7 +1144,7 @@ impl Workspace {
     fn move_selection(&mut self, rows: isize, cols: isize, extend: bool, cx: &App) {
         let grid = self.grid(cx);
         let visible = &grid.rows;
-        let columns = self.result.columns.len();
+        let columns = self.result.column_count();
         if visible.is_empty() || columns == 0 {
             return;
         }
@@ -1158,7 +1184,8 @@ impl Workspace {
         };
         let names: Vec<&str> = cols
             .clone()
-            .map(|col| self.result.columns[col].0.as_str())
+            .filter_map(|col| self.result.columns().get(col))
+            .map(|column| column.name.as_str())
             .collect();
         let data: Vec<Vec<Option<&str>>> = rows
             .map(|position| {
@@ -1239,9 +1266,10 @@ impl Workspace {
                             .border_b_1()
                             .border_color(rgb(0x2a303b))
                             .child(div().w(px(35.)).flex_none().text_center().child(label("#")))
-                            .children(self.result.columns.iter().enumerate().map(
-                                |(index, (name, kind))| {
-                                    let kind = kind.to_lowercase();
+                            .children(self.result.columns().iter().enumerate().map(
+                                |(index, column)| {
+                                    let name = &column.name;
+                                    let kind = column.data_type.to_lowercase();
                                     let tooltip = format!("{name} : {kind}");
                                     row()
                                         .id(("result-header", index))
@@ -1250,7 +1278,7 @@ impl Workspace {
                                         .h_full()
                                         .px_3()
                                         .gap_1()
-                                        .when(self.result.sales, |s| {
+                                        .when(self.sales, |s| {
                                             s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][index])
                                         })
                                         .border_l_1()
@@ -1276,13 +1304,13 @@ impl Workspace {
                                                 .text_color(rgb(0x6f7a8a))
                                                 .child(format!(": {kind}")),
                                         )
-                                        .when(index == 2 && self.result.sales, |s| {
+                                        .when(index == 2 && self.sales, |s| {
                                             s.cursor_pointer()
                                                 .focusable()
                                                 .tab_index(0)
                                                 .focus_visible(|s| s.bg(rgb(HOVER)))
                                         })
-                                        .when(index == 2 && self.result.sales, |s| {
+                                        .when(index == 2 && self.sales, |s| {
                                             s.child(icon(
                                                 if self.descending {
                                                     I::ArrowDown
@@ -1293,7 +1321,7 @@ impl Workspace {
                                             ))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            if index == 2 && this.result.sales {
+                                            if index == 2 && this.sales {
                                                 this.descending = !this.descending;
                                                 cx.notify();
                                             }
@@ -1383,18 +1411,24 @@ impl Workspace {
             .selection
             .and_then(|selection| selection_block(selection, &grid.rows));
         let focus = self.selection.map(|selection| selection.focus);
-        let last_column = self.result.columns.len().saturating_sub(1);
+        let last_column = self.result.column_count().saturating_sub(1);
         range
             .filter_map(|position| Some((position, *grid.rows.get(position)?)))
             .map(|(position, index)| {
-                let cells = &self.result.rows[index];
+                let cells: Vec<_> = self.result.row(index).collect();
                 let row_selected = block.as_ref().is_some_and(|(rows, cols)| {
                     rows.contains(&position) && *cols.start() == 0 && *cols.end() == last_column
                 });
                 row()
                     .id(("data-row", index))
                     .role(Role::Row)
-                    .aria_label(cells.join(", "))
+                    .aria_label(
+                        cells
+                            .iter()
+                            .map(|cell| cell.unwrap_or("NULL"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    )
                     .w_full()
                     .h(px(34.))
                     .flex_none()
@@ -1429,9 +1463,9 @@ impl Workspace {
                             }))
                             .child((index + 1).to_string()),
                     )
-                    .children(cells.iter().enumerate().map(|(col, value)| {
+                    .children(cells.iter().enumerate().map(|(col, raw)| {
                         let family = grid.families[col];
-                        let raw = self.result.value(index, col);
+                        let raw = *raw;
                         // A cell is one line: line breaks show as ↵ and the
                         // full value stays in the tooltip and in copies.
                         let displayed = cell_format::display(raw, family, self.numbers_pt_br)
@@ -1457,8 +1491,11 @@ impl Workspace {
                             .aria_label(tr!(
                                 "Row {0}, {1}: {2}",
                                 index + 1,
-                                self.result.columns[col].0,
-                                value
+                                self.result
+                                    .columns()
+                                    .get(col)
+                                    .map_or("", |column| column.name.as_str()),
+                                raw.unwrap_or("NULL")
                             ))
                             .cursor_pointer()
                             .w(px(widths[col]))
@@ -1490,9 +1527,7 @@ impl Workspace {
                                     cx.notify();
                                 }),
                             )
-                            .when(self.result.sales, |s| {
-                                s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col])
-                            })
+                            .when(self.sales, |s| s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col]))
                             .font_family("Cascadia Mono")
                             .text_size(px(13.))
                             .when(is_null, |s| s.italic())
@@ -1521,7 +1556,7 @@ impl Workspace {
     }
 
     fn result_chart(&self, _: &mut Context<Self>) -> AnyElement {
-        if !self.result.sales {
+        if !self.sales {
             return column()
                 .size_full()
                 .items_center()
@@ -1607,13 +1642,16 @@ impl Workspace {
             .child(label(tr!(
                 "{0} run(s) in this session · {1} rows · {2} ms",
                 self.run.executions(),
-                self.result.rows.len(),
+                self.result.row_count(),
                 self.elapsed_ms
             )))
             .child(label(if self.input.is_some() {
-                tr!("Server execution · limit of 1,000 rows per statement · 300 s timeout")
+                tr!(
+                    "Server execution · limit of {0} rows per statement · 300 s timeout",
+                    cell_format::count(self.row_limit as usize)
+                )
             } else {
-                tr!("Visual demo results.")
+                tr!("Visual demo results.").into()
             }))
             .child(label(match self.run.state() {
                 RunState::Failed { error } => error.clone(),
@@ -1637,7 +1675,7 @@ impl Workspace {
                         .on_click(cx.listener(|this, _, _, cx| { this.assistant_open = false; cx.notify(); })))))
             .child(row().px_4().h(px(37.)).flex_none().gap_2().border_b_1().border_color(rgb(BORDER))
                 .child(icon(I::Layers, FAINT)).child(label(tr!("Context")))
-                .child(badge(tr!("Current SQL"), MUTED)).child(badge(if self.result.sales { tr!("3 tables") } else { tr!("1 query") }, MUTED)))
+                .child(badge(tr!("Current SQL"), MUTED)).child(badge(if self.sales { tr!("3 tables") } else { tr!("1 query") }, MUTED)))
             .child(column().id("ai-conversation").flex_1().overflow_y_scroll().track_scroll(&self.chat_scroll).vertical_scrollbar(&self.chat_scroll).px_4().py_4().gap_5()
                 .child(row().gap_2().child(div().h(px(1.)).flex_1().bg(rgb(BORDER)))
                     .child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Context of this query")))
@@ -1664,7 +1702,7 @@ impl Workspace {
                                     this.notice = Some(Feedback::new(Tone::Info, tr!("Suggestion inserted. Review the SQL before running it."))); cx.notify();
                                 })))))
                 }))
-                .when(self.has_result && self.result.sales, |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
+                .when(self.has_result && self.sales, |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
                     .child(row().child(icon(I::Lightbulb, MINT)).child(div().text_size(px(14.)).text_color(rgb(MINT)).font_weight(FontWeight::MEDIUM).child(tr!("A look at the data"))))
                     .child(div().text_size(px(14.)).line_height(relative(1.55)).text_color(rgb(0xb8c8c1)).child(tr!("Electronics and Home account for 52.7% of the quarter's revenue.")))
                     .child(button("ai-show-chart", I::ChartColumn, tr!("View distribution")).px_0().text_color(rgb(MINT))
@@ -1681,32 +1719,6 @@ impl Workspace {
                         .child(icon_button("send-ai", I::ArrowUp, tr!("Send message")).bg(rgb(0x304a40))
                             .on_click(cx.listener(|this, _, window, cx| this.submit_prompt(window, cx))))))
                 .child(div().text_center().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Simulated AI · Always review the suggestions."))))
-    }
-}
-
-/// Takes the columns and rows out of a driver result as display text. Its cost
-/// grows with the rows, so it runs off the UI thread.
-fn result_data(result: &mut backend::QueryResult) -> ResultData {
-    let rows = std::mem::take(&mut result.rows);
-    ResultData {
-        columns: std::mem::take(&mut result.columns)
-            .into_iter()
-            .map(|column| (column.name, column.data_type))
-            .collect(),
-        rows: rows
-            .iter()
-            .map(|row| row.iter().map(backend::cell_text).collect())
-            .collect(),
-        sales: false,
-        nulls: rows
-            .iter()
-            .enumerate()
-            .flat_map(|(row_index, row)| {
-                row.iter().enumerate().filter_map(move |(column, cell)| {
-                    matches!(cell, Cell::Null).then_some((row_index, column))
-                })
-            })
-            .collect(),
     }
 }
 
@@ -1730,11 +1742,12 @@ impl Workspace {
         &mut self,
         name: String,
         input: Option<ResolvedConnection>,
+        row_limit: u32,
         cx: &mut Context<Self>,
     ) {
         self.connection = name.into();
         if let Some(input) = input {
-            self.set_connection(input);
+            self.set_connection(input, row_limit);
         } else {
             self.abandon_run();
             self.input = None;
@@ -1756,9 +1769,12 @@ impl Workspace {
         &mut self,
         name: String,
         input: ResolvedConnection,
+        row_limit: u32,
         cx: &mut Context<Self>,
     ) {
         self.connection = name.into();
+        // The new limit applies from the next run.
+        self.row_limit = row_limit;
         // A rename or a new password keeps the server, so results, messages and
         // a running execution stay valid. Only a different server resets them.
         if self
@@ -1768,7 +1784,7 @@ impl Workspace {
         {
             self.input = Some(input);
         } else {
-            self.set_connection(input);
+            self.set_connection(input, row_limit);
         }
         cx.notify();
     }
@@ -1781,9 +1797,11 @@ impl Workspace {
 
     /// Binds the tab to another server. Any run is abandoned and the
     /// previous result cleared.
-    pub fn set_connection(&mut self, input: ResolvedConnection) {
+    pub fn set_connection(&mut self, input: ResolvedConnection, row_limit: u32) {
         self.abandon_run();
-        if let Ok(driver) = builtin_registry().and_then(|registry| registry.get(input.config.driver))
+        self.row_limit = row_limit;
+        if let Ok(driver) =
+            builtin_registry().and_then(|registry| registry.get(input.config.driver))
         {
             self.dialect = driver.descriptor().display_name.into();
         }
@@ -1796,18 +1814,19 @@ impl Workspace {
         self.assistant_open = false;
         self.has_result = false;
         self.selection = None;
-        self.limited = false;
-        self.set_result(ResultData {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            sales: false,
-            nulls: Default::default(),
-        });
+        self.limit = None;
+        self.sales = false;
+        self.set_result(ResultData::default());
         self.messages.clear();
     }
 
+    /// Replaces the result. The previous one is freed on the database runtime
+    /// when nothing else holds it, so a large result never stalls a frame.
     fn set_result(&mut self, result: ResultData) {
-        self.result = result;
+        let previous = std::mem::replace(&mut self.result, Rc::new(result));
+        if let Ok(previous) = Rc::try_unwrap(previous) {
+            backend::release(previous);
+        }
         self.result_version += 1;
     }
 
@@ -1936,12 +1955,9 @@ impl Drop for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CellSelection, GridCache, GridKey, GridView, ResultData, result_data, selection_block,
-    };
-    use jykre::backend;
+    use super::{CellSelection, GridCache, GridKey, GridView, ResultData, selection_block};
     use jykre::cell_format::ValueFamily;
-    use jykre::drivers::{Cell, ColumnInfo};
+    use jykre::result::ResultColumn;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
 
@@ -1958,32 +1974,40 @@ mod tests {
         assert_eq!(selection_block(selection, &[5, 4, 3]), None);
     }
     /// Shaped like the `sales.event_log` seed, without a database.
+    fn event_log_rows(rows: usize) -> Vec<Vec<String>> {
+        (0..rows)
+            .map(|row| {
+                vec![
+                    row.to_string(),
+                    ["debug", "info", "warn", "error"][row % 4].into(),
+                    format!("Synthetic event {row}"),
+                    format!("2026-01-01 00:{:02}:00+00", row % 60),
+                    format!("{{\"seq\": {row}}}"),
+                ]
+            })
+            .collect()
+    }
+
+    fn table(rows: &[Vec<String>]) -> ResultData {
+        let columns = [
+            ("id", "int8"),
+            ("level", "text"),
+            ("message", "text"),
+            ("occurred_at", "timestamptz"),
+            ("payload", "jsonb"),
+        ]
+        .into_iter()
+        .map(|(name, kind)| ResultColumn::new(name, kind))
+        .collect();
+        ResultData::from_rows(
+            columns,
+            rows.iter()
+                .map(|row| row.iter().map(|cell| Some(cell.as_str()))),
+        )
+    }
+
     fn event_log(rows: usize) -> ResultData {
-        ResultData {
-            columns: [
-                ("id", "int8"),
-                ("level", "text"),
-                ("message", "text"),
-                ("occurred_at", "timestamptz"),
-                ("payload", "jsonb"),
-            ]
-            .into_iter()
-            .map(|(name, kind)| (name.into(), kind.into()))
-            .collect(),
-            rows: (0..rows)
-                .map(|row| {
-                    vec![
-                        row.to_string(),
-                        ["debug", "info", "warn", "error"][row % 4].into(),
-                        format!("Synthetic event {row}"),
-                        format!("2026-01-01 00:{:02}:00+00", row % 60),
-                        format!("{{\"seq\": {row}}}"),
-                    ]
-                })
-                .collect(),
-            sales: false,
-            nulls: Default::default(),
-        }
+        table(&event_log_rows(rows))
     }
 
     fn key(result: u64, filter: &str, descending: bool) -> GridKey {
@@ -1997,8 +2021,9 @@ mod tests {
 
     #[test]
     fn grid_view_filters_sorts_and_sizes_columns_from_the_first_rows() {
-        let mut result = event_log(300);
-        result.rows[1][1] = "ERROR".into();
+        let mut rows = event_log_rows(300);
+        rows[1][1] = "ERROR".into();
+        let result = table(&rows);
         let grid = GridView::new(&result, key(0, "", true));
         assert_eq!(grid.rows, (0..300).collect::<Vec<_>>());
         assert_eq!(
@@ -2019,10 +2044,13 @@ mod tests {
         // Only the first 200 rows size a column, so the cost does not grow
         // with the result.
         let width = GridView::new(&result, key(0, "", true)).widths[2];
-        result.rows[250][2] = "x".repeat(80);
-        assert_eq!(GridView::new(&result, key(0, "", true)).widths[2], width);
-        result.rows[10][2] = "x".repeat(80);
-        assert!(GridView::new(&result, key(0, "", true)).widths[2] > width);
+        rows[250][2] = "x".repeat(80);
+        assert_eq!(
+            GridView::new(&table(&rows), key(0, "", true)).widths[2],
+            width
+        );
+        rows[10][2] = "x".repeat(80);
+        assert!(GridView::new(&table(&rows), key(0, "", true)).widths[2] > width);
     }
 
     #[test]
@@ -2058,33 +2086,5 @@ mod tests {
         let elapsed = start.elapsed();
         assert_eq!(grid.rows.len(), 25_000);
         assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
-    }
-
-    #[test]
-    fn driver_rows_leave_the_query_result_as_text() {
-        let column = |name: &str, data_type: &str| ColumnInfo {
-            name: name.into(),
-            data_type: data_type.into(),
-            nullable: Some(true),
-        };
-        let mut result = backend::QueryResult {
-            columns: vec![column("id", "int8"), column("note", "text")],
-            rows: vec![
-                vec![Cell::Integer(1), Cell::Text("NULL".into())],
-                vec![Cell::Integer(2), Cell::Null],
-            ],
-            ..Default::default()
-        };
-        let data = result_data(&mut result);
-        assert_eq!(
-            data.columns,
-            [("id".into(), "int8".into()), ("note".into(), "text".into())]
-        );
-        assert_eq!(data.value(1, 0), Some("2"));
-        // The text "NULL" stays a value; only a real NULL is marked.
-        assert_eq!(data.value(0, 1), Some("NULL"));
-        assert_eq!(data.value(1, 1), None);
-        // The driver cells moved out, so they are dropped where this ran.
-        assert!(result.columns.is_empty() && result.rows.is_empty());
     }
 }

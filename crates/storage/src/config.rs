@@ -129,6 +129,29 @@ impl ConfigRepository {
         .await
         .map_err(sql_error)
     }
+    /// The row limit chosen for a connection, if one was saved. Stored as
+    /// the setting `connection.<id>.row_limit`; a value that is not a
+    /// positive 32-bit number reads as unset.
+    pub async fn row_limit(&self, id: ConnectionId) -> DriverResult<Option<u32>> {
+        Ok(self
+            .setting(&row_limit_key(id))
+            .await?
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0))
+    }
+
+    /// Saves a connection's row limit. Callers validate its range.
+    pub async fn set_row_limit(&self, id: ConnectionId, limit: u32) -> DriverResult<()> {
+        if limit == 0 {
+            return Err(DriverError::validation(
+                "Row limit must be greater than zero",
+            ));
+        }
+        self.set_setting(&row_limit_key(id), &serde_json::json!(limit))
+            .await
+    }
+
     pub async fn setting(&self, key: &str) -> DriverResult<Option<serde_json::Value>> {
         let value: Option<String> =
             sqlx::query_scalar("SELECT value_json FROM settings WHERE key=?")
@@ -145,4 +168,8 @@ impl ConfigRepository {
             .bind(key).bind(serde_json::to_string(value).map_err(json_error)?).execute(&self.pool).await.map_err(sql_error)?;
         Ok(())
     }
+}
+
+fn row_limit_key(id: ConnectionId) -> String {
+    format!("connection.{id}.row_limit")
 }

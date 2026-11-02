@@ -1,5 +1,7 @@
 //! Simulated connections, queries and results for `JYKRE_DEMO=1`. Nothing
 //! here touches a database.
+use jykre::result::{ResultColumn, ResultData};
+
 pub const SALES_SQL: &str = "-- Revenue by category · Q3 2026\nSELECT\n    c.name AS category,\n    COUNT(o.id) AS orders,\n    SUM(o.total) AS revenue,\n    ROUND(AVG(o.total), 2) AS avg_ticket\nFROM orders o\nJOIN products p ON p.id = o.product_id\nJOIN categories c ON c.id = p.category_id\nWHERE o.created_at >= '2026-07-01'\n  AND o.created_at <  '2026-10-01'\n  AND o.status = 'completed'\nGROUP BY c.name\nORDER BY revenue DESC;";
 
 pub const OPTIMIZED_SQL: &str = "-- AI suggestion · aggregate before the JOINs\nWITH sales AS (\n    SELECT product_id, COUNT(*) AS orders,\n           SUM(total) AS revenue, AVG(total) AS ticket\n    FROM orders\n    WHERE created_at >= '2026-07-01'\n      AND created_at < '2026-10-01'\n      AND status = 'completed'\n    GROUP BY product_id\n)\nSELECT c.name AS category, SUM(s.orders) AS orders,\n       SUM(s.revenue) AS revenue,\n       ROUND(SUM(s.revenue) / SUM(s.orders), 2) AS avg_ticket\nFROM sales s\nJOIN products p ON p.id = s.product_id\nJOIN categories c ON c.id = p.category_id\nGROUP BY c.name ORDER BY revenue DESC;";
@@ -116,67 +118,46 @@ pub fn table_sql(table: &str) -> String {
     format!("-- Preview of table public.{table}\nSELECT *\nFROM public.{table}\nLIMIT 100;")
 }
 
-#[derive(Clone)]
-pub struct ResultData {
-    pub columns: Vec<(String, String)>,
-    pub rows: Vec<Vec<String>>,
-    pub sales: bool,
-    pub nulls: std::collections::HashSet<(usize, usize)>,
-}
-
+/// Demo rows as text; the text `NULL` stands for a NULL cell.
 fn fixture<const N: usize>(
     columns: [(&'static str, &'static str); N],
     rows: &[[&str; N]],
 ) -> ResultData {
-    ResultData {
-        columns: columns
+    ResultData::from_rows(
+        columns
             .into_iter()
-            .map(|(name, kind)| (name.into(), kind.into()))
+            .map(|(name, kind)| ResultColumn::new(name, kind))
             .collect(),
-        rows: rows
-            .iter()
-            .map(|row| row.iter().map(|cell| cell.to_string()).collect())
-            .collect(),
-        sales: false,
-        nulls: rows
-            .iter()
-            .enumerate()
-            .flat_map(|(row_index, row)| {
-                row.iter().enumerate().filter_map(move |(column, value)| {
-                    (*value == "NULL").then_some((row_index, column))
-                })
-            })
-            .collect(),
-    }
+        rows.iter()
+            .map(|row| row.iter().map(|cell| (*cell != "NULL").then_some(*cell))),
+    )
+}
+
+/// Whether `sql` is the revenue-by-category demo, which has a chart and an
+/// assistant analysis.
+pub fn is_sales(sql: &str) -> bool {
+    let sql = sql.to_lowercase();
+    sql.contains("group by") && (sql.contains("categories") || sql.contains("category"))
 }
 
 pub fn sample_result(sql: &str) -> ResultData {
-    let sql = sql.to_lowercase();
-    if sql.contains("group by") && (sql.contains("categories") || sql.contains("category")) {
-        return ResultData {
-            columns: vec![
-                ("category".into(), "text".into()),
-                ("orders".into(), "int8".into()),
-                ("revenue".into(), "numeric".into()),
-                ("avg_ticket".into(), "numeric".into()),
-                ("share %".into(), "numeric".into()),
+    if is_sales(sql) {
+        return ResultData::from_rows(
+            vec![
+                ResultColumn::new("category", "text"),
+                ResultColumn::new("orders", "int8"),
+                ResultColumn::new("revenue", "numeric"),
+                ResultColumn::new("avg_ticket", "numeric"),
+                ResultColumn::new("share %", "numeric"),
             ],
-            rows: SALES
-                .iter()
-                .map(|r| {
-                    vec![
-                        r.category.into(),
-                        r.orders.into(),
-                        r.revenue.into(),
-                        r.ticket.into(),
-                        r.share.into(),
-                    ]
-                })
-                .collect(),
-            sales: true,
-            nulls: Default::default(),
-        };
+            SALES.iter().map(|r| {
+                [r.category, r.orders, r.revenue, r.ticket, r.share]
+                    .into_iter()
+                    .map(Some)
+            }),
+        );
     }
+    let sql = sql.to_lowercase();
     if sql.contains("customers") {
         fixture(
             [
@@ -320,21 +301,6 @@ pub fn sample_result(sql: &str) -> ResultData {
             ],
         )
     } else {
-        ResultData {
-            columns: vec![("preview".into(), "text".into())],
-            rows: Vec::new(),
-            sales: false,
-            nulls: Default::default(),
-        }
-    }
-}
-
-impl ResultData {
-    pub fn value(&self, row: usize, column: usize) -> Option<&str> {
-        if self.nulls.contains(&(row, column)) {
-            None
-        } else {
-            self.rows.get(row)?.get(column).map(String::as_str)
-        }
+        ResultData::new(vec![ResultColumn::new("preview", "text")])
     }
 }

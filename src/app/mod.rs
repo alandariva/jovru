@@ -17,7 +17,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId, TabId};
-use jykre::{backend, connection_store, drivers::*};
+use jykre::{backend, connection_store, drivers::*, result::DEFAULT_ROW_LIMIT};
 use jykre_secrets::SystemSecretStore;
 use jykre_storage::{ConfigRepository, RefreshStatus};
 use layout::{ASSISTANT_WIDTH, EXPLORER_WIDTH, splitter};
@@ -51,6 +51,8 @@ struct Connection {
     group: TabGroupId,
     expanded: bool,
     input: Option<ResolvedConnection>,
+    /// Rows kept per statement in this connection's tabs.
+    row_limit: u32,
     metadata: Vec<MetadataObject>,
     collapsed: HashSet<ObjectPath>,
     /// Scope being refreshed and how to cancel it.
@@ -92,6 +94,7 @@ struct AppView {
     connection_user: Entity<InputState>,
     driver: usize,
     connection_port: Entity<InputState>,
+    connection_row_limit: Entity<InputState>,
     connection_password: Entity<InputState>,
     connection_ssl: Entity<InputState>,
     connection_profile: Entity<InputState>,
@@ -137,6 +140,7 @@ impl AppView {
                             panel.rebind_connection(
                                 connection.name.clone(),
                                 connection.input.clone(),
+                                connection.row_limit,
                                 cx,
                             )
                         });
@@ -211,6 +215,8 @@ impl AppView {
             connection_user,
             driver: 0,
             connection_port: cx.new(|cx| InputState::new(window, cx).default_value("5432")),
+            connection_row_limit: cx
+                .new(|cx| InputState::new(window, cx).default_value(DEFAULT_ROW_LIMIT.to_string())),
             connection_password: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
@@ -244,6 +250,7 @@ impl AppView {
             &app.connection_name,
             &app.connection_host,
             &app.connection_port,
+            &app.connection_row_limit,
             &app.connection_database,
             &app.connection_user,
             &app.connection_password,
@@ -291,6 +298,7 @@ impl AppView {
                     group,
                     expanded: app.connections.is_empty(),
                     input: None,
+                    row_limit: DEFAULT_ROW_LIMIT,
                     metadata: Vec::new(),
                     collapsed: HashSet::new(),
                     refreshing: None,
@@ -352,13 +360,13 @@ impl AppView {
                 cx,
             )
         });
-        if let Some(input) = self
+        if let Some((input, row_limit)) = self
             .connections
             .iter()
             .find(|connection| connection.group == group)
-            .and_then(|connection| connection.input.clone())
+            .and_then(|connection| Some((connection.input.clone()?, connection.row_limit)))
         {
-            panel.update(cx, |panel, _| panel.set_connection(input));
+            panel.update(cx, |panel, _| panel.set_connection(input, row_limit));
         }
         let subscription = cx.subscribe(&panel, |this, _, event: &WorkspaceEvent, cx| {
             match event {

@@ -1,5 +1,6 @@
 //! Application operations, independent of the UI and its executor.
 use crate::drivers::*;
+use crate::result::{ResultBuilder, ResultData, ResultLimit};
 use crate::tr;
 use jykre_storage::{MetadataRepository, PendingRefresh, RefreshStatus};
 use std::path::{Path, PathBuf};
@@ -158,20 +159,24 @@ pub async fn refresh_metadata(
     Ok(version)
 }
 
+/// The only Tokio runtime, created on first use.
+fn runtime() -> DriverResult<&'static tokio::runtime::Runtime> {
+    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, std::io::Error>> = OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+        })
+        .as_ref()
+        .map_err(|_| DriverError::new(ErrorCode::Internal, tr!("Cannot start database runtime")))
+}
+
 /// Drive network futures on Tokio while allowing the GUI to await their result.
 pub async fn run<T: Send + 'static>(
     work: impl Future<Output = DriverResult<T>> + Send + 'static,
 ) -> DriverResult<T> {
-    static RUNTIME: OnceLock<Result<tokio::runtime::Runtime, std::io::Error>> = OnceLock::new();
-    let runtime = RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-    });
-    let runtime = runtime
-        .as_ref()
-        .map_err(|_| DriverError::new(ErrorCode::Internal, tr!("Cannot start database runtime")))?;
-    runtime
+    runtime()?
         .spawn(work)
         .await
         .map_err(|_| DriverError::new(ErrorCode::Internal, tr!("Database task failed")))?
@@ -231,13 +236,15 @@ pub fn merge_metadata(
     });
 }
 
-#[derive(Default)]
+/// One statement's result, built while the driver reads it.
+#[derive(Debug, Default)]
 pub struct QueryResult {
-    pub columns: Vec<ColumnInfo>,
-    pub rows: Vec<Row>,
+    /// Display text, stored compactly. Empty for statements without rows.
+    pub data: ResultData,
     pub outcome: DriverOutcome,
     pub elapsed_ms: u128,
-    pub limited: bool,
+    /// The limit that stopped reading, if any.
+    pub limit: Option<ResultLimit>,
 }
 
 pub struct QueryBatch {
@@ -246,22 +253,18 @@ pub struct QueryBatch {
     /// statements may already have committed; never imply they were rolled back.
     pub error: Option<DriverError>,
 }
-impl RowSink for QueryResult {
-    fn columns(&mut self, columns: Vec<ColumnInfo>) -> SinkControl {
-        self.columns = columns;
-        SinkControl::Continue
-    }
-    fn row(&mut self, row: Row) -> SinkControl {
-        self.rows.push(row);
-        SinkControl::Continue
-    }
-}
 
 /// All statements in a run share one dedicated session. Always close it, also
 /// after failure; cancelled sessions are never reused by subsequent runs.
+///
+/// Each result is converted to [`ResultData`] row by row as the driver reads
+/// it, so driver cells are dropped here, on the runtime, and reading stops at
+/// the request's row limit or at `memory_ceiling` bytes, whichever comes
+/// first.
 pub async fn query(
     input: ResolvedConnection,
     requests: Vec<QueryRequest>,
+    memory_ceiling: usize,
     cancel: CancellationToken,
 ) -> DriverResult<QueryBatch> {
     for request in &requests {
@@ -273,13 +276,19 @@ pub async fn query(
     let mut failure = None;
     for request in requests {
         let start = Instant::now();
-        let mut result = QueryResult::default();
-        match session.execute(&request, &mut result, cancel.clone()).await {
+        let mut builder = ResultBuilder::new(request.options.max_rows, memory_ceiling);
+        match session
+            .execute(&request, &mut builder, cancel.clone())
+            .await
+        {
             Ok(outcome) => {
-                result.outcome = outcome;
-                result.elapsed_ms = start.elapsed().as_millis();
-                result.limited = result.rows.len() >= request.options.max_rows as usize;
-                results.push(result);
+                let (data, limit) = builder.finish();
+                results.push(QueryResult {
+                    data,
+                    outcome,
+                    elapsed_ms: start.elapsed().as_millis(),
+                    limit,
+                });
             }
             Err(error) => {
                 failure = Some(error);
@@ -297,21 +306,12 @@ pub async fn query(
     })
 }
 
-pub fn cell_text(cell: &Cell) -> String {
-    match cell {
-        Cell::Null => "NULL".into(),
-        Cell::Boolean(value) => value.to_string(),
-        Cell::Integer(value) => value.to_string(),
-        Cell::UnsignedInteger(value) => value.to_string(),
-        Cell::Float(value) => value.to_string(),
-        Cell::Decimal(value) | Cell::Text(value) | Cell::Temporal(value) => value.clone(),
-        Cell::Binary(bytes) => format!(
-            "0x{}",
-            bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        ),
+/// Drops `value` on the database runtime's blocking pool, so freeing a large
+/// result never stalls the UI thread. Without a runtime it is dropped here.
+pub fn release<T: Send + 'static>(value: T) {
+    match runtime() {
+        Ok(runtime) => drop(runtime.spawn_blocking(move || drop(value))),
+        Err(_) => drop(value),
     }
 }
 

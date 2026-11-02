@@ -1,5 +1,6 @@
 //! Result presentation grouped by value type family. Formatting never
 //! mutates source values or converts exact database numbers through floats.
+use crate::result::ResultData;
 use crate::tr;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueFamily {
@@ -88,6 +89,25 @@ pub fn display(value: Option<&str>, family: ValueFamily, numbers_pt_br: bool) ->
     }
 }
 
+/// A count for user-facing text, with digits grouped in the UI language
+/// (`100,000` in English, `100.000` in Portuguese).
+pub fn count(value: usize) -> String {
+    let digits = value.to_string();
+    let separator = if crate::i18n::locale().starts_with("pt") {
+        '.'
+    } else {
+        ','
+    };
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(separator);
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
+
 pub fn number_pt_br(value: &str) -> String {
     let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
     let mut parts = unsigned.split('.');
@@ -123,6 +143,23 @@ pub fn csv_field(value: Option<&str>) -> String {
     value
         .map(|text| format!("\"{}\"", text.replace('"', "\"\"")))
         .unwrap_or_default()
+}
+
+/// The whole result as CSV with headers: `;` between fields, every value
+/// quoted, NULL as an empty field. Values are the originals, regardless of
+/// how the grid presents them.
+pub fn result_csv(result: &ResultData) -> String {
+    let mut csv = result
+        .columns()
+        .iter()
+        .map(|column| csv_field(Some(&column.name)))
+        .collect::<Vec<_>>()
+        .join(";");
+    for row in 0..result.row_count() {
+        csv.push('\n');
+        csv.push_str(&result.row(row).map(csv_field).collect::<Vec<_>>().join(";"));
+    }
+    csv
 }
 
 /// Copies a block of cells as tab-separated text, the clipboard format
@@ -251,5 +288,31 @@ mod tests {
             "2026-11-02 12:34:56+03"
         );
         assert_eq!(display(Some("t"), ValueFamily::Boolean, false), "true");
+    }
+
+    #[test]
+    fn result_csv_quotes_every_value_and_leaves_null_empty() {
+        use crate::result::ResultColumn;
+        let result = ResultData::from_rows(
+            vec![
+                ResultColumn::new("id", "int8"),
+                ResultColumn::new("no\"te", "text"),
+            ],
+            [vec![Some("1"), None], vec![Some("2"), Some("a;\"b\"\nc")]],
+        );
+        assert_eq!(
+            result_csv(&result),
+            "\"id\";\"no\"\"te\"\n\"1\";\n\"2\";\"a;\"\"b\"\"\nc\""
+        );
+    }
+
+    #[test]
+    fn counts_group_digits_in_threes() {
+        // Unit tests run in the source language.
+        assert_eq!(count(0), "0");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1_000), "1,000");
+        assert_eq!(count(100_000), "100,000");
+        assert_eq!(count(1_234_567), "1,234,567");
     }
 }

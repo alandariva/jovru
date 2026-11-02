@@ -54,9 +54,19 @@ alignment only; the value itself is never converted.
 
 ## Model in memory
 
-- `ResultData` holds the columns (name and database type), the rows as display
-  text and the positions of NULL cells. It is built from the driver's cells on
-  the Tokio runtime, where the driver cells are also dropped.
+- `jykre::result::ResultData` holds the columns (name and database type) once,
+  all cell text in one UTF-8 buffer, the end offset of each cell and a NULL
+  bitmap ([ADR-0008](adr/0008-compact-result-storage.md)). Cells are read
+  through `value(row, column)`, which returns `None` for NULL. Its size in
+  memory is exact (`memory_bytes`).
+- `ResultBuilder` is the `RowSink` that `backend::query` hands the driver: it
+  converts each row as it arrives, on the Tokio runtime, and drops the driver
+  cells there. It stops reading at the memory ceiling and records which limit
+  applied.
+- A tab shares its result as `Rc<ResultData>`. A new run releases the previous
+  result before the next one arrives; a result that is no longer held is freed
+  on the runtime's blocking pool (`backend::release`), never on the UI thread.
+  Closing a tab releases everything.
 - `GridView` holds what the grid derives from the result: the rows in display
   order (after the open filter and the sort), the column widths (sampled from
   the first 200 rows) and the value families. `GridCache` rebuilds it only
@@ -70,19 +80,15 @@ alignment only; the value itself is never converted.
 
 | Limit | Value |
 | --- | --- |
-| Rows per statement | 1,000 (`ExecutionOptions.max_rows`); the driver stops reading at the limit |
+| Rows per statement | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`); the driver stops reading at the limit |
+| Memory per result | 256 MB (`DEFAULT_MEMORY_CEILING`); `ResultBuilder` stops reading even below the row limit |
 | Statement timeout | 300 s (`ExecutionOptions.timeout`) |
 | Column width | 110 to 360 px, from the header and the first 200 rows |
 
-The standard ([ADR-0008](adr/0008-compact-result-storage.md), proposed):
-
-- The row limit is configurable per connection, up to 100,000 rows.
-- A **memory ceiling** per result (default 256 MB) stops reading even below
-  the row limit, and the footer says which limit applied.
-- Results use a compact representation: one UTF-8 buffer, cell offsets and a
-  NULL bitmap, instead of one `String` per cell and a hash set of NULLs.
-- Starting a new run in a tab releases that tab's previous result; closing the
-  tab releases everything.
+- The row limit is set in the connection dialog (**Row limit per statement**)
+  and stored with the connection's preferences.
+- The footer says which limit applied: "row limit reached" or "memory limit
+  reached", with the limit in its tooltip.
 
 ## Statements and results
 
@@ -146,6 +152,5 @@ format ([User experience](ux.md#feedback)).
 
 | Standard | Current code |
 | --- | --- |
-| Configurable row limit, memory ceiling, compact storage | Fixed 1,000-row limit; `Vec<Vec<String>>` plus a `HashSet` of NULL positions ([ADR-0008](adr/0008-compact-result-storage.md), proposed) |
 | One result per statement | A run with several statements shows only the last statement's result; **Messages** summarises the run |
 | Copy confirmation above 50 MiB, off the UI thread when large | Copies always run on the UI thread, without confirmation (about 85 ms for 500,000 cells) |
