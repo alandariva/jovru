@@ -65,8 +65,9 @@ Demo connections and results are labelled as such and never reach a server.
 - Click a table or view to open a SQL preview with escaped identifiers.
   `Ctrl Shift P` searches real tables, `Ctrl N` opens a query on the active
   connection and `Ctrl Enter` runs it. Each run uses a dedicated session shared
-  by the editor's statements and closes it at the end. Limits: 1,000 rows per
-  statement and a 300 s timeout. The run button can cancel.
+  by the editor's statements and closes it at the end. Limits: a row limit per
+  statement set in each connection (1,000 by default, up to 100,000), 256 MB
+  per result and a 300 s timeout. The run button can cancel.
 - Tabs keep their SQL. Moving a tab to another group changes its connection and
   cancels a running execution. Review the context before running.
 - Result headers show `name : type`, with the SQL type in a neutral tone.
@@ -120,6 +121,11 @@ The data folder follows each platform's convention:
 Set `JYKRE_CONFIG_DIR` to use another folder (for example, an isolated test
 folder). Only when no home directory can be found does the app fall back to
 `.jykre/` in the working directory.
+
+Logs are written to `logs/` inside the data folder as JSON lines, one file per
+day, keeping the last seven. `JYKRE_LOG` changes the level (for example
+`JYKRE_LOG=jykre=debug`); SQL text is logged only at `trace` and passwords
+never. `JYKRE_PROBE=1` adds frame-time measurements to the log.
 
 Credentials are never serialized: SQLite and JSON files hold only non-sensitive
 configuration. Databricks tokens are resolved by the CLI at runtime and kept in
