@@ -58,5 +58,8 @@ await_holding_refcell_ref = "deny"
 ## Implementation notes
 
 Implemented on 2026-11-02. Besides `xtask`, two development targets allow one
-lint each, with a comment: the command-line examples (`connect`, `drivers`)
-allow `print_stdout`, and the benchmarks allow `expect_used` for their setup.
+lint each, with a comment, approved by the maintainer on 2026-11-02: the
+command-line examples (`connect`, `drivers`) allow `print_stdout`, and the
+benchmarks allow `expect_used` for their setup. A test sink in the Databricks
+driver that must never be called uses `unreachable!` instead of `panic!`, also
+approved.

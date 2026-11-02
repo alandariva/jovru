@@ -136,7 +136,8 @@ Tests opt out of `unwrap_used`/`expect_used` with
 `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` at each
 crate root and integration test file. Development tools allow only what their
 job needs, with a comment: `xtask` and the command-line examples may print,
-and the benchmarks may `expect` on their setup. A lint is never silenced in
+and the benchmarks may `expect` on their setup (approved by the maintainer on
+2026-11-02, [ADR-0011](adr/0011-workspace-lints.md#implementation-notes)). A lint is never silenced in
 production code to make the gate pass; an exception needs the maintainer's
 approval and a comment.
 
