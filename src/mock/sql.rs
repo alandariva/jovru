@@ -168,6 +168,15 @@ pub fn statements(sql: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+/// Executable statements with runs of whitespace collapsed, so layout-only
+/// edits (new lines, indentation) do not count as a different statement.
+pub fn normalized_statements(sql: &str) -> Vec<String> {
+    statements(sql)
+        .into_iter()
+        .map(|range| sql[range].split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
 pub fn preview_error(sql: &str) -> Option<&'static str> {
     let first = tokenize(sql).into_iter().next()?;
     let command = sql[first.0].to_ascii_uppercase();
@@ -189,6 +198,12 @@ pub fn preview_error(sql: &str) -> Option<&'static str> {
         None
     }
 }
+
+/// Longest first, so `->>` wins over `->`.
+const OPERATORS: &[&str] = &[
+    "->>", "#>>", "<=>", "->", "#>", "<=", ">=", "<>", "!=", "::", "||", "=>", ":=", "@>", "<@",
+    "&&", "<<", ">>", "!~", "~*",
+];
 
 fn tokenize(sql: &str) -> Vec<(Range<usize>, Kind)> {
     let mut tokens = Vec::new();
@@ -223,6 +238,34 @@ fn tokenize(sql: &str) -> Vec<(Range<usize>, Kind)> {
                 }
             }
             Kind::String
+        } else if ch == '$' {
+            let rest = &sql[start + 1..];
+            let tag_len = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            if rest[tag_len..].starts_with('$')
+                && !rest[..tag_len].starts_with(|c: char| c.is_ascii_digit())
+            {
+                // PostgreSQL dollar quoting: `$$…$$` or `$tag$…$tag$`.
+                let delimiter = &sql[start..start + tag_len + 2];
+                let body = start + delimiter.len();
+                let end = sql[body..]
+                    .find(delimiter)
+                    .map_or(sql.len(), |close| body + close + delimiter.len());
+                while chars.peek().is_some_and(|(offset, _)| *offset < end) {
+                    chars.next();
+                }
+                Kind::String
+            } else {
+                // Positional parameter such as `$1`.
+                while chars
+                    .peek()
+                    .is_some_and(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    chars.next();
+                }
+                Kind::Word
+            }
         } else if ch.is_ascii_digit() {
             while chars
                 .peek()
@@ -252,6 +295,16 @@ fn tokenize(sql: &str) -> Vec<(Range<usize>, Kind)> {
                 _ => Kind::Word,
             }
         } else {
+            // Multi-character operators are one token, so formatting never
+            // splits `>=` into `> =` or `::` into `: :`.
+            if let Some(operator) = OPERATORS
+                .iter()
+                .find(|operator| sql[start..].starts_with(*operator))
+            {
+                for _ in 1..operator.len() {
+                    chars.next();
+                }
+            }
             Kind::Symbol
         };
         let end = chars.peek().map_or(sql.len(), |(offset, _)| *offset);
@@ -334,7 +387,40 @@ pub fn format(sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{preview_error, statements};
+    use super::{format, normalized_statements, preview_error, statements};
+
+    #[test]
+    fn format_keeps_operators_literals_and_parameters_intact() {
+        let sql = "select a from t where a>=1 and b<=2 and c<>3 and d!=4 and e::int=5 \
+                   and f||'x'='y' and g->>'k'=$1 and h=$$a >= b;$$ and i=$q$x$q$";
+        let formatted = format(sql);
+        for kept in [
+            ">= 1",
+            "<= 2",
+            "<> 3",
+            "!= 4",
+            "::",
+            "||",
+            "->>",
+            "$1",
+            "$$a >= b;$$",
+            "$q$x$q$",
+        ] {
+            assert!(formatted.contains(kept), "{kept:?} in {formatted:?}");
+        }
+        assert!(!formatted.contains("> ="), "{formatted:?}");
+        assert!(!formatted.contains(": :"), "{formatted:?}");
+        // Formatting is stable, so a second run changes nothing.
+        assert_eq!(format(&formatted), formatted);
+    }
+
+    #[test]
+    fn normalized_statements_ignore_layout_only() {
+        assert_eq!(
+            normalized_statements("SELECT\n    1;\n\n  SELECT  2;\n"),
+            ["SELECT 1;", "SELECT 2;"]
+        );
+    }
 
     #[test]
     fn finds_queries_without_splitting_literals_or_comments() {

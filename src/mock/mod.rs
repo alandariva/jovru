@@ -55,7 +55,7 @@ struct Connection {
     metadata: Vec<MetadataObject>,
     collapsed: HashSet<ObjectPath>,
     refreshing: Option<CancellationToken>,
-    status: String,
+    status: Feedback,
     notice: Option<String>,
 }
 
@@ -96,7 +96,11 @@ struct AppView {
     connection_ssl: Entity<InputState>,
     connection_profile: Entity<InputState>,
     connection_warehouse: Entity<InputState>,
-    connection_status: String,
+    connection_status: Option<Feedback>,
+    /// Application-level problem (loading connections, saving preferences,
+    /// searching) shown in the explorer until dismissed.
+    app_notice: Option<Feedback>,
+    command_searching: bool,
     remember_password: bool,
     connection_saving: bool,
     connections_loading: bool,
@@ -216,7 +220,9 @@ impl AppView {
             connection_profile: cx.new(|cx| InputState::new(window, cx).default_value("DEFAULT")),
             connection_warehouse: cx
                 .new(|cx| InputState::new(window, cx).placeholder(tr!("Optional for metadata"))),
-            connection_status: "".into(),
+            connection_status: None,
+            app_notice: None,
+            command_searching: false,
             remember_password: false,
             connection_saving: false,
             connections_loading: true,
@@ -245,12 +251,20 @@ impl AppView {
             &app.connection_profile,
             &app.connection_warehouse,
         ] {
-            let subscription = cx.subscribe(field, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.invalidate_connection_test();
-                    cx.notify();
-                }
-            });
+            let subscription =
+                cx.subscribe_in(field, window, |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::Change => {
+                            this.invalidate_connection_test();
+                            cx.notify();
+                        }
+                        // Enter in any field submits the form, as in other dialogs.
+                        InputEvent::PressEnter { .. } if this.connection_open => {
+                            this.save_connection(window, cx);
+                        }
+                        _ => {}
+                    }
+                });
             app._subscriptions.push(subscription);
         }
         if std::env::var_os("JYKRE_DEMO").is_some() {
@@ -280,7 +294,7 @@ impl AppView {
                     metadata: Vec::new(),
                     collapsed: HashSet::new(),
                     refreshing: None,
-                    status: tr!("Demo · simulated data").into(),
+                    status: Feedback::new(Tone::Info, tr!("Demo · simulated data")),
                     notice: None,
                 });
             }
@@ -434,6 +448,45 @@ impl AppView {
         self.command_open = false;
     }
 
+    fn rail_item(
+        &self,
+        index: usize,
+        section: Section,
+        name: I,
+        title: &'static str,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let active = self.section == section && self.sidebar_open;
+        div()
+            .id(("rail-item", index))
+            .role(Role::Button)
+            .aria_label(title)
+            .aria_selected(active)
+            .focusable()
+            .tab_index(0)
+            .focus_visible(|s| s.bg(rgb(HOVER)))
+            .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
+            .size(px(34.))
+            .flex_none()
+            .rounded(px(7.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when(active, |s| s.bg(rgb(0x26342f)))
+            .hover(|s| s.bg(rgb(HOVER)))
+            .child(icon(name, if active { MINT } else { FAINT }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.section == section {
+                    this.sidebar_open = !this.sidebar_open;
+                } else {
+                    this.section = section;
+                    this.sidebar_open = true;
+                }
+                cx.notify();
+            }))
+    }
+
     fn rail(&self, cx: &mut Context<Self>) -> Div {
         column()
             .w(px(48.))
@@ -453,54 +506,11 @@ impl AppView {
                 ]
                 .into_iter()
                 .enumerate()
-                .map(|(i, (section, name, title))| {
-                    div()
-                        .id(("rail-item", i))
-                        .role(Role::Button)
-                        .aria_label(title)
-                        .focusable()
-                        .tab_index(0)
-                        .focus_visible(|s| s.bg(rgb(HOVER)))
-                        .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
-                        .size(px(34.))
-                        .rounded(px(7.))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .when(self.section == section && self.sidebar_open, |s| {
-                            s.bg(rgb(0x26342f))
-                        })
-                        .hover(|s| s.bg(rgb(HOVER)))
-                        .child(icon(
-                            name,
-                            if self.section == section && self.sidebar_open {
-                                MINT
-                            } else {
-                                FAINT
-                            },
-                        ))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.section == section {
-                                this.sidebar_open = !this.sidebar_open;
-                            } else {
-                                this.section = section;
-                                this.sidebar_open = true;
-                            }
-                            cx.notify();
-                        }))
-                }),
+                .map(|(i, (section, name, title))| self.rail_item(i, section, name, title, cx))
+                .collect::<Vec<_>>(),
             )
             .child(div().flex_1())
-            .child(
-                icon_button("settings-rail", I::Settings2, tr!("Preferences")).on_click(
-                    cx.listener(|this, _, _, cx| {
-                        this.section = Section::Settings;
-                        this.sidebar_open = true;
-                        cx.notify();
-                    }),
-                ),
-            )
+            .child(self.rail_item(3, Section::Settings, I::Settings2, tr!("Preferences"), cx))
             .child(
                 div()
                     .size(px(26.))
@@ -543,18 +553,22 @@ impl AppView {
                     .child(
                         row()
                             .gap_0()
-                            .child(
-                                icon_button("add-connection", I::Plus, tr!("New connection")).on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.open_connection(None, window, cx)
-                                    }),
-                                ),
-                            )
+                            .when(self.section == Section::Explorer, |s| {
+                                s.child(
+                                    icon_button("add-connection", I::Plus, tr!("New connection"))
+                                        .when(self.connections_loading, |s| {
+                                            s.opacity(0.5).cursor_default()
+                                        })
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.open_connection(None, window, cx)
+                                        })),
+                                )
+                            })
                             .child(
                                 icon_button(
                                     "collapse-sidebar",
                                     I::PanelLeftClose,
-                                    tr!("Collapse explorer"),
+                                    tr!("Collapse sidebar"),
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
@@ -590,6 +604,33 @@ impl AppView {
                         )
                         .child(badge(self.connections.len().to_string(), FAINT)),
                 )
+                .when_some(self.app_notice.as_ref(), |s, notice| {
+                    s.child(
+                        row()
+                            .id("app-notice")
+                            .role(if notice.tone == Tone::Error {
+                                Role::Alert
+                            } else {
+                                Role::Status
+                            })
+                            .aria_label(notice.text.clone())
+                            .mx_3()
+                            .mb_2()
+                            .p_2()
+                            .items_start()
+                            .rounded(px(6.))
+                            .bg(rgb(notice.tone.background()))
+                            .child(feedback_line(notice).flex_1().text_size(px(12.)))
+                            .child(
+                                icon_button("dismiss-app-notice", I::X, tr!("Close notice"))
+                                    .size(px(24.))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.app_notice = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                })
                 .child(
                     column()
                         .id("connection-tree")
@@ -598,6 +639,39 @@ impl AppView {
                         .track_scroll(&self.explorer_scroll)
                         .vertical_scrollbar(&self.explorer_scroll)
                         .pb_3()
+                        .when(self.connections_loading, |s| {
+                            s.child(
+                                row()
+                                    .px_4()
+                                    .py_3()
+                                    .child(icon(I::LoaderCircle, FAINT))
+                                    .child(label(tr!("Loading connections…"))),
+                            )
+                        })
+                        .when(
+                            !self.connections_loading && self.connections.is_empty(),
+                            |s| {
+                                s.child(
+                                    column()
+                                        .px_4()
+                                        .py_3()
+                                        .gap_2()
+                                        .child(label(tr!(
+                                            "No connections yet. Add one to explore its metadata and run SQL."
+                                        )))
+                                        .child(
+                                            button(
+                                                "explorer-add-connection",
+                                                I::Plus,
+                                                tr!("New connection"),
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.open_connection(None, window, cx)
+                                            })),
+                                        ),
+                                )
+                            },
+                        )
                         .children(self.connections.iter().enumerate().map(
                             |(index, connection)| self.connection_tree(index, connection, cx),
                         )),
@@ -705,13 +779,13 @@ impl AppView {
                         tr!("In this session")
                     }))
                     .when(queries.is_empty(), |s| {
-                        s.child(
-                            div()
-                                .p_3()
-                                .text_size(px(14.))
-                                .text_color(rgb(MUTED))
-                                .child(tr!("Save a query with the bookmark icon in the editor.")),
-                        )
+                        s.child(div().p_3().text_size(px(14.)).text_color(rgb(MUTED)).child(
+                            if self.section == Section::Saved {
+                                tr!("Save a query with the bookmark icon in the editor.")
+                            } else {
+                                tr!("Queries you run appear here.")
+                            },
+                        ))
                     })
                     .children(queries.iter().enumerate().map(|(index, query)| {
                         let query = query.clone();
@@ -746,12 +820,15 @@ impl AppView {
                             )
                             .child(div().pl_6().child(label(query.connection.clone())))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                let group = this
+                                let Some(group) = this
                                     .connections
                                     .iter()
                                     .find(|c| c.name == query.connection)
+                                    .or(this.connections.first())
                                     .map(|c| c.group)
-                                    .unwrap_or(this.connections[0].group);
+                                else {
+                                    return;
+                                };
                                 this.add_query(group, &query.title, &query.sql, window, cx);
                             }))
                     }))
@@ -787,7 +864,7 @@ impl AppView {
                 })))
             .child(div().mt_3().child(label(tr!("Shortcuts"))))
             .children([
-                (tr!("Search tables"), "Ctrl K"), (tr!("New query"), "Ctrl N"),
+                (tr!("Search tables"), "Ctrl Shift P"), (tr!("New query"), "Ctrl N"),
                 (tr!("Run SQL"), "Ctrl ↵"), (tr!("Explorer"), "Ctrl B"),
                 (tr!("Assistant"), "Ctrl Shift B"), (tr!("SQL font"), "Ctrl + / −"), (tr!("Reset font"), "Ctrl 0"),
             ].into_iter().map(|(title, key)| row().justify_between().child(label(title)).child(shortcut(key))))
@@ -861,7 +938,7 @@ impl AppView {
                     .child(icon(I::Search, FAINT))
                     .child(label(tr!("Search the workspace…")))
                     .child(div().flex_1())
-                    .child(shortcut("Ctrl K"))
+                    .child(shortcut("Ctrl Shift P"))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.command_open = true;
                         this.command.update(cx, |input, cx| input.focus(window, cx));
@@ -882,6 +959,32 @@ impl AppView {
                     .text_color(rgb(MINT))
                     .on_click(cx.listener(|this, _, window, cx| this.new_active_query(window, cx))),
             )
+    }
+
+    /// The tabs, or a welcome state with the next step when there is nothing
+    /// to show yet.
+    fn main_area(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.connections_loading || !self.connections.is_empty() {
+            return self.tabs.clone().into_any_element();
+        }
+        column()
+            .id("welcome")
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p_6()
+            .child(icon(I::Database, MINT))
+            .child(div().text_size(px(16.)).child(tr!("Connect to a database")))
+            .child(label(tr!(
+                "Add a PostgreSQL, MySQL or Databricks connection to explore its metadata and run SQL."
+            )))
+            .child(
+                primary_button("welcome-add-connection", I::Plus, tr!("New connection")).on_click(
+                    cx.listener(|this, _, window, cx| this.open_connection(None, window, cx)),
+                ),
+            )
+            .into_any_element()
     }
 
     fn table_matches(&self, _: &App) -> Vec<(usize, String, String)> {
@@ -927,9 +1030,13 @@ impl AppView {
                             .px_2()
                             .pb_3()
                             .when(matches.is_empty(), |s| {
-                                s.child(div().p_5().child(label(tr!(
-                                    "No objects found. Refresh the connection metadata."
-                                ))))
+                                s.child(div().p_5().child(label(if self.command_searching {
+                                    tr!("Searching…")
+                                } else if self.connections.is_empty() {
+                                    tr!("No connections yet. Add one to search its tables.")
+                                } else {
+                                    tr!("No objects found. Refresh the connection metadata.")
+                                })))
                             })
                             .children(matches.into_iter().enumerate().map(
                                 |(index, (connection_index, name, sql))| {
@@ -993,11 +1100,12 @@ impl AppView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.command_open = false;
-                    if !this.connection_saving {
-                        this.connection_open = false;
+                    // Only the palette closes on an outside click. The connection
+                    // form keeps what was typed until it is closed explicitly.
+                    if this.command_open {
+                        this.command_open = false;
+                        cx.notify();
                     }
-                    cx.notify();
                 }),
             )
     }
@@ -1030,10 +1138,18 @@ impl Render for AppView {
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    this.command_open = false;
-                    this.connection_open = false;
-                    cx.notify();
-                } else if event.keystroke.modifiers.control && event.keystroke.key == "k" {
+                    if this.command_open {
+                        this.command_open = false;
+                        cx.notify();
+                    } else {
+                        this.close_connection_dialog(cx);
+                    }
+                } else if this.connection_open {
+                    // Workspace shortcuts would act behind the modal form.
+                } else if event.keystroke.modifiers.control
+                    && event.keystroke.modifiers.shift
+                    && event.keystroke.key.eq_ignore_ascii_case("p")
+                {
                     this.command_open = !this.command_open;
                     if this.command_open {
                         this.command.update(cx, |input, cx| input.focus(window, cx));
@@ -1117,11 +1233,11 @@ impl Render for AppView {
                                     .child(
                                         resizable_panel()
                                             .size_range(px(760.)..Pixels::MAX)
-                                            .child(self.tabs.clone()),
+                                            .child(self.main_area(cx)),
                                     )
                                     .into_any_element()
                             } else {
-                                self.tabs.clone().into_any_element()
+                                self.main_area(cx)
                             }),
                     ),
             )
@@ -1145,7 +1261,10 @@ impl Render for AppView {
                                     .child(label(tr!("Personal workspace"))),
                             )
                             .child(divider())
-                            .child(label(tr!("{0} connections", self.connections.len()))),
+                            .child(label(match self.connections.len() {
+                                1 => tr!("1 connection").to_string(),
+                                count => tr!("{0} connections", count),
+                            })),
                     )
                     .child(
                         row()

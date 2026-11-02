@@ -8,7 +8,18 @@ impl AppView {
         if let Some(cancel) = self.connection_testing.take() {
             cancel.cancel();
         }
-        self.connection_status.clear();
+        self.connection_status = None;
+    }
+
+    /// Closes the connection dialog unless a save is still in progress, so
+    /// the save result (or its error) always has a visible place to land.
+    pub(super) fn close_connection_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.connection_saving || !self.connection_open {
+            return;
+        }
+        self.connection_open = false;
+        self.invalidate_connection_test();
+        cx.notify();
     }
 
     pub(super) fn open_connection(
@@ -150,20 +161,20 @@ impl AppView {
     }
 
     fn test_connection(&mut self, cx: &mut Context<Self>) {
-        if self.connection_testing.is_some() {
+        if self.connection_testing.is_some() || self.connection_saving {
             return;
         }
         let (_, input) = match self.form_connection(cx) {
             Ok(value) => value,
             Err(error) => {
-                self.connection_status = error.to_string();
+                self.connection_status = Some(Feedback::new(Tone::Error, error.to_string()));
                 cx.notify();
                 return;
             }
         };
         let cancel = CancellationToken::new();
         self.connection_testing = Some(cancel.clone());
-        self.connection_status = tr!("Testing connection…").into();
+        self.connection_status = Some(Feedback::new(Tone::Info, tr!("Testing connection…")));
         let revision = self.connection_revision;
         cx.spawn(async move |weak, cx| {
             let result = backend::run(async move {
@@ -178,10 +189,12 @@ impl AppView {
                     return;
                 }
                 this.connection_testing = None;
-                this.connection_status = match result {
-                    Ok(_) => tr!("Connection established successfully.").into(),
-                    Err(error) => error.to_string(),
-                };
+                this.connection_status = Some(match result {
+                    Ok(_) => {
+                        Feedback::new(Tone::Success, tr!("Connection established successfully."))
+                    }
+                    Err(error) => Feedback::new(Tone::Error, error.to_string()),
+                });
                 cx.notify();
             });
         })
@@ -213,15 +226,17 @@ impl AppView {
                         for loaded in connections {
                             this.insert_connection(loaded, cx);
                         }
-                        if this.connections.is_empty() {
-                            this.open_connection(None, window, cx);
-                        } else if this.panels.is_empty() {
+                        // Without connections the explorer and the workspace show
+                        // an empty state with the way forward; nothing pops up.
+                        if !this.connections.is_empty() && this.panels.is_empty() {
                             this.new_query(this.connections[0].group, window, cx);
                         }
                     }
                     Err(error) => {
-                        this.connection_status = error.to_string();
-                        this.connection_open = true;
+                        this.app_notice = Some(Feedback::new(
+                            Tone::Error,
+                            tr!("Could not load the saved connections: {0}", error),
+                        ));
                     }
                 }
                 cx.notify();
@@ -244,7 +259,10 @@ impl AppView {
             .await;
             if let Err(error) = result {
                 let _ = weak.update(cx, |this, cx| {
-                    this.connection_status = error.to_string();
+                    this.app_notice = Some(Feedback::new(
+                        Tone::Error,
+                        tr!("Could not save the preference: {0}", error),
+                    ));
                     cx.notify();
                 });
             }
@@ -329,31 +347,36 @@ impl AppView {
             refresh_generation: 0,
             collapsed: HashSet::new(),
             refreshing: None,
-            status: tr!("Local cache available without connecting to the server.").into(),
+            status: Feedback::new(
+                Tone::Info,
+                tr!("Local cache available without connecting to the server."),
+            ),
             notice: warning.clone(),
         };
         if let Some(cache) = cache {
             Self::apply_cache(&mut connection, cache);
         }
         if connection.metadata.is_empty() {
-            connection.status =
-                tr!("No saved metadata. Use refresh to fetch it from the server.").into();
+            connection.status = Feedback::new(
+                Tone::Info,
+                tr!("No saved metadata. Use refresh to fetch it from the server."),
+            );
         }
         if let Some(warning) = warning {
-            connection.status = warning;
+            connection.status = Feedback::new(Tone::Warning, warning);
         }
         self.connections.push(connection);
         self.connections.len() - 1
     }
 
-    fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.connection_saving {
             return;
         }
         let (name, input) = match self.form_connection(cx) {
             Ok(value) => value,
             Err(error) => {
-                self.connection_status = error.to_string();
+                self.connection_status = Some(Feedback::new(Tone::Error, error.to_string()));
                 cx.notify();
                 return;
             }
@@ -378,8 +401,12 @@ impl AppView {
             }
             connection.refresh_generation += 1;
         }
+        if let Some(cancel) = self.connection_testing.take() {
+            cancel.cancel();
+        }
+        self.connection_revision += 1;
         self.connection_saving = true;
-        self.connection_status = tr!("Saving connection…").into();
+        self.connection_status = Some(Feedback::new(Tone::Info, tr!("Saving connection…")));
         let dir = connection_store::data_dir();
         cx.spawn_in(window, async move |weak, cx| {
             let result = backend::run(async move {
@@ -390,7 +417,8 @@ impl AppView {
                 this.connection_saving = false;
                 match result {
                     Err(error) => {
-                        this.connection_status = error.to_string();
+                        this.connection_status =
+                            Some(Feedback::new(Tone::Error, error.to_string()));
                         cx.notify();
                     }
                     Ok(loaded) => {
@@ -426,9 +454,10 @@ impl AppView {
                                 connection.metadata_more.clear();
                             }
                             connection.notice = loaded.warning.clone();
-                            connection.status = loaded
-                                .warning
-                                .unwrap_or_else(|| tr!("Connection saved.").into());
+                            connection.status = match loaded.warning {
+                                Some(warning) => Feedback::new(Tone::Warning, warning),
+                                None => Feedback::new(Tone::Success, tr!("Connection saved.")),
+                            };
                             let _ = this.tabs.update(cx, |tabs, cx| {
                                 tabs.rename_group(connection.group, connection.name.clone(), cx)
                             });
@@ -489,7 +518,7 @@ impl AppView {
             .last()
             .map(|part| part.name.clone())
             .unwrap_or_else(|| tr!("full connection").into());
-        connection.status = tr!("Refreshing {0}…", scope_name);
+        connection.status = Feedback::new(Tone::Info, tr!("Refreshing {0}…", scope_name));
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
             let operation_cancel = cancel.clone();
@@ -542,14 +571,21 @@ impl AppView {
                     Self::apply_cache(connection, snapshot);
                 }
                 connection.status = match result {
-                    Ok(_) => tr!("{0}: refresh completed and saved.", scope_name),
-                    Err(error) if error.code == ErrorCode::Cancelled => {
-                        tr!("Refresh cancelled. Previous cache preserved.").into()
-                    }
-                    Err(error) => tr!(
-                        "Failed to refresh {0}: {1}. Previous cache preserved.",
-                        scope_name,
-                        error
+                    Ok(_) => Feedback::new(
+                        Tone::Success,
+                        tr!("Refresh of {0} completed and saved.", scope_name),
+                    ),
+                    Err(error) if error.code == ErrorCode::Cancelled => Feedback::new(
+                        Tone::Warning,
+                        tr!("Refresh cancelled. Previous cache preserved."),
+                    ),
+                    Err(error) => Feedback::new(
+                        Tone::Error,
+                        tr!(
+                            "Failed to refresh {0}: {1}. Previous cache preserved.",
+                            scope_name,
+                            error
+                        ),
                     ),
                 };
                 if !this.search.read(cx).value().is_empty() {
@@ -610,7 +646,7 @@ impl AppView {
                 }
                 match result {
                     Ok(snapshot) => Self::apply_cache(connection, snapshot),
-                    Err(error) => connection.status = error.to_string(),
+                    Err(error) => connection.status = Feedback::new(Tone::Error, error.to_string()),
                 }
                 cx.notify();
             });
@@ -624,18 +660,20 @@ impl AppView {
         } else {
             self.search.read(cx).value().to_string()
         };
+        // Previous results stay on screen until the new ones arrive, so the
+        // list does not blink empty on every keystroke.
         let revision = if palette {
             self.command_revision += 1;
-            self.command_matches.clear();
+            self.command_searching = true;
             self.command_revision
         } else {
             self.search_revision += 1;
-            for connection in &mut self.connections {
-                connection.search_results.clear();
-            }
             self.search_revision
         };
         if !palette && query.is_empty() {
+            for connection in &mut self.connections {
+                connection.search_results.clear();
+            }
             cx.notify();
             return;
         }
@@ -683,6 +721,14 @@ impl AppView {
                 {
                     return;
                 }
+                if palette {
+                    this.command_searching = false;
+                    this.command_matches.clear();
+                } else {
+                    for connection in &mut this.connections {
+                        connection.search_results.clear();
+                    }
+                }
                 match result {
                     Ok(found) => {
                         for (index, driver, objects) in found {
@@ -701,7 +747,10 @@ impl AppView {
                             }
                         }
                     }
-                    Err(error) => this.connection_status = error.to_string(),
+                    Err(error) => {
+                        this.app_notice =
+                            Some(Feedback::new(Tone::Error, tr!("Search failed: {0}", error)))
+                    }
                 }
                 cx.notify();
             });
@@ -793,15 +842,19 @@ impl AppView {
                             s.child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(0xe6bb78))
+                                    .text_color(rgb(AMBER))
                                     .child(notice),
                             )
                         })
                         .child(
                             div()
                                 .text_size(px(12.))
-                                .text_color(rgb(MUTED))
-                                .child(connection.status.clone()),
+                                .text_color(rgb(if connection.status.tone == Tone::Info {
+                                    MUTED
+                                } else {
+                                    connection.status.tone.color()
+                                }))
+                                .child(connection.status.text.clone()),
                         )
                         .when(connection.refreshing.is_some(), |s| {
                             s.child(
@@ -816,9 +869,10 @@ impl AppView {
                                         if let Some(cancel) = &connection.refreshing {
                                             cancel.cancel();
                                         }
-                                        connection.status =
-                                            tr!("Cancelling refresh; previous cache preserved.")
-                                                .into();
+                                        connection.status = Feedback::new(
+                                            Tone::Info,
+                                            tr!("Cancelling refresh; previous cache preserved."),
+                                        );
                                         cx.notify();
                                     },
                                 )),
@@ -1017,11 +1071,12 @@ impl AppView {
             .child(column().id("connection-form").role(Role::Dialog).aria_label(tr!("Configure connection")).w(px(560.)).max_h(px(750.)).overflow_y_scroll().mt(px(48.)).p_5().gap_3().rounded(px(12.)).border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).shadow_lg()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(row().justify_between().child(div().text_size(px(20.)).child(if self.editing_connection.is_some() { tr!("Configure connection") } else { tr!("New connection") }))
-                    .child(icon_button("close-connection", I::X, tr!("Close new connection")).on_click(cx.listener(|this, _, _, cx| { this.connection_open = false; this.invalidate_connection_test(); cx.notify(); }))))
+                    .child(icon_button("close-connection", I::X, tr!("Close")).when(self.connection_saving, |s| s.opacity(0.5).cursor_default()).on_click(cx.listener(|this, _, _, cx| this.close_connection_dialog(cx)))))
                 .child(row().children(["PostgreSQL", "MySQL", "Databricks"].into_iter().enumerate().map(|(index, name)| {
                     button(("select-driver", index), I::Database, name).flex_1().when(self.driver == index, |s| s.bg(rgb(HOVER)).text_color(rgb(MINT)))
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            if this.connection_saving { return; } this.driver = index; this.invalidate_connection_test();
+                            // Re-selecting the current driver keeps the typed port and TLS mode.
+                            if this.connection_saving || this.driver == index { return; } this.driver = index; this.invalidate_connection_test();
                             this.connection_port.update(cx, |input, cx| input.set_value(if index == 1 { "3306" } else { "5432" }, window, cx));
                             this.connection_ssl.update(cx, |input, cx| input.set_value(if index == 1 { "preferred" } else { "prefer" }, window, cx));
                             cx.notify();
@@ -1043,10 +1098,14 @@ impl AppView {
                     .child(field(tr!("SQL Warehouse ID"), &self.connection_warehouse))
                     .child(label(tr!("A warehouse is required only for queries. Metadata uses Unity Catalog."))))
                 .child(label(if self.editing_connection.is_some() { tr!("An empty password keeps the one already available. Passwords are never written to SQLite.") } else { tr!("Without remember password, the password stays only in this session.") }))
-                .when(!self.connection_status.is_empty(), |s| s.child(div().text_size(px(14.)).text_color(rgb(MINT)).child(self.connection_status.clone())))
+                .when_some(self.connection_status.as_ref(), |s, status| s.child(feedback_line(status).id("connection-status").role(if status.tone == Tone::Error { Role::Alert } else { Role::Status }).aria_label(status.text.clone())))
                 .child(row().justify_between()
-                    .child(button("test-connection", I::PlugZap, tr!("Test connection")).on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))))
-                    .child(primary_button("create-connection", I::Plus, tr!("Save connection")).on_click(cx.listener(|this, _, window, cx| this.save_connection(window, cx)))))
+                    .child(button("test-connection", I::PlugZap, if self.connection_testing.is_some() { tr!("Testing…") } else { tr!("Test connection") })
+                        .when(self.connection_testing.is_some() || self.connection_saving, |s| s.opacity(0.6).cursor_default())
+                        .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))))
+                    .child(primary_button("create-connection", if self.connection_saving { I::LoaderCircle } else { I::Plus }, if self.connection_saving { tr!("Saving…") } else { tr!("Save connection") })
+                        .when(self.connection_saving, |s| s.opacity(0.6).cursor_default())
+                        .on_click(cx.listener(|this, _, window, cx| this.save_connection(window, cx)))))
                 .focus_trap("connection-focus-trap", &self.connection_focus))
             .into_any_element()
     }

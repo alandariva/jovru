@@ -13,6 +13,78 @@ pub const FAINT: u32 = 0x9aa5b1;
 pub const MINT: u32 = 0x8bddbc;
 pub const BLUE: u32 = 0x8eb9ef;
 pub const PURPLE: u32 = 0xb5a0e8;
+pub const RED: u32 = 0xef8b91;
+pub const AMBER: u32 = 0xe6bb78;
+
+/// Meaning of a feedback message. Colour and icon follow the meaning, so an
+/// error never reads as a success.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl Tone {
+    pub fn color(self) -> u32 {
+        match self {
+            Tone::Info => MUTED,
+            Tone::Success => MINT,
+            Tone::Warning => AMBER,
+            Tone::Error => RED,
+        }
+    }
+
+    pub fn background(self) -> u32 {
+        match self {
+            Tone::Info => SURFACE,
+            Tone::Success => 0x21322b,
+            Tone::Warning => 0x332c1f,
+            Tone::Error => 0x3a2326,
+        }
+    }
+
+    pub fn icon(self) -> IconName {
+        match self {
+            Tone::Info => IconName::Info,
+            Tone::Success => IconName::CircleCheck,
+            Tone::Warning => IconName::TriangleAlert,
+            Tone::Error => IconName::CircleX,
+        }
+    }
+}
+
+/// A message together with its meaning.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Feedback {
+    pub tone: Tone,
+    pub text: String,
+}
+
+impl Feedback {
+    pub fn new(tone: Tone, text: impl Into<String>) -> Self {
+        Self {
+            tone,
+            text: text.into(),
+        }
+    }
+}
+
+/// Inline message coloured by its tone, with an icon so the meaning does not
+/// rely on colour alone.
+pub fn feedback_line(feedback: &Feedback) -> Div {
+    row()
+        .items_start()
+        .text_size(px(14.))
+        .text_color(rgb(feedback.tone.color()))
+        .child(
+            div()
+                .pt(px(2.))
+                .child(icon(feedback.tone.icon(), feedback.tone.color())),
+        )
+        .child(div().flex_1().min_w_0().child(feedback.text.clone()))
+}
 
 pub fn row() -> Div {
     div().flex().items_center().gap_2().min_w_0()

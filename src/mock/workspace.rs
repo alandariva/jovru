@@ -21,7 +21,7 @@ enum ResultView {
     Messages,
 }
 
-#[derive(Clone, Copy, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 enum QueryStatus {
     #[default]
     Ready,
@@ -60,11 +60,16 @@ pub struct Workspace {
     running: bool,
     executions: usize,
     query_statuses: Vec<QueryStatus>,
+    /// Normalized text of each statement when its status was recorded. A
+    /// status only survives edits while its statement is unchanged.
+    status_sql: Vec<String>,
     execution_id: usize,
     editor_sql: String,
     execution_error: Option<String>,
-    saved: bool,
-    notice: Option<String>,
+    cancelled: bool,
+    /// SQL as last saved to the library, if this tab is saved.
+    saved_sql: Option<String>,
+    notice: Option<Feedback>,
     selected_cell: Option<(usize, usize)>,
     descending: bool,
     filter_open: bool,
@@ -111,17 +116,13 @@ impl Workspace {
         let resize_subscription = cx.observe(&assistant_split, |_, _, cx| cx.notify());
         let query_split = cx.new(|_| ResizableState::default());
         let query_resize = cx.observe(&query_split, |_, _, cx| cx.notify());
+        // Editing the SQL never discards results, messages or a running
+        // execution. Only the gutter status of statements that changed resets.
         let editor_observation = cx.observe(&editor, |this, editor, cx| {
             let sql = editor.read(cx).text().to_string();
             if this.editor_sql != sql {
                 this.editor_sql = sql;
-                this.cancellation.cancel();
-                this.execution_id += 1;
-                this.running = false;
-                this.query_statuses.clear();
-                this.execution_error = None;
-                this.executed = false;
-                this.notice = None;
+                this.sync_statement_statuses();
             }
             cx.notify();
         });
@@ -186,10 +187,12 @@ impl Workspace {
             running: false,
             executions: 0,
             query_statuses: Vec::new(),
+            status_sql: Vec::new(),
             execution_id: 0,
             editor_sql: sql.to_string(),
             execution_error: None,
-            saved: false,
+            cancelled: false,
+            saved_sql: None,
             notice: None,
             selected_cell: None,
             descending: true,
@@ -215,16 +218,42 @@ impl Workspace {
     }
 
     fn stop_execution(&mut self, cx: &mut Context<Self>) {
+        if !self.running {
+            return;
+        }
         self.cancellation.cancel();
         self.execution_id += 1;
         self.running = false;
+        self.cancelled = true;
         for status in &mut self.query_statuses {
             if *status == QueryStatus::Running {
                 *status = QueryStatus::Cancelled;
             }
         }
-        self.notice = Some(tr!("Execution cancelled.").into());
+        self.notice = Some(Feedback::new(Tone::Warning, tr!("Execution cancelled.")));
+        self.sync_statement_statuses();
         cx.notify();
+    }
+
+    /// Keeps the status of statements whose text is unchanged and resets the
+    /// others. Statuses are left alone while an execution owns them.
+    fn sync_statement_statuses(&mut self) {
+        if self.running {
+            return;
+        }
+        let statements = super::sql::normalized_statements(&self.editor_sql);
+        self.query_statuses = carry_statuses(&self.status_sql, &self.query_statuses, &statements);
+        self.status_sql = statements;
+    }
+
+    fn set_status(&mut self, index: usize, status: QueryStatus) {
+        if let Some(slot) = self.query_statuses.get_mut(index) {
+            *slot = status;
+        }
+    }
+
+    fn has_results(&self) -> bool {
+        self.executed && self.execution_error.is_none()
     }
 
     fn execute_queries(&mut self, only: Option<usize>, cx: &mut Context<Self>) {
@@ -240,12 +269,19 @@ impl Workspace {
             .map(|(index, range)| (index, sql[range.clone()].to_string()))
             .collect();
         if queries.is_empty() {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!("There is no SQL statement to run."),
+            ));
+            cx.notify();
             return;
         }
+        self.sync_statement_statuses();
         self.query_statuses.resize(ranges.len(), QueryStatus::Ready);
         self.execution_id += 1;
         let execution_id = self.execution_id;
         self.running = true;
+        self.cancelled = false;
         self.execution_error = None;
         self.notice = None;
         cx.notify();
@@ -253,9 +289,8 @@ impl Workspace {
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
             for (index, _) in &queries {
-                self.query_statuses[*index] = QueryStatus::Running;
+                self.set_status(*index, QueryStatus::Running);
             }
-            self.executed = false;
             cx.spawn(async move |weak, cx| {
                 let requests = queries.iter().map(|(_, sql)| QueryRequest { sql: sql.clone(), options: ExecutionOptions::default() }).collect();
                 let result = backend::run(backend::query(input, requests, cancel)).await;
@@ -267,9 +302,15 @@ impl Workspace {
                             this.elapsed_ms = batch.completed.iter().map(|result| result.elapsed_ms).sum();
                             let completed = batch.completed.len();
                             for ((index, sql), result) in queries.iter().zip(batch.completed) {
-                                this.query_statuses[*index] = QueryStatus::Success;
+                                this.set_status(*index, QueryStatus::Success);
                                 this.rows_affected = result.outcome.rows_affected;
-                                this.notice = Some(if result.limited { tr!("Limit of 1,000 rows reached. Refine the SQL to get other rows.").into() } else { tr!("Query completed. {0} rows; {1} rows affected.", result.rows.len(), result.outcome.rows_affected.unwrap_or(0)) });
+                                this.notice = Some(if result.limited {
+                                    Feedback::new(Tone::Warning, tr!("Limit of 1,000 rows reached. Refine the SQL to get other rows."))
+                                } else if let Some(affected) = result.outcome.rows_affected {
+                                    Feedback::new(Tone::Success, tr!("Query completed. {0} rows; {1} rows affected.", result.rows.len(), affected))
+                                } else {
+                                    Feedback::new(Tone::Success, tr!("Query completed. {0} rows.", result.rows.len()))
+                                });
                                 this.result = ResultData {
                                     columns: result.columns.into_iter().map(|column| (column.name, column.data_type)).collect(),
                                     rows: result.rows.iter().map(|row| row.iter().map(backend::cell_text).collect()).collect(),
@@ -284,19 +325,24 @@ impl Workspace {
                             }
                             if let Some(error) = batch.error {
                                 for (position, (index, _)) in queries.iter().enumerate().skip(completed) {
-                                    this.query_statuses[*index] = if position == completed { QueryStatus::Error } else { QueryStatus::Ready };
+                                    this.set_status(*index, if position == completed { QueryStatus::Error } else { QueryStatus::Ready });
                                 }
                                 this.execution_error = Some(error.to_string());
-                                this.notice = Some(tr!("{0} statement(s) completed before the failure: {1}. Previous statements were not rolled back automatically.", completed, error));
+                                this.notice = Some(Feedback::new(Tone::Error, tr!("{0} statement(s) completed before the failure: {1}. Previous statements were not rolled back automatically.", completed, error)));
                             }
                         }
+                        Err(error) if error.code == ErrorCode::Cancelled => {
+                            for (index, _) in queries { this.set_status(index, QueryStatus::Cancelled); }
+                            this.cancelled = true;
+                            this.notice = Some(Feedback::new(Tone::Warning, tr!("Execution cancelled.")));
+                        }
                         Err(error) => {
-                            let status = if error.code == ErrorCode::Cancelled { QueryStatus::Cancelled } else { QueryStatus::Error };
-                            for (index, _) in queries { this.query_statuses[index] = status; }
+                            for (index, _) in queries { this.set_status(index, QueryStatus::Error); }
                             this.execution_error = Some(error.to_string());
-                            this.notice = Some(error.to_string());
+                            this.notice = Some(Feedback::new(Tone::Error, error.to_string()));
                         }
                     }
+                    this.sync_statement_statuses();
                     cx.notify();
                 });
             }).detach();
@@ -309,7 +355,7 @@ impl Workspace {
                         if this.execution_id != execution_id {
                             return false;
                         }
-                        this.query_statuses[index] = QueryStatus::Running;
+                        this.set_status(index, QueryStatus::Running);
                         cx.notify();
                         true
                     })
@@ -327,15 +373,19 @@ impl Workspace {
                         }
                         this.executions += 1;
                         if let Some(error) = super::sql::preview_error(&sql) {
-                            this.query_statuses[index] = QueryStatus::Error;
+                            this.set_status(index, QueryStatus::Error);
                             this.execution_error = Some(error.into());
-                            this.notice = Some(tr!("Error in query {0}: {1}", index + 1, error));
+                            this.notice = Some(Feedback::new(
+                                Tone::Error,
+                                tr!("Error in query {0}: {1}", index + 1, error),
+                            ));
                             this.executed = false;
                             this.running = false;
+                            this.sync_statement_statuses();
                             cx.notify();
                             return false;
                         }
-                        this.query_statuses[index] = QueryStatus::Success;
+                        this.set_status(index, QueryStatus::Success);
                         this.result = sample_result(&sql);
                         this.selected_cell = None;
                         this.executed = true;
@@ -358,8 +408,11 @@ impl Workspace {
                     return;
                 }
                 this.running = false;
-                this.notice =
-                    Some(tr!("Simulated query completed. No real database was accessed.").into());
+                this.notice = Some(Feedback::new(
+                    Tone::Success,
+                    tr!("Simulated query completed. No real database was accessed."),
+                ));
+                this.sync_statement_statuses();
                 cx.notify();
             });
         })
@@ -466,9 +519,22 @@ impl Workspace {
                         cx.listener(|this, _, window, cx| {
                             let sql = this.editor.read(cx).text().to_string();
                             let formatted = super::sql::format(&sql);
-                            this.editor
-                                .update(cx, |editor, cx| editor.set_value(formatted, window, cx));
-                            this.notice = Some(tr!("SQL formatted.").into());
+                            if formatted == sql {
+                                this.notice = Some(Feedback::new(
+                                    Tone::Info,
+                                    tr!("SQL is already formatted."),
+                                ));
+                            } else {
+                                // `replace_all` keeps the undo history, so Ctrl+Z restores
+                                // the previous layout.
+                                this.editor.update(cx, |editor, cx| {
+                                    editor.replace_all(formatted, window, cx)
+                                });
+                                this.notice = Some(Feedback::new(
+                                    Tone::Success,
+                                    tr!("SQL formatted. Use Ctrl+Z to undo."),
+                                ));
+                            }
                             cx.notify();
                         }),
                     )),
@@ -478,29 +544,51 @@ impl Workspace {
                     .child(
                         icon_button(
                             "save-query",
-                            if self.saved {
+                            if self.saved_sql.as_deref() == Some(self.editor_sql.as_str()) {
                                 I::BookmarkCheck
                             } else {
                                 I::Bookmark
                             },
-                            tr!("Save query"),
+                            match &self.saved_sql {
+                                Some(saved) if *saved == self.editor_sql => {
+                                    tr!("Remove from saved queries")
+                                }
+                                Some(_) => tr!("Update saved query"),
+                                None => tr!("Save query"),
+                            },
                         )
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.saved = !this.saved;
+                            let sql = this.editor.read(cx).text().to_string();
+                            // A saved tab whose SQL changed since then is updated
+                            // instead of removed, so later edits are not lost.
+                            let (saved, notice) = match &this.saved_sql {
+                                Some(saved) if *saved == sql => (
+                                    false,
+                                    Feedback::new(
+                                        Tone::Info,
+                                        tr!("Query removed from saved queries."),
+                                    ),
+                                ),
+                                Some(_) => (
+                                    true,
+                                    Feedback::new(Tone::Success, tr!("Saved query updated.")),
+                                ),
+                                None => (
+                                    true,
+                                    Feedback::new(
+                                        Tone::Success,
+                                        tr!("Query saved in this session."),
+                                    ),
+                                ),
+                            };
+                            this.saved_sql = saved.then(|| sql.clone());
                             cx.emit(WorkspaceEvent::Saved {
-                                saved: this.saved,
+                                saved,
                                 title: this.title.to_string(),
                                 connection: this.connection.to_string(),
-                                sql: this.editor.read(cx).text().to_string(),
+                                sql,
                             });
-                            this.notice = Some(
-                                if this.saved {
-                                    tr!("Query saved in this session.")
-                                } else {
-                                    tr!("Query removed from saved queries.")
-                                }
-                                .into(),
-                            );
+                            this.notice = Some(notice);
                             cx.notify();
                         })),
                     )
@@ -677,10 +765,10 @@ impl Workspace {
                             .gap_3()
                             .child(label("UTF-8"))
                             .child(label(tr!("Spaces: 4")))
-                            .child(label(tr!(
-                                "{0} rows",
-                                self.editor.read(cx).text().to_string().lines().count()
-                            ))),
+                            .child(label(match self.editor_sql.split('\n').count() {
+                                1 => tr!("1 line").to_string(),
+                                lines => tr!("{0} lines", lines),
+                            })),
                     ),
             )
     }
@@ -710,9 +798,12 @@ impl Workspace {
                                 .when(self.result_view == view, |s| {
                                     s.bg(rgb(SURFACE)).text_color(rgb(TEXT))
                                 })
-                                .when(view == ResultView::Table && self.executed, |s| {
-                                    s.child(badge(self.result.rows.len().to_string(), MINT))
-                                })
+                                .when(
+                                    view == ResultView::Table
+                                        && self.has_results()
+                                        && !self.running,
+                                    |s| s.child(badge(self.result.rows.len().to_string(), MINT)),
+                                )
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.result_view = view;
                                     cx.notify();
@@ -734,8 +825,14 @@ impl Workspace {
                             )
                             .child(
                                 icon_button("filter-results", I::ListFilter, tr!("Filter results"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
+                                    .aria_selected(self.filter_open)
+                                    .when(self.filter_open, |s| s.bg(rgb(HOVER)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
                                         this.filter_open = !this.filter_open;
+                                        if this.filter_open {
+                                            this.filter
+                                                .update(cx, |input, cx| input.focus(window, cx));
+                                        }
                                         cx.notify();
                                     })),
                             )
@@ -747,6 +844,14 @@ impl Workspace {
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
+                                        if !this.has_results() {
+                                            this.notice = Some(Feedback::new(
+                                                Tone::Info,
+                                                tr!("Run a query before copying the results."),
+                                            ));
+                                            cx.notify();
+                                            return;
+                                        }
                                         let mut csv = this
                                             .result
                                             .columns
@@ -772,10 +877,10 @@ impl Workspace {
                                             );
                                         }
                                         cx.write_to_clipboard(ClipboardItem::new_string(csv));
-                                        this.notice = Some(
-                                            tr!("CSV copied. Paste it into a spreadsheet or file.")
-                                                .into(),
-                                        );
+                                        this.notice = Some(Feedback::new(
+                                            Tone::Success,
+                                            tr!("CSV copied. Paste it into a spreadsheet or file."),
+                                        ));
                                         cx.notify();
                                     },
                                 )),
@@ -823,8 +928,13 @@ impl Workspace {
                             .justify_center()
                             .gap_3()
                             .p_4()
-                            .child(icon(I::CircleX, 0xef8b91))
-                            .child(label(error.clone()))
+                            .child(icon(I::CircleX, RED))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(RED))
+                                    .child(error.clone()),
+                            )
                             .into_any_element()
                     } else if !self.executed {
                         column()
@@ -861,35 +971,48 @@ impl Workspace {
                             .gap_2()
                             .child(icon(
                                 if self.running {
-                                    I::Square
+                                    I::LoaderCircle
                                 } else if self.execution_error.is_some() {
                                     I::CircleX
+                                } else if self.cancelled {
+                                    I::Ban
                                 } else if self.executed {
                                     I::CircleCheck
                                 } else {
                                     I::Clock
                                 },
-                                if self.execution_error.is_some() {
-                                    0xef8b91
-                                } else {
+                                if self.running || self.cancelled {
+                                    AMBER
+                                } else if self.execution_error.is_some() {
+                                    RED
+                                } else if self.executed {
                                     MINT
+                                } else {
+                                    FAINT
                                 },
                             ))
                             .child(label(if self.running {
                                 tr!("Running…").into()
                             } else if self.execution_error.is_some() {
                                 tr!("Query error").into()
+                            } else if self.cancelled {
+                                tr!("Execution cancelled").into()
                             } else if self.executed {
-                                tr!("{0} rows", self.result.rows.len())
+                                match self.result.rows.len() {
+                                    1 => tr!("1 row").to_string(),
+                                    count => tr!("{0} rows", count),
+                                }
                             } else {
                                 tr!("Waiting to run").into()
                             }))
                             .child(label("·"))
-                            .child(label(if self.executed {
-                                format!("{} ms", self.elapsed_ms)
-                            } else {
-                                "—".into()
-                            })),
+                            .child(label(
+                                if self.has_results() && !self.running && !self.cancelled {
+                                    format!("{} ms", self.elapsed_ms)
+                                } else {
+                                    "—".into()
+                                },
+                            )),
                     )
                     .child(
                         row()
@@ -907,7 +1030,12 @@ impl Workspace {
     }
 
     fn result_table(&self, cx: &mut Context<Self>) -> AnyElement {
-        let query = self.filter.read(cx).value().to_lowercase();
+        // A closed filter bar must not keep hiding rows.
+        let query = if self.filter_open {
+            self.filter.read(cx).value().to_lowercase()
+        } else {
+            String::new()
+        };
         let mut rows: Vec<_> = self
             .result
             .rows
@@ -1087,8 +1215,10 @@ impl Workspace {
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.selected_cell = Some((index, col));
-                                                this.notice =
-                                                    Some(this.result.rows[index][col].clone());
+                                                this.notice = Some(Feedback::new(
+                                                    Tone::Info,
+                                                    this.result.rows[index][col].clone(),
+                                                ));
                                                 cx.notify();
                                             }))
                                             .when(self.result.sales, |s| {
@@ -1272,13 +1402,13 @@ impl Workspace {
                         .when_some(message.sql, |s, suggested| s.child(column().mt_1().rounded(px(6.)).border_1().border_color(rgb(BORDER)).bg(rgb(BG)).overflow_hidden()
                             .child(row().px_3().h(px(28.)).justify_between().border_b_1().border_color(rgb(BORDER)).child(label(tr!("SQL · suggestion")))
                                 .child(icon_button(("copy-ai", index), I::Copy, tr!("Copy suggested SQL"))
-                                    .on_click(cx.listener(move |this, _, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(suggested.into())); this.notice = Some(tr!("Suggested SQL copied.").into()); cx.notify(); }))))
+                                    .on_click(cx.listener(move |this, _, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(suggested.into())); this.notice = Some(Feedback::new(Tone::Success, tr!("Suggested SQL copied."))); cx.notify(); }))))
                             .child(div().px_3().py_3().font_family("Cascadia Mono").text_size(px(12.)).line_height(relative(1.6)).text_color(rgb(BLUE))
                                 .child(if suggested == OPTIMIZED_SQL { "WITH sales AS (\n  SELECT product_id,\n         SUM(total) AS revenue\n  FROM orders\n  …\n)" } else { "SELECT c.name AS category,\n       SUM(o.total) AS revenue\nFROM orders o\nJOIN products p ON …\nGROUP BY c.name;" }))
                             .child(button(("apply-ai", index), I::CornerDownLeft, tr!("Insert into editor")).w_full().justify_center().border_t_1().border_color(rgb(BORDER)).text_color(rgb(MINT))
                                 .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.editor.update(cx, |editor, cx| editor.set_value(suggested, window, cx));
-                                    this.notice = Some(tr!("Suggestion inserted. Review the SQL before running it.").into()); cx.notify();
+                                    this.editor.update(cx, |editor, cx| editor.replace_all(suggested, window, cx));
+                                    this.notice = Some(Feedback::new(Tone::Info, tr!("Suggestion inserted. Review the SQL before running it."))); cx.notify();
                                 })))))
                 }))
                 .when(self.executed && self.result.sales, |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
@@ -1299,6 +1429,26 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, window, cx| this.submit_prompt(window, cx))))))
                 .child(div().text_center().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Simulated AI · Always review the suggestions."))))
     }
+}
+
+/// The status each statement should show after an edit: it is kept only when
+/// the statement at the same position still has the same text.
+fn carry_statuses(
+    old_sql: &[String],
+    old_statuses: &[QueryStatus],
+    statements: &[String],
+) -> Vec<QueryStatus> {
+    statements
+        .iter()
+        .enumerate()
+        .map(|(index, sql)| {
+            if old_sql.get(index) == Some(sql) {
+                old_statuses.get(index).copied().unwrap_or_default()
+            } else {
+                QueryStatus::Ready
+            }
+        })
+        .collect()
 }
 
 pub enum WorkspaceEvent {
@@ -1332,8 +1482,10 @@ impl Workspace {
             self.executed = false;
             self.result = sample_result("");
         }
-        self.notice =
-            Some(tr!("The tab's connection changed. Review the SQL before running it.").into());
+        self.notice = Some(Feedback::new(
+            Tone::Warning,
+            tr!("The tab's connection changed. Review the SQL before running it."),
+        ));
         cx.notify();
     }
 
@@ -1347,11 +1499,19 @@ impl Workspace {
         input: ResolvedConnection,
         cx: &mut Context<Self>,
     ) {
-        if self.running {
-            self.stop_execution(cx);
-        }
         self.connection = name.into();
-        self.set_connection(input);
+        // A rename or a new password keeps the server, so results, messages and
+        // a running execution stay valid. Only a different server resets them.
+        if self
+            .input
+            .as_ref()
+            .is_some_and(|current| current.config == input.config)
+        {
+            self.input = Some(input);
+        } else {
+            self.stop_execution(cx);
+            self.set_connection(input);
+        }
         cx.notify();
     }
 
@@ -1369,6 +1529,8 @@ impl Workspace {
         self.input = Some(input);
         self.assistant_open = false;
         self.executed = false;
+        self.execution_error = None;
+        self.selected_cell = None;
         self.result = ResultData {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -1411,20 +1573,40 @@ impl Workspace {
                         ),
                 ),
             )
-            .when_some(self.notice.clone(), |s, text| {
+            .when_some(self.notice.clone(), |s, notice| {
                 s.child(
                     row()
+                        .id("query-notice")
+                        .role(if notice.tone == Tone::Error {
+                            Role::Alert
+                        } else {
+                            Role::Status
+                        })
+                        .aria_label(notice.text.clone())
                         .h(px(38.))
                         .flex_none()
                         .px_3()
-                        .bg(rgb(0x21322b))
+                        .bg(rgb(notice.tone.background()))
                         .justify_between()
                         .child(
-                            div()
-                                .text_size(px(14.))
-                                .text_color(rgb(MINT))
-                                .truncate()
-                                .child(text),
+                            row()
+                                .flex_1()
+                                .child(icon(notice.tone.icon(), notice.tone.color()))
+                                .child(
+                                    div()
+                                        .id("query-notice-text")
+                                        .flex_1()
+                                        .text_size(px(14.))
+                                        .text_color(rgb(notice.tone.color()))
+                                        .truncate()
+                                        .tooltip({
+                                            let text = notice.text.clone();
+                                            move |window, cx| {
+                                                Tooltip::new(text.clone()).build(window, cx)
+                                            }
+                                        })
+                                        .child(notice.text),
+                                ),
                         )
                         .child(
                             icon_button("dismiss-notice", I::X, tr!("Close notice")).on_click(
@@ -1478,5 +1660,33 @@ impl Render for Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         self.cancellation.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{QueryStatus, carry_statuses};
+    use crate::mock::sql::normalized_statements;
+
+    #[test]
+    fn edits_keep_the_status_of_unchanged_statements() {
+        let before = normalized_statements("SELECT 1;\nSELECT 2;");
+        let statuses = [QueryStatus::Success, QueryStatus::Error];
+        // A new line after the last statement changes nothing.
+        let after = normalized_statements("SELECT 1;\nSELECT 2;\n");
+        assert_eq!(carry_statuses(&before, &statuses, &after), statuses);
+        // Re-indenting keeps the statement; editing it resets only that one.
+        let after = normalized_statements("SELECT\n  1;\nSELECT 3;");
+        assert_eq!(
+            carry_statuses(&before, &statuses, &after),
+            [QueryStatus::Success, QueryStatus::Ready]
+        );
+        // A new statement starts ready; removed ones disappear.
+        let after = normalized_statements("SELECT 1;\nSELECT 2;\nSELECT 4;");
+        assert_eq!(
+            carry_statuses(&before, &statuses, &after),
+            [QueryStatus::Success, QueryStatus::Error, QueryStatus::Ready]
+        );
+        assert!(carry_statuses(&before, &statuses, &[]).is_empty());
     }
 }

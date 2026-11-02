@@ -61,7 +61,7 @@ Demo connections and results are labelled as such and never reach a server.
 - The metadata cache is stored locally, read page by page and browsable offline
   after a restart. Search also queries the local cache.
 - Click a table or view to open a SQL preview with escaped identifiers.
-  `Ctrl K` searches real tables, `Ctrl N` opens a query on the active
+  `Ctrl Shift P` searches real tables, `Ctrl N` opens a query on the active
   connection and `Ctrl Enter` runs it. Each run uses a dedicated session shared
   by the editor's statements and closes it at the end. Limits: 1,000 rows per
   statement and a 300 s timeout. The run button can cancel.
