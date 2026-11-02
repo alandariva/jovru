@@ -1,6 +1,6 @@
 # ADR-0012: Result grid as its own cached entity
 
-- **Status:** Accepted (by the maintainer on 2026-11-02)
+- **Status:** Accepted (by the maintainer on 2026-11-02; implemented on 2026-11-02)
 - **Date:** 2026-11-02
 
 ## Context
@@ -106,3 +106,15 @@ the dev databases:
 - A visual check of the whole grid flow: selection by click, Shift+click,
   Shift+arrows, row number and `Ctrl A`; copy with and without headers;
   tooltips; keyboard focus; footer count; notice bar.
+
+## Implementation notes
+
+Implemented on 2026-11-02 (`src/app/result_grid.rs`, `jykre::grid`).
+
+- There is no `set_sort`: the only sort is the demo's header toggle, which
+  lives inside the grid.
+- The frame probe confirmed that typing in the editor does not re-render the
+  grid (24 `Workspace` renders, 1 `ResultGrid`). Hover, scroll and selection
+  in the grid still re-render `Workspace`, because GPUI marks every ancestor of
+  a notified view dirty, so the first validation above does not hold as
+  written ([Performance](../performance.md#known-deviations)).

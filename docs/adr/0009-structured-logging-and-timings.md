@@ -1,6 +1,6 @@
 # ADR-0009: Structured logging and timings with `tracing`
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented on 2026-11-02)
 - **Date:** 2026-11-02
 
 ## Context
@@ -44,3 +44,13 @@ production timings.
 
 A test captures log output during a run with a password and SQL text and
 asserts that neither appears above `trace`.
+
+## Implementation notes
+
+Implemented on 2026-11-02 (`jykre::logging`).
+
+- `tracing-appender` names daily files `jykre.<date>.log` (for example
+  `jykre.2026-11-02.log`) instead of a single `jykre.log` renamed on rotation;
+  the last 7 are kept.
+- Slow UI-thread work is measured with `logging::UiTimer`; cache reads warn
+  above their 50 ms budget.

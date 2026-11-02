@@ -1,6 +1,6 @@
 # ADR-0010: Benchmarks with `criterion` for hot paths
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented on 2026-11-02)
 - **Date:** 2026-11-02
 
 ## Context
@@ -34,3 +34,10 @@ path would go unnoticed until users feel it.
 - Positive: measurable, comparable numbers for the paths that matter.
 - Negative: one dev-dependency and longer full-gate runs.
 - Required after acceptance: the listed paths keep their benchmarks.
+
+## Implementation notes
+
+Implemented on 2026-11-02: `benches/hot_paths.rs` (criterion 0.8 without
+default features), run with `--quick` by `cargo xtask check --full`. The frame
+probe and heartbeat live in `src/app/probe.rs` behind `JYKRE_PROBE=1` and log
+their summary every 5 s.

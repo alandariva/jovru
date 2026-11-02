@@ -1,6 +1,6 @@
 # ADR-0008: Compact result storage with a configurable row limit and a memory ceiling
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented on 2026-11-02)
 - **Date:** 2026-11-02
 
 ## Context
@@ -46,3 +46,19 @@ A unit test checks values, NULLs, empty text and Unicode round-trip through
 the representation. Measure memory and frame time at 100,000 × 30 columns in
 a release build; frame budgets in [Performance](../performance.md#budgets)
 must hold.
+
+## Implementation notes
+
+Implemented on 2026-11-02 (`jykre::result`).
+
+- The per-connection row limit is stored in `config.db` as the setting
+  `connection.<connection-id>.row_limit`, in the existing `settings` table, so
+  no schema migration was needed. A missing or out-of-range value reads as the
+  default (1,000).
+- To tell a result that has exactly the row limit from one that has more, the
+  backend asks the driver for one row beyond the limit; that extra row is not
+  kept, and only its arrival marks the limit as reached.
+- A new run releases the tab's previous result when it starts, so a cancelled
+  run leaves the grid empty.
+- Measured: a 100,000 × 30 result takes about 38 MB (the previous
+  representation was estimated at about 102 MB).

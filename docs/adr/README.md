@@ -29,9 +29,9 @@ something is the way it is, and so a decision is not undone by accident.
 | [0004](0004-os-vault-for-credentials.md) | Operating system vault for credentials, with no file fallback | Accepted |
 | [0005](0005-databricks-through-cli-and-rest.md) | Databricks through CLI profiles and REST APIs | Accepted |
 | [0006](0006-layered-crates-independent-of-the-ui.md) | Layered crates independent of the UI, with a static driver registry | Accepted |
-| [0007](0007-application-logic-outside-views.md) | Application logic outside views | Proposed |
-| [0008](0008-compact-result-storage.md) | Compact result storage with a configurable row limit and a memory ceiling | Proposed |
-| [0009](0009-structured-logging-and-timings.md) | Structured logging and timings with `tracing` | Proposed |
-| [0010](0010-benchmarks-with-criterion.md) | Benchmarks with `criterion` for hot paths | Proposed |
-| [0011](0011-workspace-lints.md) | Workspace-wide lints for panics, output and async locks | Proposed |
-| [0012](0012-result-grid-as-a-cached-entity.md) | Result grid as its own cached entity | Accepted |
+| [0007](0007-application-logic-outside-views.md) | Application logic outside views | Accepted (implemented) |
+| [0008](0008-compact-result-storage.md) | Compact result storage with a configurable row limit and a memory ceiling | Accepted (implemented) |
+| [0009](0009-structured-logging-and-timings.md) | Structured logging and timings with `tracing` | Accepted (implemented) |
+| [0010](0010-benchmarks-with-criterion.md) | Benchmarks with `criterion` for hot paths | Accepted (implemented) |
+| [0011](0011-workspace-lints.md) | Workspace-wide lints for panics, output and async locks | Accepted (implemented) |
+| [0012](0012-result-grid-as-a-cached-entity.md) | Result grid as its own cached entity | Accepted (implemented) |

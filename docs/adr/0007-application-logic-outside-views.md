@@ -1,6 +1,6 @@
 # ADR-0007: Application logic outside views
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented on 2026-11-02)
 - **Date:** 2026-11-02
 
 ## Context
@@ -49,3 +49,15 @@ interface (a CLI, an automated check) would have to repeat it.
 Each step passes the gate and a visual check of the affected flow; the run
 state machine has unit tests for every transition, including cancellation and
 stale results.
+
+## Implementation notes
+
+Implemented on 2026-11-02 in the order above, one commit per step.
+
+- The drivers' "dialect" for identifier quoting is two `Driver` methods with
+  defaults, `quote_identifier` and `relation_name`; PostgreSQL overrides
+  `relation_name` to leave the database out. `backend::preview_sql` takes the
+  driver.
+- The run state machine is `jykre::query::QueryRun`. `Cancelling` waits for
+  the driver's outcome; a new run may supersede a run that is still stopping.
+- The grid step was implemented as decided in ADR-0012.

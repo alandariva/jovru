@@ -1,6 +1,6 @@
 # ADR-0011: Workspace-wide lints for panics, output and async locks
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented on 2026-11-02)
 - **Date:** 2026-11-02
 
 ## Context
@@ -54,3 +54,9 @@ await_holding_refcell_ref = "deny"
 ## How to validate
 
 `cargo xtask check` passes with the lints enabled and no blanket `allow`.
+
+## Implementation notes
+
+Implemented on 2026-11-02. Besides `xtask`, two development targets allow one
+lint each, with a comment: the command-line examples (`connect`, `drivers`)
+allow `print_stdout`, and the benchmarks allow `expect_used` for their setup.
