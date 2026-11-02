@@ -125,9 +125,63 @@ pub fn csv_field(value: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+/// Copies a block of cells as tab-separated text, the clipboard format
+/// spreadsheets and SQL tools paste as a grid. A single cell is copied as its
+/// exact value. Fields with tabs, line breaks or quotes are quoted with
+/// doubled quotes; NULL becomes an empty field, as in [`csv_field`].
+pub fn copy_cells(headers: Option<&[&str]>, rows: &[Vec<Option<&str>>]) -> String {
+    if headers.is_none() && rows.len() == 1 && rows[0].len() == 1 {
+        return rows[0][0].unwrap_or_default().to_owned();
+    }
+    let field = |value: &str| {
+        if value.contains(['\t', '\n', '\r', '"']) {
+            format!("\"{}\"", value.replace('"', "\"\""))
+        } else {
+            value.to_owned()
+        }
+    };
+    let mut lines = Vec::with_capacity(rows.len() + 1);
+    if let Some(headers) = headers {
+        lines.push(
+            headers
+                .iter()
+                .map(|name| field(name))
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+    }
+    for row in rows {
+        lines.push(
+            row.iter()
+                .map(|value| value.map(field).unwrap_or_default())
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+    }
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_cells_as_spreadsheet_text() {
+        assert_eq!(copy_cells(None, &[vec![Some("a\tb")]]), "a\tb");
+        assert_eq!(copy_cells(None, &[vec![None]]), "");
+        assert_eq!(
+            copy_cells(
+                Some(&["id", "note"]),
+                &[vec![Some("1"), Some("say \"hi\"")], vec![Some("2"), None]]
+            ),
+            "id\tnote\n1\t\"say \"\"hi\"\"\"\n2\t"
+        );
+        assert_eq!(
+            copy_cells(None, &[vec![Some("x"), Some("line\nbreak")]]),
+            "x\t\"line\nbreak\""
+        );
+    }
+
     #[test]
     fn recognizes_types_from_all_three_drivers() {
         for name in [

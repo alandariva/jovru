@@ -53,9 +53,11 @@ Demo connections and results are labelled as such and never reach a server.
   (Windows Credential Manager, macOS Keychain, Linux Secret Service). Without
   it, the password lives only in the session. If the vault fails, the UI says
   so; there is no fallback to a password file.
-- `↻` on a connection refreshes everything; `↻` on a database, catalog, schema,
-  table, view or column refreshes only that node and its descendants.
-  Cancellation and failures keep the last good read, and permission warnings
+- `↻` on a connection refreshes everything; **Refresh** in the context menu
+  (right click, or `F5` on a focused node) of a database, catalog, schema,
+  table, view or column refreshes only that node and its descendants. While a
+  refresh runs, its `↻` spins; clicking it cancels. Cancellation and failures
+  keep the last good read, and permission warnings
   keep the parts that could not be read. Each scope keeps its own state and
   timestamp.
 - The metadata cache is stored locally, read page by page and browsable offline
@@ -67,10 +69,14 @@ Demo connections and results are labelled as such and never reach a server.
   statement and a 300 s timeout. The run button can cancel.
 - Tabs keep their SQL. Moving a tab to another group changes its connection and
   cancels a running execution. Review the context before running.
-- Result columns use type pictograms, colours, alignment and SQL type tooltips.
-  NULL, empty text and whitespace are distinct. **pt-BR numbers** groups digits
-  without converting decimals or integers to floating point. CSV copy keeps the
-  original values regardless of presentation.
+- Result headers show `name : type`, with the SQL type in a neutral tone.
+  Values use colours and alignment by type; NULL, empty text and whitespace
+  are distinct. Click a cell, then Shift+click or Shift+arrows to select a
+  block (click the row number for a whole row, `Ctrl A` for everything).
+  `Ctrl C` copies the block as tab-separated text that pastes into
+  spreadsheets; the context menu also copies it with headers. **pt-BR
+  numbers** groups digits without converting decimals or integers to floating
+  point. CSV copy keeps the original values regardless of presentation.
 - `Ctrl B` toggles the explorer and `Ctrl Shift B` the assistant. Dividers and
   the SQL font size are adjustable.
 

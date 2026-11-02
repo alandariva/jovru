@@ -3,6 +3,7 @@ use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Sizable, tooltip::Tooltip};
@@ -29,6 +30,33 @@ enum QueryStatus {
     Success,
     Error,
     Cancelled,
+}
+
+/// A rectangular block of result cells, from the cell clicked first (anchor)
+/// to the one reached with Shift (focus). Rows are indices into the result
+/// data, so sorting or filtering the view does not change what is selected.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CellSelection {
+    anchor: (usize, usize),
+    focus: (usize, usize),
+}
+
+/// Position of each selected cell in the displayed grid: rows as positions in
+/// `visible`, columns as indices. `None` when the selection is hidden.
+fn selection_block(
+    selection: CellSelection,
+    visible: &[usize],
+) -> Option<(
+    std::ops::RangeInclusive<usize>,
+    std::ops::RangeInclusive<usize>,
+)> {
+    let anchor = visible.iter().position(|row| *row == selection.anchor.0)?;
+    let focus = visible.iter().position(|row| *row == selection.focus.0)?;
+    let (left, right) = (selection.anchor.1, selection.focus.1);
+    Some((
+        anchor.min(focus)..=anchor.max(focus),
+        left.min(right)..=left.max(right),
+    ))
 }
 
 struct Message {
@@ -70,7 +98,10 @@ pub struct Workspace {
     /// SQL as last saved to the library, if this tab is saved.
     saved_sql: Option<String>,
     notice: Option<Feedback>,
-    selected_cell: Option<(usize, usize)>,
+    /// The last statement hit the row limit.
+    limited: bool,
+    selection: Option<CellSelection>,
+    grid_focus: FocusHandle,
     descending: bool,
     filter_open: bool,
     filter: Entity<InputState>,
@@ -112,7 +143,12 @@ impl Workspace {
                 }
             },
         );
-        let filter_subscription = cx.subscribe(&filter, |_, _, _: &InputEvent, cx| cx.notify());
+        let filter_subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.selection = None;
+            }
+            cx.notify()
+        });
         let resize_subscription = cx.observe(&assistant_split, |_, _, cx| cx.notify());
         let query_split = cx.new(|_| ResizableState::default());
         let query_resize = cx.observe(&query_split, |_, _, cx| cx.notify());
@@ -194,7 +230,9 @@ impl Workspace {
             cancelled: false,
             saved_sql: None,
             notice: None,
-            selected_cell: None,
+            limited: false,
+            selection: None,
+            grid_focus: cx.focus_handle(),
             descending: true,
             filter_open: false,
             chat_scroll: ScrollHandle::new(),
@@ -230,7 +268,7 @@ impl Workspace {
                 *status = QueryStatus::Cancelled;
             }
         }
-        self.notice = Some(Feedback::new(Tone::Warning, tr!("Execution cancelled.")));
+        // The results footer reports the cancellation; no second message.
         self.sync_statement_statuses();
         cx.notify();
     }
@@ -304,13 +342,7 @@ impl Workspace {
                             for ((index, sql), result) in queries.iter().zip(batch.completed) {
                                 this.set_status(*index, QueryStatus::Success);
                                 this.rows_affected = result.outcome.rows_affected;
-                                this.notice = Some(if result.limited {
-                                    Feedback::new(Tone::Warning, tr!("Limit of 1,000 rows reached. Refine the SQL to get other rows."))
-                                } else if let Some(affected) = result.outcome.rows_affected {
-                                    Feedback::new(Tone::Success, tr!("Query completed. {0} rows; {1} rows affected.", result.rows.len(), affected))
-                                } else {
-                                    Feedback::new(Tone::Success, tr!("Query completed. {0} rows.", result.rows.len()))
-                                });
+                                this.limited = result.limited;
                                 this.result = ResultData {
                                     columns: result.columns.into_iter().map(|column| (column.name, column.data_type)).collect(),
                                     rows: result.rows.iter().map(|row| row.iter().map(backend::cell_text).collect()).collect(),
@@ -319,7 +351,7 @@ impl Workspace {
                                 };
                                 this.executed = true;
                                 this.executions += 1;
-                                this.selected_cell = None;
+                                this.selection = None;
                                 this.result_view = ResultView::Table;
                                 cx.emit(WorkspaceEvent::Executed { title: this.title.to_string(), connection: this.connection.to_string(), sql: sql.clone() });
                             }
@@ -327,19 +359,20 @@ impl Workspace {
                                 for (position, (index, _)) in queries.iter().enumerate().skip(completed) {
                                     this.set_status(*index, if position == completed { QueryStatus::Error } else { QueryStatus::Ready });
                                 }
-                                this.execution_error = Some(error.to_string());
-                                this.notice = Some(Feedback::new(Tone::Error, tr!("{0} statement(s) completed before the failure: {1}. Previous statements were not rolled back automatically.", completed, error)));
+                                this.execution_error = Some(if completed == 0 {
+                                    error.to_string()
+                                } else {
+                                    tr!("{0} statement(s) completed before the failure: {1}. Previous statements were not rolled back automatically.", completed, error)
+                                });
                             }
                         }
                         Err(error) if error.code == ErrorCode::Cancelled => {
                             for (index, _) in queries { this.set_status(index, QueryStatus::Cancelled); }
                             this.cancelled = true;
-                            this.notice = Some(Feedback::new(Tone::Warning, tr!("Execution cancelled.")));
                         }
                         Err(error) => {
                             for (index, _) in queries { this.set_status(index, QueryStatus::Error); }
                             this.execution_error = Some(error.to_string());
-                            this.notice = Some(Feedback::new(Tone::Error, error.to_string()));
                         }
                     }
                     this.sync_statement_statuses();
@@ -374,11 +407,8 @@ impl Workspace {
                         this.executions += 1;
                         if let Some(error) = super::sql::preview_error(&sql) {
                             this.set_status(index, QueryStatus::Error);
-                            this.execution_error = Some(error.into());
-                            this.notice = Some(Feedback::new(
-                                Tone::Error,
-                                tr!("Error in query {0}: {1}", index + 1, error),
-                            ));
+                            this.execution_error =
+                                Some(tr!("Error in query {0}: {1}", index + 1, error));
                             this.executed = false;
                             this.running = false;
                             this.sync_statement_statuses();
@@ -387,7 +417,9 @@ impl Workspace {
                         }
                         this.set_status(index, QueryStatus::Success);
                         this.result = sample_result(&sql);
-                        this.selected_cell = None;
+                        this.limited = false;
+                        this.rows_affected = None;
+                        this.selection = None;
                         this.executed = true;
                         this.result_view = ResultView::Table;
                         cx.emit(WorkspaceEvent::Executed {
@@ -408,10 +440,6 @@ impl Workspace {
                     return;
                 }
                 this.running = false;
-                this.notice = Some(Feedback::new(
-                    Tone::Success,
-                    tr!("Simulated query completed. No real database was accessed."),
-                ));
                 this.sync_statement_statuses();
                 cx.notify();
             });
@@ -914,7 +942,7 @@ impl Workspace {
                             .items_center()
                             .justify_center()
                             .gap_3()
-                            .child(icon(I::LoaderCircle, MINT))
+                            .child(spinning_icon("running-spinner", I::LoaderCircle, MINT))
                             .child(label(if self.input.is_some() {
                                 tr!("Running on the server…")
                             } else {
@@ -966,56 +994,74 @@ impl Workspace {
                     .border_t_1()
                     .border_color(rgb(BORDER))
                     .justify_between()
-                    .child(
-                        row()
-                            .gap_2()
-                            .child(icon(
-                                if self.running {
-                                    I::LoaderCircle
-                                } else if self.execution_error.is_some() {
-                                    I::CircleX
-                                } else if self.cancelled {
-                                    I::Ban
-                                } else if self.executed {
-                                    I::CircleCheck
-                                } else {
-                                    I::Clock
-                                },
-                                if self.running || self.cancelled {
-                                    AMBER
-                                } else if self.execution_error.is_some() {
-                                    RED
-                                } else if self.executed {
-                                    MINT
-                                } else {
-                                    FAINT
-                                },
-                            ))
-                            .child(label(if self.running {
-                                tr!("Running…").into()
-                            } else if self.execution_error.is_some() {
-                                tr!("Query error").into()
-                            } else if self.cancelled {
-                                tr!("Execution cancelled").into()
-                            } else if self.executed {
-                                match self.result.rows.len() {
-                                    1 => tr!("1 row").to_string(),
-                                    count => tr!("{0} rows", count),
+                    .child({
+                        let rows = match self.result.rows.len() {
+                            1 => tr!("1 row").to_string(),
+                            count => tr!("{0} rows", count),
+                        };
+                        // The footer is the single place that reports how the last run
+                        // ended; errors also fill the results area with their message.
+                        let (symbol, color, text, detail): (I, u32, String, Option<&str>) = if self
+                            .running
+                        {
+                            (I::LoaderCircle, AMBER, tr!("Running…").into(), None)
+                        } else if self.execution_error.is_some() {
+                            (I::CircleX, RED, tr!("Query error").into(), None)
+                        } else if self.cancelled {
+                            (I::Ban, AMBER, tr!("Execution cancelled").into(), None)
+                        } else if self.executed && self.limited {
+                            (
+                                I::TriangleAlert,
+                                AMBER,
+                                tr!("{0} · row limit reached", rows),
+                                Some(tr!(
+                                    "Limit of 1,000 rows reached. Refine the SQL to get other rows."
+                                )),
+                            )
+                        } else if self.executed {
+                            let text = match self.rows_affected {
+                                Some(affected) => {
+                                    tr!("{0} · {1} rows affected", rows, affected)
                                 }
-                            } else {
-                                tr!("Waiting to run").into()
-                            }))
-                            .child(label("·"))
-                            .child(label(
-                                if self.has_results() && !self.running && !self.cancelled {
-                                    format!("{} ms", self.elapsed_ms)
+                                None => rows,
+                            };
+                            (I::CircleCheck, MINT, text, None)
+                        } else {
+                            (I::Clock, FAINT, tr!("Waiting to run").into(), None)
+                        };
+                        row()
+                            .id("run-status")
+                            .role(Role::Status)
+                            .aria_label(text.clone())
+                            .gap_2()
+                            .when_some(detail, |s, detail| {
+                                s.tooltip(move |window, cx| Tooltip::new(detail).build(window, cx))
+                            })
+                            .map(|s| {
+                                if self.running {
+                                    s.child(spinning_icon("run-status-spinner", symbol, color))
                                 } else {
-                                    "—".into()
+                                    s.child(icon(symbol, color))
+                                }
+                            })
+                            .child(div().text_size(px(12.)).text_color(rgb(color)).child(text))
+                            .when(
+                                self.has_results() && !self.running && !self.cancelled,
+                                |s| {
+                                    s.child(label("·"))
+                                        .child(label(format!("{} ms", self.elapsed_ms)))
                                 },
-                            )),
-                    )
+                            )
+                    })
                     .child(
                         row()
+                            .when(self.has_results() && !self.running, |s| {
+                                let selected = self.selected_count(cx);
+                                s.when(selected > 1, |s| {
+                                    s.child(label(tr!("{0} cells selected", selected)))
+                                        .child(label("·"))
+                                })
+                            })
                             .child(label(if self.input.is_some() {
                                 tr!("Server results")
                             } else {
@@ -1029,7 +1075,8 @@ impl Workspace {
             )
     }
 
-    fn result_table(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Data rows in display order, after the open filter and the sort.
+    fn visible_rows(&self, cx: &App) -> Vec<usize> {
         // A closed filter bar must not keep hiding rows.
         let query = if self.filter_open {
             self.filter.read(cx).value().to_lowercase()
@@ -1042,15 +1089,149 @@ impl Workspace {
             .iter()
             .enumerate()
             .filter(|(_, cells)| {
-                cells
-                    .iter()
-                    .any(|cell| cell.to_lowercase().contains(&query))
+                query.is_empty()
+                    || cells
+                        .iter()
+                        .any(|cell| cell.to_lowercase().contains(&query))
             })
+            .map(|(index, _)| index)
             .collect();
         if !self.descending {
             rows.reverse();
         }
-        let empty = rows.is_empty();
+        rows
+    }
+
+    fn select_cell(&mut self, row: usize, col: usize, extend: bool) {
+        self.selection = Some(match self.selection {
+            Some(selection) if extend => CellSelection {
+                anchor: selection.anchor,
+                focus: (row, col),
+            },
+            _ => CellSelection {
+                anchor: (row, col),
+                focus: (row, col),
+            },
+        });
+    }
+
+    fn select_all(&mut self, cx: &App) {
+        let visible = self.visible_rows(cx);
+        let columns = self.result.columns.len();
+        if let (Some(first), Some(last)) = (visible.first(), visible.last())
+            && columns > 0
+        {
+            self.selection = Some(CellSelection {
+                anchor: (*first, 0),
+                focus: (*last, columns - 1),
+            });
+        }
+    }
+
+    /// Arrow-key navigation; with Shift the block grows from the anchor.
+    fn move_selection(&mut self, rows: isize, cols: isize, extend: bool, cx: &App) {
+        let visible = self.visible_rows(cx);
+        let columns = self.result.columns.len();
+        if visible.is_empty() || columns == 0 {
+            return;
+        }
+        let (position, col) = self
+            .selection
+            .and_then(|selection| {
+                let position = visible.iter().position(|row| *row == selection.focus.0)?;
+                Some((position, selection.focus.1))
+            })
+            .unwrap_or((0, 0));
+        let position = position.saturating_add_signed(rows).min(visible.len() - 1);
+        let col = col.saturating_add_signed(cols).min(columns - 1);
+        self.select_cell(visible[position], col, extend && self.selection.is_some());
+        self.result_scroll.scroll_to_item(position);
+    }
+
+    fn selected_count(&self, cx: &App) -> usize {
+        let visible = self.visible_rows(cx);
+        self.selection
+            .and_then(|selection| selection_block(selection, &visible))
+            .map_or(0, |(rows, cols)| rows.count() * cols.count())
+    }
+
+    /// Copies the selected block as tab-separated text (a single cell as its
+    /// exact value), optionally with the column names first.
+    fn copy_selection(&mut self, headers: bool, cx: &mut Context<Self>) {
+        let visible = self.visible_rows(cx);
+        let Some((rows, cols)) = self
+            .selection
+            .and_then(|selection| selection_block(selection, &visible))
+        else {
+            self.notice = Some(Feedback::new(Tone::Info, tr!("Select cells to copy.")));
+            cx.notify();
+            return;
+        };
+        let names: Vec<&str> = cols
+            .clone()
+            .map(|col| self.result.columns[col].0.as_str())
+            .collect();
+        let data: Vec<Vec<Option<&str>>> = rows
+            .map(|position| {
+                cols.clone()
+                    .map(|col| self.result.value(visible[position], col))
+                    .collect()
+            })
+            .collect();
+        let count = data.len() * names.len();
+        let text = cell_format::copy_cells(headers.then_some(names.as_slice()), &data);
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.notice = Some(Feedback::new(
+            Tone::Success,
+            if count == 1 {
+                tr!("Cell copied.").to_string()
+            } else {
+                tr!("{0} cells copied.", count)
+            },
+        ));
+        cx.notify();
+    }
+
+    fn grid_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        let shift = keystroke.modifiers.shift;
+        let handled = if keystroke.modifiers.control || keystroke.modifiers.platform {
+            match keystroke.key.as_str() {
+                "c" => {
+                    self.copy_selection(shift, cx);
+                    true
+                }
+                "a" => {
+                    self.select_all(cx);
+                    true
+                }
+                _ => false,
+            }
+        } else {
+            match keystroke.key.as_str() {
+                "up" => self.move_selection(-1, 0, shift, cx),
+                "down" => self.move_selection(1, 0, shift, cx),
+                "left" => self.move_selection(0, -1, shift, cx),
+                "right" => self.move_selection(0, 1, shift, cx),
+                "escape" if self.selection.is_some() => self.selection = None,
+                _ => return,
+            }
+            true
+        };
+        if handled {
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    fn result_table(&self, cx: &mut Context<Self>) -> AnyElement {
+        let visible = self.visible_rows(cx);
+        let block = self
+            .selection
+            .and_then(|selection| selection_block(selection, &visible));
+        let focus = self.selection.map(|selection| selection.focus);
+        let empty = visible.is_empty();
         let numeric = |kind: &str| cell_format::family(kind) == ValueFamily::Number;
         let widths: Vec<_> = self
             .result
@@ -1076,11 +1257,14 @@ impl Workspace {
                     })
                     .max()
                     .unwrap_or(0);
-                ((content.max(name.chars().count() + 4) as f32 * 8.) + 32.).clamp(110., 360.)
+                let header = name.chars().count() + 3 + kind.chars().count();
+                ((content.max(header) as f32 * 8.) + 32.).clamp(110., 360.)
             })
             .collect();
         let grid_width = widths.iter().sum::<f32>() + 35.;
-        div()
+        let last_column = self.result.columns.len().saturating_sub(1);
+        let weak = cx.weak_entity();
+        let grid = div()
             .id("result-table-scroll")
             .size_full()
             .bg(rgb(0x13171d))
@@ -1102,26 +1286,41 @@ impl Workspace {
                             .child(div().w(px(35.)).flex_none().text_center().child(label("#")))
                             .children(self.result.columns.iter().enumerate().map(
                                 |(index, (name, kind))| {
-                                    let tooltip = format!("{name} · {kind}");
+                                    let kind = kind.to_lowercase();
+                                    let tooltip = format!("{name} : {kind}");
                                     row()
                                         .id(("result-header", index))
                                         .w(px(widths[index]))
                                         .flex_none()
                                         .h_full()
                                         .px_3()
-                                        .gap_2()
+                                        .gap_1()
                                         .when(self.result.sales, |s| {
                                             s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][index])
                                         })
                                         .border_l_1()
                                         .border_color(rgb(0x2a303b))
                                         .text_size(px(14.))
-                                        .text_color(rgb(0xa0acbf))
+                                        .text_color(rgb(0xc2cbd8))
                                         .tooltip(move |window, cx| {
                                             Tooltip::new(tooltip.clone()).build(window, cx)
                                         })
-                                        .child(super::type_icons::header_icon(kind))
-                                        .child(div().flex_1().truncate().child(name.clone()))
+                                        .child(
+                                            div()
+                                                .flex_shrink(1.)
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(px(12.))
+                                                .text_color(rgb(0x6f7a8a))
+                                                .child(format!(": {kind}")),
+                                        )
                                         .when(index == 2 && self.result.sales, |s| {
                                             s.cursor_pointer()
                                                 .focusable()
@@ -1154,7 +1353,13 @@ impl Workspace {
                             .overflow_y_scroll()
                             .track_scroll(&self.result_scroll)
                             .vertical_scrollbar(&self.result_scroll)
-                            .children(rows.into_iter().map(|(index, cells)| {
+                            .children(visible.iter().enumerate().map(|(position, &index)| {
+                                let cells = &self.result.rows[index];
+                                let row_selected = block.as_ref().is_some_and(|(rows, cols)| {
+                                    rows.contains(&position)
+                                        && *cols.start() == 0
+                                        && *cols.end() == last_column
+                                });
                                 row()
                                     .id(("data-row", index))
                                     .role(Role::Row)
@@ -1164,33 +1369,69 @@ impl Workspace {
                                     .gap_0()
                                     .child(
                                         div()
+                                            .id(("row-number", index))
                                             .w(px(35.))
                                             .flex_none()
                                             .h_full()
                                             .flex()
                                             .items_center()
                                             .justify_center()
-                                            .bg(rgb(0x1b2028))
+                                            .cursor_pointer()
+                                            .bg(rgb(if row_selected { 0x283e65 } else { 0x1b2028 }))
+                                            .hover(|s| s.bg(rgb(0x222a36)))
                                             .border_b_1()
                                             .border_color(rgb(0x2a303b))
                                             .text_center()
                                             .text_size(px(12.))
                                             .text_color(rgb(FAINT))
+                                            .on_click(cx.listener(
+                                                move |this, event: &ClickEvent, window, cx| {
+                                                    let extend = event.modifiers().shift;
+                                                    if !extend || this.selection.is_none() {
+                                                        this.select_cell(index, 0, false);
+                                                    } else if let Some(selection) =
+                                                        &mut this.selection
+                                                    {
+                                                        selection.anchor.1 = 0;
+                                                    }
+                                                    this.select_cell(index, last_column, true);
+                                                    window.focus(&this.grid_focus, cx);
+                                                    cx.notify();
+                                                },
+                                            ))
                                             .child((index + 1).to_string()),
                                     )
                                     .children(cells.iter().enumerate().map(|(col, value)| {
                                         let family =
                                             cell_format::family(&self.result.columns[col].1);
                                         let raw = self.result.value(index, col);
+                                        // A cell is one line: line breaks show as ↵ and the
+                                        // full value stays in the tooltip and in copies.
                                         let displayed =
-                                            cell_format::display(raw, family, self.numbers_pt_br);
+                                            cell_format::display(raw, family, self.numbers_pt_br)
+                                                .replace("\r\n", "↵")
+                                                .replace(['\n', '\r'], "↵");
                                         let is_null = raw.is_none();
-                                        let tooltip = raw.unwrap_or("NULL").to_owned();
+                                        // Only values that do not fit get a tooltip, so it
+                                        // does not cover the context menu or neighbours.
+                                        let tooltip = raw
+                                            .filter(|value| {
+                                                value.contains(['\n', '\r'])
+                                                    || displayed.chars().count() as f32 * 7.8
+                                                        > widths[col] - 18.
+                                            })
+                                            .map(str::to_owned);
+                                        let selected =
+                                            block.as_ref().is_some_and(|(rows, cols)| {
+                                                rows.contains(&position) && cols.contains(&col)
+                                            });
+                                        let focused = focus == Some((index, col));
                                         div()
                                             .id(ElementId::Name(
                                                 format!("result-cell-{index}-{col}").into(),
                                             ))
                                             .role(Role::GridCell)
+                                            .aria_selected(selected)
                                             .aria_label(tr!(
                                                 "Row {0}, {1}: {2}",
                                                 index + 1,
@@ -1207,20 +1448,32 @@ impl Workspace {
                                             .px(px(8.))
                                             .border_1()
                                             .border_color(rgb(0x2a303b))
-                                            .when(self.selected_cell != Some((index, col)), |s| {
-                                                s.hover(|s| s.bg(rgb(0x222a36)))
-                                            })
-                                            .when(self.selected_cell == Some((index, col)), |s| {
-                                                s.bg(rgb(0x283e65)).border_color(rgb(0x7fa8fa))
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.selected_cell = Some((index, col));
-                                                this.notice = Some(Feedback::new(
-                                                    Tone::Info,
-                                                    this.result.rows[index][col].clone(),
-                                                ));
-                                                cx.notify();
-                                            }))
+                                            .when(!selected, |s| s.hover(|s| s.bg(rgb(0x222a36))))
+                                            .when(selected, |s| s.bg(rgb(0x283e65)))
+                                            .when(focused, |s| s.border_color(rgb(0x7fa8fa)))
+                                            .on_click(cx.listener(
+                                                move |this, event: &ClickEvent, window, cx| {
+                                                    this.select_cell(
+                                                        index,
+                                                        col,
+                                                        event.modifiers().shift,
+                                                    );
+                                                    window.focus(&this.grid_focus, cx);
+                                                    cx.notify();
+                                                },
+                                            ))
+                                            // A right click outside the selection selects the
+                                            // cell first, so the menu acts on what is under it.
+                                            .on_mouse_down(
+                                                MouseButton::Right,
+                                                cx.listener(move |this, _, window, cx| {
+                                                    if !selected {
+                                                        this.select_cell(index, col, false);
+                                                    }
+                                                    window.focus(&this.grid_focus, cx);
+                                                    cx.notify();
+                                                }),
+                                            )
                                             .when(self.result.sales, |s| {
                                                 s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col])
                                             })
@@ -1230,13 +1483,13 @@ impl Workspace {
                                             .when(family == ValueFamily::Boolean, |s| {
                                                 s.justify_center()
                                             })
-                                            .tooltip(move |window, cx| {
-                                                Tooltip::new(tooltip.clone()).build(window, cx)
+                                            .when_some(tooltip, |s, tooltip| {
+                                                s.tooltip(move |window, cx| {
+                                                    Tooltip::new(tooltip.clone()).build(window, cx)
+                                                })
                                             })
                                             .when(numeric(&self.result.columns[col].1), |s| {
                                                 s.justify_end()
-                                                    .font_family("Cascadia Mono")
-                                                    .text_size(px(13.))
                                             })
                                             .text_color(rgb(if is_null {
                                                 0x64748b
@@ -1264,9 +1517,50 @@ impl Workspace {
                                 )
                             }),
                     ),
-            )
+            );
+        div()
+            .id("result-grid")
+            .size_full()
+            .track_focus(&self.grid_focus)
+            .on_key_down(cx.listener(Self::grid_key_down))
+            .child(grid)
+            .context_menu(move |menu, _, cx| {
+                let has_selection = weak
+                    .upgrade()
+                    .is_some_and(|this| this.read(cx).selection.is_some());
+                let action =
+                    |weak: WeakEntity<Workspace>,
+                     run: fn(&mut Workspace, &mut Context<Workspace>)| {
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            let _ = weak.update(cx, |this, cx| {
+                                run(this, cx);
+                                cx.notify();
+                            });
+                        }
+                    };
+                menu.item(
+                    PopupMenuItem::new(tr!("Copy"))
+                        .disabled(!has_selection)
+                        .on_click(action(weak.clone(), |this, cx| {
+                            this.copy_selection(false, cx)
+                        })),
+                )
+                .item(
+                    PopupMenuItem::new(tr!("Copy with headers"))
+                        .disabled(!has_selection)
+                        .on_click(action(weak.clone(), |this, cx| {
+                            this.copy_selection(true, cx)
+                        })),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(tr!("Select all"))
+                        .on_click(action(weak.clone(), |this, cx| this.select_all(cx))),
+                )
+            })
             .into_any_element()
     }
+
     fn result_chart(&self, _: &mut Context<Self>) -> AnyElement {
         if !self.result.sales {
             return column()
@@ -1530,7 +1824,8 @@ impl Workspace {
         self.assistant_open = false;
         self.executed = false;
         self.execution_error = None;
-        self.selected_cell = None;
+        self.selection = None;
+        self.limited = false;
         self.result = ResultData {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -1665,7 +1960,20 @@ impl Drop for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{QueryStatus, carry_statuses};
+    use super::{CellSelection, QueryStatus, carry_statuses, selection_block};
+
+    #[test]
+    fn selection_follows_the_displayed_order_and_hides_with_its_rows() {
+        let selection = CellSelection {
+            anchor: (4, 2),
+            focus: (1, 0),
+        };
+        // Rows shown in reverse order: data rows 4..1 sit at positions 1..=4.
+        let visible = [5, 4, 3, 2, 1, 0];
+        assert_eq!(selection_block(selection, &visible), Some((1..=4, 0..=2)));
+        // A filter that hides an end of the block hides the selection.
+        assert_eq!(selection_block(selection, &[5, 4, 3]), None);
+    }
     use crate::mock::sql::normalized_statements;
 
     #[test]

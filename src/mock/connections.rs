@@ -1,6 +1,10 @@
 use super::*;
 use gpui_kit::base::FocusTrapElement as _;
+use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use jykre::tr;
+
+/// A context-menu command run against the app view.
+type MenuAction = Box<dyn Fn(&mut AppView, &mut Window, &mut Context<AppView>)>;
 
 impl AppView {
     pub(super) fn invalidate_connection_test(&mut self) {
@@ -396,7 +400,7 @@ impl AppView {
         profile.remember_password = self.driver != 2 && self.remember_password;
         if let Some(index) = editing {
             let connection = &mut self.connections[index];
-            if let Some(cancel) = connection.refreshing.take() {
+            if let Some((_, cancel)) = connection.refreshing.take() {
                 cancel.cancel();
             }
             connection.refresh_generation += 1;
@@ -512,7 +516,7 @@ impl AppView {
         let cancel = CancellationToken::new();
         connection.refresh_generation += 1;
         let generation = connection.refresh_generation;
-        connection.refreshing = Some(cancel.clone());
+        connection.refreshing = Some((scope.clone(), cancel.clone()));
         let scope_name = scope
             .0
             .last()
@@ -596,6 +600,62 @@ impl AppView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Starts refreshing `scope`, or cancels it when that scope is the one
+    /// already refreshing. Another scope in progress leaves things unchanged.
+    pub(super) fn toggle_refresh(
+        &mut self,
+        index: usize,
+        scope: ObjectPath,
+        cx: &mut Context<Self>,
+    ) {
+        let connection = &mut self.connections[index];
+        match &connection.refreshing {
+            Some((current, cancel)) if *current == scope => {
+                cancel.cancel();
+                connection.status = Feedback::new(
+                    Tone::Info,
+                    tr!("Cancelling refresh; previous cache preserved."),
+                );
+                cx.notify();
+            }
+            Some(_) => {}
+            None => self.refresh_metadata(index, scope, cx),
+        }
+    }
+
+    fn toggle_node(&mut self, index: usize, path: &ObjectPath, cx: &mut Context<Self>) {
+        if self.connections[index].cache_loading {
+            return;
+        }
+        if self.connections[index].collapsed.remove(path) {
+            self.load_cached_children(index, path.clone(), false, cx);
+        } else {
+            self.connections[index].collapsed.insert(path.clone());
+        }
+        cx.notify();
+    }
+
+    fn open_relation(
+        &mut self,
+        index: usize,
+        path: &ObjectPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let connection = &self.connections[index];
+        let Some(input) = connection.input.as_ref() else {
+            return;
+        };
+        let sql = backend::preview_sql(path, input.config.driver);
+        let title = path
+            .0
+            .last()
+            .map(|part| part.name.clone())
+            .unwrap_or_default();
+        let group = connection.group;
+        self.add_query(group, &title, &sql, window, cx);
     }
 
     fn load_cached_children(
@@ -791,10 +851,18 @@ impl AppView {
                     .any(|path| path != &object.path && object.path.is_within(path))
             })
             .collect();
+        let weak = cx.weak_entity();
+        let refreshing = connection
+            .refreshing
+            .as_ref()
+            .map(|(scope, _)| scope.clone());
+        let refreshing_all = refreshing.as_ref().is_some_and(|scope| scope.0.is_empty());
+        let busy = refreshing.is_some();
         column()
             .flex_none()
             .child(
                 row()
+                    .id(("live-connection-row", index))
                     .px_2()
                     .h(px(38.))
                     .child(
@@ -802,6 +870,15 @@ impl AppView {
                             .aria_label(connection.name.clone())
                             .flex_1()
                             .child(div().truncate().child(connection.name.clone()))
+                            .on_key_down(cx.listener(
+                                move |this, event: &KeyDownEvent, window, cx| {
+                                    if event.keystroke.key == "f5" {
+                                        this.toggle_refresh(index, ObjectPath::default(), cx);
+                                        window.prevent_default();
+                                        cx.stop_propagation();
+                                    }
+                                },
+                            ))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.connections[index].expanded = !expanded;
                                 cx.notify();
@@ -819,16 +896,74 @@ impl AppView {
                             },
                         )),
                     )
-                    .child(
+                    // While the whole connection refreshes the same button spins and
+                    // cancels; a node refresh keeps it disabled until it ends.
+                    .child(if refreshing_all {
+                        spinner_button(
+                            ("refresh-connection", index),
+                            ("refresh-connection-spinner", index),
+                            tr!("Cancel refresh"),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_refresh(index, ObjectPath::default(), cx)
+                        }))
+                    } else {
                         icon_button(
                             ("refresh-connection", index),
                             I::RefreshCw,
                             tr!("Refresh all metadata"),
                         )
+                        .when(busy, |s| s.opacity(0.5).cursor_default())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.refresh_metadata(index, ObjectPath::default(), cx)
-                        })),
-                    ),
+                            this.toggle_refresh(index, ObjectPath::default(), cx)
+                        }))
+                    })
+                    .context_menu({
+                        let weak = weak.clone();
+                        move |menu, _, _| {
+                            let run = |action: fn(
+                                &mut AppView,
+                                usize,
+                                &mut Window,
+                                &mut Context<AppView>,
+                            )| {
+                                let weak = weak.clone();
+                                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                    let _ =
+                                        weak.update(cx, |this, cx| action(this, index, window, cx));
+                                }
+                            };
+                            menu.item(
+                                PopupMenuItem::new(tr!("New query"))
+                                    .icon(I::SquareTerminal)
+                                    .on_click(run(|this, index, window, cx| {
+                                        this.new_query(this.connections[index].group, window, cx)
+                                    })),
+                            )
+                            .item(
+                                PopupMenuItem::new(if refreshing_all {
+                                    tr!("Cancel refresh")
+                                } else {
+                                    tr!("Refresh all metadata")
+                                })
+                                .icon(I::RefreshCw)
+                                .disabled(busy && !refreshing_all)
+                                .on_click(run(
+                                    |this, index, _, cx| {
+                                        this.toggle_refresh(index, ObjectPath::default(), cx)
+                                    },
+                                )),
+                            )
+                            .separator()
+                            .item(
+                                PopupMenuItem::new(tr!("Configure connection"))
+                                    .icon(I::Settings)
+                                    .on_click(run(|this, index, window, cx| {
+                                        this.open_connection(Some(index), window, cx)
+                                    })),
+                            )
+                        }
+                    }),
             )
             .when(expanded, |s| {
                 s.child(
@@ -856,28 +991,6 @@ impl AppView {
                                 }))
                                 .child(connection.status.text.clone()),
                         )
-                        .when(connection.refreshing.is_some(), |s| {
-                            s.child(
-                                button(
-                                    ("cancel-metadata", index),
-                                    I::Square,
-                                    tr!("Cancel refresh"),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        let connection = &mut this.connections[index];
-                                        if let Some(cancel) = &connection.refreshing {
-                                            cancel.cancel();
-                                        }
-                                        connection.status = Feedback::new(
-                                            Tone::Info,
-                                            tr!("Cancelling refresh; previous cache preserved."),
-                                        );
-                                        cx.notify();
-                                    },
-                                )),
-                            )
-                        })
                         .child(
                             button(
                                 ("live-new-query", index),
@@ -895,10 +1008,23 @@ impl AppView {
                     let path = object.path.clone();
                     let refresh_path = path.clone();
                     let toggle_path = path.clone();
+                    let key_path = path.clone();
+                    let menu_path = path.clone();
                     let relation = matches!(object.kind, ObjectKind::Table | ObjectKind::View);
                     let collapsed = connection.collapsed.contains(&path);
                     let freshness = connection.node_freshness(&path);
+                    let refreshing_this = refreshing.as_ref() == Some(&path);
+                    let name = object.name.clone();
+                    let node_id = path
+                        .0
+                        .iter()
+                        .map(|part| part.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join("/");
                     row()
+                        .id(ElementId::Name(
+                            format!("node-row-{index}-{node_id}").into(),
+                        ))
                         .pl(px(12. + (path.0.len() - 1) as f32 * 14.))
                         .pr_1()
                         .h(px(32.))
@@ -917,24 +1043,7 @@ impl AppView {
                                 )
                                 .size(px(20.))
                                 .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        if this.connections[index].cache_loading {
-                                            return;
-                                        }
-                                        if this.connections[index].collapsed.remove(&toggle_path) {
-                                            this.load_cached_children(
-                                                index,
-                                                toggle_path.clone(),
-                                                false,
-                                                cx,
-                                            );
-                                        } else {
-                                            this.connections[index]
-                                                .collapsed
-                                                .insert(toggle_path.clone());
-                                        }
-                                        cx.notify();
-                                    },
+                                    move |this, _, _, cx| this.toggle_node(index, &toggle_path, cx),
                                 )),
                             )
                         })
@@ -961,9 +1070,6 @@ impl AppView {
                                 .min_w_0()
                                 .cursor_pointer()
                                 .hover(|s| s.bg(rgb(HOVER)))
-                                .tooltip(move |window, cx| {
-                                    Tooltip::new(freshness.clone()).build(window, cx)
-                                })
                                 .child(icon(
                                     if relation {
                                         I::Table2
@@ -982,47 +1088,102 @@ impl AppView {
                                         .text_size(px(14.))
                                         .child(object.name.clone()),
                                 )
+                                // F5 refreshes the focused node, or cancels its refresh.
+                                .on_key_down(cx.listener(
+                                    move |this, event: &KeyDownEvent, window, cx| {
+                                        if event.keystroke.key == "f5" {
+                                            this.toggle_refresh(index, key_path.clone(), cx);
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                ))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     if relation {
-                                        let connection = &this.connections[index];
-                                        let sql = backend::preview_sql(
-                                            &path,
-                                            connection.input.as_ref().unwrap().config.driver,
-                                        );
-                                        let title = path.0.last().unwrap().name.clone();
-                                        let group = connection.group;
-                                        this.add_query(group, &title, &sql, window, cx);
+                                        this.open_relation(index, &path, window, cx);
                                     } else {
-                                        if this.connections[index].cache_loading {
-                                            return;
-                                        }
-                                        if this.connections[index].collapsed.remove(&path) {
-                                            this.load_cached_children(
-                                                index,
-                                                path.clone(),
-                                                false,
-                                                cx,
-                                            );
-                                        } else {
-                                            this.connections[index].collapsed.insert(path.clone());
-                                        }
-                                        cx.notify();
+                                        this.toggle_node(index, &path, cx);
                                     }
                                 })),
                         )
-                        .child(
-                            icon_button(
-                                ElementId::Name(format!("refresh-node-{index}-{row_index}").into()),
-                                I::RefreshCw,
-                                tr!("Refresh only this node"),
+                        // Refresh lives in the context menu; only a running refresh
+                        // shows here, as a spinner that cancels it.
+                        .when(refreshing_this, |s| {
+                            s.child(
+                                spinner_button(
+                                    ElementId::Name(
+                                        format!("cancel-node-refresh-{index}-{row_index}").into(),
+                                    ),
+                                    ElementId::Name(
+                                        format!("node-refresh-spinner-{index}-{row_index}").into(),
+                                    ),
+                                    tr!("Cancel refresh"),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.toggle_refresh(index, refresh_path.clone(), cx)
+                                    },
+                                )),
                             )
-                            .aria_label(tr!("Refresh only {0}", object.name))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.refresh_metadata(index, refresh_path.clone(), cx)
-                                },
-                            )),
-                        )
+                        })
+                        .context_menu({
+                            let weak = weak.clone();
+                            move |menu, _, _| {
+                                let run = |action: MenuAction| {
+                                    let weak = weak.clone();
+                                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                        let _ =
+                                            weak.update(cx, |this, cx| action(this, window, cx));
+                                    }
+                                };
+                                let open_path = menu_path.clone();
+                                let refresh_path = menu_path.clone();
+                                let copy_name = name.clone();
+                                menu.item(if relation {
+                                    PopupMenuItem::new(tr!("Open preview"))
+                                        .icon(I::SquareTerminal)
+                                        .on_click(run(Box::new(move |this, window, cx| {
+                                            this.open_relation(index, &open_path, window, cx)
+                                        })))
+                                } else {
+                                    PopupMenuItem::new(if collapsed {
+                                        tr!("Expand")
+                                    } else {
+                                        tr!("Collapse")
+                                    })
+                                    .icon(if collapsed {
+                                        I::ChevronRight
+                                    } else {
+                                        I::ChevronDown
+                                    })
+                                    .on_click(run(Box::new(move |this, _, cx| {
+                                        this.toggle_node(index, &open_path, cx)
+                                    })))
+                                })
+                                .item(
+                                    PopupMenuItem::new(if refreshing_this {
+                                        tr!("Cancel refresh")
+                                    } else {
+                                        tr!("Refresh")
+                                    })
+                                    .icon(I::RefreshCw)
+                                    .disabled(busy && !refreshing_this)
+                                    .on_click(run(Box::new(move |this, _, cx| {
+                                        this.toggle_refresh(index, refresh_path.clone(), cx)
+                                    }))),
+                                )
+                                .separator()
+                                .item(PopupMenuItem::new(tr!("Copy name")).icon(I::Copy).on_click(
+                                    move |_, _, cx: &mut App| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_name.to_string(),
+                                        ))
+                                    },
+                                ))
+                                .separator()
+                                .label(freshness.clone())
+                            }
+                        })
                 }))
                 .children(
                     connection
@@ -1113,7 +1274,7 @@ impl AppView {
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        if let Some(cancel) = self.refreshing.take() {
+        if let Some((_, cancel)) = self.refreshing.take() {
             cancel.cancel();
         }
     }

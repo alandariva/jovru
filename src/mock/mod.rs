@@ -3,7 +3,6 @@ mod connections;
 mod data;
 mod layout;
 mod sql;
-mod type_icons;
 mod ui;
 mod workspace;
 
@@ -54,7 +53,8 @@ struct Connection {
     input: Option<ResolvedConnection>,
     metadata: Vec<MetadataObject>,
     collapsed: HashSet<ObjectPath>,
-    refreshing: Option<CancellationToken>,
+    /// Scope being refreshed and how to cancel it.
+    refreshing: Option<(ObjectPath, CancellationToken)>,
     status: Feedback,
     notice: Option<String>,
 }
@@ -694,7 +694,7 @@ impl AppView {
                                 .line_height(relative(1.5))
                                 .text_color(rgb(FAINT))
                                 .child(
-                                    tr!("Use ↻ on the connection or the desired node to refresh metadata."),
+                                    tr!("↻ refreshes the whole connection. Right-click a node (or press F5) to refresh only it."),
                                 ),
                         ),
                 )
@@ -1287,7 +1287,7 @@ impl Render for AppView {
 }
 
 pub fn run() {
-    application().with_assets(type_icons::AppAssets).run(|cx| {
+    application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         cx.bind_keys([KeyBinding::new("ctrl-enter", ExecuteActiveQuery, None)]);
         Theme::change(ThemeMode::Dark, None, cx);

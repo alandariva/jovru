@@ -98,6 +98,19 @@ pub fn icon(name: IconName, color: u32) -> Icon {
     Icon::new(name).size(px(16.)).text_color(rgb(color))
 }
 
+/// An icon that rotates continuously, for work in progress.
+pub fn spinning_icon(
+    id: impl Into<ElementId>,
+    name: IconName,
+    color: u32,
+) -> impl IntoElement + 'static {
+    icon(name, color).with_animation(
+        id,
+        Animation::new(std::time::Duration::from_millis(900)).repeat(),
+        |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+    )
+}
+
 pub fn dot(color: u32) -> Div {
     div().size(px(6.)).flex_none().rounded_full().bg(rgb(color))
 }
@@ -191,6 +204,33 @@ pub fn icon_button(id: impl Into<ElementId>, name: IconName, title: &'static str
         .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
         .hover(|s| s.bg(rgb(HOVER)))
         .child(icon(name, MUTED))
+}
+
+/// An icon button showing work in progress; clicking it usually cancels.
+pub fn spinner_button(
+    id: impl Into<ElementId>,
+    spinner: impl Into<ElementId>,
+    title: &'static str,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .role(Role::Button)
+        .aria_label(title)
+        .focusable()
+        .tab_index(0)
+        .border_1()
+        .border_color(transparent_black())
+        .focus_visible(|s| s.border_color(rgb(MINT)))
+        .size(px(28.))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .cursor_pointer()
+        .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
+        .hover(|s| s.bg(rgb(HOVER)))
+        .child(spinning_icon(spinner, IconName::RefreshCw, MINT))
 }
 
 pub fn divider() -> Div {
