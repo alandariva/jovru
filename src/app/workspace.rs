@@ -13,6 +13,7 @@ use jykre::{
     backend,
     cell_format::{self, ValueFamily},
     drivers::*,
+    query::{Outcome, QueryRun, RunState, StatementStatus},
 };
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
@@ -21,16 +22,6 @@ enum ResultView {
     Table,
     Chart,
     Messages,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-enum QueryStatus {
-    #[default]
-    Ready,
-    Running,
-    Success,
-    Error,
-    Cancelled,
 }
 
 /// A rectangular block of result cells, from the cell clicked first (anchor)
@@ -174,17 +165,11 @@ pub struct Workspace {
     result_view: ResultView,
     assistant_open: bool,
     messages: Vec<Message>,
-    executed: bool,
-    running: bool,
-    executions: usize,
-    query_statuses: Vec<QueryStatus>,
-    /// Normalized text of each statement when its status was recorded. A
-    /// status only survives edits while its statement is unchanged.
-    status_sql: Vec<String>,
-    execution_id: usize,
+    /// A result is loaded (from a run or the demo), whatever the run state.
+    has_result: bool,
+    /// The run state and the status of each statement in the editor.
+    run: QueryRun,
     editor_sql: String,
-    execution_error: Option<String>,
-    cancelled: bool,
     /// SQL as last saved to the library, if this tab is saved.
     saved_sql: Option<String>,
     notice: Option<Feedback>,
@@ -247,8 +232,8 @@ impl Workspace {
         let editor_observation = cx.observe(&editor, |this, editor, cx| {
             let sql = editor.read(cx).text().to_string();
             if this.editor_sql != sql {
+                this.run.edit(&sql);
                 this.editor_sql = sql;
-                this.sync_statement_statuses();
             }
             cx.notify();
         });
@@ -305,15 +290,9 @@ impl Workspace {
             } else {
                 Vec::new()
             },
-            executed: sql == SALES_SQL,
-            running: false,
-            executions: 0,
-            query_statuses: Vec::new(),
-            status_sql: Vec::new(),
-            execution_id: 0,
+            has_result: sql == SALES_SQL,
+            run: QueryRun::new(sql),
             editor_sql: sql.to_string(),
-            execution_error: None,
-            cancelled: false,
             saved_sql: None,
             notice: None,
             limited: false,
@@ -334,87 +313,48 @@ impl Workspace {
     }
 
     pub fn execute(&mut self, cx: &mut Context<Self>) {
-        if self.running {
+        if self.run.is_running() {
             self.stop_execution(cx);
         } else {
             self.execute_queries(None, cx);
         }
     }
 
+    /// Asks the run to stop. The footer reports the cancellation; there is
+    /// no second message.
     fn stop_execution(&mut self, cx: &mut Context<Self>) {
-        if !self.running {
-            return;
-        }
-        self.cancellation.cancel();
-        self.execution_id += 1;
-        self.running = false;
-        self.cancelled = true;
-        for status in &mut self.query_statuses {
-            if *status == QueryStatus::Running {
-                *status = QueryStatus::Cancelled;
-            }
-        }
-        // The results footer reports the cancellation; no second message.
-        self.sync_statement_statuses();
-        cx.notify();
-    }
-
-    /// Keeps the status of statements whose text is unchanged and resets the
-    /// others. Statuses are left alone while an execution owns them.
-    fn sync_statement_statuses(&mut self) {
-        if self.running {
-            return;
-        }
-        let statements = jykre::sql::normalized_statements(&self.editor_sql);
-        self.query_statuses = carry_statuses(&self.status_sql, &self.query_statuses, &statements);
-        self.status_sql = statements;
-    }
-
-    fn set_status(&mut self, index: usize, status: QueryStatus) {
-        if let Some(slot) = self.query_statuses.get_mut(index) {
-            *slot = status;
+        if self.run.cancel() {
+            self.cancellation.cancel();
+            cx.notify();
         }
     }
 
+    /// A result is shown: loaded, and the last run did not fail.
     fn has_results(&self) -> bool {
-        self.executed && self.execution_error.is_none()
+        self.has_result && !matches!(self.run.state(), RunState::Failed { .. })
     }
 
     fn execute_queries(&mut self, only: Option<usize>, cx: &mut Context<Self>) {
-        if self.running {
-            return;
-        }
         let sql = self.editor.read(cx).text().to_string();
-        let ranges = jykre::sql::statements(&sql);
-        let queries: Vec<_> = ranges
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| only.is_none_or(|only| *index == only))
-            .map(|(index, range)| (index, sql[range.clone()].to_string()))
-            .collect();
-        if queries.is_empty() {
-            self.notice = Some(Feedback::new(
-                Tone::Info,
-                tr!("There is no SQL statement to run."),
-            ));
-            cx.notify();
+        let Some(plan) = self.run.start(&sql, only) else {
+            if !self.run.is_running() {
+                self.notice = Some(Feedback::new(
+                    Tone::Info,
+                    tr!("There is no SQL statement to run."),
+                ));
+                cx.notify();
+            }
             return;
-        }
-        self.sync_statement_statuses();
-        self.query_statuses.resize(ranges.len(), QueryStatus::Ready);
-        self.execution_id += 1;
-        let execution_id = self.execution_id;
-        self.running = true;
-        self.cancelled = false;
-        self.execution_error = None;
+        };
+        let id = plan.id;
+        let queries = plan.statements;
         self.notice = None;
         cx.notify();
         if let Some(input) = self.input.clone() {
+            // A superseded run that is still stopping keeps its own token.
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
-            for (index, _) in &queries {
-                self.set_status(*index, QueryStatus::Running);
-            }
+            self.run.begin_all(id);
             cx.spawn(async move |weak, cx| {
                 let requests = queries.iter().map(|(_, sql)| QueryRequest { sql: sql.clone(), options: ExecutionOptions::default() }).collect();
                 // Rows become display text on the database runtime: that work,
@@ -425,44 +365,28 @@ impl Workspace {
                     Ok((batch, data))
                 }).await;
                 let _ = weak.update(cx, |this, cx| {
-                    if this.execution_id != execution_id { return; }
-                    this.running = false;
                     match result {
                         Ok((batch, data)) => {
-                            this.elapsed_ms = batch.completed.iter().map(|result| result.elapsed_ms).sum();
                             let completed = batch.completed.len();
-                            for (((index, sql), result), data) in queries.iter().zip(batch.completed).zip(data) {
-                                this.set_status(*index, QueryStatus::Success);
-                                this.rows_affected = result.outcome.rows_affected;
-                                this.limited = result.limited;
-                                this.set_result(data);
-                                this.executed = true;
-                                this.executions += 1;
-                                this.selection = None;
-                                this.result_view = ResultView::Table;
-                                cx.emit(WorkspaceEvent::Executed { title: this.title.to_string(), connection: this.connection.to_string(), sql: sql.clone() });
-                            }
-                            if let Some(error) = batch.error {
-                                for (position, (index, _)) in queries.iter().enumerate().skip(completed) {
-                                    this.set_status(*index, if position == completed { QueryStatus::Error } else { QueryStatus::Ready });
+                            let elapsed_ms = batch.completed.iter().map(|result| result.elapsed_ms).sum();
+                            let outcome = Outcome::Batch { completed, error: batch.error };
+                            if this.run.finish(id, outcome) {
+                                this.elapsed_ms = elapsed_ms;
+                                for (((_, sql), result), data) in queries.iter().zip(batch.completed).zip(data) {
+                                    this.rows_affected = result.outcome.rows_affected;
+                                    this.limited = result.limited;
+                                    this.set_result(data);
+                                    this.has_result = true;
+                                    this.selection = None;
+                                    this.result_view = ResultView::Table;
+                                    cx.emit(WorkspaceEvent::Executed { title: this.title.to_string(), connection: this.connection.to_string(), sql: sql.clone() });
                                 }
-                                this.execution_error = Some(if completed == 0 {
-                                    error.to_string()
-                                } else {
-                                    tr!("{0} statement(s) completed before the failure: {1}. Previous statements were not rolled back automatically.", completed, error)
-                                });
                             }
-                        }
-                        Err(error) if error.code == ErrorCode::Cancelled => {
-                            for (index, _) in queries { this.set_status(index, QueryStatus::Cancelled); }
-                            this.cancelled = true;
                         }
                         Err(error) => {
-                            for (index, _) in queries { this.set_status(index, QueryStatus::Error); }
-                            this.execution_error = Some(error.to_string());
+                            this.run.finish(id, Outcome::Failed(error));
                         }
                     }
-                    this.sync_statement_statuses();
                     cx.notify();
                 });
             }).detach();
@@ -472,12 +396,8 @@ impl Workspace {
             for (index, sql) in queries {
                 let active = weak
                     .update(cx, |this, cx| {
-                        if this.execution_id != execution_id {
-                            return false;
-                        }
-                        this.set_status(index, QueryStatus::Running);
                         cx.notify();
-                        true
+                        this.run.begin_statement(id, index)
                     })
                     .unwrap_or(false);
                 if !active {
@@ -488,33 +408,25 @@ impl Workspace {
                     .await;
                 let keep_running = weak
                     .update(cx, |this, cx| {
-                        if this.execution_id != execution_id {
+                        cx.notify();
+                        let error = jykre::sql::preview_error(&sql);
+                        if !this.run.finish_statement(id, index, error) {
+                            if error.is_some() {
+                                this.has_result = false;
+                            }
                             return false;
                         }
-                        this.executions += 1;
-                        if let Some(error) = jykre::sql::preview_error(&sql) {
-                            this.set_status(index, QueryStatus::Error);
-                            this.execution_error =
-                                Some(tr!("Error in query {0}: {1}", index + 1, error));
-                            this.executed = false;
-                            this.running = false;
-                            this.sync_statement_statuses();
-                            cx.notify();
-                            return false;
-                        }
-                        this.set_status(index, QueryStatus::Success);
                         this.set_result(sample_result(&sql));
                         this.limited = false;
                         this.rows_affected = None;
                         this.selection = None;
-                        this.executed = true;
+                        this.has_result = true;
                         this.result_view = ResultView::Table;
                         cx.emit(WorkspaceEvent::Executed {
                             title: this.title.to_string(),
                             connection: this.connection.to_string(),
                             sql,
                         });
-                        cx.notify();
                         true
                     })
                     .unwrap_or(false);
@@ -523,11 +435,7 @@ impl Workspace {
                 }
             }
             let _ = weak.update(cx, |this, cx| {
-                if this.execution_id != execution_id {
-                    return;
-                }
-                this.running = false;
-                this.sync_statement_statuses();
+                this.run.complete(id);
                 cx.notify();
             });
         })
@@ -612,8 +520,8 @@ impl Workspace {
                     .child(
                         primary_button(
                             "execute",
-                            if self.running { I::Square } else { I::Play },
-                            if self.running {
+                            if self.run.is_running() { I::Square } else { I::Play },
+                            if self.run.is_running() {
                                 tr!("Stop")
                             } else {
                                 tr!("Run")
@@ -730,13 +638,12 @@ impl Workspace {
             .into_iter()
             .enumerate()
             .map(|(index, range)| {
-                let status = self.query_statuses.get(index).copied().unwrap_or_default();
-                let (symbol, color, title) = match status {
-                    QueryStatus::Ready => (I::Play, MINT, tr!("Run this query")),
-                    QueryStatus::Running => (I::Square, 0xe7bd7b, tr!("Stop execution")),
-                    QueryStatus::Success => (I::CircleCheck, MINT, tr!("Success · run again")),
-                    QueryStatus::Error => (I::CircleX, 0xef8b91, tr!("Error · run again")),
-                    QueryStatus::Cancelled => (I::Play, FAINT, tr!("Cancelled · run again")),
+                let (symbol, color, title) = match self.run.status(index) {
+                    StatementStatus::Ready => (I::Play, MINT, tr!("Run this query")),
+                    StatementStatus::Running => (I::Square, 0xe7bd7b, tr!("Stop execution")),
+                    StatementStatus::Success => (I::CircleCheck, MINT, tr!("Success · run again")),
+                    StatementStatus::Error => (I::CircleX, 0xef8b91, tr!("Error · run again")),
+                    StatementStatus::Cancelled => (I::Play, FAINT, tr!("Cancelled · run again")),
                 };
                 let button = div()
                     .id(("query-run", index))
@@ -752,7 +659,7 @@ impl Workspace {
                     .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
                     .child(icon(symbol, color))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.query_statuses.get(index) == Some(&QueryStatus::Running) {
+                        if this.run.status(index) == StatementStatus::Running {
                             this.stop_execution(cx);
                         } else {
                             this.execute_queries(Some(index), cx);
@@ -916,7 +823,7 @@ impl Workspace {
                                 .when(
                                     view == ResultView::Table
                                         && self.has_results()
-                                        && !self.running,
+                                        && !self.run.is_running(),
                                     |s| s.child(badge(self.result.rows.len().to_string(), MINT)),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1023,7 +930,7 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(if self.running {
+                    .child(if self.run.is_running() {
                         column()
                             .size_full()
                             .items_center()
@@ -1036,7 +943,7 @@ impl Workspace {
                                 tr!("Preparing the demo…")
                             }))
                             .into_any_element()
-                    } else if let Some(error) = &self.execution_error {
+                    } else if let RunState::Failed { error } = self.run.state() {
                         column()
                             .size_full()
                             .items_center()
@@ -1051,7 +958,7 @@ impl Workspace {
                                     .child(error.clone()),
                             )
                             .into_any_element()
-                    } else if !self.executed {
+                    } else if !self.has_result {
                         column()
                             .size_full()
                             .items_center()
@@ -1088,15 +995,17 @@ impl Workspace {
                         };
                         // The footer is the single place that reports how the last run
                         // ended; errors also fill the results area with their message.
-                        let (symbol, color, text, detail): (I, u32, String, Option<&str>) = if self
-                            .running
+                        let state = self.run.state();
+                        let (symbol, color, text, detail): (I, u32, String, Option<&str>) = if let RunState::Running { .. } = state
                         {
                             (I::LoaderCircle, AMBER, tr!("Running…").into(), None)
-                        } else if self.execution_error.is_some() {
+                        } else if *state == RunState::Cancelling {
+                            (I::LoaderCircle, AMBER, tr!("Cancelling…").into(), None)
+                        } else if let RunState::Failed { .. } = state {
                             (I::CircleX, RED, tr!("Query error").into(), None)
-                        } else if self.cancelled {
+                        } else if *state == RunState::Cancelled {
                             (I::Ban, AMBER, tr!("Execution cancelled").into(), None)
-                        } else if self.executed && self.limited {
+                        } else if self.has_result && self.limited {
                             (
                                 I::TriangleAlert,
                                 AMBER,
@@ -1105,7 +1014,7 @@ impl Workspace {
                                     "Limit of 1,000 rows reached. Refine the SQL to get other rows."
                                 )),
                             )
-                        } else if self.executed {
+                        } else if self.has_result {
                             let text = match self.rows_affected {
                                 Some(affected) => {
                                     tr!("{0} · {1} rows affected", rows, affected)
@@ -1125,7 +1034,7 @@ impl Workspace {
                                 s.tooltip(move |window, cx| Tooltip::new(detail).build(window, cx))
                             })
                             .map(|s| {
-                                if self.running {
+                                if self.run.is_active() {
                                     s.child(spinning_icon("run-status-spinner", symbol, color))
                                 } else {
                                     s.child(icon(symbol, color))
@@ -1133,7 +1042,7 @@ impl Workspace {
                             })
                             .child(div().text_size(px(12.)).text_color(rgb(color)).child(text))
                             .when(
-                                self.has_results() && !self.running && !self.cancelled,
+                                self.has_results() && !self.run.is_active() && *self.run.state() != RunState::Cancelled,
                                 |s| {
                                     s.child(label("·"))
                                         .child(label(format!("{} ms", self.elapsed_ms)))
@@ -1142,7 +1051,7 @@ impl Workspace {
                     })
                     .child(
                         row()
-                            .when(self.has_results() && !self.running, |s| {
+                            .when(self.has_results() && !self.run.is_running(), |s| {
                                 let selected = self.selected_count(cx);
                                 s.when(selected > 1, |s| {
                                     s.child(label(tr!("{0} cells selected", selected)))
@@ -1697,7 +1606,7 @@ impl Workspace {
             )
             .child(label(tr!(
                 "{0} run(s) in this session · {1} rows · {2} ms",
-                self.executions,
+                self.run.executions(),
                 self.result.rows.len(),
                 self.elapsed_ms
             )))
@@ -1706,13 +1615,13 @@ impl Workspace {
             } else {
                 tr!("Visual demo results.")
             }))
-            .child(label(self.execution_error.clone().unwrap_or_else(|| {
-                if self.input.is_some() {
+            .child(label(match self.run.state() {
+                RunState::Failed { error } => error.clone(),
+                _ if self.input.is_some() => {
                     tr!("{0} rows affected", self.rows_affected.unwrap_or(0))
-                } else {
-                    tr!("No changes to a real database.").into()
                 }
-            })))
+                _ => tr!("No changes to a real database.").into(),
+            }))
             .into_any_element()
     }
 
@@ -1755,7 +1664,7 @@ impl Workspace {
                                     this.notice = Some(Feedback::new(Tone::Info, tr!("Suggestion inserted. Review the SQL before running it."))); cx.notify();
                                 })))))
                 }))
-                .when(self.executed && self.result.sales, |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
+                .when(self.has_result && self.result.sales, |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
                     .child(row().child(icon(I::Lightbulb, MINT)).child(div().text_size(px(14.)).text_color(rgb(MINT)).font_weight(FontWeight::MEDIUM).child(tr!("A look at the data"))))
                     .child(div().text_size(px(14.)).line_height(relative(1.55)).text_color(rgb(0xb8c8c1)).child(tr!("Electronics and Home account for 52.7% of the quarter's revenue.")))
                     .child(button("ai-show-chart", I::ChartColumn, tr!("View distribution")).px_0().text_color(rgb(MINT))
@@ -1801,26 +1710,6 @@ fn result_data(result: &mut backend::QueryResult) -> ResultData {
     }
 }
 
-/// The status each statement should show after an edit: it is kept only when
-/// the statement at the same position still has the same text.
-fn carry_statuses(
-    old_sql: &[String],
-    old_statuses: &[QueryStatus],
-    statements: &[String],
-) -> Vec<QueryStatus> {
-    statements
-        .iter()
-        .enumerate()
-        .map(|(index, sql)| {
-            if old_sql.get(index) == Some(sql) {
-                old_statuses.get(index).copied().unwrap_or_default()
-            } else {
-                QueryStatus::Ready
-            }
-        })
-        .collect()
-}
-
 pub enum WorkspaceEvent {
     Saved {
         saved: bool,
@@ -1843,13 +1732,13 @@ impl Workspace {
         input: Option<ResolvedConnection>,
         cx: &mut Context<Self>,
     ) {
-        self.stop_execution(cx);
         self.connection = name.into();
         if let Some(input) = input {
             self.set_connection(input);
         } else {
+            self.abandon_run();
             self.input = None;
-            self.executed = false;
+            self.has_result = false;
             self.set_result(sample_result(""));
         }
         self.notice = Some(Feedback::new(
@@ -1879,13 +1768,21 @@ impl Workspace {
         {
             self.input = Some(input);
         } else {
-            self.stop_execution(cx);
             self.set_connection(input);
         }
         cx.notify();
     }
 
+    /// Stops the run and forgets it: its outcome no longer applies.
+    fn abandon_run(&mut self) {
+        self.cancellation.cancel();
+        self.run.reset();
+    }
+
+    /// Binds the tab to another server. Any run is abandoned and the
+    /// previous result cleared.
     pub fn set_connection(&mut self, input: ResolvedConnection) {
+        self.abandon_run();
         if let Ok(driver) = builtin_registry().and_then(|registry| registry.get(input.config.driver))
         {
             self.dialect = driver.descriptor().display_name.into();
@@ -1897,8 +1794,7 @@ impl Workspace {
             .to_owned();
         self.input = Some(input);
         self.assistant_open = false;
-        self.executed = false;
-        self.execution_error = None;
+        self.has_result = false;
         self.selection = None;
         self.limited = false;
         self.set_result(ResultData {
@@ -2041,8 +1937,7 @@ impl Drop for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        CellSelection, GridCache, GridKey, GridView, QueryStatus, ResultData, carry_statuses,
-        result_data, selection_block,
+        CellSelection, GridCache, GridKey, GridView, ResultData, result_data, selection_block,
     };
     use jykre::backend;
     use jykre::cell_format::ValueFamily;
@@ -2062,30 +1957,6 @@ mod tests {
         // A filter that hides an end of the block hides the selection.
         assert_eq!(selection_block(selection, &[5, 4, 3]), None);
     }
-    use jykre::sql::normalized_statements;
-
-    #[test]
-    fn edits_keep_the_status_of_unchanged_statements() {
-        let before = normalized_statements("SELECT 1;\nSELECT 2;");
-        let statuses = [QueryStatus::Success, QueryStatus::Error];
-        // A new line after the last statement changes nothing.
-        let after = normalized_statements("SELECT 1;\nSELECT 2;\n");
-        assert_eq!(carry_statuses(&before, &statuses, &after), statuses);
-        // Re-indenting keeps the statement; editing it resets only that one.
-        let after = normalized_statements("SELECT\n  1;\nSELECT 3;");
-        assert_eq!(
-            carry_statuses(&before, &statuses, &after),
-            [QueryStatus::Success, QueryStatus::Ready]
-        );
-        // A new statement starts ready; removed ones disappear.
-        let after = normalized_statements("SELECT 1;\nSELECT 2;\nSELECT 4;");
-        assert_eq!(
-            carry_statuses(&before, &statuses, &after),
-            [QueryStatus::Success, QueryStatus::Error, QueryStatus::Ready]
-        );
-        assert!(carry_statuses(&before, &statuses, &[]).is_empty());
-    }
-
     /// Shaped like the `sales.event_log` seed, without a database.
     fn event_log(rows: usize) -> ResultData {
         ResultData {

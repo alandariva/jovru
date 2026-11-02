@@ -37,6 +37,7 @@ Each state has one consistent representation.
 | Query running | Footer, results area, Run button | Spinner, "Running…", the Run button turns into Cancel |
 | Statement status | Editor gutter | Running, success, error or cancelled per statement |
 | Row limit reached | Footer | Amber warning with the limit in its tooltip |
+| Run cancelling | Footer | Spinner and "Cancelling…" until the driver stops; the previous result stays and a new run may start |
 | Run cancelled / failed | Footer (and the results area for errors) | Cancel or error icon with a short text |
 | Metadata refreshing | The node being refreshed | Its `↻` spins; clicking it cancels |
 | Metadata state per scope | Explorer node and its tooltip | Last success time, failure message, permission warnings |

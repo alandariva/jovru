@@ -20,6 +20,7 @@ flowchart TB
         Store[connection_store]
         Format[cell_format]
         Sql[sql: statements, tokens, format]
+        Query[query: run state machine]
         I18n[i18n]
         Tabs[grouped_tabs component]
         Drivers[drivers: registry composition]
@@ -54,7 +55,7 @@ flowchart TB
 | Layer | Location | Does | Does not |
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), SQL text handling (`sql`), value presentation rules (`cell_format`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), SQL text handling (`sql`), run states (`query`), value presentation rules (`cell_format`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
@@ -86,7 +87,7 @@ checked in review.
 ├── src/
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
-│   │                       # drivers, grouped_tabs, i18n, sql
+│   │                       # drivers, grouped_tabs, i18n, query, sql
 │   └── app/                # the application's GPUI views; demo/ holds the demo data
 ├── crates/
 │   ├── core/               # jykre-core
@@ -139,13 +140,13 @@ sequenceDiagram
     participant W as Workspace (UI thread)
     participant R as backend::run (Tokio)
     participant D as Driver session
-    W->>W: split statements, mark them Running
+    W->>W: QueryRun::start splits statements and marks them Running
     W->>R: backend::query(connection, requests, cancel)
     R->>D: open_session, execute each statement
     D-->>R: columns and rows through RowSink (bounded by the row limit)
     R->>R: convert rows to display data, drop driver cells
     R-->>W: completed results and the first error
-    W->>W: discard if a newer run started; publish result and statuses
+    W->>W: QueryRun::finish discards a superseded or cancelled run; publish result and statuses
 ```
 
 - Each run opens a dedicated session shared by the editor's statements and
@@ -189,7 +190,9 @@ sequenceDiagram
 Operation states are explicit enums, never combinations of booleans. A view
 holds one value per operation, for example:
 
-- Query run: `Idle | Running { started_at } | Cancelling | Done | Failed { error } | Cancelled`.
+- Query run: `Idle | Running { started_at } | Cancelling | Done | Failed { error } | Cancelled`
+  (`jykre::query::RunState`, owned by `QueryRun` together with the status of
+  each statement).
 - Metadata scope: `Idle { last_success_at } | Refreshing | Failed { error, last_success_at }`
   (stored as `RefreshStatus` in the metadata file).
 
@@ -209,7 +212,4 @@ value, so they cannot disagree.
 
 ## Known deviations
 
-| Standard | Current code | Plan |
-| --- | --- | --- |
-| Logic that does not need GPUI lives outside views | Query orchestration lives in `Workspace` | [ADR-0007](adr/0007-application-logic-outside-views.md) (proposed) |
-| Operation state is one enum | `Workspace` tracks a run with `running`, `executed`, `cancelled` and `execution_error` | Migrate with ADR-0007 |
+None at the moment.
