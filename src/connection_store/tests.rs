@@ -169,3 +169,21 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn data_dir_prefers_override_then_platform_folder() {
+    let platform = Some(PathBuf::from("base"));
+    assert_eq!(
+        resolve_data_dir(Some("custom".into()), platform.clone()),
+        PathBuf::from("custom")
+    );
+    assert_eq!(
+        resolve_data_dir(Some("".into()), platform.clone()),
+        PathBuf::from("base").join(APP_DIR)
+    );
+    assert_eq!(
+        resolve_data_dir(None, platform),
+        PathBuf::from("base").join(APP_DIR)
+    );
+    assert_eq!(resolve_data_dir(None, None), PathBuf::from(".jykre"));
+}

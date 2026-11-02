@@ -102,9 +102,17 @@ the demo data are not translatable yet.
 | Metadata cache | `metadata/<connection-id>.db` in the data folder |
 | Passwords (only with **Remember password**) | OS vault, service `JykreStudio` |
 
-The data folder is `%LOCALAPPDATA%/JykreStudio` on Windows. Set
-`JYKRE_CONFIG_DIR` to use another folder (for example, an isolated test folder).
-Other platforms currently fall back to `.jykre/` in the working directory.
+The data folder follows each platform's convention:
+
+| Platform | Data folder |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\JykreStudio` |
+| macOS | `~/Library/Application Support/JykreStudio` |
+| Linux | `$XDG_DATA_HOME/jykre-studio` (default `~/.local/share/jykre-studio`) |
+
+Set `JYKRE_CONFIG_DIR` to use another folder (for example, an isolated test
+folder). Only when no home directory can be found does the app fall back to
+`.jykre/` in the working directory.
 
 Credentials are never serialized: SQLite and JSON files hold only non-sensitive
 configuration. Databricks tokens are resolved by the CLI at runtime and kept in

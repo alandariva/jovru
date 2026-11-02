@@ -7,14 +7,31 @@ use crate::{
 use jykre_secrets::SecretStore;
 use jykre_storage::{ConfigRepository, MetadataRepository};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
+/// Folder name inside the platform data directory, following each OS convention.
+const APP_DIR: &str = if cfg!(any(windows, target_os = "macos")) {
+    "JykreStudio"
+} else {
+    "jykre-studio"
+};
+
+/// `JYKRE_CONFIG_DIR`, else the per-user local data directory:
+/// `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS and
+/// `$XDG_DATA_HOME` (default `~/.local/share`) on Linux.
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("JYKRE_CONFIG_DIR")
+    resolve_data_dir(std::env::var_os("JYKRE_CONFIG_DIR"), dirs::data_local_dir())
+}
+
+fn resolve_data_dir(configured: Option<OsString>, platform: Option<PathBuf>) -> PathBuf {
+    configured
+        .filter(|dir| !dir.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("JykreStudio"))
-        })
+        .or_else(|| platform.map(|base| base.join(APP_DIR)))
+        // Only without a home directory; the app then keeps data next to it.
         .unwrap_or_else(|| PathBuf::from(".jykre"))
 }
 pub fn default_path() -> PathBuf {

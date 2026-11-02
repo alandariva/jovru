@@ -47,3 +47,4 @@ jykre-secrets = { path = "crates/secrets" }
 tokio.workspace = true
 serde_json.workspace = true
 sys-locale = "0.3"
+dirs = "6"
