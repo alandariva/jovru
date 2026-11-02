@@ -1,6 +1,6 @@
 # ADR-0012: Result grid as its own cached entity
 
-- **Status:** Accepted (by the maintainer on 2026-11-02; implementation pending)
+- **Status:** Accepted (by the maintainer on 2026-11-02)
 - **Date:** 2026-11-02
 
 ## Context

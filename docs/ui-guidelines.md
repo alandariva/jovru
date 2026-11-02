@@ -122,6 +122,6 @@ See [Performance](performance.md) for budgets and how to measure.
 | Standard | Current code |
 | --- | --- |
 | Shortcuts are actions in one keymap | Only `Ctrl+Enter` is an action (`ExecuteActiveQuery`). The others are matched by hand in `on_key_down`/`capture_key_down` handlers in `src/app/mod.rs`, `workspace.rs`, `connections.rs` and `grouped_tabs` |
-| Frequently changing regions are their own cached entities | The result grid, the editor and the assistant all render inside `Workspace`; hovering a cell redraws the whole workspace (about 2.5 ms in release, well within budget). The grid's split is decided in [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md) |
-| Colours come from named tokens | The result grid uses inline hex values (`0x13171d`, `0x283e65`, ...) |
+| Frequently changing regions are their own cached entities | The result grid is its own cached entity (`src/app/result_grid.rs`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); the editor and the assistant still render inside `Workspace` |
+| Colours come from named tokens | A few views still use inline hex values (the SQL highlighter's number colour, the gutter's running and error icons, the assistant panel) |
 | Long collections are virtualized | The result grid is. The explorer tree, saved queries and history still build all their children; they have not been measured |

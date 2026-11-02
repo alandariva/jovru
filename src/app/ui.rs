@@ -16,6 +16,23 @@ pub const PURPLE: u32 = 0xb5a0e8;
 pub const RED: u32 = 0xef8b91;
 pub const AMBER: u32 = 0xe6bb78;
 
+// Result grid.
+pub const GRID_BG: u32 = 0x13171d;
+pub const GRID_HEADER: u32 = 0x1b2028;
+pub const GRID_LINE: u32 = 0x2a303b;
+pub const GRID_HOVER: u32 = 0x222a36;
+pub const GRID_SELECTED: u32 = 0x283e65;
+pub const GRID_FOCUS: u32 = 0x7fa8fa;
+pub const GRID_HEADER_TEXT: u32 = 0xc2cbd8;
+pub const GRID_TYPE_TEXT: u32 = 0x6f7a8a;
+
+// Values by type family ([Results](../../docs/results.md#value-presentation)).
+pub const VALUE_TEXT: u32 = 0xe2e8f0;
+pub const VALUE_NUMBER: u32 = 0x60a5fa;
+pub const VALUE_TEMPORAL: u32 = 0xc4b5fd;
+pub const VALUE_BINARY: u32 = 0x94a3b8;
+pub const VALUE_NULL: u32 = 0x64748b;
+
 /// Meaning of a feedback message. Colour and icon follow the meaning, so an
 /// error never reads as a success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

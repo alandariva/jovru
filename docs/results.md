@@ -67,11 +67,16 @@ alignment only; the value itself is never converted.
   result before the next one arrives; a result that is no longer held is freed
   on the runtime's blocking pool (`backend::release`), never on the UI thread.
   Closing a tab releases everything.
-- `GridView` holds what the grid derives from the result: the rows in display
+- `jykre::grid::GridView` holds what the grid derives from the result: the rows in display
   order (after the open filter and the sort), the column widths (sampled from
   the first 200 rows) and the value families. `GridCache` rebuilds it only
   when its key changes: the result version, the filter text, the sort or the
   number format. Hover, scroll and selection never rebuild it.
+- The grid on screen is `ResultGrid`, its own entity embedded in the workspace
+  with `.cached(...)` ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)).
+  It shares the tab's `Rc<ResultData>`, owns the selection, focus and scroll,
+  and reports the selected count and copy notices to the workspace through
+  `ResultGridEvent`. Selection and copy rules live in `jykre::grid`.
 - Selections are stored as data-row indices, so filtering or sorting the view
   does not change what is selected; a selection whose ends are hidden is not
   shown.

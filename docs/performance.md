@@ -103,5 +103,5 @@ A change that introduces one of these is rejected in review:
 | A reusable frame probe and heartbeat in the repository | The 2026-11-02 measurements used a temporary harness that was not committed |
 | Benchmarks for hot paths | None yet ([ADR-0010](adr/0010-benchmarks-with-criterion.md), proposed) |
 | Long collections are virtualized | The explorer tree, saved queries and history build all their children |
-| Frequently changing regions are cached entities | The result grid renders inside `Workspace`; [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md) (accepted) moves it to its own cached entity |
+| Frequently changing regions are cached entities | The result grid is (`ResultGrid`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); the editor and the assistant still render inside `Workspace` |
 | Filters are debounced | The result filter rebuilds the grid view on every keystroke |

@@ -2,6 +2,7 @@ use jykre::tr;
 mod connections;
 mod demo;
 mod layout;
+mod result_grid;
 mod sql;
 mod ui;
 mod workspace;
@@ -366,7 +367,7 @@ impl AppView {
             .find(|connection| connection.group == group)
             .and_then(|connection| Some((connection.input.clone()?, connection.row_limit)))
         {
-            panel.update(cx, |panel, _| panel.set_connection(input, row_limit));
+            panel.update(cx, |panel, cx| panel.set_connection(input, row_limit, cx));
         }
         let subscription = cx.subscribe(&panel, |this, _, event: &WorkspaceEvent, cx| {
             match event {

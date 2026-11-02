@@ -1,139 +1,27 @@
 use super::demo::{self, OPTIMIZED_SQL, SALES, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
+use super::result_grid::{ResultGrid, ResultGridEvent};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
-use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{ActiveTheme, Sizable, tooltip::Tooltip};
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::tr;
 use jykre::{
-    backend,
-    cell_format::{self, ValueFamily},
+    backend, cell_format,
     drivers::*,
     query::{Outcome, QueryRun, RunState, StatementStatus},
     result::{DEFAULT_MEMORY_CEILING, DEFAULT_ROW_LIMIT, ResultData, ResultLimit},
 };
-use std::{cell::RefCell, ops::Range, rc::Rc};
+use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq)]
 enum ResultView {
     Table,
     Chart,
     Messages,
-}
-
-/// A rectangular block of result cells, from the cell clicked first (anchor)
-/// to the one reached with Shift (focus). Rows are indices into the result
-/// data, so sorting or filtering the view does not change what is selected.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct CellSelection {
-    anchor: (usize, usize),
-    focus: (usize, usize),
-}
-
-/// Position of each selected cell in the displayed grid: rows as positions in
-/// `visible`, columns as indices. `None` when the selection is hidden.
-fn selection_block(
-    selection: CellSelection,
-    visible: &[usize],
-) -> Option<(
-    std::ops::RangeInclusive<usize>,
-    std::ops::RangeInclusive<usize>,
-)> {
-    let anchor = visible.iter().position(|row| *row == selection.anchor.0)?;
-    let focus = visible.iter().position(|row| *row == selection.focus.0)?;
-    let (left, right) = (selection.anchor.1, selection.focus.1);
-    Some((
-        anchor.min(focus)..=anchor.max(focus),
-        left.min(right)..=left.max(right),
-    ))
-}
-
-/// What the grid shows for one result, filter, sort and number format. It is
-/// rebuilt only when one of them changes, not on every frame, so scrolling,
-/// hovering and selecting cost only the rows on screen.
-struct GridView {
-    key: GridKey,
-    /// Data rows in display order, after the open filter and the sort.
-    rows: Vec<usize>,
-    widths: Vec<f32>,
-    families: Vec<ValueFamily>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct GridKey {
-    /// Changes with every new result.
-    result: u64,
-    /// Lowercase text of the open filter; empty when the bar is closed.
-    filter: String,
-    descending: bool,
-    numbers_pt_br: bool,
-}
-
-impl GridView {
-    fn new(result: &ResultData, key: GridKey) -> Self {
-        // NULL matches as the text it shows, so a filter for "null" finds it.
-        let mut rows: Vec<_> = (0..result.row_count())
-            .filter(|row| {
-                key.filter.is_empty()
-                    || result
-                        .row(*row)
-                        .any(|cell| cell.unwrap_or("NULL").to_lowercase().contains(&key.filter))
-            })
-            .collect();
-        if !key.descending {
-            rows.reverse();
-        }
-        let families: Vec<_> = result
-            .columns()
-            .iter()
-            .map(|column| cell_format::family(&column.data_type))
-            .collect();
-        // Widths follow the first rows only, so a long result sizes as fast
-        // as a short one.
-        let widths = result
-            .columns()
-            .iter()
-            .zip(&families)
-            .enumerate()
-            .map(|(column, (info, family))| {
-                let (name, kind) = (&info.name, &info.data_type);
-                let content = (0..result.row_count().min(200))
-                    .map(|row| {
-                        cell_format::display(result.value(row, column), *family, key.numbers_pt_br)
-                            .chars()
-                            .count()
-                    })
-                    .max()
-                    .unwrap_or(0);
-                let header = name.chars().count() + 3 + kind.chars().count();
-                ((content.max(header) as f32 * 8.) + 32.).clamp(110., 360.)
-            })
-            .collect();
-        Self {
-            key,
-            rows,
-            widths,
-            families,
-        }
-    }
-}
-
-/// The last [`GridView`], reused while its key is unchanged.
-#[derive(Default)]
-struct GridCache(RefCell<Option<Rc<GridView>>>);
-
-impl GridCache {
-    fn get(&self, result: &ResultData, key: GridKey) -> Rc<GridView> {
-        let mut cached = self.0.borrow_mut();
-        match cached.as_ref() {
-            Some(grid) if grid.key == key => grid.clone(),
-            _ => cached.insert(Rc::new(GridView::new(result, key))).clone(),
-        }
-    }
 }
 
 struct Message {
@@ -163,9 +51,10 @@ pub struct Workspace {
     sales: bool,
     /// Rows kept per statement, from the connection.
     row_limit: u32,
-    /// Bumped by [`Workspace::set_result`] so the grid knows to rebuild.
-    result_version: u64,
-    grid: GridCache,
+    /// The result grid, its own entity ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
+    grid: Entity<ResultGrid>,
+    /// Visible cells selected in the grid, as it last reported.
+    selected_cells: usize,
     result_view: ResultView,
     assistant_open: bool,
     messages: Vec<Message>,
@@ -179,13 +68,9 @@ pub struct Workspace {
     notice: Option<Feedback>,
     /// The limit that stopped the last statement's result, if any.
     limit: Option<ResultLimit>,
-    selection: Option<CellSelection>,
-    grid_focus: FocusHandle,
-    descending: bool,
     filter_open: bool,
     filter: Entity<InputState>,
     chat_scroll: ScrollHandle,
-    result_scroll: UniformListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -223,11 +108,28 @@ impl Workspace {
             },
         );
         let filter_subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.selection = None;
+            if matches!(event, InputEvent::Change) && this.filter_open {
+                let filter = this.filter.read(cx).value().to_string();
+                this.grid
+                    .update(cx, |grid, cx| grid.set_filter(&filter, cx));
             }
-            cx.notify()
         });
+        let result = Rc::new(sample_result(sql));
+        let sales = demo::is_sales(sql);
+        let grid = cx.new(|cx| ResultGrid::new(result.clone(), sales, cx));
+        // The grid notifies only itself; the workspace keeps the little it
+        // shows: the selected count and notices.
+        let grid_subscription =
+            cx.subscribe(&grid, |this, _, event: &ResultGridEvent, cx| match event {
+                ResultGridEvent::SelectionChanged { cells } => {
+                    this.selected_cells = *cells;
+                    cx.notify();
+                }
+                ResultGridEvent::Notice(notice) => {
+                    this.notice = Some(notice.clone());
+                    cx.notify();
+                }
+            });
         let resize_subscription = cx.observe(&assistant_split, |_, _, cx| cx.notify());
         let query_split = cx.new(|_| ResizableState::default());
         let query_resize = cx.observe(&query_split, |_, _, cx| cx.notify());
@@ -269,11 +171,11 @@ impl Workspace {
                 MINT
             },
             title: title.to_string().into(),
-            result: Rc::new(sample_result(sql)),
-            sales: demo::is_sales(sql),
+            result,
+            sales,
             row_limit: DEFAULT_ROW_LIMIT,
-            result_version: 0,
-            grid: GridCache::default(),
+            grid,
+            selected_cells: 0,
             result_view: ResultView::Table,
             assistant_open: true,
             messages: if sql == SALES_SQL {
@@ -302,15 +204,12 @@ impl Workspace {
             saved_sql: None,
             notice: None,
             limit: None,
-            selection: None,
-            grid_focus: cx.focus_handle(),
-            descending: true,
             filter_open: false,
             chat_scroll: ScrollHandle::new(),
-            result_scroll: UniformListScrollHandle::new(),
             _subscriptions: vec![
                 prompt_subscription,
                 filter_subscription,
+                grid_subscription,
                 resize_subscription,
                 query_resize,
                 editor_observation,
@@ -355,9 +254,9 @@ impl Workspace {
         let id = plan.id;
         let queries = plan.statements;
         // A new run releases the previous result before the next one arrives.
-        self.set_result(ResultData::default());
-        self.has_result = false;
         self.sales = false;
+        self.set_result(ResultData::default(), cx);
+        self.has_result = false;
         self.limit = None;
         self.notice = None;
         cx.notify();
@@ -402,9 +301,8 @@ impl Workspace {
                                 for ((_, sql), result) in queries.iter().zip(batch.completed) {
                                     this.rows_affected = result.outcome.rows_affected;
                                     this.limit = result.limit;
-                                    this.set_result(result.data);
+                                    this.set_result(result.data, cx);
                                     this.has_result = true;
-                                    this.selection = None;
                                     this.result_view = ResultView::Table;
                                     cx.emit(WorkspaceEvent::Executed {
                                         title: this.title.to_string(),
@@ -448,11 +346,10 @@ impl Workspace {
                             }
                             return false;
                         }
-                        this.set_result(sample_result(&sql));
                         this.sales = demo::is_sales(&sql);
+                        this.set_result(sample_result(&sql), cx);
                         this.limit = None;
                         this.rows_affected = None;
-                        this.selection = None;
                         this.has_result = true;
                         this.result_view = ResultView::Table;
                         cx.emit(WorkspaceEvent::Executed {
@@ -879,6 +776,10 @@ impl Workspace {
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.numbers_pt_br = !this.numbers_pt_br;
+                                        let numbers_pt_br = this.numbers_pt_br;
+                                        this.grid.update(cx, |grid, cx| {
+                                            grid.set_number_format(numbers_pt_br, cx)
+                                        });
                                         cx.notify();
                                     })),
                             )
@@ -892,6 +793,14 @@ impl Workspace {
                                             this.filter
                                                 .update(cx, |input, cx| input.focus(window, cx));
                                         }
+                                        // A closed filter bar must not keep hiding rows.
+                                        let filter = if this.filter_open {
+                                            this.filter.read(cx).value().to_string()
+                                        } else {
+                                            String::new()
+                                        };
+                                        this.grid
+                                            .update(cx, |grid, cx| grid.set_filter(&filter, cx));
                                         cx.notify();
                                     })),
                             )
@@ -988,7 +897,13 @@ impl Workspace {
                             .into_any_element()
                     } else {
                         match self.result_view {
-                            ResultView::Table => self.result_table(cx),
+                            // A cached view reuses the grid's last frame
+                            // while only the workspace changes.
+                            ResultView::Table => self
+                                .grid
+                                .clone()
+                                .cached(StyleRefinement::default().size_full())
+                                .into_any_element(),
                             ResultView::Chart => self.result_chart(cx),
                             ResultView::Messages => self.result_messages(),
                         }
@@ -1078,7 +993,7 @@ impl Workspace {
                     .child(
                         row()
                             .when(self.has_results() && !self.run.is_running(), |s| {
-                                let selected = self.selected_count(cx);
+                                let selected = self.selected_cells;
                                 s.when(selected > 1, |s| {
                                     s.child(label(tr!("{0} cells selected", selected)))
                                         .child(label("·"))
@@ -1095,464 +1010,6 @@ impl Workspace {
                             )),
                     ),
             )
-    }
-
-    /// The grid for the current result, filter, sort and number format.
-    fn grid(&self, cx: &App) -> Rc<GridView> {
-        let key = GridKey {
-            result: self.result_version,
-            // A closed filter bar must not keep hiding rows.
-            filter: if self.filter_open {
-                self.filter.read(cx).value().to_lowercase()
-            } else {
-                String::new()
-            },
-            descending: self.descending,
-            numbers_pt_br: self.numbers_pt_br,
-        };
-        self.grid.get(&self.result, key)
-    }
-
-    fn select_cell(&mut self, row: usize, col: usize, extend: bool) {
-        self.selection = Some(match self.selection {
-            Some(selection) if extend => CellSelection {
-                anchor: selection.anchor,
-                focus: (row, col),
-            },
-            _ => CellSelection {
-                anchor: (row, col),
-                focus: (row, col),
-            },
-        });
-    }
-
-    fn select_all(&mut self, cx: &App) {
-        let grid = self.grid(cx);
-        let visible = &grid.rows;
-        let columns = self.result.column_count();
-        if let (Some(first), Some(last)) = (visible.first(), visible.last())
-            && columns > 0
-        {
-            self.selection = Some(CellSelection {
-                anchor: (*first, 0),
-                focus: (*last, columns - 1),
-            });
-        }
-    }
-
-    /// Arrow-key navigation; with Shift the block grows from the anchor.
-    fn move_selection(&mut self, rows: isize, cols: isize, extend: bool, cx: &App) {
-        let grid = self.grid(cx);
-        let visible = &grid.rows;
-        let columns = self.result.column_count();
-        if visible.is_empty() || columns == 0 {
-            return;
-        }
-        let (position, col) = self
-            .selection
-            .and_then(|selection| {
-                let position = visible.iter().position(|row| *row == selection.focus.0)?;
-                Some((position, selection.focus.1))
-            })
-            .unwrap_or((0, 0));
-        let position = position.saturating_add_signed(rows).min(visible.len() - 1);
-        let col = col.saturating_add_signed(cols).min(columns - 1);
-        self.select_cell(visible[position], col, extend && self.selection.is_some());
-        self.result_scroll
-            .scroll_to_item(position, ScrollStrategy::Nearest);
-    }
-
-    fn selected_count(&self, cx: &App) -> usize {
-        let grid = self.grid(cx);
-        self.selection
-            .and_then(|selection| selection_block(selection, &grid.rows))
-            .map_or(0, |(rows, cols)| rows.count() * cols.count())
-    }
-
-    /// Copies the selected block as tab-separated text (a single cell as its
-    /// exact value), optionally with the column names first.
-    fn copy_selection(&mut self, headers: bool, cx: &mut Context<Self>) {
-        let grid = self.grid(cx);
-        let visible = &grid.rows;
-        let Some((rows, cols)) = self
-            .selection
-            .and_then(|selection| selection_block(selection, visible))
-        else {
-            self.notice = Some(Feedback::new(Tone::Info, tr!("Select cells to copy.")));
-            cx.notify();
-            return;
-        };
-        let names: Vec<&str> = cols
-            .clone()
-            .filter_map(|col| self.result.columns().get(col))
-            .map(|column| column.name.as_str())
-            .collect();
-        let data: Vec<Vec<Option<&str>>> = rows
-            .map(|position| {
-                cols.clone()
-                    .map(|col| self.result.value(visible[position], col))
-                    .collect()
-            })
-            .collect();
-        let count = data.len() * names.len();
-        let text = cell_format::copy_cells(headers.then_some(names.as_slice()), &data);
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.notice = Some(Feedback::new(
-            Tone::Success,
-            if count == 1 {
-                tr!("Cell copied.").to_string()
-            } else {
-                tr!("{0} cells copied.", count)
-            },
-        ));
-        cx.notify();
-    }
-
-    fn grid_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let keystroke = &event.keystroke;
-        let shift = keystroke.modifiers.shift;
-        let handled = if keystroke.modifiers.control || keystroke.modifiers.platform {
-            match keystroke.key.as_str() {
-                "c" => {
-                    self.copy_selection(shift, cx);
-                    true
-                }
-                "a" => {
-                    self.select_all(cx);
-                    true
-                }
-                _ => false,
-            }
-        } else {
-            match keystroke.key.as_str() {
-                "up" => self.move_selection(-1, 0, shift, cx),
-                "down" => self.move_selection(1, 0, shift, cx),
-                "left" => self.move_selection(0, -1, shift, cx),
-                "right" => self.move_selection(0, 1, shift, cx),
-                "escape" if self.selection.is_some() => self.selection = None,
-                _ => return,
-            }
-            true
-        };
-        if handled {
-            window.prevent_default();
-            cx.stop_propagation();
-            cx.notify();
-        }
-    }
-
-    fn result_table(&self, cx: &mut Context<Self>) -> AnyElement {
-        let grid = self.grid(cx);
-        let widths = &grid.widths;
-        let grid_width = widths.iter().sum::<f32>() + 35.;
-        let weak = cx.weak_entity();
-        let table = div()
-            .id("result-table-scroll")
-            .size_full()
-            .bg(rgb(0x13171d))
-            .text_color(rgb(0xe2e8f0))
-            .overflow_x_scrollbar()
-            .child(
-                column()
-                    .w(px(grid_width))
-                    .min_w_full()
-                    .h_full()
-                    .child(
-                        row()
-                            .h(px(34.))
-                            .flex_none()
-                            .gap_0()
-                            .bg(rgb(0x1b2028))
-                            .border_b_1()
-                            .border_color(rgb(0x2a303b))
-                            .child(div().w(px(35.)).flex_none().text_center().child(label("#")))
-                            .children(self.result.columns().iter().enumerate().map(
-                                |(index, column)| {
-                                    let name = &column.name;
-                                    let kind = column.data_type.to_lowercase();
-                                    let tooltip = format!("{name} : {kind}");
-                                    row()
-                                        .id(("result-header", index))
-                                        .w(px(widths[index]))
-                                        .flex_none()
-                                        .h_full()
-                                        .px_3()
-                                        .gap_1()
-                                        .when(self.sales, |s| {
-                                            s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][index])
-                                        })
-                                        .border_l_1()
-                                        .border_color(rgb(0x2a303b))
-                                        .text_size(px(14.))
-                                        .text_color(rgb(0xc2cbd8))
-                                        .tooltip(move |window, cx| {
-                                            Tooltip::new(tooltip.clone()).build(window, cx)
-                                        })
-                                        .child(
-                                            div()
-                                                .flex_shrink(1.)
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(name.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .truncate()
-                                                .text_size(px(12.))
-                                                .text_color(rgb(0x6f7a8a))
-                                                .child(format!(": {kind}")),
-                                        )
-                                        .when(index == 2 && self.sales, |s| {
-                                            s.cursor_pointer()
-                                                .focusable()
-                                                .tab_index(0)
-                                                .focus_visible(|s| s.bg(rgb(HOVER)))
-                                        })
-                                        .when(index == 2 && self.sales, |s| {
-                                            s.child(icon(
-                                                if self.descending {
-                                                    I::ArrowDown
-                                                } else {
-                                                    I::ArrowUp
-                                                },
-                                                MINT,
-                                            ))
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if index == 2 && this.sales {
-                                                this.descending = !this.descending;
-                                                cx.notify();
-                                            }
-                                        }))
-                                },
-                            )),
-                    )
-                    .child(if grid.rows.is_empty() {
-                        column()
-                            .p_6()
-                            .gap_2()
-                            .child(label(tr!("No results for this selection.")))
-                            .child(label(tr!(
-                                "The query or the current filter returned no rows."
-                            )))
-                            .into_any_element()
-                    } else {
-                        // Only the rows on screen are built, so a frame costs
-                        // the same for 30 rows or 100,000.
-                        div()
-                            .relative()
-                            .flex_1()
-                            .min_h_0()
-                            .child(
-                                uniform_list(
-                                    "result-rows",
-                                    grid.rows.len(),
-                                    cx.processor(|this, range: Range<usize>, _, cx| {
-                                        this.result_rows(range, cx)
-                                    }),
-                                )
-                                .size_full()
-                                .track_scroll(&self.result_scroll),
-                            )
-                            .vertical_scrollbar(&self.result_scroll)
-                            .into_any_element()
-                    }),
-            );
-        div()
-            .id("result-grid")
-            .size_full()
-            .track_focus(&self.grid_focus)
-            .on_key_down(cx.listener(Self::grid_key_down))
-            .child(table)
-            .context_menu(move |menu, _, cx| {
-                let has_selection = weak
-                    .upgrade()
-                    .is_some_and(|this| this.read(cx).selection.is_some());
-                let action =
-                    |weak: WeakEntity<Workspace>,
-                     run: fn(&mut Workspace, &mut Context<Workspace>)| {
-                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                            let _ = weak.update(cx, |this, cx| {
-                                run(this, cx);
-                                cx.notify();
-                            });
-                        }
-                    };
-                menu.item(
-                    PopupMenuItem::new(tr!("Copy"))
-                        .disabled(!has_selection)
-                        .on_click(action(weak.clone(), |this, cx| {
-                            this.copy_selection(false, cx)
-                        })),
-                )
-                .item(
-                    PopupMenuItem::new(tr!("Copy with headers"))
-                        .disabled(!has_selection)
-                        .on_click(action(weak.clone(), |this, cx| {
-                            this.copy_selection(true, cx)
-                        })),
-                )
-                .separator()
-                .item(
-                    PopupMenuItem::new(tr!("Select all"))
-                        .on_click(action(weak.clone(), |this, cx| this.select_all(cx))),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// The data rows at `range` of the displayed order.
-    fn result_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
-        let grid = self.grid(cx);
-        let widths = &grid.widths;
-        let block = self
-            .selection
-            .and_then(|selection| selection_block(selection, &grid.rows));
-        let focus = self.selection.map(|selection| selection.focus);
-        let last_column = self.result.column_count().saturating_sub(1);
-        range
-            .filter_map(|position| Some((position, *grid.rows.get(position)?)))
-            .map(|(position, index)| {
-                let cells: Vec<_> = self.result.row(index).collect();
-                let row_selected = block.as_ref().is_some_and(|(rows, cols)| {
-                    rows.contains(&position) && *cols.start() == 0 && *cols.end() == last_column
-                });
-                row()
-                    .id(("data-row", index))
-                    .role(Role::Row)
-                    .aria_label(
-                        cells
-                            .iter()
-                            .map(|cell| cell.unwrap_or("NULL"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                    )
-                    .w_full()
-                    .h(px(34.))
-                    .flex_none()
-                    .gap_0()
-                    .child(
-                        div()
-                            .id(("row-number", index))
-                            .w(px(35.))
-                            .flex_none()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .bg(rgb(if row_selected { 0x283e65 } else { 0x1b2028 }))
-                            .hover(|s| s.bg(rgb(0x222a36)))
-                            .border_b_1()
-                            .border_color(rgb(0x2a303b))
-                            .text_center()
-                            .text_size(px(12.))
-                            .text_color(rgb(FAINT))
-                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                let extend = event.modifiers().shift;
-                                if !extend || this.selection.is_none() {
-                                    this.select_cell(index, 0, false);
-                                } else if let Some(selection) = &mut this.selection {
-                                    selection.anchor.1 = 0;
-                                }
-                                this.select_cell(index, last_column, true);
-                                window.focus(&this.grid_focus, cx);
-                                cx.notify();
-                            }))
-                            .child((index + 1).to_string()),
-                    )
-                    .children(cells.iter().enumerate().map(|(col, raw)| {
-                        let family = grid.families[col];
-                        let raw = *raw;
-                        // A cell is one line: line breaks show as ↵ and the
-                        // full value stays in the tooltip and in copies.
-                        let displayed = cell_format::display(raw, family, self.numbers_pt_br)
-                            .replace("\r\n", "↵")
-                            .replace(['\n', '\r'], "↵");
-                        let is_null = raw.is_none();
-                        // Only values that do not fit get a tooltip, so it
-                        // does not cover the context menu or neighbours.
-                        let tooltip = raw
-                            .filter(|value| {
-                                value.contains(['\n', '\r'])
-                                    || displayed.chars().count() as f32 * 7.8 > widths[col] - 18.
-                            })
-                            .map(str::to_owned);
-                        let selected = block.as_ref().is_some_and(|(rows, cols)| {
-                            rows.contains(&position) && cols.contains(&col)
-                        });
-                        let focused = focus == Some((index, col));
-                        div()
-                            .id(("result-cell", col))
-                            .role(Role::GridCell)
-                            .aria_selected(selected)
-                            .aria_label(tr!(
-                                "Row {0}, {1}: {2}",
-                                index + 1,
-                                self.result
-                                    .columns()
-                                    .get(col)
-                                    .map_or("", |column| column.name.as_str()),
-                                raw.unwrap_or("NULL")
-                            ))
-                            .cursor_pointer()
-                            .w(px(widths[col]))
-                            .flex_none()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .px(px(8.))
-                            .border_1()
-                            .border_color(rgb(0x2a303b))
-                            .when(!selected, |s| s.hover(|s| s.bg(rgb(0x222a36))))
-                            .when(selected, |s| s.bg(rgb(0x283e65)))
-                            .when(focused, |s| s.border_color(rgb(0x7fa8fa)))
-                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                this.select_cell(index, col, event.modifiers().shift);
-                                window.focus(&this.grid_focus, cx);
-                                cx.notify();
-                            }))
-                            // A right click outside the selection selects the
-                            // cell first, so the menu acts on what is under it.
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, _, window, cx| {
-                                    if !selected {
-                                        this.select_cell(index, col, false);
-                                    }
-                                    window.focus(&this.grid_focus, cx);
-                                    cx.notify();
-                                }),
-                            )
-                            .when(self.sales, |s| s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col]))
-                            .font_family("Cascadia Mono")
-                            .text_size(px(13.))
-                            .when(is_null, |s| s.italic())
-                            .when(family == ValueFamily::Boolean, |s| s.justify_center())
-                            .when_some(tooltip, |s, tooltip| {
-                                s.tooltip(move |window, cx| {
-                                    Tooltip::new(tooltip.clone()).build(window, cx)
-                                })
-                            })
-                            .when(family == ValueFamily::Number, |s| s.justify_end())
-                            .text_color(rgb(if is_null {
-                                0x64748b
-                            } else if family == ValueFamily::Number {
-                                0x60a5fa
-                            } else if family == ValueFamily::Temporal {
-                                0xc4b5fd
-                            } else if family == ValueFamily::Binary {
-                                0x94a3b8
-                            } else {
-                                0xe2e8f0
-                            }))
-                            .child(div().truncate().child(displayed))
-                    }))
-            })
-            .collect()
     }
 
     fn result_chart(&self, _: &mut Context<Self>) -> AnyElement {
@@ -1747,12 +1204,13 @@ impl Workspace {
     ) {
         self.connection = name.into();
         if let Some(input) = input {
-            self.set_connection(input, row_limit);
+            self.set_connection(input, row_limit, cx);
         } else {
             self.abandon_run();
             self.input = None;
             self.has_result = false;
-            self.set_result(sample_result(""));
+            self.sales = false;
+            self.set_result(sample_result(""), cx);
         }
         self.notice = Some(Feedback::new(
             Tone::Warning,
@@ -1784,7 +1242,7 @@ impl Workspace {
         {
             self.input = Some(input);
         } else {
-            self.set_connection(input, row_limit);
+            self.set_connection(input, row_limit, cx);
         }
         cx.notify();
     }
@@ -1797,7 +1255,12 @@ impl Workspace {
 
     /// Binds the tab to another server. Any run is abandoned and the
     /// previous result cleared.
-    pub fn set_connection(&mut self, input: ResolvedConnection, row_limit: u32) {
+    pub fn set_connection(
+        &mut self,
+        input: ResolvedConnection,
+        row_limit: u32,
+        cx: &mut Context<Self>,
+    ) {
         self.abandon_run();
         self.row_limit = row_limit;
         if let Ok(driver) =
@@ -1813,21 +1276,25 @@ impl Workspace {
         self.input = Some(input);
         self.assistant_open = false;
         self.has_result = false;
-        self.selection = None;
         self.limit = None;
         self.sales = false;
-        self.set_result(ResultData::default());
+        self.set_result(ResultData::default(), cx);
         self.messages.clear();
     }
 
     /// Replaces the result. The previous one is freed on the database runtime
     /// when nothing else holds it, so a large result never stalls a frame.
-    fn set_result(&mut self, result: ResultData) {
-        let previous = std::mem::replace(&mut self.result, Rc::new(result));
+    fn set_result(&mut self, result: ResultData, cx: &mut Context<Self>) {
+        let result = Rc::new(result);
+        let sales = self.sales;
+        // The grid lets go of the previous result first, so this is its last
+        // holder.
+        self.grid
+            .update(cx, |grid, cx| grid.set_result(result.clone(), sales, cx));
+        let previous = std::mem::replace(&mut self.result, result);
         if let Ok(previous) = Rc::try_unwrap(previous) {
             backend::release(previous);
         }
-        self.result_version += 1;
     }
 
     pub fn toggle_assistant(&mut self, cx: &mut Context<Self>) {
@@ -1950,141 +1417,5 @@ impl Render for Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         self.cancellation.cancel();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CellSelection, GridCache, GridKey, GridView, ResultData, selection_block};
-    use jykre::cell_format::ValueFamily;
-    use jykre::result::ResultColumn;
-    use std::rc::Rc;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn selection_follows_the_displayed_order_and_hides_with_its_rows() {
-        let selection = CellSelection {
-            anchor: (4, 2),
-            focus: (1, 0),
-        };
-        // Rows shown in reverse order: data rows 4..1 sit at positions 1..=4.
-        let visible = [5, 4, 3, 2, 1, 0];
-        assert_eq!(selection_block(selection, &visible), Some((1..=4, 0..=2)));
-        // A filter that hides an end of the block hides the selection.
-        assert_eq!(selection_block(selection, &[5, 4, 3]), None);
-    }
-    /// Shaped like the `sales.event_log` seed, without a database.
-    fn event_log_rows(rows: usize) -> Vec<Vec<String>> {
-        (0..rows)
-            .map(|row| {
-                vec![
-                    row.to_string(),
-                    ["debug", "info", "warn", "error"][row % 4].into(),
-                    format!("Synthetic event {row}"),
-                    format!("2026-01-01 00:{:02}:00+00", row % 60),
-                    format!("{{\"seq\": {row}}}"),
-                ]
-            })
-            .collect()
-    }
-
-    fn table(rows: &[Vec<String>]) -> ResultData {
-        let columns = [
-            ("id", "int8"),
-            ("level", "text"),
-            ("message", "text"),
-            ("occurred_at", "timestamptz"),
-            ("payload", "jsonb"),
-        ]
-        .into_iter()
-        .map(|(name, kind)| ResultColumn::new(name, kind))
-        .collect();
-        ResultData::from_rows(
-            columns,
-            rows.iter()
-                .map(|row| row.iter().map(|cell| Some(cell.as_str()))),
-        )
-    }
-
-    fn event_log(rows: usize) -> ResultData {
-        table(&event_log_rows(rows))
-    }
-
-    fn key(result: u64, filter: &str, descending: bool) -> GridKey {
-        GridKey {
-            result,
-            filter: filter.into(),
-            descending,
-            numbers_pt_br: false,
-        }
-    }
-
-    #[test]
-    fn grid_view_filters_sorts_and_sizes_columns_from_the_first_rows() {
-        let mut rows = event_log_rows(300);
-        rows[1][1] = "ERROR".into();
-        let result = table(&rows);
-        let grid = GridView::new(&result, key(0, "", true));
-        assert_eq!(grid.rows, (0..300).collect::<Vec<_>>());
-        assert_eq!(
-            grid.families,
-            [
-                ValueFamily::Number,
-                ValueFamily::Text,
-                ValueFamily::Text,
-                ValueFamily::Temporal,
-                ValueFamily::Text,
-            ]
-        );
-        // The filter ignores case; ascending order reverses the rows.
-        let grid = GridView::new(&result, key(0, "error", false));
-        assert_eq!(grid.rows.len(), 76);
-        assert_eq!(grid.rows.first(), Some(&299));
-        assert_eq!(grid.rows.last(), Some(&1));
-        // Only the first 200 rows size a column, so the cost does not grow
-        // with the result.
-        let width = GridView::new(&result, key(0, "", true)).widths[2];
-        rows[250][2] = "x".repeat(80);
-        assert_eq!(
-            GridView::new(&table(&rows), key(0, "", true)).widths[2],
-            width
-        );
-        rows[10][2] = "x".repeat(80);
-        assert!(GridView::new(&table(&rows), key(0, "", true)).widths[2] > width);
-    }
-
-    #[test]
-    fn grid_view_is_rebuilt_only_when_its_inputs_change() {
-        let result = event_log(10);
-        let cache = GridCache::default();
-        let first = cache.get(&result, key(1, "", true));
-        // Hover, scroll and selection frames change none of the inputs.
-        assert!(Rc::ptr_eq(&first, &cache.get(&result, key(1, "", true))));
-        for changed in [
-            key(2, "", true),
-            key(1, "info", true),
-            key(1, "", false),
-            GridKey {
-                numbers_pt_br: true,
-                ..key(1, "", true)
-            },
-        ] {
-            let rebuilt = cache.get(&result, changed.clone());
-            assert!(!Rc::ptr_eq(&first, &rebuilt));
-            assert_eq!(rebuilt.key, changed);
-        }
-    }
-
-    #[test]
-    fn a_large_result_builds_its_grid_view_within_budget() {
-        // A hundred times the default row limit, filtered and reversed: the
-        // slowest build, paid once per change rather than once per frame.
-        let result = event_log(100_000);
-        let cache = GridCache::default();
-        let start = Instant::now();
-        let grid = cache.get(&result, key(1, "error", false));
-        let elapsed = start.elapsed();
-        assert_eq!(grid.rows.len(), 25_000);
-        assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
     }
 }
