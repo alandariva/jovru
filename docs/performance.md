@@ -118,4 +118,5 @@ A change that introduces one of these is rejected in review:
 | --- | --- |
 | Long collections are virtualized | The explorer tree, saved queries and history build all their children |
 | Frequently changing regions are cached entities | The result grid is (`ResultGrid`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); the editor and the assistant still render inside `Workspace` |
+| A grid interaction renders only the grid ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md#how-to-validate)) | GPUI marks every ancestor of a notified view dirty, so hover, scroll and selection in the grid still re-render `AppView` and `Workspace`. `.cached(...)` spares the grid when only the workspace changes: typing 15 characters rendered `Workspace` 24 times and `ResultGrid` once (frame probe, 2026-11-02). Needs a maintainer decision |
 | Filters are debounced | The result filter rebuilds the grid view on every keystroke |
