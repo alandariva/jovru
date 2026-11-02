@@ -19,7 +19,7 @@ members = ["crates/*", "xtask"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 license = "MIT"
 repository = "https://github.com/alandariva/jykre-studio"
 authors = ["Alan de Oliveira"]
@@ -49,4 +49,4 @@ jykre-secrets = { path = "crates/secrets" }
 tokio.workspace = true
 serde_json.workspace = true
 sys-locale = "0.3"
-dirs = "6"
+dirs = "7"

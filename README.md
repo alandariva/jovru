@@ -12,7 +12,7 @@ real SQL.
 
 ## Requirements
 
-- Rust stable 1.94 or newer (`rustup update stable`).
+- Rust stable 1.95 or newer (`rustup update stable`).
 - Windows 10/11. Linux and macOS builds go through GPUI but are not validated;
   on Linux install the GPUI system packages first (see the CI workflow).
 - Optional: Docker with Compose v2 and `cargo-deny` for the full test gate.
