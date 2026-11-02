@@ -33,10 +33,12 @@ struct Active {
 fn active() -> &'static Active {
     static ACTIVE: OnceLock<Active> = OnceLock::new();
     ACTIVE.get_or_init(|| {
+        // Unit tests assert source text, so they ignore the machine's language.
         let requested = std::env::var("JYKRE_LOCALE")
             .ok()
             .filter(|tag| !tag.trim().is_empty())
-            .or_else(sys_locale::get_locale);
+            .or_else(sys_locale::get_locale)
+            .filter(|_| !cfg!(test));
         let tags: Vec<_> = CATALOGS.iter().map(|(tag, _)| *tag).collect();
         let tag = resolve(requested.as_deref(), &tags);
         let messages = CATALOGS
