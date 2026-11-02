@@ -12,7 +12,7 @@ pub const SOURCE_LOCALE: &str = "en";
 
 /// Embedded catalogs as `(BCP 47 tag, JSON)`. To ship a language, generate
 /// `locales/<tag>.json` and add `("<tag>", include_str!("../locales/<tag>.json"))`.
-const CATALOGS: &[(&str, &str)] = &[];
+const CATALOGS: &[(&str, &str)] = &[("pt-BR", include_str!("../locales/pt-BR.json"))];
 
 /// Translates a message, or formats it with positional arguments.
 #[macro_export]
