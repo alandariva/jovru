@@ -87,6 +87,41 @@ by the receiver. Interrupted sessions must reject reuse; a new session must run
 normally. TLS with certificates and effective server-side interruption need
 additional scenarios before the guarantees are extended.
 
+## Local databases for manual testing
+
+`docker-compose.dev.yml` starts persistent databases with synthetic data for
+opening the app and exploring by hand. They are separate from the gate
+fixtures above: other ports, a fixed Compose project (`jykre-dev`) and named
+volumes that survive restarts, so both can run at the same time.
+
+```bash
+docker compose -f docker-compose.dev.yml up -d --wait
+# Stop, keeping the data:
+docker compose -f docker-compose.dev.yml down
+# Reset to the seed:
+docker compose -f docker-compose.dev.yml down --volumes
+```
+
+| Database | Image | Host:port | Databases |
+| --- | --- | --- | --- |
+| PostgreSQL | postgres:18 | 127.0.0.1:55432 | `jykre` (schemas `public`, `catalog`, `sales`) |
+| MySQL | mysql:8.4 | 127.0.0.1:55306 | `jykre`, `catalog`, `sales` |
+
+User `jykre`, fixture-only password `jykre-test`, as in the gate. The seeds in
+`dev/seed/` run only when a volume is created, so edit them and reset to apply
+changes. They create:
+
+- `catalog.product`, `sales.customer`, `sales.orders` and `sales.order_item`
+  with foreign keys, an enum, a view (`sales.order_summary`) and a function
+  (`sales.customer_total`) for the metadata tree.
+- `sales.event_log` with 100,000 rows for row limits, scrolling and
+  cancellation; `pg_sleep(n)` or `SLEEP(n)` gives a slow query for timeouts.
+- `type_showcase` (in `public`/`jykre`) with one column per common type and
+  rows with typical, NULL, extreme, Unicode and long values.
+
+Point the app at an isolated folder so these connections stay apart from your
+own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
+
 ## Rules for changes and review
 
 - Test public behaviour and error cases; a bug fix gets a regression test when

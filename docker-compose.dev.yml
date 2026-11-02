@@ -1,0 +1,41 @@
+# Persistent databases with synthetic data for manual testing. Separate from
+# docker-compose.test.yml, whose fixtures the full gate creates and removes.
+# Usage is described in docs/testing.md ("Local databases for manual testing").
+name: jykre-dev
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: jykre
+      POSTGRES_PASSWORD: jykre-test
+      POSTGRES_DB: jykre
+    ports: ["127.0.0.1:55432:5432"]
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./dev/seed/postgres.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U jykre -d jykre"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: jykre-test
+      MYSQL_DATABASE: jykre
+      MYSQL_USER: jykre
+      MYSQL_PASSWORD: jykre-test
+    ports: ["127.0.0.1:55306:3306"]
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./dev/seed/mysql.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -pjykre-test"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
+
+volumes:
+  postgres-data:
+  mysql-data:
