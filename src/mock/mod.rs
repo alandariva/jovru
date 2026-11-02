@@ -1,0 +1,1214 @@
+use jykre::tr;
+mod connections;
+mod data;
+mod layout;
+mod sql;
+mod type_icons;
+mod ui;
+mod workspace;
+
+use data::{ORDER_COLUMNS, SALES_SQL, TABLES, table_sql};
+use gpui_kit::assets::IconName as I;
+use gpui_kit::component::{
+    ActiveTheme, Sizable, Theme, ThemeMode, TitleBar,
+    input::{Input, InputEvent, InputState},
+    resizable::{ResizableState, h_resizable, resizable_panel},
+    scroll::ScrollableElement,
+    tooltip::Tooltip,
+};
+use gpui_kit::{prelude::FluentBuilder as _, *};
+use jykre::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId, TabId};
+use jykre::{backend, connection_store, drivers::*};
+use jykre_secrets::SystemSecretStore;
+use jykre_storage::{ConfigRepository, RefreshStatus};
+use layout::{ASSISTANT_WIDTH, EXPLORER_WIDTH, splitter};
+use std::collections::HashMap;
+use std::collections::HashSet;
+use ui::*;
+use workspace::{Workspace, WorkspaceEvent};
+
+actions!(jykre, [ExecuteActiveQuery]);
+
+#[derive(Clone, Copy, PartialEq)]
+enum Section {
+    Explorer,
+    Saved,
+    History,
+    Settings,
+}
+
+struct Connection {
+    name: String,
+    profile: Option<ConnectionProfile>,
+    metadata_statuses: Vec<RefreshStatus>,
+    metadata_version: i64,
+    metadata_pages: HashMap<ObjectPath, u32>,
+    metadata_more: HashSet<ObjectPath>,
+    cache_loading: bool,
+    search_results: Vec<MetadataObject>,
+    refresh_generation: usize,
+    detail: String,
+    color: u32,
+    group: TabGroupId,
+    expanded: bool,
+    input: Option<ResolvedConnection>,
+    metadata: Vec<MetadataObject>,
+    collapsed: HashSet<ObjectPath>,
+    refreshing: Option<CancellationToken>,
+    status: String,
+    notice: Option<String>,
+}
+
+#[derive(Clone)]
+struct QuerySnapshot {
+    title: String,
+    connection: String,
+    sql: String,
+}
+
+struct AppView {
+    tabs: Entity<GroupedTabs>,
+    panels: HashMap<TabId, Entity<Workspace>>,
+    explorer_split: Entity<ResizableState>,
+    assistant_split: Entity<ResizableState>,
+    saved_queries: Vec<QuerySnapshot>,
+    history: Vec<QuerySnapshot>,
+    connections: Vec<Connection>,
+    section: Section,
+    next_query: usize,
+    sidebar_open: bool,
+    schema_open: bool,
+    tables_open: bool,
+    orders_open: bool,
+    explorer_scroll: ScrollHandle,
+    search: Entity<InputState>,
+    command: Entity<InputState>,
+    command_open: bool,
+    connection_open: bool,
+    connection_focus: FocusHandle,
+    connection_name: Entity<InputState>,
+    connection_host: Entity<InputState>,
+    connection_database: Entity<InputState>,
+    connection_user: Entity<InputState>,
+    driver: usize,
+    connection_port: Entity<InputState>,
+    connection_password: Entity<InputState>,
+    connection_ssl: Entity<InputState>,
+    connection_profile: Entity<InputState>,
+    connection_warehouse: Entity<InputState>,
+    connection_status: String,
+    remember_password: bool,
+    connection_saving: bool,
+    connections_loading: bool,
+    search_revision: usize,
+    command_revision: usize,
+    command_matches: Vec<(usize, String, String)>,
+    connection_testing: Option<CancellationToken>,
+    connection_revision: usize,
+    editing_connection: Option<usize>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl AppView {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let tabs = cx.new(GroupedTabs::new);
+        let explorer_split = cx.new(|_| ResizableState::default());
+        let assistant_split = cx.new(|_| ResizableState::default());
+        let explorer_resize = cx.observe(&explorer_split, |_, _, cx| cx.notify());
+        let assistant_resize = cx.observe(&assistant_split, |_, _, cx| cx.notify());
+        let tab_subscription =
+            cx.subscribe_in(&tabs, window, |this, _, event, window, cx| match event {
+                GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
+                GroupedTabsEvent::TabClosed(tab) => {
+                    this.panels.remove(tab);
+                }
+                GroupedTabsEvent::TabMoved { tab, from, to, .. } if from != to => {
+                    if let (Some(panel), Some(connection)) = (
+                        this.panels.get(tab),
+                        this.connections
+                            .iter()
+                            .find(|connection| connection.group == *to),
+                    ) {
+                        panel.update(cx, |panel, cx| {
+                            panel.rebind_connection(
+                                connection.name.clone(),
+                                connection.input.clone(),
+                                cx,
+                            )
+                        });
+                    }
+                }
+                _ => {}
+            });
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search objects…")));
+        let command = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr!("Search tables in the workspace…"))
+        });
+        let search_subscription = cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.search_cache(false, cx);
+            }
+            cx.notify();
+        });
+        let command_subscription = cx.subscribe_in(
+            &command,
+            window,
+            |this, input, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.search_cache(true, cx);
+                }
+                if let InputEvent::PressEnter { .. } = event {
+                    let _ = input;
+                    if let Some((index, name, sql)) = this.table_matches(cx).into_iter().next() {
+                        this.add_query(this.connections[index].group, &name, &sql, window, cx);
+                        this.command_open = false;
+                    }
+                }
+                cx.notify();
+            },
+        );
+        let connection_name =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("e.g. PostgreSQL · Staging")));
+        let connection_host = cx.new(|cx| InputState::new(window, cx).default_value("localhost"));
+        let connection_database =
+            cx.new(|cx| InputState::new(window, cx).default_value("commerce"));
+        let connection_user = cx.new(|cx| InputState::new(window, cx).default_value("postgres"));
+        let mut app = Self {
+            tabs,
+            explorer_split,
+            assistant_split,
+            panels: HashMap::new(),
+            saved_queries: vec![QuerySnapshot {
+                title: tr!("Active customers").into(),
+                connection: tr!("PostgreSQL · Local").into(),
+                sql: table_sql("customers"),
+            }],
+            history: vec![QuerySnapshot {
+                title: tr!("Revenue by category").into(),
+                connection: tr!("PostgreSQL · Local").into(),
+                sql: SALES_SQL.into(),
+            }],
+            connections: Vec::new(),
+            section: Section::Explorer,
+            next_query: 1,
+            sidebar_open: true,
+            schema_open: true,
+            tables_open: true,
+            orders_open: true,
+            explorer_scroll: ScrollHandle::new(),
+            search,
+            command,
+            command_open: false,
+            connection_open: false,
+            connection_focus: cx.focus_handle(),
+            connection_name,
+            connection_host,
+            connection_database,
+            connection_user,
+            driver: 0,
+            connection_port: cx.new(|cx| InputState::new(window, cx).default_value("5432")),
+            connection_password: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder(tr!("Enter the password"))
+            }),
+            connection_ssl: cx.new(|cx| InputState::new(window, cx).default_value("prefer")),
+            connection_profile: cx.new(|cx| InputState::new(window, cx).default_value("DEFAULT")),
+            connection_warehouse: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr!("Optional for metadata"))),
+            connection_status: "".into(),
+            remember_password: false,
+            connection_saving: false,
+            connections_loading: true,
+            search_revision: 0,
+            command_revision: 0,
+            command_matches: Vec::new(),
+            connection_testing: None,
+            connection_revision: 0,
+            editing_connection: None,
+            _subscriptions: vec![
+                tab_subscription,
+                search_subscription,
+                command_subscription,
+                explorer_resize,
+                assistant_resize,
+            ],
+        };
+        for field in [
+            &app.connection_name,
+            &app.connection_host,
+            &app.connection_port,
+            &app.connection_database,
+            &app.connection_user,
+            &app.connection_password,
+            &app.connection_ssl,
+            &app.connection_profile,
+            &app.connection_warehouse,
+        ] {
+            let subscription = cx.subscribe(field, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.invalidate_connection_test();
+                    cx.notify();
+                }
+            });
+            app._subscriptions.push(subscription);
+        }
+        if std::env::var_os("JYKRE_DEMO").is_some() {
+            for (name, detail, color) in [
+                (tr!("PostgreSQL · Local"), "localhost:5432", MINT),
+                ("Databricks · Dev", "analytics / development", BLUE),
+                (tr!("MySQL · Finance"), "finance / development", 0xd995a7),
+            ] {
+                let group = app
+                    .tabs
+                    .update(cx, |tabs, cx| tabs.add_group(name, rgb(color).into(), cx));
+                app.connections.push(Connection {
+                    name: name.into(),
+                    profile: None,
+                    metadata_statuses: Vec::new(),
+                    metadata_version: 0,
+                    metadata_pages: HashMap::new(),
+                    metadata_more: HashSet::new(),
+                    cache_loading: false,
+                    search_results: Vec::new(),
+                    refresh_generation: 0,
+                    detail: detail.into(),
+                    color,
+                    group,
+                    expanded: app.connections.is_empty(),
+                    input: None,
+                    metadata: Vec::new(),
+                    collapsed: HashSet::new(),
+                    refreshing: None,
+                    status: tr!("Demo · simulated data").into(),
+                    notice: None,
+                });
+            }
+            let first = app.connections[0].group;
+            app.add_query(first, tr!("Revenue by category"), SALES_SQL, window, cx);
+            app.add_query(first, tr!("Customers"), &table_sql("customers"), window, cx);
+            let second = app.connections[1].group;
+            app.add_query(second, tr!("Daily events"), "-- Events per day\nSELECT DATE(event_time) AS day,\n       COUNT(*) AS events\nFROM analytics.events\nGROUP BY DATE(event_time)\nORDER BY day DESC;", window, cx);
+            let third = app.connections[2].group;
+            app.add_query(third, tr!("Financial summary"), "-- Monthly financial summary\nSELECT DATE_FORMAT(created_at, '%Y-%m') AS month,\n       SUM(amount) AS total\nFROM transactions\nGROUP BY month\nORDER BY month DESC;", window, cx);
+            let first_tab = app.tabs.read(cx).tab_ids().next().unwrap();
+            app.tabs
+                .update(cx, |tabs, cx| tabs.select_tab(first_tab, cx))
+                .unwrap();
+        } else {
+            app.saved_queries.clear();
+            app.history.clear();
+        }
+        app.load_connections(window, cx);
+        app
+    }
+
+    fn add_query(
+        &mut self,
+        group: TabGroupId,
+        title: &str,
+        sql: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Connections outlive their tab groups. Recreate the group on demand
+        // when opening a query after its last tab was closed or moved away.
+        let mut group = group;
+        if !self.tabs.read(cx).group_ids().any(|id| id == group)
+            && let Some(connection) = self.connections.iter_mut().find(|c| c.group == group)
+        {
+            group = self.tabs.update(cx, |tabs, cx| {
+                tabs.add_group(connection.name.clone(), rgb(connection.color).into(), cx)
+            });
+            connection.group = group;
+        }
+        let connection = self
+            .connections
+            .iter()
+            .find(|c| c.group == group)
+            .map(|c| c.name.as_str())
+            .unwrap_or(tr!("Workspace"));
+        let panel = cx.new(|cx| {
+            Workspace::new(
+                title,
+                connection,
+                sql,
+                self.assistant_split.clone(),
+                window,
+                cx,
+            )
+        });
+        if let Some(input) = self
+            .connections
+            .iter()
+            .find(|connection| connection.group == group)
+            .and_then(|connection| connection.input.clone())
+        {
+            panel.update(cx, |panel, _| panel.set_connection(input));
+        }
+        let subscription = cx.subscribe(&panel, |this, _, event: &WorkspaceEvent, cx| {
+            match event {
+                WorkspaceEvent::Saved {
+                    saved,
+                    title,
+                    connection,
+                    sql,
+                } => {
+                    this.saved_queries
+                        .retain(|query| query.title != *title || query.connection != *connection);
+                    if *saved {
+                        this.saved_queries.push(QuerySnapshot {
+                            title: title.clone(),
+                            connection: connection.clone(),
+                            sql: sql.clone(),
+                        });
+                    }
+                }
+                WorkspaceEvent::Executed {
+                    title,
+                    connection,
+                    sql,
+                } => {
+                    this.history.insert(
+                        0,
+                        QuerySnapshot {
+                            title: title.clone(),
+                            connection: connection.clone(),
+                            sql: sql.clone(),
+                        },
+                    );
+                    this.history.truncate(30);
+                }
+            }
+            cx.notify();
+        });
+        self._subscriptions.push(subscription);
+        let tab = self
+            .tabs
+            .update(cx, |tabs, cx| {
+                tabs.add_tab(group, title.to_string(), panel.clone(), cx)
+            })
+            .expect("existing connection group");
+        self.panels.insert(tab, panel);
+        cx.notify();
+    }
+
+    fn new_query(&mut self, group: TabGroupId, window: &mut Window, cx: &mut Context<Self>) {
+        let title = tr!("Query {0}", self.next_query);
+        self.next_query += 1;
+        let sql = if self
+            .connections
+            .iter()
+            .any(|connection| connection.group == group && connection.input.is_some())
+        {
+            "SELECT 1;"
+        } else {
+            "SELECT * FROM orders LIMIT 100;"
+        };
+        self.add_query(group, &title, sql, window, cx);
+    }
+
+    fn new_active_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(group) = self.active_group(cx) {
+            self.new_query(group, window, cx);
+        } else {
+            self.open_connection(None, window, cx);
+        }
+    }
+
+    fn active_group(&self, cx: &App) -> Option<TabGroupId> {
+        let tabs = self.tabs.read(cx);
+        tabs.active_tab()
+            .and_then(|tab| tabs.tab_group(tab))
+            .or_else(|| self.connections.first().map(|connection| connection.group))
+    }
+
+    fn open_table(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_query(
+            self.connections[0].group,
+            name,
+            &table_sql(name),
+            window,
+            cx,
+        );
+        self.command_open = false;
+    }
+
+    fn rail(&self, cx: &mut Context<Self>) -> Div {
+        column()
+            .w(px(48.))
+            .flex_none()
+            .h_full()
+            .items_center()
+            .py_3()
+            .gap_2()
+            .bg(rgb(0x13161a))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .children(
+                [
+                    (Section::Explorer, I::Database, tr!("Explorer")),
+                    (Section::Saved, I::Bookmark, tr!("Saved queries")),
+                    (Section::History, I::Clock, tr!("History")),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (section, name, title))| {
+                    div()
+                        .id(("rail-item", i))
+                        .role(Role::Button)
+                        .aria_label(title)
+                        .focusable()
+                        .tab_index(0)
+                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                        .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
+                        .size(px(34.))
+                        .rounded(px(7.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .when(self.section == section && self.sidebar_open, |s| {
+                            s.bg(rgb(0x26342f))
+                        })
+                        .hover(|s| s.bg(rgb(HOVER)))
+                        .child(icon(
+                            name,
+                            if self.section == section && self.sidebar_open {
+                                MINT
+                            } else {
+                                FAINT
+                            },
+                        ))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.section == section {
+                                this.sidebar_open = !this.sidebar_open;
+                            } else {
+                                this.section = section;
+                                this.sidebar_open = true;
+                            }
+                            cx.notify();
+                        }))
+                }),
+            )
+            .child(div().flex_1())
+            .child(
+                icon_button("settings-rail", I::Settings2, tr!("Preferences")).on_click(
+                    cx.listener(|this, _, _, cx| {
+                        this.section = Section::Settings;
+                        this.sidebar_open = true;
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(
+                div()
+                    .size(px(26.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(0x303c36))
+                    .text_color(rgb(MINT))
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child("AL"),
+            )
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> Div {
+        let title = match self.section {
+            Section::Explorer => tr!("Explorer"),
+            Section::Saved => tr!("Saved queries"),
+            Section::History => tr!("History"),
+            Section::Settings => tr!("Preferences"),
+        };
+        column()
+            .size_full()
+            .bg(rgb(PANEL))
+            .border_r_1()
+            .border_color(rgb(BORDER))
+            .child(
+                row()
+                    .h(px(48.))
+                    .flex_none()
+                    .px_4()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        row()
+                            .gap_0()
+                            .child(
+                                icon_button("add-connection", I::Plus, tr!("New connection")).on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.open_connection(None, window, cx)
+                                    }),
+                                ),
+                            )
+                            .child(
+                                icon_button(
+                                    "collapse-sidebar",
+                                    I::PanelLeftClose,
+                                    tr!("Collapse explorer"),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.sidebar_open = false;
+                                        cx.notify();
+                                    },
+                                )),
+                            ),
+                    ),
+            )
+            .when(self.section == Section::Explorer, |s| {
+                s.child(
+                    div().px_3().pb_3().child(
+                        Input::new(&self.search)
+                            .small()
+                            .prefix(I::Search)
+                            .w_full()
+                            .aria_label(tr!("Search objects in the explorer")),
+                    ),
+                )
+                .child(
+                    row()
+                        .px_4()
+                        .h(px(26.))
+                        .flex_none()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(rgb(FAINT))
+                                .child(tr!("Connections")),
+                        )
+                        .child(badge(self.connections.len().to_string(), FAINT)),
+                )
+                .child(
+                    column()
+                        .id("connection-tree")
+                        .flex_1()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.explorer_scroll)
+                        .vertical_scrollbar(&self.explorer_scroll)
+                        .pb_3()
+                        .children(self.connections.iter().enumerate().map(
+                            |(index, connection)| self.connection_tree(index, connection, cx),
+                        )),
+                )
+                .child(
+                    column()
+                        .flex_none()
+                        .p_3()
+                        .gap_2()
+                        .border_t_1()
+                        .border_color(rgb(BORDER))
+                        .child(
+                            row()
+                                .child(icon(I::ShieldCheck, FAINT))
+                                .child(label(tr!("Your exploration environment"))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .line_height(relative(1.5))
+                                .text_color(rgb(FAINT))
+                                .child(
+                                    tr!("Use ↻ on the connection or the desired node to refresh metadata."),
+                                ),
+                        ),
+                )
+            })
+            .when(self.section != Section::Explorer, |s| {
+                s.child(self.sidebar_content(cx))
+            })
+    }
+
+    fn connection_tree(
+        &self,
+        index: usize,
+        connection: &Connection,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        if connection.input.is_some() {
+            return self.live_connection_tree(index, connection, cx);
+        }
+        let query = self.search.read(cx).value().to_lowercase();
+        let expanded = connection.expanded || !query.is_empty();
+        column().flex_none()
+            .child(row().id(("connection", index)).role(Role::Button).aria_label(connection.name.clone()).aria_expanded(expanded).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(38.)).px_3().gap_2().cursor_pointer().hover(|s| s.bg(rgb(SURFACE)))
+                .on_click(cx.listener(move |this, _, _, cx| { this.connections[index].expanded = !this.connections[index].expanded; cx.notify(); }))
+                .child(icon(if expanded { I::ChevronDown } else { I::ChevronRight }, FAINT))
+                .child(icon(I::Database, connection.color))
+                .child(div().text_size(px(14.)).flex_1().truncate().child(connection.name.clone()))
+                .child(dot(connection.color)))
+            .when(expanded, |s| s
+                .child(div().pl(px(43.)).pb_2().child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(connection.detail.clone())))
+                .when(index == 0, |s| s
+                    .child(row().px_3().pl(px(29.)).h(px(30.)).child(icon(I::ChevronDown, FAINT)).child(icon(I::Database, MUTED)).child(label("commerce")))
+                    .child(row().id("schema-public").role(Role::Button).aria_label(tr!("Schema public")).aria_expanded(self.schema_open).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).pl(px(43.)).h(px(30.)).cursor_pointer()
+                        .child(icon(if self.schema_open { I::ChevronDown } else { I::ChevronRight }, FAINT)).child(icon(I::Layers, MUTED)).child(label("public"))
+                        .on_click(cx.listener(|this, _, _, cx| { this.schema_open = !this.schema_open; cx.notify(); })))
+                    .when(self.schema_open || !query.is_empty(), |s| s
+                        .child(row().id("tables-folder").role(Role::Button).aria_label(tr!("Tables")).aria_expanded(self.tables_open).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).pl(px(57.)).pr_3().h(px(30.)).cursor_pointer()
+                            .child(icon(if self.tables_open { I::ChevronDown } else { I::ChevronRight }, FAINT)).child(icon(I::Table2, MUTED)).child(label(tr!("Tables")))
+                            .child(div().flex_1()).child(label("7"))
+                            .on_click(cx.listener(|this, _, _, cx| { this.tables_open = !this.tables_open; cx.notify(); })))
+                        .when(self.tables_open || !query.is_empty(), |s| s.children(TABLES.into_iter().enumerate().filter(|(_, table)| query.is_empty() || table.contains(&query)).map(|(table_index, table)| {
+                            column().flex_none()
+                                .child(row().id(("schema-table", table_index)).role(Role::Button).aria_label(tr!("Open table {0}", table)).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(32.)).pl(px(71.)).pr_3().gap_2().cursor_pointer()
+                                    .when(table == "orders", |s| s.bg(rgb(0x25352f)))
+                                    .hover(|s| s.bg(rgb(HOVER)))
+                                    .child(icon(if table == "orders" && self.orders_open { I::ChevronDown } else { I::ChevronRight }, FAINT))
+                                    .child(icon(I::Table2, if table == "orders" { MINT } else { FAINT }))
+                                    .child(div().text_size(px(14.)).text_color(rgb(if table == "orders" { MINT } else { MUTED })).child(table))
+                                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                        if table == "orders" && event.click_count() == 1 { this.orders_open = !this.orders_open; cx.notify(); }
+                                        else { this.open_table(table, window, cx); }
+                                    })))
+                                .when(table == "orders" && self.orders_open, |s| s.children(ORDER_COLUMNS.into_iter().map(|(name, kind, key)| {
+                                    row().h(px(30.)).pl(px(99.)).pr_3().gap_2().child(icon(if key { I::KeyRound } else { I::Columns3 }, if key { 0xd8be85 } else { FAINT }))
+                                        .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(name)).child(div().flex_1())
+                                        .child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(kind))
+                                })))
+                        })))
+                        .child(row().pl(px(57.)).h(px(32.)).child(icon(I::ChevronRight, FAINT)).child(icon(I::Eye, FAINT)).child(label(tr!("Views"))))
+                        .child(row().pl(px(57.)).h(px(32.)).child(icon(I::ChevronRight, FAINT)).child(icon(I::Braces, FAINT)).child(label(tr!("Functions"))))))
+                .when(index != 0, |s| s.child(column().pl_5().pr_3().pb_3().gap_2()
+                    .child(label(if index == 1 { tr!("analytics · 12 tables") } else { tr!("finance · 8 tables") }))
+                    .child(button(("open-connection-query", index), I::SquareTerminal, tr!("New query"))
+                        .on_click(cx.listener(move |this, _, window, cx| { let group = this.connections[index].group; this.new_query(group, window, cx); }))))))
+    }
+
+    fn sidebar_content(&self, cx: &mut Context<Self>) -> Div {
+        column()
+            .flex_1()
+            .p_3()
+            .gap_2()
+            .when(
+                self.section == Section::Saved || self.section == Section::History,
+                |s| {
+                    let queries = if self.section == Section::Saved {
+                        &self.saved_queries
+                    } else {
+                        &self.history
+                    };
+                    s.child(label(if self.section == Section::Saved {
+                        tr!("Your library")
+                    } else {
+                        tr!("In this session")
+                    }))
+                    .when(queries.is_empty(), |s| {
+                        s.child(
+                            div()
+                                .p_3()
+                                .text_size(px(14.))
+                                .text_color(rgb(MUTED))
+                                .child(tr!("Save a query with the bookmark icon in the editor.")),
+                        )
+                    })
+                    .children(queries.iter().enumerate().map(|(index, query)| {
+                        let query = query.clone();
+                        column()
+                            .id(("query-snapshot", index))
+                            .role(Role::Button)
+                            .aria_label(tr!("Open {0}", query.title))
+                            .focusable()
+                            .tab_index(0)
+                            .focus_visible(|s| s.bg(rgb(HOVER)))
+                            .p_3()
+                            .gap_1()
+                            .rounded(px(6.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(HOVER)))
+                            .child(
+                                row()
+                                    .child(icon(
+                                        if self.section == Section::Saved {
+                                            I::Bookmark
+                                        } else {
+                                            I::Clock
+                                        },
+                                        MINT,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(px(14.))
+                                            .truncate()
+                                            .child(query.title.clone()),
+                                    ),
+                            )
+                            .child(div().pl_6().child(label(query.connection.clone())))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let group = this
+                                    .connections
+                                    .iter()
+                                    .find(|c| c.name == query.connection)
+                                    .map(|c| c.group)
+                                    .unwrap_or(this.connections[0].group);
+                                this.add_query(group, &query.title, &query.sql, window, cx);
+                            }))
+                    }))
+                },
+            )
+            .when(self.section == Section::Settings, |s| {
+                s.child(self.preferences(cx))
+            })
+    }
+
+    fn preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        column().id("appearance-preferences").overflow_y_scroll().gap_3()
+            .child(label(tr!("Appearance")))
+            .child(row().justify_between().child(label(tr!("Theme"))).child(badge("Graphite", MINT)))
+            .child(row().justify_between().child(label(tr!("SQL font"))).child(label("Cascadia Code")))
+            .child(row().justify_between().child(label(tr!("SQL size"))).child(badge(format!("{} px", f32::from(cx.theme().mono_font_size)), MINT)))
+            .child(row().gap_1().children([12., 14., 16., 18., 20.].into_iter().enumerate().map(|(index, size)| {
+                div().id(("sql-font-size", index)).role(Role::Button).aria_label(tr!("SQL font at {0} pixels", size))
+                    .focusable().tab_index(0).w(px(37.)).h(px(32.)).flex().items_center().justify_center()
+                    .rounded(px(4.)).border_1().border_color(rgb(BORDER)).cursor_pointer()
+                    .when(f32::from(cx.theme().mono_font_size) == size, |s| s.bg(rgb(0x263b37)).border_color(rgb(MINT)))
+                    .focus_visible(|s| s.border_color(rgb(MINT)))
+                    .hover(|s| s.bg(rgb(HOVER))).child(format!("{size}"))
+                    .on_click(cx.listener(move |this, _, _, cx| { Theme::update(cx, |theme| theme.mono_font_size = px(size)); this.persist_font_size(size, cx); }))
+            })))
+            .child(div().mt_3().child(label(tr!("Layout"))))
+            .child(label(tr!("Drag the dividers. With the keyboard, use Tab to focus a divider and the arrows to adjust it.")))
+            .child(button("reset-layout", I::RotateCcw, tr!("Reset widths"))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.explorer_split.update(cx, |state, cx| state.resize_panel(0, px(EXPLORER_WIDTH), window, cx));
+                    this.assistant_split.update(cx, |state, cx| state.resize_panel(1, px(ASSISTANT_WIDTH), window, cx));
+                    cx.notify();
+                })))
+            .child(div().mt_3().child(label(tr!("Shortcuts"))))
+            .children([
+                (tr!("Search tables"), "Ctrl K"), (tr!("New query"), "Ctrl N"),
+                (tr!("Run SQL"), "Ctrl ↵"), (tr!("Explorer"), "Ctrl B"),
+                (tr!("Assistant"), "Ctrl Shift B"), (tr!("SQL font"), "Ctrl + / −"), (tr!("Reset font"), "Ctrl 0"),
+            ].into_iter().map(|(title, key)| row().justify_between().child(label(title)).child(shortcut(key))))
+            .child(div().mt_3().child(label(tr!("Preferences saved on this computer."))))
+    }
+
+    fn titlebar_content(&self, cx: &mut Context<Self>) -> Div {
+        row()
+            .w_full()
+            .h_full()
+            .pr_3()
+            .gap_3()
+            .child(
+                row()
+                    .flex_none()
+                    .gap_2()
+                    .child(
+                        div()
+                            .size(px(21.))
+                            .rounded(px(5.))
+                            .bg(rgb(MINT))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon(I::Database, 0x172820)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Jykre Studio"),
+                    ),
+            )
+            .child(divider())
+            .child(
+                row()
+                    .flex_none()
+                    .gap_2()
+                    .child(icon(I::PanelsTopLeft, MUTED))
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(tr!("Workspace")),
+                    )
+                    .child(icon(I::ChevronRight, FAINT))
+                    .child(label(tr!("Personal"))),
+            )
+            .child(div().flex_1())
+            .child(
+                row()
+                    .id("global-search")
+                    .role(Role::Button)
+                    .aria_label(tr!("Search the workspace"))
+                    .focusable()
+                    .tab_index(0)
+                    .focus_visible(|s| s.border_color(rgb(MINT)))
+                    .w(px(400.))
+                    .min_w(px(180.))
+                    .flex_shrink_1()
+                    .h(px(32.))
+                    .px_3()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(BG))
+                    .cursor_pointer()
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .hover(|s| s.border_color(rgb(0x4a5753)))
+                    .child(icon(I::Search, FAINT))
+                    .child(label(tr!("Search the workspace…")))
+                    .child(div().flex_1())
+                    .child(shortcut("Ctrl K"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.command_open = true;
+                        this.command.update(cx, |input, cx| input.focus(window, cx));
+                        this.search_cache(true, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(div().flex_1())
+            .child(badge("Workspace SQL", FAINT))
+            .child(divider())
+            .child(
+                button("new-query", I::Plus, tr!("New query"))
+                    .flex_none()
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .border_1()
+                    .border_color(rgb(0x3b4943))
+                    .text_color(rgb(MINT))
+                    .on_click(cx.listener(|this, _, window, cx| this.new_active_query(window, cx))),
+            )
+    }
+
+    fn table_matches(&self, _: &App) -> Vec<(usize, String, String)> {
+        self.command_matches.clone()
+    }
+
+    fn command_palette(&self, cx: &mut Context<Self>) -> AnyElement {
+        let matches = self.table_matches(cx);
+        self.overlay("command-backdrop", cx)
+            .child(
+                column()
+                    .w(px(530.))
+                    .max_h(px(580.))
+                    .mt(px(100.))
+                    .rounded(px(10.))
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(0x424c57))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        row().p_4().border_b_1().border_color(rgb(BORDER)).child(
+                            Input::new(&self.command)
+                                .prefix(I::Search)
+                                .appearance(false)
+                                .bordered(false)
+                                .w_full(),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .px_4()
+                            .pt_4()
+                            .pb_2()
+                            .child(label(tr!("Tables and views · connections"))),
+                    )
+                    .child(
+                        column()
+                            .id("command-results")
+                            .max_h(px(320.))
+                            .overflow_y_scroll()
+                            .px_2()
+                            .pb_3()
+                            .when(matches.is_empty(), |s| {
+                                s.child(div().p_5().child(label(tr!(
+                                    "No objects found. Refresh the connection metadata."
+                                ))))
+                            })
+                            .children(matches.into_iter().enumerate().map(
+                                |(index, (connection_index, name, sql))| {
+                                    row()
+                                        .id(("command-table", index))
+                                        .role(Role::Button)
+                                        .aria_label(tr!("Open table {0}", name))
+                                        .focusable()
+                                        .tab_index(0)
+                                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                                        .h(px(43.))
+                                        .px_3()
+                                        .rounded(px(5.))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(HOVER)))
+                                        .child(icon(I::Table2, MINT))
+                                        .child(
+                                            div().flex_1().text_size(px(14.)).child(name.clone()),
+                                        )
+                                        .child(label(
+                                            self.connections[connection_index].name.clone(),
+                                        ))
+                                        .child(icon(I::CornerDownLeft, FAINT))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.add_query(
+                                                this.connections[connection_index].group,
+                                                &name,
+                                                &sql,
+                                                window,
+                                                cx,
+                                            );
+                                            this.command_open = false;
+                                        }))
+                                },
+                            )),
+                    )
+                    .child(
+                        row()
+                            .h(px(40.))
+                            .px_4()
+                            .justify_between()
+                            .bg(rgb(BG))
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .child(label(tr!("Click an object to open the query.")))
+                            .child(row().child(shortcut("Esc")).child(label(tr!("close")))),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn overlay(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(id)
+            .absolute()
+            .inset_0()
+            .flex()
+            .justify_center()
+            .items_start()
+            .bg(black().opacity(0.65))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.command_open = false;
+                    if !this.connection_saving {
+                        this.connection_open = false;
+                    }
+                    cx.notify();
+                }),
+            )
+    }
+}
+
+impl Render for AppView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        column()
+            .id("jykre")
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .bg(rgb(BG))
+            .text_color(rgb(TEXT))
+            .font_family("Segoe UI")
+            .text_size(px(14.))
+            .on_action(cx.listener(|this, _: &ExecuteActiveQuery, _, cx| {
+                if this.connection_open || this.command_open {
+                    return;
+                }
+                if let Some(panel) = this
+                    .tabs
+                    .read(cx)
+                    .active_tab()
+                    .and_then(|tab| this.panels.get(&tab))
+                    .cloned()
+                {
+                    panel.update(cx, |panel, cx| panel.execute(cx));
+                }
+            }))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.command_open = false;
+                    this.connection_open = false;
+                    cx.notify();
+                } else if event.keystroke.modifiers.control && event.keystroke.key == "k" {
+                    this.command_open = !this.command_open;
+                    if this.command_open {
+                        this.command.update(cx, |input, cx| input.focus(window, cx));
+                        this.search_cache(true, cx);
+                    }
+                    cx.notify();
+                    window.prevent_default();
+                    cx.stop_propagation();
+                } else if event.keystroke.modifiers.control && event.keystroke.key == "n" {
+                    this.new_active_query(window, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                } else if event.keystroke.modifiers.control && event.keystroke.key == "b" {
+                    if event.keystroke.modifiers.shift {
+                        if let Some(panel) = this
+                            .tabs
+                            .read(cx)
+                            .active_tab()
+                            .and_then(|tab| this.panels.get(&tab))
+                            .cloned()
+                        {
+                            panel.update(cx, |panel, cx| panel.toggle_assistant(cx));
+                        }
+                    } else {
+                        this.sidebar_open = !this.sidebar_open;
+                        cx.notify();
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                } else if event.keystroke.modifiers.control
+                    && matches!(event.keystroke.key.as_str(), "+" | "=" | "-" | "0")
+                {
+                    let current = f32::from(cx.theme().mono_font_size);
+                    let size = match event.keystroke.key.as_str() {
+                        "-" => (current - 1.).max(12.),
+                        "0" => 14.,
+                        _ => (current + 1.).min(24.),
+                    };
+                    Theme::update(cx, |theme| theme.mono_font_size = px(size));
+                    this.persist_font_size(size, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            }))
+            .child(
+                TitleBar::new()
+                    .h(px(46.))
+                    .bg(rgb(0x13161a))
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.titlebar_content(cx)),
+            )
+            .child(
+                row()
+                    .flex_1()
+                    .min_h_0()
+                    .gap_0()
+                    .items_stretch()
+                    .child(self.rail(cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(if self.sidebar_open {
+                                h_resizable("explorer-layout")
+                                    .with_state(&self.explorer_split)
+                                    .with_handle_appearance(splitter(
+                                        &self.explorer_split,
+                                        0,
+                                        tr!("Explorer width. Use the arrows to adjust."),
+                                        240.0..480.0,
+                                    ))
+                                    .child(
+                                        resizable_panel()
+                                            .size(px(EXPLORER_WIDTH))
+                                            .size_range(px(240.)..px(480.))
+                                            .fixed()
+                                            .child(self.sidebar(cx)),
+                                    )
+                                    .child(
+                                        resizable_panel()
+                                            .size_range(px(760.)..Pixels::MAX)
+                                            .child(self.tabs.clone()),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                self.tabs.clone().into_any_element()
+                            }),
+                    ),
+            )
+            .child(
+                row()
+                    .h(px(30.))
+                    .flex_none()
+                    .px_3()
+                    .gap_3()
+                    .bg(rgb(0x13161a))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .justify_between()
+                    .child(
+                        row()
+                            .gap_3()
+                            .child(
+                                row()
+                                    .gap_1()
+                                    .child(icon(I::Folder, FAINT))
+                                    .child(label(tr!("Personal workspace"))),
+                            )
+                            .child(divider())
+                            .child(label(tr!("{0} connections", self.connections.len()))),
+                    )
+                    .child(
+                        row()
+                            .gap_3()
+                            .child(label(tr!("Local data · optional vault")))
+                            .child(divider())
+                            .child(
+                                row()
+                                    .gap_1()
+                                    .child(dot(MINT))
+                                    .child(label("Jykre Studio · v0.1")),
+                            ),
+                    ),
+            )
+            .when(self.command_open, |s| s.child(self.command_palette(cx)))
+            .when(self.connection_open, |s| {
+                s.child(self.connection_dialog(cx))
+            })
+    }
+}
+
+pub fn run() {
+    application().with_assets(type_icons::AppAssets).run(|cx| {
+        init(cx);
+        cx.bind_keys([KeyBinding::new("ctrl-enter", ExecuteActiveQuery, None)]);
+        Theme::change(ThemeMode::Dark, None, cx);
+        Theme::update(cx, |theme| {
+            theme.font_family = "Segoe UI".into();
+            theme.font_size = px(14.);
+            theme.mono_font_family = "Cascadia Code".into();
+            theme.mono_font_size = px(14.);
+            theme.background = rgb(BG).into();
+            theme.foreground = rgb(TEXT).into();
+            theme.border = rgb(BORDER).into();
+            theme.input = rgb(BG).into();
+            theme.accent = rgb(HOVER).into();
+            theme.accent_foreground = rgb(TEXT).into();
+            theme.muted = rgb(SURFACE).into();
+            theme.muted_foreground = rgb(MUTED).into();
+            theme.primary = rgb(MINT).into();
+            theme.primary_foreground = rgb(0x172820).into();
+            theme.tab_bar = rgb(PANEL).into();
+            theme.tab_active = rgb(BG).into();
+            theme.tab_foreground = rgb(MUTED).into();
+            theme.tab_active_foreground = rgb(TEXT).into();
+            theme.title_bar = rgb(0x13161a).into();
+            theme.title_bar_border = rgb(BORDER).into();
+            theme.radius = px(5.);
+        });
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                None,
+                size(px(1480.), px(920.)),
+                cx,
+            ))),
+            window_min_size: Some(size(px(1100.), px(700.))),
+            ..TitleBar::window_options()
+        };
+        let (window, _) = open_window(options, cx, |window, cx| {
+            window.set_window_title("Jykre Studio · Workspace");
+            cx.new(|cx| AppView::new(window, cx))
+        })
+        .expect(tr!("Could not open Jykre Studio"));
+        let _ = window;
+    });
+}

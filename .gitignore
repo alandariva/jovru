@@ -1,0 +1,27 @@
+# Build output
+/target
+**/*.rs.bk
+*.pdb
+
+# Local gate logs and validation output
+/artifacts/
+*.log
+
+# Local app data when JYKRE_CONFIG_DIR is unset outside Windows
+/.jykre/
+
+# Environment and credentials
+.env
+.env.*
+*.pem
+*.key
+.databrickscfg
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

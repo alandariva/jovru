@@ -1,0 +1,119 @@
+use crate::{
+    CancellationToken, ConnectionConfig, DriverError, DriverKind, DriverOutcome, DriverResult,
+    IntrospectionReport, MetadataObject, ObjectKind, ObjectPath, QueryRequest, ResolvedConnection,
+    RowSink, ServerInfo, SqlDialect,
+};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::fmt::Debug;
+
+/// Planned support, not a guarantee of readiness. Check DriverDescriptor::status.
+/// Table and View are alternative relation kinds within the hierarchy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriverCapabilities {
+    pub sql: bool,
+    pub metadata: bool,
+    pub transactions: bool,
+    pub hierarchy: Vec<ObjectKind>,
+    pub default_port: Option<u16>,
+    pub identifier_quote: char,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DriverStatus {
+    Stub,
+    Ready,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriverDescriptor {
+    pub kind: DriverKind,
+    pub display_name: String,
+    pub dialect: SqlDialect,
+    pub status: DriverStatus,
+    pub capabilities: DriverCapabilities,
+}
+
+/// A dedicated SQL session. Stateful semantics vary by driver: Databricks
+/// Statement Execution will forward catalog/schema on each request.
+#[async_trait]
+pub trait Session: Debug + Send {
+    /// Implementations validate the request, honor cancellation, timeout and
+    /// row limits, and stop producing data when the sink returns Stop.
+    async fn execute(
+        &mut self,
+        request: &QueryRequest,
+        sink: &mut dyn RowSink,
+        cancel: CancellationToken,
+    ) -> DriverResult<DriverOutcome>;
+
+    async fn close(self: Box<Self>) -> DriverResult<()>;
+}
+
+/// Receives batches without requiring the driver to retain the full catalog.
+/// A sink error stops introspection; a failed operation may have emitted batches.
+/// Consumers should only publish a complete snapshot after successful completion.
+#[async_trait]
+pub trait IntrospectionSink: Send {
+    async fn batch(&mut self, objects: Vec<MetadataObject>) -> DriverResult<()>;
+}
+
+/// Protocol-specific code depends only on these object-safe contracts.
+/// Operations validate configuration before cancellation or external I/O.
+#[async_trait]
+pub trait Driver: Debug + Send + Sync + 'static {
+    fn descriptor(&self) -> DriverDescriptor;
+
+    fn validate_config(&self, options: &serde_json::Value) -> DriverResult<()>;
+
+    fn validate_connection(&self, config: &ConnectionConfig) -> DriverResult<()> {
+        if config.driver != self.descriptor().kind {
+            return Err(DriverError::validation(
+                "Configuration belongs to another driver",
+            ));
+        }
+        self.validate_config(&config.options)
+    }
+
+    async fn test(
+        &self,
+        connection: &ResolvedConnection,
+        cancel: CancellationToken,
+    ) -> DriverResult<ServerInfo>;
+
+    async fn open_session(
+        &self,
+        connection: &ResolvedConnection,
+        cancel: CancellationToken,
+    ) -> DriverResult<Box<dyn Session>>;
+
+    /// Metadata must not require an existing SQL session. In particular,
+    /// Databricks Unity Catalog must not start or require a warehouse.
+    async fn introspect(
+        &self,
+        connection: &ResolvedConnection,
+        sink: &mut dyn IntrospectionSink,
+        cancel: CancellationToken,
+    ) -> DriverResult<IntrospectionReport>;
+
+    /// Refresh a structural subtree. Empty scope means the complete connection.
+    /// Only objects inside the scope are emitted. A successful empty result
+    /// removes a deleted object; errors must leave the consumer's snapshot intact.
+    async fn introspect_scoped(
+        &self,
+        connection: &ResolvedConnection,
+        scope: &ObjectPath,
+        sink: &mut dyn IntrospectionSink,
+        cancel: CancellationToken,
+    ) -> DriverResult<IntrospectionReport> {
+        if scope.0.is_empty() {
+            self.introspect(connection, sink, cancel).await
+        } else {
+            Err(DriverError::not_implemented(
+                &self.descriptor().display_name,
+                "scoped metadata",
+            ))
+        }
+    }
+}

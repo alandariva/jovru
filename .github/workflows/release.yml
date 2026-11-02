@@ -1,0 +1,44 @@
+name: Release
+
+# Push a tag such as v0.1.0 to build the Windows binary and draft a GitHub
+# Release. Review the draft before publishing it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo xtask check
+      - run: cargo build --release --locked --bin jykre
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "jykre-studio-${env:GITHUB_REF_NAME}-windows-x86_64"
+          New-Item -ItemType Directory -Force dist/$name | Out-Null
+          Copy-Item target/release/jykre.exe, LICENSE, README.md dist/$name
+          Compress-Archive -Path dist/$name -DestinationPath dist/$name.zip
+          (Get-FileHash dist/$name.zip -Algorithm SHA256).Hash.ToLower() + "  $name.zip" |
+            Out-File -Encoding ascii dist/$name.zip.sha256
+      - name: Draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create $env:GITHUB_REF_NAME --draft --generate-notes
+          --repo $env:GITHUB_REPOSITORY (Get-ChildItem dist/*.zip, dist/*.sha256)

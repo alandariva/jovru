@@ -1,0 +1,148 @@
+use crate::*;
+use sqlx::Row;
+use std::path::Path;
+
+const SCHEMA: &str = r#"
+CREATE TABLE connections (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, config_json TEXT NOT NULL,
+    remember_password INTEGER NOT NULL DEFAULT 0, revision INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+"#;
+
+#[derive(Clone)]
+pub struct ConfigRepository {
+    pool: SqlitePool,
+}
+
+impl ConfigRepository {
+    pub async fn open(dir: &Path) -> DriverResult<Self> {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|_| error("Could not create the data folder."))?;
+        let path = dir.join("config.db");
+        let existed = path.exists();
+        let pool = open_pool(&path, true).await?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .map_err(sql_error)?;
+        if existed && version == 0 {
+            let backup_dir = dir.join("backups");
+            tokio::fs::create_dir_all(&backup_dir)
+                .await
+                .map_err(|_| error("Could not prepare the configuration backup."))?;
+            let backup = backup_dir.join(format!("config-before-v1-{}.db", ConnectionId::new()));
+            sqlx::query("VACUUM INTO ?")
+                .bind(backup.to_string_lossy().as_ref())
+                .execute(&pool)
+                .await
+                .map_err(sql_error)?;
+        }
+        schema(&pool, SCHEMA).await?;
+        Ok(Self { pool })
+    }
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
+    pub async fn list(&self) -> DriverResult<Vec<ConnectionProfile>> {
+        let rows = sqlx::query(
+            "SELECT id,name,config_json,remember_password,revision FROM connections ORDER BY rowid",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sql_error)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ConnectionProfile {
+                    id: row
+                        .try_get::<String, _>("id")
+                        .map_err(sql_error)?
+                        .parse()
+                        .map_err(|_| error("Invalid connection identity."))?,
+                    name: row.try_get("name").map_err(sql_error)?,
+                    config: serde_json::from_str(
+                        &row.try_get::<String, _>("config_json").map_err(sql_error)?,
+                    )
+                    .map_err(json_error)?,
+                    remember_password: row.try_get("remember_password").map_err(sql_error)?,
+                    revision: row.try_get("revision").map_err(sql_error)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Compare-and-swap prevents an obsolete editor from overwriting a newer profile.
+    pub async fn save(&self, profile: &ConnectionProfile) -> DriverResult<ConnectionProfile> {
+        if profile.name.trim().is_empty() || profile.name.chars().any(char::is_control) {
+            return Err(DriverError::validation("Invalid connection name."));
+        }
+        let json = serde_json::to_string(&profile.config).map_err(json_error)?;
+        let result = if profile.revision == 0 {
+            sqlx::query("INSERT INTO connections(id,name,config_json,remember_password,revision) VALUES(?,?,?,?,1)")
+                .bind(profile.id.to_string()).bind(&profile.name).bind(json).bind(profile.remember_password).execute(&self.pool).await
+        } else {
+            sqlx::query("UPDATE connections SET name=?,config_json=?,remember_password=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND revision=?")
+                .bind(&profile.name).bind(json).bind(profile.remember_password).bind(profile.id.to_string()).bind(profile.revision).execute(&self.pool).await
+        }.map_err(|error| if error.as_database_error().is_some_and(|db| db.is_unique_violation()) { DriverError::validation("A connection with this name already exists.") } else { sql_error(error) })?;
+        if result.rows_affected() != 1 {
+            return Err(DriverError::validation(
+                "The connection was changed in another window. Reopen the configuration.",
+            ));
+        }
+        let mut saved = profile.clone();
+        saved.revision += 1;
+        Ok(saved)
+    }
+
+    /// Import and marker are committed together. The caller can then remove the JSON.
+    pub async fn import_legacy(&self, profiles: &[ConnectionProfile]) -> DriverResult<()> {
+        let mut tx = self.pool.begin().await.map_err(sql_error)?;
+        let imported: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key='legacy_connections_imported')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(sql_error)?;
+        if !imported {
+            for profile in profiles {
+                sqlx::query("INSERT INTO connections(id,name,config_json,remember_password,revision) VALUES(?,?,?,0,1)")
+                    .bind(profile.id.to_string()).bind(&profile.name).bind(serde_json::to_string(&profile.config).map_err(json_error)?)
+                    .execute(&mut *tx).await.map_err(sql_error)?;
+            }
+            sqlx::query(
+                "INSERT INTO settings(key,value_json) VALUES('legacy_connections_imported','true')",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        }
+        tx.commit().await.map_err(sql_error)
+    }
+    pub async fn legacy_imported(&self) -> DriverResult<bool> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key='legacy_connections_imported')",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(sql_error)
+    }
+    pub async fn setting(&self, key: &str) -> DriverResult<Option<serde_json::Value>> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value_json FROM settings WHERE key=?")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(sql_error)?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(json_error))
+            .transpose()
+    }
+    pub async fn set_setting(&self, key: &str, value: &serde_json::Value) -> DriverResult<()> {
+        sqlx::query("INSERT INTO settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json")
+            .bind(key).bind(serde_json::to_string(value).map_err(json_error)?).execute(&self.pool).await.map_err(sql_error)?;
+        Ok(())
+    }
+}

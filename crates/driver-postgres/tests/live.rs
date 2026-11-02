@@ -1,0 +1,287 @@
+use jykre_core::*;
+use jykre_driver_postgres::PostgresDriver;
+use serde_json::json;
+use std::time::Duration;
+#[derive(Default)]
+struct Sink {
+    columns: usize,
+    rows: Vec<Row>,
+}
+impl RowSink for Sink {
+    fn columns(&mut self, c: Vec<ColumnInfo>) -> SinkControl {
+        self.columns = c.len();
+        SinkControl::Continue
+    }
+    fn row(&mut self, r: Row) -> SinkControl {
+        self.rows.push(r);
+        SinkControl::Continue
+    }
+}
+#[derive(Default)]
+struct Metadata(Vec<MetadataObject>);
+#[async_trait]
+impl IntrospectionSink for Metadata {
+    async fn batch(&mut self, b: Vec<MetadataObject>) -> DriverResult<()> {
+        self.0.extend(b);
+        Ok(())
+    }
+}
+fn input() -> ResolvedConnection {
+    let port: u16 = std::env::var("JYKRE_TEST_PORT")
+        .map(|value| value.parse().expect("JYKRE_TEST_PORT must be a valid port"))
+        .unwrap_or(55424);
+    ResolvedConnection {
+        config: ConnectionConfig {
+            driver: DriverKind::Postgres,
+            options: json!({"host":"127.0.0.1","port":port,"database":"jykre","user":"jykre","sslMode":"disable"}),
+        },
+        credentials: Credentials {
+            password: Some(SecretString::from("jykre-test".to_owned())),
+        },
+    }
+}
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_connection_queries_metadata_and_timeout() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+    let driver = PostgresDriver;
+    let input = input();
+    let cancel = CancellationToken::new();
+    assert!(
+        driver
+            .test(&input, cancel.clone())
+            .await
+            .unwrap()
+            .version
+            .is_some()
+    );
+    let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
+    let mut sink = Sink::default();
+    session.execute(&QueryRequest{sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
+    assert_eq!(sink.columns, 3);
+    assert_eq!(sink.rows.len(), 1);
+    assert_eq!(sink.rows[0][1], Cell::Null);
+    assert_eq!(sink.rows[0][2], Cell::Text("123456789.12".into()));
+    let mut empty = Sink::default();
+    session
+        .execute(
+            &QueryRequest {
+                sql: "SELECT 1 AS answer WHERE 1=0".into(),
+                options: ExecutionOptions::default(),
+            },
+            &mut empty,
+            cancel.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(empty.columns, 1);
+    assert!(empty.rows.is_empty());
+    session.close().await.unwrap();
+    let mut metadata = Metadata::default();
+    driver
+        .introspect(&input, &mut metadata, cancel.clone())
+        .await
+        .unwrap();
+    for (kind, name) in [
+        (ObjectKind::Table, "gate_fixture"),
+        (ObjectKind::View, "gate_fixture_view"),
+        (ObjectKind::Column, "amount"),
+    ] {
+        assert!(
+            metadata
+                .0
+                .iter()
+                .any(|object| object.kind == kind && object.name == name),
+            "missing fixture object: {name}"
+        );
+    }
+    let table = metadata.0.iter().find(|object| object.kind == ObjectKind::Table && object.name == "gate_fixture").unwrap();
+    for scope in [table.path.clone(), table.path.child(ObjectKind::Column, "amount")] {
+        let mut partial = Metadata::default();
+        driver.introspect_scoped(&input, &scope, &mut partial, cancel.clone()).await.unwrap();
+        assert!(!partial.0.is_empty());
+        assert!(partial.0.iter().all(|object| object.path.is_within(&scope)));
+        let expected: Vec<_> = metadata.0.iter().filter(|object| object.path.is_within(&scope)).cloned().collect();
+        assert_eq!(partial.0, expected);
+    }
+    let mut missing = Metadata::default();
+    driver.introspect_scoped(&input, &table.path.parent().unwrap().child(ObjectKind::Table, "absent_fixture"), &mut missing, cancel.clone()).await.unwrap();
+    assert!(missing.0.is_empty());
+    let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
+    let err = session
+        .execute(
+            &QueryRequest {
+                sql: "SELECT pg_sleep(10)".into(),
+                options: ExecutionOptions {
+                    timeout: Some(Duration::from_millis(100)),
+                    ..ExecutionOptions::default()
+                },
+            },
+            &mut Sink::default(),
+            cancel,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Timeout);
+    assert_eq!(
+        session
+            .execute(
+                &QueryRequest {
+                    sql: "SELECT 1".into(),
+                    options: ExecutionOptions::default()
+                },
+                &mut Sink::default(),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Connection
+    );
+    let mut bad = input.clone();
+    bad.credentials.password = Some(SecretString::from("wrong-password".to_owned()));
+    assert_eq!(
+        driver
+            .test(&bad, CancellationToken::new())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Authentication
+    );
+    let mut session = driver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    let token = CancellationToken::new();
+    let trigger = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        trigger.cancel();
+    });
+    let cancelled = session
+        .execute(
+            &QueryRequest {
+                sql: "SELECT pg_sleep(10)".into(),
+                options: ExecutionOptions::default(),
+            },
+            &mut Sink::default(),
+            token,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(cancelled.code, ErrorCode::Cancelled);
+    assert_eq!(
+        session
+            .execute(
+                &QueryRequest {
+                    sql: "SELECT 1".into(),
+                    options: ExecutionOptions::default()
+                },
+                &mut Sink::default(),
+                CancellationToken::new()
+            )
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Connection
+    );
+    let mut session = driver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    let query = QueryRequest {
+        sql: "SELECT 1 UNION ALL SELECT 2".into(),
+        options: ExecutionOptions {
+            max_rows: 1,
+            ..ExecutionOptions::default()
+        },
+    };
+    let mut limited = Sink::default();
+    session
+        .execute(&query, &mut limited, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(limited.rows.len(), 1);
+    assert_eq!(
+        session
+            .execute(&query, &mut Sink::default(), CancellationToken::new())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Connection
+    );
+
+    }).await.expect("live scenario exceeded its time budget");
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn receiver_stop_discards_session_and_fresh_session_works() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        struct Stop {
+            columns: usize,
+            rows: usize,
+            at_columns: bool,
+        }
+        impl RowSink for Stop {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                self.columns += 1;
+                assert_eq!(self.columns, 1);
+                if self.at_columns {
+                    SinkControl::Stop
+                } else {
+                    SinkControl::Continue
+                }
+            }
+            fn row(&mut self, _: Row) -> SinkControl {
+                assert_eq!(self.columns, 1);
+                self.rows += 1;
+                assert_eq!(self.rows, 1, "delivery must stop immediately");
+                SinkControl::Stop
+            }
+        }
+        let driver = PostgresDriver;
+        let query = QueryRequest {
+            sql: "SELECT 1 UNION ALL SELECT 2".into(),
+            options: ExecutionOptions::default(),
+        };
+        for at_columns in [true, false] {
+            let mut session = driver
+                .open_session(&input(), CancellationToken::new())
+                .await
+                .unwrap();
+            let mut sink = Stop {
+                columns: 0,
+                rows: 0,
+                at_columns,
+            };
+            session
+                .execute(&query, &mut sink, CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(sink.columns, 1);
+            assert_eq!(sink.rows, usize::from(!at_columns));
+            assert_eq!(
+                session
+                    .execute(&query, &mut Sink::default(), CancellationToken::new())
+                    .await
+                    .unwrap_err()
+                    .code,
+                ErrorCode::Connection
+            );
+            let mut fresh = driver
+                .open_session(&input(), CancellationToken::new())
+                .await
+                .unwrap();
+            let mut rows = Sink::default();
+            fresh
+                .execute(&query, &mut rows, CancellationToken::new())
+                .await
+                .unwrap();
+            assert_eq!(rows.rows.len(), 2);
+            fresh.close().await.unwrap();
+        }
+    })
+    .await
+    .expect("live scenario exceeded its time budget");
+}

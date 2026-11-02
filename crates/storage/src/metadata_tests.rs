@@ -1,0 +1,273 @@
+use super::*;
+
+fn dir() -> PathBuf {
+    std::env::temp_dir().join(format!("jykre-metadata-{}", ConnectionId::new()))
+}
+fn config() -> ConnectionConfig {
+    ConnectionConfig {
+        driver: DriverKind::MySql,
+        options: serde_json::json!({"host":"localhost","user":"fixture","database":"fixture","sslMode":"disabled"}),
+    }
+}
+fn objects() -> Vec<MetadataObject> {
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db.a/%_");
+    let table = MetadataObject::new(ObjectKind::Table, &db.path, "target");
+    let col = MetadataObject::new(ObjectKind::Column, &table.path, "old");
+    let sibling = MetadataObject::new(ObjectKind::Table, &db.path, "target.more");
+    vec![db, table, col, sibling]
+}
+async fn seed(repository: &MetadataRepository) {
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(objects()).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+}
+#[tokio::test]
+async fn partial_publication_is_atomic_does_not_rewrite_siblings_and_persists() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let config = config();
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    seed(&repository).await;
+    let original = repository.all().await.unwrap();
+    let root_status = repository.statuses().await.unwrap()[0]
+        .last_success_at
+        .clone();
+    sqlx::raw_sql("CREATE TRIGGER protect_sibling_delete BEFORE DELETE ON objects WHEN OLD.name='target.more' BEGIN SELECT RAISE(ABORT,'sibling changed'); END; CREATE TRIGGER protect_sibling_update BEFORE UPDATE ON objects WHEN OLD.name='target.more' BEGIN SELECT RAISE(ABORT,'sibling changed'); END;").execute(&repository.pool).await.unwrap();
+    let table = objects()[1].clone();
+    let col = MetadataObject::new(ObjectKind::Column, &table.path, "new");
+    let mut run = repository.begin(&table.path).await.unwrap();
+    run.batch(vec![table.clone(), col.clone()]).await.unwrap();
+    assert_eq!(repository.all().await.unwrap(), original);
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let all = repository.all().await.unwrap();
+    assert!(all.contains(&objects()[3]));
+    assert!(!all.contains(&objects()[2]));
+    assert!(all.contains(&col));
+    let statuses = repository.statuses().await.unwrap();
+    assert_eq!(
+        statuses
+            .iter()
+            .find(|status| status.scope.0.is_empty())
+            .unwrap()
+            .last_success_at,
+        root_status
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .find(|status| status.scope == table.path)
+            .unwrap()
+            .state,
+        "success"
+    );
+    repository.close().await;
+    let reopened = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    assert_eq!(reopened.all().await.unwrap(), all);
+    assert_eq!(reopened.version().await.unwrap(), 2);
+    let mut run = reopened.begin(&table.path).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    assert!(
+        !reopened
+            .all()
+            .await
+            .unwrap()
+            .iter()
+            .any(|object| object.path.is_within(&table.path))
+    );
+    assert!(reopened.all().await.unwrap().contains(&objects()[3]));
+    reopened.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn errors_cancellation_and_crash_never_publish_staged_data() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let config = config();
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    seed(&repository).await;
+    let all = repository.all().await.unwrap();
+    let mut run = repository.begin(&objects()[1].path).await.unwrap();
+    run.batch(vec![objects()[1].clone()]).await.unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let error = run
+        .activate(&IntrospectionReport::default(), &cancel)
+        .await
+        .unwrap_err();
+    run.fail(&error).await.unwrap();
+    drop(run);
+    assert_eq!(repository.all().await.unwrap(), all);
+    assert_eq!(repository.version().await.unwrap(), 1);
+    let mut run = repository.begin(&objects()[1].path).await.unwrap();
+    run.batch(vec![objects()[1].clone()]).await.unwrap();
+    assert!(repository.begin(&ObjectPath::default()).await.is_err());
+    // A second reader must not recover a refresh that still owns its OS lock.
+    repository.recover_interrupted().await.unwrap();
+    assert!(
+        repository
+            .statuses()
+            .await
+            .unwrap()
+            .iter()
+            .any(|status| status.state == "running")
+    );
+    drop(run);
+    repository.close().await;
+    let reopened = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    reopened.recover_interrupted().await.unwrap();
+    assert_eq!(reopened.all().await.unwrap(), all);
+    assert!(
+        reopened
+            .statuses()
+            .await
+            .unwrap()
+            .iter()
+            .any(|status| status.state == "interrupted")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM staging_objects")
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap(),
+        0
+    );
+    reopened.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn permission_warnings_preserve_unreadable_subtrees_and_mark_them() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    seed(&repository).await;
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(vec![objects()[0].clone()]).await.unwrap();
+    let report = IntrospectionReport {
+        warnings: vec![IntrospectionWarning {
+            path: objects()[1].path.clone(),
+            message: "fixture denied".into(),
+        }],
+    };
+    run.activate(&report, &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let all = repository.all().await.unwrap();
+    assert!(all.contains(&objects()[1]));
+    assert!(all.contains(&objects()[2]));
+    assert!(!all.contains(&objects()[3]));
+    assert!(
+        repository
+            .statuses()
+            .await
+            .unwrap()
+            .iter()
+            .any(|status| status.state == "warning" && status.scope == objects()[1].path)
+    );
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn malformed_batch_and_failed_commit_preserve_active_cache() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    seed(&repository).await;
+    let original = repository.all().await.unwrap();
+    let mut run = repository.begin(&objects()[1].path).await.unwrap();
+    assert!(run.batch(vec![objects()[3].clone()]).await.is_err());
+    let orphan = MetadataObject::new(ObjectKind::Column, &objects()[1].path, "orphan");
+    run.batch(vec![orphan]).await.unwrap();
+    let error = run
+        .activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap_err();
+    run.fail(&error).await.unwrap();
+    drop(run);
+    assert_eq!(repository.all().await.unwrap(), original);
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn config_change_invalidates_cache_and_corruption_is_preserved() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let mut config = config();
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    seed(&repository).await;
+    repository.close().await;
+    config.options["user"] = serde_json::json!("another-test-user");
+    let repository = MetadataRepository::prepare(&dir, id, &config)
+        .await
+        .unwrap();
+    assert!(repository.all().await.unwrap().is_empty());
+    repository.close().await;
+    let path = dir.join("metadata").join(format!("{id}.db"));
+    std::fs::write(&path, b"synthetic corrupt fixture").unwrap();
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    assert!(repository.recovered);
+    assert!(repository.all().await.unwrap().is_empty());
+    assert!(
+        std::fs::read_dir(dir.join("metadata"))
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".corrupt-"))
+    );
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn obsolete_readers_and_refresh_handles_cannot_revert_cache_identity() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let old_config = config();
+    let old_reader = MetadataRepository::open(&dir, id, &old_config)
+        .await
+        .unwrap();
+    seed(&old_reader).await;
+    let mut current_config = old_config.clone();
+    current_config.options["user"] = serde_json::json!("new-fixture-user");
+    let current = MetadataRepository::prepare(&dir, id, &current_config)
+        .await
+        .unwrap();
+    seed(&current).await;
+    let expected = current.all().await.unwrap();
+    let version = current.version().await.unwrap();
+
+    assert!(
+        MetadataRepository::open(&dir, id, &old_config)
+            .await
+            .is_err()
+    );
+    assert!(old_reader.begin(&ObjectPath::default()).await.is_err());
+    assert_eq!(current.version().await.unwrap(), version);
+    assert_eq!(current.all().await.unwrap(), expected);
+
+    old_reader.close().await;
+    current.close().await;
+    let reopened = MetadataRepository::open(&dir, id, &current_config)
+        .await
+        .unwrap();
+    assert_eq!(reopened.version().await.unwrap(), version);
+    assert_eq!(reopened.all().await.unwrap(), expected);
+    reopened.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}

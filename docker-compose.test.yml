@@ -1,0 +1,59 @@
+services:
+  postgres-min:
+    image: postgres:14
+    environment:
+      POSTGRES_USER: jykre
+      POSTGRES_PASSWORD: jykre-test
+      POSTGRES_DB: jykre
+    ports: ["127.0.0.1:55424:5432"]
+    volumes:
+      - ./tests/fixtures/postgres.sql:/docker-entrypoint-initdb.d/fixture.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U jykre -d jykre"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
+  postgres-max:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: jykre
+      POSTGRES_PASSWORD: jykre-test
+      POSTGRES_DB: jykre
+    ports: ["127.0.0.1:55428:5432"]
+    volumes:
+      - ./tests/fixtures/postgres.sql:/docker-entrypoint-initdb.d/fixture.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U jykre -d jykre"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
+  mysql-lts:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: jykre-test
+      MYSQL_DATABASE: jykre
+      MYSQL_USER: jykre
+      MYSQL_PASSWORD: jykre-test
+    ports: ["127.0.0.1:55394:3306"]
+    volumes:
+      - ./tests/fixtures/mysql.sql:/docker-entrypoint-initdb.d/fixture.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -pjykre-test"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
+  mysql-current:
+    image: mysql:9.7
+    environment:
+      MYSQL_ROOT_PASSWORD: jykre-test
+      MYSQL_DATABASE: jykre
+      MYSQL_USER: jykre
+      MYSQL_PASSWORD: jykre-test
+    ports: ["127.0.0.1:55399:3306"]
+    volumes:
+      - ./tests/fixtures/mysql.sql:/docker-entrypoint-initdb.d/fixture.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -pjykre-test"]
+      interval: 2s
+      timeout: 2s
+      retries: 90
