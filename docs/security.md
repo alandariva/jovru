@@ -67,15 +67,14 @@ document is the engineering standard.
 
 ## Logs and diagnostics
 
-These rules apply to any output (today there is no logging framework; see
-[Reliability](reliability.md#logs)):
+These rules apply to any output, including the logs ([Reliability](reliability.md#logs)):
 
 - Never log passwords, tokens, `Authorization` headers, connection URLs,
   cell values or query parameters.
 - SQL text only at `trace`, which is off by default; at higher levels, log its
   length.
-- When a logging framework is added: no header logging in `reqwest`, and
-  statement logging in SQLx turned off (`log_statements(LevelFilter::Off)`),
+- No header logging in `reqwest`, and statement logging in SQLx turned off
+  (`disable_statement_logging()`) in every driver and in `jykre-storage`,
   because SQLx logs SQL by default.
 
 ## External processes (Databricks CLI)

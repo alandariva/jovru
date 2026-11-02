@@ -145,6 +145,11 @@ async fn load_from(
                 match secrets.get(profile.id).await {
                     Ok(value) => value,
                     Err(error) => {
+                        tracing::warn!(
+                            connection_id = %profile.id,
+                            error_code = ?error.code,
+                            "password unavailable from the vault"
+                        );
                         warning = Some(error.to_string());
                         Credentials::default()
                     }

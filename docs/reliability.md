@@ -72,15 +72,26 @@ A test of the error mapping is required in each driver ([Testing](testing.md)).
 
 ## Logs
 
-There is no logging framework yet. [ADR-0009](adr/0009-structured-logging-and-timings.md)
-(proposed) defines the target:
+Logs follow [ADR-0009](adr/0009-structured-logging-and-timings.md) and are set
+up by `jykre::logging::init` when the application starts:
 
-- `tracing` with `tracing-subscriber`, initialised by the application.
-- JSON lines in `<data folder>/logs/jykre.log`, rotated daily, keeping 7 files;
-  readable console output in debug builds.
+- `tracing` with `tracing-subscriber`; `tracing-appender` writes in the
+  background.
+- JSON lines in `<data folder>/logs/jykre.<date>.log`, one file per day,
+  keeping the last 7; readable lines on the console in debug builds.
 - Default level `info` for `jykre*` crates and `warn` for dependencies,
-  configurable with `JYKRE_LOG` (`EnvFilter` syntax).
-- A panic hook records panics with a backtrace, without sensitive data.
+  configurable with `JYKRE_LOG` (`EnvFilter` syntax, for example
+  `JYKRE_LOG=jykre=debug`).
+- A panic hook records panics with their location and a backtrace.
+- Runs (`backend::query`) log their outcome at `info` (duration, statements,
+  rows, error code); each statement logs its time, size and limit at `debug`;
+  SQL text only at `trace`. Metadata refreshes log their outcome and duration.
+- `logging::UiTimer` measures UI-thread work (publishing a result, rebuilding
+  the grid view, copying) and warns above 100 ms; `logging::timing` warns when
+  a cache read exceeds its 50 ms budget.
+- SQLx statement logging is off in the drivers and in local storage, and
+  `reqwest` never logs headers. A unit test runs a batch with a password and
+  SQL text and checks neither appears in the logs above `trace`.
 
 ### Levels
 
@@ -109,13 +120,13 @@ parameters, and SQL above `trace`. See [Security](security.md#logs-and-diagnosti
 - Error messages in the UI offer **Copy details**: code, technical message,
   time, application version and run identifier, so a report needs no
   screenshot.
-- Once logs exist, a menu entry opens the log folder.
+- A menu entry opens the log folder.
 
 ## Known deviations
 
 | Standard | Current code |
 | --- | --- |
-| Structured logs and a panic hook | None ([ADR-0009](adr/0009-structured-logging-and-timings.md), proposed) |
 | Retries with backoff for idempotent reads | No automatic retries |
 | Clean shutdown with a deadline | Dropping a workspace cancels its run; there is no explicit shutdown sequence |
 | Copy details on errors | Errors show their message only |
+| A menu entry opens the log folder | Logs are written, but the folder is opened by hand |

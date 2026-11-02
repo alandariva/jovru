@@ -1,10 +1,20 @@
 //! Application operations, independent of the UI and its executor.
 use crate::drivers::*;
+use crate::logging;
 use crate::result::{ResultBuilder, ResultData, ResultLimit};
 use crate::tr;
 use jykre_storage::{MetadataRepository, PendingRefresh, RefreshStatus};
 use std::path::{Path, PathBuf};
-use std::{future::Future, sync::OnceLock, time::Instant};
+use std::{
+    future::Future,
+    sync::{Arc, OnceLock},
+    time::{Duration, Instant},
+};
+use tracing::Instrument as _;
+
+/// How long a read from the local metadata cache is expected to take
+/// ([Performance](../docs/performance.md#budgets)).
+const CACHE_READ_BUDGET: Duration = Duration::from_millis(50);
 
 pub struct MetadataSnapshot {
     pub objects: Vec<MetadataObject>,
@@ -30,6 +40,7 @@ pub async fn cached_metadata_pages(
     recover: bool,
     pages: Vec<(ObjectPath, u32)>,
 ) -> DriverResult<MetadataSnapshot> {
+    let started = Instant::now();
     let repository = MetadataRepository::open(dir, id, config).await?;
     if recover {
         repository.recover_interrupted().await?;
@@ -82,6 +93,7 @@ pub async fn cached_metadata_pages(
         pages: loaded_pages,
     };
     repository.close().await;
+    logging::timing("expand from cache", started, CACHE_READ_BUDGET);
     Ok(snapshot)
 }
 
@@ -91,9 +103,11 @@ pub async fn search_metadata(
     config: &ConnectionConfig,
     query: &str,
 ) -> DriverResult<Vec<MetadataObject>> {
+    let started = Instant::now();
     let repository = MetadataRepository::open(dir, id, config).await?;
     let result = repository.search(query, 200).await;
     repository.close().await;
+    logging::timing("metadata search", started, CACHE_READ_BUDGET);
     result
 }
 
@@ -123,6 +137,37 @@ impl IntrospectionSink for StagedMetadata<'_> {
 /// Remote I/O only fills staging. Publication happens in a short transaction
 /// after success; no active objects outside the selected scope are rewritten.
 pub async fn refresh_metadata(
+    dir: PathBuf,
+    id: ConnectionId,
+    input: ResolvedConnection,
+    scope: ObjectPath,
+    cancel: CancellationToken,
+) -> DriverResult<i64> {
+    let span = tracing::info_span!(
+        "refresh_metadata",
+        connection_id = %id,
+        driver = ?input.config.driver,
+        depth = scope.0.len()
+    );
+    let started = Instant::now();
+    let result = refresh_metadata_in(dir, id, input, scope, cancel)
+        .instrument(span.clone())
+        .await;
+    let _entered = span.enter();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(version) => tracing::info!(elapsed_ms, version, "metadata refresh finished"),
+        Err(error) if error.code == ErrorCode::Cancelled => {
+            tracing::info!(elapsed_ms, "metadata refresh cancelled")
+        }
+        Err(error) => {
+            tracing::warn!(elapsed_ms, error_code = ?error.code, "metadata refresh failed")
+        }
+    }
+    result
+}
+
+async fn refresh_metadata_in(
     dir: PathBuf,
     id: ConnectionId,
     input: ResolvedConnection,
@@ -176,10 +221,11 @@ fn runtime() -> DriverResult<&'static tokio::runtime::Runtime> {
 pub async fn run<T: Send + 'static>(
     work: impl Future<Output = DriverResult<T>> + Send + 'static,
 ) -> DriverResult<T> {
-    runtime()?
-        .spawn(work)
-        .await
-        .map_err(|_| DriverError::new(ErrorCode::Internal, tr!("Database task failed")))?
+    runtime()?.spawn(work).await.map_err(|error| {
+        // The panic hook already recorded a panic with its backtrace.
+        tracing::error!(panicked = error.is_panic(), "database task failed");
+        DriverError::new(ErrorCode::Internal, tr!("Database task failed"))
+    })?
 }
 
 #[derive(Default)]
@@ -261,7 +307,57 @@ pub struct QueryBatch {
 /// it, so driver cells are dropped here, on the runtime, and reading stops at
 /// the request's row limit or at `memory_ceiling` bytes, whichever comes
 /// first.
+///
+/// The run is logged at `info` with its duration, statement count, rows and
+/// error code; SQL text only at `trace`.
 pub async fn query(
+    input: ResolvedConnection,
+    requests: Vec<QueryRequest>,
+    memory_ceiling: usize,
+    cancel: CancellationToken,
+) -> DriverResult<QueryBatch> {
+    let driver = builtin_registry()?.get(input.config.driver)?;
+    query_with(driver, input, requests, memory_ceiling, cancel).await
+}
+
+/// [`query`] with a given driver.
+pub async fn query_with(
+    driver: Arc<dyn Driver>,
+    input: ResolvedConnection,
+    requests: Vec<QueryRequest>,
+    memory_ceiling: usize,
+    cancel: CancellationToken,
+) -> DriverResult<QueryBatch> {
+    let span = tracing::info_span!(
+        "query",
+        driver = ?input.config.driver,
+        statements = requests.len()
+    );
+    let started = Instant::now();
+    let result = run_statements(driver, input, requests, memory_ceiling, cancel)
+        .instrument(span.clone())
+        .await;
+    let _entered = span.enter();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(batch) => {
+            let rows: usize = batch.completed.iter().map(|r| r.data.row_count()).sum();
+            let error_code = batch.error.as_ref().map(|error| error.code);
+            tracing::info!(
+                elapsed_ms,
+                completed = batch.completed.len(),
+                rows,
+                error_code = ?error_code,
+                "run finished"
+            );
+        }
+        Err(error) => tracing::info!(elapsed_ms, error_code = ?error.code, "run failed"),
+    }
+    result
+}
+
+async fn run_statements(
+    driver: Arc<dyn Driver>,
     input: ResolvedConnection,
     requests: Vec<QueryRequest>,
     memory_ceiling: usize,
@@ -270,11 +366,11 @@ pub async fn query(
     for request in &requests {
         request.validate()?;
     }
-    let driver = builtin_registry()?.get(input.config.driver)?;
     let mut session = driver.open_session(&input, cancel.clone()).await?;
     let mut results = Vec::new();
     let mut failure = None;
-    for request in requests {
+    for (index, request) in requests.into_iter().enumerate() {
+        tracing::trace!(statement = index, sql = %request.sql, "statement");
         let start = Instant::now();
         let mut builder = ResultBuilder::new(request.options.max_rows, memory_ceiling);
         match session
@@ -283,6 +379,15 @@ pub async fn query(
         {
             Ok(outcome) => {
                 let (data, limit) = builder.finish();
+                tracing::debug!(
+                    statement = index,
+                    sql_len = request.sql.len(),
+                    elapsed_ms = start.elapsed().as_millis() as u64,
+                    rows = data.row_count(),
+                    bytes = data.memory_bytes(),
+                    limit = ?limit,
+                    "statement finished"
+                );
                 results.push(QueryResult {
                     data,
                     outcome,
@@ -291,6 +396,12 @@ pub async fn query(
                 });
             }
             Err(error) => {
+                tracing::debug!(
+                    statement = index,
+                    sql_len = request.sql.len(),
+                    error_code = ?error.code,
+                    "statement failed"
+                );
                 failure = Some(error);
                 break;
             }
@@ -448,5 +559,118 @@ mod tests {
             preview_sql(&DatabricksDriver, &path),
             "SELECT * FROM `cat`.`sch`.`a``b` LIMIT 100;"
         );
+    }
+
+    /// Answers every statement with one row, without a database.
+    #[derive(Debug)]
+    struct EchoDriver;
+
+    #[derive(Debug)]
+    struct EchoSession;
+
+    #[async_trait]
+    impl Session for EchoSession {
+        async fn execute(
+            &mut self,
+            _: &QueryRequest,
+            sink: &mut dyn RowSink,
+            _: CancellationToken,
+        ) -> DriverResult<DriverOutcome> {
+            sink.columns(vec![ColumnInfo {
+                name: "value".into(),
+                data_type: "text".into(),
+                nullable: Some(false),
+            }]);
+            sink.row(vec![Cell::Text("synthetic-cell-value".into())]);
+            Ok(DriverOutcome::default())
+        }
+
+        async fn close(self: Box<Self>) -> DriverResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Driver for EchoDriver {
+        fn descriptor(&self) -> DriverDescriptor {
+            PostgresDriver.descriptor()
+        }
+        fn validate_config(&self, _: &serde_json::Value) -> DriverResult<()> {
+            Ok(())
+        }
+        async fn test(
+            &self,
+            _: &ResolvedConnection,
+            _: CancellationToken,
+        ) -> DriverResult<ServerInfo> {
+            Ok(ServerInfo { version: None })
+        }
+        async fn open_session(
+            &self,
+            _: &ResolvedConnection,
+            _: CancellationToken,
+        ) -> DriverResult<Box<dyn Session>> {
+            Ok(Box::new(EchoSession))
+        }
+        async fn introspect(
+            &self,
+            _: &ResolvedConnection,
+            _: &mut dyn IntrospectionSink,
+            _: CancellationToken,
+        ) -> DriverResult<IntrospectionReport> {
+            Ok(IntrospectionReport::default())
+        }
+    }
+
+    async fn logged_run(level: tracing::Level) -> String {
+        let (subscriber, captured) = crate::logging::capture::subscriber(level);
+        let _default = tracing::subscriber::set_default(subscriber);
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({"host":"localhost","user":"fixture","database":"fixture","sslMode":"disable"}),
+            },
+            credentials: Credentials {
+                password: Some(SecretString::from("synthetic-password-1234")),
+            },
+        };
+        let requests = ["SELECT 'synthetic-sql-marker'", "SELECT 2"]
+            .into_iter()
+            .map(|sql| QueryRequest {
+                sql: sql.into(),
+                options: ExecutionOptions::default(),
+            })
+            .collect();
+        let batch = query_with(
+            Arc::new(EchoDriver),
+            input,
+            requests,
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch.completed.len(), 2);
+        captured.text()
+    }
+
+    #[tokio::test]
+    async fn runs_never_log_passwords_cell_values_or_sql_above_trace() {
+        let text = logged_run(tracing::Level::DEBUG).await;
+        assert!(text.contains("run finished"), "{text}");
+        assert!(text.contains("elapsed_ms"), "{text}");
+        for secret in [
+            "synthetic-password-1234",
+            "synthetic-sql-marker",
+            "synthetic-cell-value",
+        ] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
+        // At trace the SQL text appears, so the capture does see it; the
+        // password and values still do not.
+        let text = logged_run(tracing::Level::TRACE).await;
+        assert!(text.contains("synthetic-sql-marker"), "{text}");
+        assert!(!text.contains("synthetic-password-1234"), "{text}");
+        assert!(!text.contains("synthetic-cell-value"), "{text}");
     }
 }

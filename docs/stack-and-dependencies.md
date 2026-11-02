@@ -13,6 +13,7 @@
 | Errors | `thiserror` 2 | One classified `DriverError` across crates |
 | Serialization | `serde`, `serde_json` | Configuration options and local JSON columns |
 | Cancellation | `tokio-util` `CancellationToken` | Every long operation |
+| Logs | `tracing`, `tracing-subscriber` (`env-filter`, `json`), `tracing-appender` | [ADR-0009](adr/0009-structured-logging-and-timings.md). Used by the `jykre` crate |
 | Platform | `dirs` (data folder), `sys-locale` (UI language) | |
 
 Development tools: `cargo xtask` (gate and catalogs), `cargo-deny` (audit),

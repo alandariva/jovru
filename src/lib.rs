@@ -9,6 +9,7 @@ pub mod drivers;
 pub mod grid;
 pub mod grouped_tabs;
 pub mod i18n;
+pub mod logging;
 pub mod query;
 pub mod result;
 pub mod sql;

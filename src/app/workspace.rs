@@ -287,6 +287,7 @@ impl Workspace {
                 ))
                 .await;
                 let _ = weak.update(cx, |this, cx| {
+                    let _timer = jykre::logging::UiTimer::start("publish result");
                     match result {
                         Ok(batch) => {
                             let completed = batch.completed.len();
@@ -820,6 +821,7 @@ impl Workspace {
                                             cx.notify();
                                             return;
                                         }
+                                        let _timer = jykre::logging::UiTimer::start("copy CSV");
                                         let csv = cell_format::result_csv(&this.result);
                                         cx.write_to_clipboard(ClipboardItem::new_string(csv));
                                         this.notice = Some(Feedback::new(

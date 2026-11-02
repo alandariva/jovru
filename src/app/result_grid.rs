@@ -136,6 +136,7 @@ impl ResultGrid {
     /// Copies the selected block as tab-separated text (a single cell as its
     /// exact value), optionally with the column names first.
     fn copy_selection(&mut self, headers: bool, cx: &mut Context<Self>) {
+        let _timer = jykre::logging::UiTimer::start("copy selection");
         let view = self.view();
         let notice = match grid::copy_selection(&self.result, &view.rows, self.selection, headers) {
             None => Feedback::new(Tone::Info, tr!("Select cells to copy.")),

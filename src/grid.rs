@@ -115,7 +115,11 @@ impl GridCache {
         let mut cached = self.0.borrow_mut();
         match cached.as_ref() {
             Some(grid) if grid.key == key => grid.clone(),
-            _ => cached.insert(Rc::new(GridView::new(result, key))).clone(),
+            _ => {
+                // Rebuilt on the UI thread once per change, never per frame.
+                let _timer = crate::logging::UiTimer::start("grid view");
+                cached.insert(Rc::new(GridView::new(result, key))).clone()
+            }
         }
     }
 }

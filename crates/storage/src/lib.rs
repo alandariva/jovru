@@ -5,7 +5,7 @@ pub use config::ConfigRepository;
 pub use metadata::{MetadataRepository, PendingRefresh, RefreshStatus};
 
 use jykre_core::*;
-use sqlx::{SqlitePool, sqlite::*};
+use sqlx::{ConnectOptions, SqlitePool, sqlite::*};
 use std::{path::Path, time::Duration};
 
 pub(crate) fn error(message: &str) -> DriverError {
@@ -32,7 +32,9 @@ pub(crate) async fn open_pool(path: &Path, durable: bool) -> DriverResult<Sqlite
                     SqliteSynchronous::Normal
                 })
                 .foreign_keys(true)
-                .busy_timeout(Duration::from_secs(5)),
+                .busy_timeout(Duration::from_secs(5))
+                // SQLx logs SQL by default; local SQL never reaches the logs.
+                .disable_statement_logging(),
         )
         .await
         .map_err(sql_error)?;

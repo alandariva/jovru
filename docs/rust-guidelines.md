@@ -91,10 +91,11 @@ session commands.
 
 ## Logs
 
-There is no logging framework yet; [ADR-0009](adr/0009-structured-logging-and-timings.md)
-proposes `tracing`. Until it is accepted, production code does not print to
-stdout or stderr. When logging is added, the rules in
-[Reliability](reliability.md#logs) apply.
+Production code logs through `tracing` ([ADR-0009](adr/0009-structured-logging-and-timings.md))
+and never prints to stdout or stderr. The rules in
+[Reliability](reliability.md#logs) apply: structured fields, spans with
+`skip_all` or explicit fields, SQL only at `trace`, and nothing from
+[Never logged](reliability.md#never-logged).
 
 ## Documentation in code
 

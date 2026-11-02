@@ -17,6 +17,7 @@ isolated folder for tests and manual checks).
 | `metadata/<connection-id>.db` | Metadata cache of one connection, refresh runs and per-scope status | Rebuildable from the server |
 | `metadata/<connection-id>.lock` | Writer lock: one refresh per cache at a time, across processes | Recreated as needed |
 | `metadata/<connection-id>.db.corrupt-<stamp>` | A cache set aside after confirmed corruption | Kept for diagnosis; safe to delete |
+| `logs/jykre.<date>.log` | JSON log lines, one file per day; the last 7 are kept ([Reliability](reliability.md#logs)) | Rotated automatically; safe to delete |
 | `connections.json` (legacy) | Profiles from earlier builds | Imported once into `config.db` in a single transaction, deleted only after the import is verified |
 
 ## SQLite configuration
