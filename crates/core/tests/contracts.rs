@@ -450,3 +450,16 @@ fn scopes_are_structural_and_validate_driver_hierarchies() {
             .is_err()
     );
 }
+
+#[test]
+fn generated_names_quote_every_structural_segment_with_the_driver_quote() {
+    let driver = TestDriver::new("test");
+    assert_eq!(driver.quote_identifier("a\"b.c"), "\"a\"\"b.c\"");
+    assert_eq!(driver.quote_identifier(""), "\"\"");
+    let path = ObjectPath::default()
+        .child(ObjectKind::Catalog, "c.1")
+        .child(ObjectKind::Schema, "s")
+        .child(ObjectKind::Table, "t")
+        .child(ObjectKind::Column, "ignored");
+    assert_eq!(driver.relation_name(&path), "\"c.1\".\"s\".\"t\"");
+}

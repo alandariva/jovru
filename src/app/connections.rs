@@ -648,7 +648,11 @@ impl AppView {
         let Some(input) = connection.input.as_ref() else {
             return;
         };
-        let sql = backend::preview_sql(path, input.config.driver);
+        let Ok(driver) = builtin_registry().and_then(|registry| registry.get(input.config.driver))
+        else {
+            return;
+        };
+        let sql = backend::preview_sql(&*driver, path);
         let title = path
             .0
             .last()
@@ -767,7 +771,8 @@ impl AppView {
                 for (index, profile) in profiles {
                     let values =
                         backend::search_metadata(&dir, profile.id, &profile.config, &query).await?;
-                    found.push((index, profile.config.driver, values));
+                    let driver = builtin_registry()?.get(profile.config.driver)?;
+                    found.push((index, driver, values));
                 }
                 Ok(found)
             })
@@ -799,7 +804,7 @@ impl AppView {
                                     this.command_matches.push((
                                         index,
                                         object.name.clone(),
-                                        backend::preview_sql(&object.path, driver),
+                                        backend::preview_sql(&*driver, &object.path),
                                     ));
                                 }
                             } else {

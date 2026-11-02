@@ -101,6 +101,17 @@ pub const ORDER_COLUMNS: [(&str, &str, bool); 7] = [
     ("updated_at", "timestamp", false),
 ];
 
+/// The SQL dialect a demo connection pretends to speak, from its name.
+pub fn dialect(connection: &str) -> &'static str {
+    if connection.contains("Databricks") {
+        "Databricks"
+    } else if connection.contains("MySQL") {
+        "MySQL"
+    } else {
+        "PostgreSQL"
+    }
+}
+
 pub fn table_sql(table: &str) -> String {
     format!("-- Preview of table public.{table}\nSELECT *\nFROM public.{table}\nLIMIT 100;")
 }

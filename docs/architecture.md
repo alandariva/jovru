@@ -213,4 +213,3 @@ value, so they cannot disagree.
 | --- | --- | --- |
 | Logic that does not need GPUI lives outside views | Query orchestration lives in `Workspace` | [ADR-0007](adr/0007-application-logic-outside-views.md) (proposed) |
 | Operation state is one enum | `Workspace` tracks a run with `running`, `executed`, `cancelled` and `execution_error` | Migrate with ADR-0007 |
-| No `match` on `DriverKind` outside drivers | `backend::preview_sql` picks the identifier quote by kind; `Workspace` picks the dialect label by kind | Move quoting to the driver's dialect; use the descriptor's display name |

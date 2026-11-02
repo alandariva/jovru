@@ -315,29 +315,9 @@ pub fn cell_text(cell: &Cell) -> String {
     }
 }
 
-/// Quote every structural SQL identifier; never split names on dots.
-pub fn preview_sql(path: &ObjectPath, driver: DriverKind) -> String {
-    let quote = if driver == DriverKind::Postgres {
-        '"'
-    } else {
-        '`'
-    };
-    let name = path
-        .0
-        .iter()
-        .filter(|part| {
-            part.kind != ObjectKind::Column
-                && !(driver == DriverKind::Postgres && part.kind == ObjectKind::Database)
-        })
-        .map(|part| {
-            format!(
-                "{quote}{}{quote}",
-                part.name.replace(quote, &format!("{quote}{quote}"))
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(".");
-    format!("SELECT * FROM {name} LIMIT 100;")
+/// A preview of the relation at `path`, quoted by the driver's rules.
+pub fn preview_sql(driver: &dyn Driver, path: &ObjectPath) -> String {
+    format!("SELECT * FROM {} LIMIT 100;", driver.relation_name(path))
 }
 
 #[cfg(test)]
@@ -449,15 +429,23 @@ mod tests {
             .child(ObjectKind::Schema, "a.b")
             .child(ObjectKind::Table, "t\"x");
         assert_eq!(
-            preview_sql(&path, DriverKind::Postgres),
+            preview_sql(&PostgresDriver, &path),
             "SELECT * FROM \"a.b\".\"t\"\"x\" LIMIT 100;"
+        );
+        let path = ObjectPath::default()
+            .child(ObjectKind::Database, "d`b")
+            .child(ObjectKind::Table, "orders")
+            .child(ObjectKind::Column, "id");
+        assert_eq!(
+            preview_sql(&MySqlDriver, &path),
+            "SELECT * FROM `d``b`.`orders` LIMIT 100;"
         );
         let path = ObjectPath::default()
             .child(ObjectKind::Catalog, "cat")
             .child(ObjectKind::Schema, "sch")
             .child(ObjectKind::Table, "a`b");
         assert_eq!(
-            preview_sql(&path, DriverKind::Databricks),
+            preview_sql(&DatabricksDriver, &path),
             "SELECT * FROM `cat`.`sch`.`a``b` LIMIT 100;"
         );
     }

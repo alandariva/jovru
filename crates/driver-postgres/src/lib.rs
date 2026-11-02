@@ -52,6 +52,17 @@ impl Driver for PostgresDriver {
         PostgresConfig::parse(options).map(|_| ())
     }
 
+    /// A session is bound to one database and PostgreSQL rejects
+    /// cross-database names, so the database is left out.
+    fn relation_name(&self, path: &ObjectPath) -> String {
+        path.0
+            .iter()
+            .filter(|part| !matches!(part.kind, ObjectKind::Database | ObjectKind::Column))
+            .map(|part| self.quote_identifier(&part.name))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
     async fn test(
         &self,
         connection: &ResolvedConnection,

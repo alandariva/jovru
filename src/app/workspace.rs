@@ -1,4 +1,4 @@
-use super::demo::{OPTIMIZED_SQL, ResultData, SALES, SALES_SQL, sample_result};
+use super::demo::{self, OPTIMIZED_SQL, ResultData, SALES, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
@@ -163,7 +163,7 @@ pub struct Workspace {
     query_split: Entity<ResizableState>,
     prompt: Entity<InputState>,
     connection: SharedString,
-    dialect: &'static str,
+    dialect: SharedString,
     database: String,
     connection_color: u32,
     title: SharedString,
@@ -264,13 +264,7 @@ impl Workspace {
             prompt,
             filter,
             connection: connection.to_string().into(),
-            dialect: if connection.contains("Databricks") {
-                "Databricks SQL"
-            } else if connection.contains("MySQL") {
-                "MySQL"
-            } else {
-                "PostgreSQL"
-            },
+            dialect: demo::dialect(connection).into(),
             database: if connection.contains("Databricks") {
                 "analytics".into()
             } else if connection.contains("MySQL") {
@@ -1892,11 +1886,10 @@ impl Workspace {
     }
 
     pub fn set_connection(&mut self, input: ResolvedConnection) {
-        self.dialect = match input.config.driver {
-            DriverKind::MySql => "MySQL",
-            DriverKind::Databricks => "Databricks SQL",
-            _ => "PostgreSQL",
-        };
+        if let Ok(driver) = builtin_registry().and_then(|registry| registry.get(input.config.driver))
+        {
+            self.dialect = driver.descriptor().display_name.into();
+        }
         self.database = input.config.options["database"]
             .as_str()
             .or(input.config.options["defaultCatalog"].as_str())
