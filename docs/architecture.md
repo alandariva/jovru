@@ -19,6 +19,7 @@ flowchart TB
         Backend[backend: operations on Tokio]
         Store[connection_store]
         Format[cell_format]
+        Sql[sql: statements, tokens, format]
         I18n[i18n]
         Tabs[grouped_tabs component]
         Drivers[drivers: registry composition]
@@ -53,7 +54,7 @@ flowchart TB
 | Layer | Location | Does | Does not |
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), value presentation rules (`cell_format`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), SQL text handling (`sql`), value presentation rules (`cell_format`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
@@ -85,7 +86,7 @@ checked in review.
 ├── src/
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
-│   │                       # drivers, grouped_tabs, i18n
+│   │                       # drivers, grouped_tabs, i18n, sql
 │   └── app/                # the application's GPUI views; demo/ holds the demo data
 ├── crates/
 │   ├── core/               # jykre-core
@@ -210,6 +211,6 @@ value, so they cannot disagree.
 
 | Standard | Current code | Plan |
 | --- | --- | --- |
-| Logic that does not need GPUI lives outside views | Statement splitting and SQL preview checks live in `src/app/sql.rs`; query orchestration lives in `Workspace` | [ADR-0007](adr/0007-application-logic-outside-views.md) (proposed) |
+| Logic that does not need GPUI lives outside views | Query orchestration lives in `Workspace` | [ADR-0007](adr/0007-application-logic-outside-views.md) (proposed) |
 | Operation state is one enum | `Workspace` tracks a run with `running`, `executed`, `cancelled` and `execution_error` | Migrate with ADR-0007 |
 | No `match` on `DriverKind` outside drivers | `backend::preview_sql` picks the identifier quote by kind; `Workspace` picks the dialect label by kind | Move quoting to the driver's dialect; use the descriptor's display name |

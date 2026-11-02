@@ -371,7 +371,7 @@ impl Workspace {
         if self.running {
             return;
         }
-        let statements = super::sql::normalized_statements(&self.editor_sql);
+        let statements = jykre::sql::normalized_statements(&self.editor_sql);
         self.query_statuses = carry_statuses(&self.status_sql, &self.query_statuses, &statements);
         self.status_sql = statements;
     }
@@ -391,7 +391,7 @@ impl Workspace {
             return;
         }
         let sql = self.editor.read(cx).text().to_string();
-        let ranges = super::sql::statements(&sql);
+        let ranges = jykre::sql::statements(&sql);
         let queries: Vec<_> = ranges
             .iter()
             .enumerate()
@@ -498,7 +498,7 @@ impl Workspace {
                             return false;
                         }
                         this.executions += 1;
-                        if let Some(error) = super::sql::preview_error(&sql) {
+                        if let Some(error) = jykre::sql::preview_error(&sql) {
                             this.set_status(index, QueryStatus::Error);
                             this.execution_error =
                                 Some(tr!("Error in query {0}: {1}", index + 1, error));
@@ -639,7 +639,7 @@ impl Workspace {
                     .child(button("format", I::TextAlignStart, tr!("Format")).on_click(
                         cx.listener(|this, _, window, cx| {
                             let sql = this.editor.read(cx).text().to_string();
-                            let formatted = super::sql::format(&sql);
+                            let formatted = jykre::sql::format(&sql);
                             if formatted == sql {
                                 this.notice = Some(Feedback::new(
                                     Tone::Info,
@@ -732,7 +732,7 @@ impl Workspace {
     fn query_gutter(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = self.editor.clone();
         let sql = editor.read(cx).text().to_string();
-        let buttons: Vec<_> = super::sql::statements(&sql)
+        let buttons: Vec<_> = jykre::sql::statements(&sql)
             .into_iter()
             .enumerate()
             .map(|(index, range)| {
@@ -2069,7 +2069,7 @@ mod tests {
         // A filter that hides an end of the block hides the selection.
         assert_eq!(selection_block(selection, &[5, 4, 3]), None);
     }
-    use crate::app::sql::normalized_statements;
+    use jykre::sql::normalized_statements;
 
     #[test]
     fn edits_keep_the_status_of_unchanged_statements() {
