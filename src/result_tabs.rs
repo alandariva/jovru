@@ -5,6 +5,7 @@
 //! created, Ctrl+Shift+Enter opens new ones and running everything replaces
 //! them all. A tab holds its result page by page: the first page arrives with
 //! the run, the next ones are read from the result the session keeps open.
+use crate::error_report::ErrorReport;
 use crate::result::{ResultColumn, ResultData, ResultLimit};
 use std::rc::Rc;
 
@@ -28,8 +29,8 @@ pub struct ResultId(u64);
 pub enum ResultState {
     Running,
     Done,
-    /// The statement failed; the tab shows this message instead of rows.
-    Failed(String),
+    /// The statement failed; the tab shows this report instead of rows.
+    Failed(Box<ErrorReport>),
     Cancelled,
 }
 
@@ -48,6 +49,9 @@ pub struct ResultTab {
     pub number: usize,
     /// The statement that produced the result.
     pub sql: String,
+    /// Byte offset of the statement in the editor when it ran, to mark an
+    /// error's position there.
+    pub origin: Option<usize>,
     pub state: ResultState,
     pub rows_affected: Option<u64>,
     pub elapsed_ms: u128,
@@ -73,6 +77,7 @@ impl ResultTab {
             id,
             number,
             sql,
+            origin: None,
             state: ResultState::Running,
             rows_affected: None,
             elapsed_ms: 0,
@@ -321,9 +326,16 @@ impl ResultTabs {
         }
     }
 
-    pub fn fail(&mut self, id: ResultId, error: String) {
+    /// Records where the statement of `id` started in the editor.
+    pub fn set_origin(&mut self, id: ResultId, origin: usize) {
         if let Some(tab) = self.get_mut(id) {
-            tab.state = ResultState::Failed(error);
+            tab.origin = Some(origin);
+        }
+    }
+
+    pub fn fail(&mut self, id: ResultId, error: ErrorReport) {
+        if let Some(tab) = self.get_mut(id) {
+            tab.state = ResultState::Failed(Box::new(error));
             tab.has_more = false;
             let pages = std::mem::take(&mut tab.pages);
             self.drop_pages(pages);
@@ -483,13 +495,12 @@ mod tests {
                 ..Completed::default()
             },
         );
-        tabs.fail(ids[1], "syntax error".into());
+        tabs.fail(ids[1], ErrorReport::database("syntax error"));
         tabs.discard(&ids[2..]);
         assert_eq!(tabs.tabs().len(), 2);
         assert_eq!(tabs.tabs()[0].current().unwrap().data.row_count(), 2);
-        assert_eq!(
-            tabs.tabs()[1].state,
-            ResultState::Failed("syntax error".into())
+        assert!(
+            matches!(&tabs.tabs()[1].state, ResultState::Failed(report) if report.message == "syntax error")
         );
         assert!(tabs.tabs()[1].current().is_none());
     }

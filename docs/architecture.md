@@ -131,7 +131,7 @@ The full types live in `jykre-core`.
 | `QueryRequest`, `ExecutionOptions` | SQL as written plus row limit, timeout and session context. |
 | `ColumnInfo`, `Cell`, `Row`, `RowSink` | Streaming result model; NULL and exact decimals are preserved. |
 | `MetadataObject`, `ObjectPath` | Database, catalog, schema, table, view and column nodes addressed by structural paths. |
-| `DriverError`, `ErrorCode` | Classified errors; messages never contain secrets, SQL or raw configuration. |
+| `DriverError`, `ErrorCode`, `ServerDiagnostic` | Classified errors; messages never contain secrets, SQL or raw configuration. A database error keeps the server's own message, SQLSTATE, vendor code and position. |
 
 ## Main flows
 

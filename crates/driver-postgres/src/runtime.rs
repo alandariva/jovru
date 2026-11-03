@@ -11,20 +11,57 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{collections::HashSet, future::Future, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
+/// Classifies an SQLx error. A database error keeps the server's own message,
+/// detail and hint, its SQLSTATE and the position it reported; errors from
+/// the connection keep the operating system's reason. Anything else (such as
+/// configuration, which may hold the connection URL) gets a fixed message.
 fn map_error(error: sqlx::Error) -> DriverError {
-    let code = match &error {
-        sqlx::Error::Database(db) => match db.code().as_deref() {
-            Some("28P01" | "28000" | "1045") => ErrorCode::Authentication,
-            Some("42501" | "1142" | "1044") => ErrorCode::PermissionDenied,
-            _ => ErrorCode::Database,
-        },
-        sqlx::Error::Io(_) | sqlx::Error::Tls(_) => ErrorCode::Connection,
-        _ => ErrorCode::Protocol,
-    };
-    DriverError::new(
-        code,
-        "Database operation failed; check connectivity, permissions and SQL",
-    )
+    match &error {
+        sqlx::Error::Database(db) => {
+            let state = db.code().map(|code| code.into_owned());
+            let code = match state.as_deref() {
+                Some("28P01" | "28000") => ErrorCode::Authentication,
+                Some("42501") => ErrorCode::PermissionDenied,
+                _ => ErrorCode::Database,
+            };
+            let mut message = db.message().to_owned();
+            let mut position = None;
+            if let Some(pg) = db.try_downcast_ref::<sqlx::postgres::PgDatabaseError>() {
+                if let Some(detail) = pg.detail() {
+                    message.push_str("\nDetail: ");
+                    message.push_str(detail);
+                }
+                if let Some(hint) = pg.hint() {
+                    message.push_str("\nHint: ");
+                    message.push_str(hint);
+                }
+                if let Some(sqlx::postgres::PgErrorPosition::Original(at)) = pg.position() {
+                    position = Some(at);
+                }
+            }
+            DriverError::from_server(
+                code,
+                message,
+                ServerDiagnostic {
+                    sqlstate: state,
+                    vendor_code: None,
+                    position,
+                },
+            )
+        }
+        sqlx::Error::Io(io) => DriverError::new(
+            ErrorCode::Connection,
+            format!("Could not reach the server: {io}"),
+        ),
+        sqlx::Error::Tls(tls) => DriverError::new(
+            ErrorCode::Connection,
+            format!("The TLS connection failed: {tls}"),
+        ),
+        _ => DriverError::new(
+            ErrorCode::Protocol,
+            "Database operation failed; check connectivity, permissions and SQL",
+        ),
+    }
 }
 /// How long a session may take to cancel a statement on the server, and then
 /// to get back to a known protocol state, before it is closed.

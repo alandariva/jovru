@@ -77,6 +77,9 @@ impl RunId {
 pub struct Plan {
     pub id: RunId,
     pub statements: Vec<(usize, String)>,
+    /// Byte offset in the editor where each statement's text starts, to mark
+    /// the position of an error there.
+    pub starts: Vec<usize>,
 }
 
 /// How the backend finished a run.
@@ -125,6 +128,11 @@ impl QueryRun {
         &self.state
     }
 
+    /// The identity of the last run started.
+    pub fn current_id(&self) -> RunId {
+        self.current
+    }
+
     pub fn is_active(&self) -> bool {
         self.state.is_active()
     }
@@ -170,13 +178,16 @@ impl QueryRun {
         let whole = |index: usize| -> Option<(usize, String)> {
             Some((index, sql.get(ranges.get(index)?.clone())?.to_owned()))
         };
-        let statements: Vec<_> = match scope {
-            Scope::All => (0..ranges.len()).filter_map(whole).collect(),
-            Scope::Statement(index) => whole(index).into_iter().collect(),
+        let whole_at = |index: usize| -> Option<((usize, String), usize)> {
+            Some((whole(index)?, ranges.get(index)?.start))
+        };
+        let (statements, starts): (Vec<_>, Vec<_>) = match scope {
+            Scope::All => (0..ranges.len()).filter_map(whole_at).unzip(),
+            Scope::Statement(index) => whole_at(index).into_iter().unzip(),
             Scope::Cursor(cursor) => sql::statement_at(sql, cursor)
-                .and_then(whole)
+                .and_then(whole_at)
                 .into_iter()
-                .collect(),
+                .unzip(),
             Scope::Selection(selection) => {
                 let text = sql.get(selection.clone()).unwrap_or_default();
                 sql::statements(text)
@@ -189,9 +200,9 @@ impl QueryRun {
                             .iter()
                             .position(|statement| statement.end > start)
                             .unwrap_or(ranges.len().saturating_sub(1));
-                        (index, text[range].to_owned())
+                        ((index, text[range].to_owned()), start)
                     })
-                    .collect()
+                    .unzip()
             }
         };
         if statements.is_empty() {
@@ -212,6 +223,7 @@ impl QueryRun {
         Some(Plan {
             id: self.current,
             statements,
+            starts,
         })
     }
 
@@ -475,6 +487,9 @@ mod tests {
             planned(select("SELECT 1")),
             Some(vec![(1, "SELECT 1".to_owned())])
         );
+        let starts = |scope: Scope| QueryRun::new(sql).start(sql, scope).map(|plan| plan.starts);
+        assert_eq!(starts(Scope::All), Some(vec![0, 21, 32]));
+        assert_eq!(starts(select("1")), Some(vec![sql.find("1;").unwrap()]));
         assert_eq!(
             planned(select("users; SELECT 1;")),
             Some(vec![(0, "users;".to_owned()), (1, "SELECT 1;".to_owned())])

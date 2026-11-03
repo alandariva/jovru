@@ -140,5 +140,4 @@ parameters, and SQL above `trace`. See [Security](security.md#logs-and-diagnosti
 | --- | --- |
 | Retries with backoff for idempotent reads | No automatic retries |
 | Clean shutdown with a deadline | Dropping a workspace cancels its run; there is no explicit shutdown sequence |
-| Copy details on errors | Errors show their message only |
 | A menu entry opens the log folder | Logs are written, but the folder is opened by hand |

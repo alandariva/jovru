@@ -45,6 +45,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Preservar metadados seguros do driver (`code`, mensagem do servidor, posição) e renderizar título + mensagem + ação + detalhes copiáveis.
 - **Evidência no projeto:** `crates/driver-postgres/src/runtime.rs` (`map_error`); `crates/driver-mysql/src/runtime.rs`; `src/query.rs` (`finish`); `src/app/workspace.rs` (`ResultState::Failed`); `src/app/connections.rs` (`test_connection`)
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. `DriverError` carrega `ServerDiagnostic` (SQLSTATE, código do fornecedor, posição) e a mensagem do servidor; PostgreSQL inclui detail/hint, MySQL usa o número do erro (1045, 1142…) e Databricks repassa `status.error`. `src/error_report.rs` dá título por código/classe SQLSTATE, ação sugerida e **Copy details**; o result tab mostra tudo, põe o cursor na posição (sem selecionar) e oferece “Go to the position”, que também foca o editor. O teste de conexão mostra título, mensagem e ação.
 
 ## N005 — Mensagem transacional e transação explícita invisível
 

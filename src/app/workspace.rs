@@ -17,6 +17,7 @@ use jykre::tr;
 use jykre::{
     backend, cell_format,
     drivers::*,
+    error_report::ErrorReport,
     query::{Outcome, QueryRun, RunState, Scope, StatementStatus},
     result::{DEFAULT_MEMORY_CEILING, DEFAULT_ROW_LIMIT, ResultData, ResultLimit},
     result_tabs::{Completed, Placement, ResultId, ResultState, ResultTab, ResultTabs},
@@ -480,6 +481,9 @@ impl Workspace {
         let queries = plan.statements;
         let texts: Vec<String> = queries.iter().map(|(_, sql)| sql.clone()).collect();
         let tabs = self.results.begin(&texts, placement);
+        for (tab, start) in tabs.iter().zip(&plan.starts) {
+            self.results.set_origin(*tab, *start);
+        }
         self.result_view = ResultView::Table;
         self.notice = None;
         self.show_active(cx);
@@ -528,7 +532,7 @@ impl Workspace {
                     match result {
                         Ok(batch) => {
                             let completed = batch.completed.len();
-                            let failure = batch.error.as_ref().map(ToString::to_string);
+                            let failure = batch.error.as_ref().map(ErrorReport::new);
                             let outcome = Outcome::Batch {
                                 completed,
                                 error: batch.error,
@@ -560,15 +564,17 @@ impl Workspace {
                                     && let Some(tab) = tabs.get(completed)
                                 {
                                     this.results.fail(*tab, failure);
+                                    this.mark_error(*tab, cx);
                                 }
                                 this.results.discard(&tabs[ran.min(tabs.len())..]);
                             } else {
-                                this.end_unfinished(&tabs);
+                                this.end_unfinished(&tabs, None);
                             }
                         }
                         Err(error) => {
+                            let report = ErrorReport::new(&error);
                             this.run.finish(id, Outcome::Failed(error));
-                            this.end_unfinished(&tabs);
+                            this.end_unfinished(&tabs, Some(report));
                         }
                     }
                     this.show_active(cx);
@@ -594,7 +600,7 @@ impl Workspace {
                     .unwrap_or(false);
                 if !active {
                     let _ = weak.update(cx, |this, cx| {
-                        this.end_unfinished(&tabs);
+                        this.end_unfinished(&tabs, None);
                         this.show_active(cx);
                     });
                     return;
@@ -621,10 +627,10 @@ impl Workspace {
                                 sql,
                             });
                         } else if let Some(error) = error {
-                            this.results.fail(tab, error.to_owned());
+                            this.results.fail(tab, ErrorReport::database(error));
                             this.results.discard(&tabs[position + 1..]);
                         } else {
-                            this.end_unfinished(&tabs);
+                            this.end_unfinished(&tabs, None);
                         }
                         this.show_active(cx);
                         shown
@@ -644,17 +650,75 @@ impl Workspace {
 
     /// The tabs of a run that ended without results: cancelled, superseded or
     /// failed as a whole. A whole-run error shows in its first tab.
-    fn end_unfinished(&mut self, tabs: &[ResultId]) {
-        if let RunState::Failed { error } = self.run.state()
+    fn end_unfinished(&mut self, tabs: &[ResultId], failure: Option<ErrorReport>) {
+        if let RunState::Failed { .. } = self.run.state()
+            && let Some(failure) = failure
             && let Some(first) = tabs.first()
         {
-            self.results.fail(*first, error.clone());
+            self.results.fail(*first, failure);
             self.results.discard(&tabs[1..]);
             return;
         }
         for tab in tabs {
             self.results.cancel(*tab);
         }
+    }
+
+    /// Where the failed statement of result `id` stops, as a byte offset in
+    /// the editor: the statement must still be where it ran, or appear once
+    /// in the editor.
+    fn error_offset(&self, id: ResultId) -> Option<usize> {
+        let tab = self.results.get(id)?;
+        let ResultState::Failed(report) = &tab.state else {
+            return None;
+        };
+        let offset = report.offset_in(&tab.sql)?;
+        let sql = &self.editor_sql;
+        let start = tab
+            .origin
+            .filter(|start| sql.get(*start..*start + tab.sql.len()) == Some(tab.sql.as_str()))
+            .or_else(|| {
+                let mut found = sql.match_indices(tab.sql.as_str()).map(|(at, _)| at);
+                let first = found.next()?;
+                found.next().is_none().then_some(first)
+            })?;
+        Some(start + offset)
+    }
+
+    /// Puts the cursor where the server stopped, when the editor still holds
+    /// the statement ([UX](../../docs/ux.md#error-messages)). Nothing is
+    /// selected, so the next key never replaces text.
+    fn mark_error(&mut self, id: ResultId, cx: &mut Context<Self>) {
+        if let Some(at) = self.error_offset(id) {
+            self.editor
+                .update(cx, |editor, cx| editor.set_selected_range(at..at, cx));
+        }
+    }
+
+    /// Moves the cursor to the error's position and focuses the editor.
+    fn go_to_error(&mut self, id: ResultId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self.error_offset(id) else {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!("The statement changed in the editor since it ran."),
+            ));
+            cx.notify();
+            return;
+        };
+        let before = &self.editor_sql[..at];
+        let line = before.matches('\n').count();
+        let character = before
+            .rsplit_once('\n')
+            .map_or(before, |(_, line)| line)
+            .chars()
+            .count();
+        self.editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(
+                gpui_kit::component::input::Position::new(line as u32, character as u32),
+                window,
+                cx,
+            );
+        });
     }
 
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1315,18 +1379,7 @@ impl Workspace {
                     tr!("Preparing the demo…")
                 }))
                 .into_any_element(),
-            ResultState::Failed(error) => centered()
-                .id("result-error")
-                .role(Role::Alert)
-                .aria_label(error.clone())
-                .child(icon(I::CircleX, RED))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(rgb(RED))
-                        .child(error.clone()),
-                )
-                .into_any_element(),
+            ResultState::Failed(report) => self.result_error(tab, report, cx),
             ResultState::Cancelled => centered()
                 .child(icon(I::Ban, AMBER))
                 .child(label(tr!("Execution cancelled")))
@@ -1357,6 +1410,90 @@ impl Workspace {
         }
     }
 
+    /// A failed statement: the title, the database's own message, its codes
+    /// and position, a suggested action and **Copy details**.
+    fn result_error(
+        &self,
+        tab: &ResultTab,
+        report: &ErrorReport,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = tab.id;
+        let position = report
+            .line_and_column(&tab.sql)
+            .map(|(line, column)| tr!("Line {0}, column {1} of the statement", line, column));
+        let codes = match (report.codes(), position.clone()) {
+            (Some(codes), Some(position)) => Some(format!("{codes} · {position}")),
+            (codes, position) => codes.or(position),
+        };
+        let details = report.details(&tr!("Run {0} · result {1}", self.run_number(), tab.number));
+        column()
+            .id("result-error")
+            .role(Role::Alert)
+            .aria_label(format!("{}. {}", report.title, report.message))
+            .size_full()
+            .overflow_y_scroll()
+            .p_4()
+            .gap_2()
+            .child(
+                row().gap_2().child(icon(I::CircleX, RED)).child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(RED))
+                        .child(report.title.clone()),
+                ),
+            )
+            .child(
+                div()
+                    .pl(px(24.))
+                    .font_family("Cascadia Mono")
+                    .text_size(px(12.))
+                    .line_height(relative(1.5))
+                    .text_color(rgb(TEXT))
+                    .child(report.message.clone()),
+            )
+            .when_some(codes, |s, codes| {
+                s.child(div().pl(px(24.)).child(label(codes)))
+            })
+            .when_some(report.action.clone(), |s, action| {
+                s.child(
+                    div()
+                        .pl(px(24.))
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child(action),
+                )
+            })
+            .child(
+                row()
+                    .pl(px(24.))
+                    .gap_2()
+                    .child(button("copy-error", I::Copy, tr!("Copy details")).on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                            this.notice =
+                                Some(Feedback::new(Tone::Success, tr!("Error details copied.")));
+                            cx.notify();
+                        }),
+                    ))
+                    .when(position.is_some(), |s| {
+                        s.child(
+                            button("go-to-error", I::CornerDownLeft, tr!("Go to the position"))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.go_to_error(id, window, cx)
+                                })),
+                        )
+                    }),
+            )
+            .into_any_element()
+    }
+
+    /// The number of the last run of this tab, for error details.
+    fn run_number(&self) -> u64 {
+        self.run.current_id().get()
+    }
+
     /// The single place that reports how the result on screen ended, with
     /// its pages.
     fn result_footer(&self, cx: &mut Context<Self>) -> Div {
@@ -1376,14 +1513,11 @@ impl Workspace {
                 )
             } else if let Some(tab) = tab {
                 match &tab.state {
-                    ResultState::Failed(_) => match state {
-                        RunState::Failed { error } => (
-                            I::CircleX,
-                            RED,
-                            tr!("Query error").into(),
-                            Some(error.clone()),
-                        ),
-                        _ => (I::CircleX, RED, tr!("Query error").into(), None),
+                    ResultState::Failed(report) => match state {
+                        RunState::Failed { error } => {
+                            (I::CircleX, RED, report.title.clone(), Some(error.clone()))
+                        }
+                        _ => (I::CircleX, RED, report.title.clone(), None),
                     },
                     ResultState::Cancelled => {
                         (I::Ban, AMBER, tr!("Execution cancelled").into(), None)
@@ -1896,7 +2030,15 @@ impl Workspace {
 fn result_status(tab: &ResultTab) -> (I, u32, String) {
     match &tab.state {
         ResultState::Running => (I::LoaderCircle, AMBER, tr!("Running…").into()),
-        ResultState::Failed(error) => (I::CircleX, RED, error.clone()),
+        ResultState::Failed(report) => (
+            I::CircleX,
+            RED,
+            format!(
+                "{}: {}",
+                report.title,
+                report.message.lines().next().unwrap_or_default()
+            ),
+        ),
         ResultState::Cancelled => (I::Ban, AMBER, tr!("Execution cancelled").into()),
         ResultState::Done => {
             let (_, _, text, _) = page_summary(tab);

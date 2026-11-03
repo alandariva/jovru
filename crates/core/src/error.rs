@@ -20,11 +20,28 @@ pub enum ErrorCode {
 }
 
 /// Messages must not contain credentials, SQL, raw configuration or CLI output.
+/// A database's own error message may be passed through, with what the server
+/// said about it in [`DriverError::server`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct DriverError {
     pub code: ErrorCode,
     pub message: String,
+    /// What the database reported, when the error came from the server.
+    pub server: Option<ServerDiagnostic>,
+}
+
+/// The parts of a database error the user needs to fix the SQL: the server's
+/// own code and where in the statement it stopped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerDiagnostic {
+    /// The standard SQLSTATE, when the server sends one.
+    pub sqlstate: Option<String>,
+    /// The server's own code: a MySQL error number or a Databricks error
+    /// class.
+    pub vendor_code: Option<String>,
+    /// One-based position, in characters, in the statement as sent.
+    pub position: Option<usize>,
 }
 
 impl DriverError {
@@ -32,6 +49,20 @@ impl DriverError {
         Self {
             code,
             message: message.into(),
+            server: None,
+        }
+    }
+
+    /// An error the database reported, with its own message.
+    pub fn from_server(
+        code: ErrorCode,
+        message: impl Into<String>,
+        server: ServerDiagnostic,
+    ) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            server: Some(server),
         }
     }
 

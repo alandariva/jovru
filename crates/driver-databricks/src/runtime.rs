@@ -9,6 +9,35 @@ use tokio::{io::AsyncReadExt, process::Command};
 fn error(code: ErrorCode, message: &str) -> DriverError {
     DriverError::new(code, message)
 }
+/// A failed statement keeps the warehouse's own message and error class;
+/// the SQLSTATE comes from the message when Databricks includes it.
+fn statement_error(status: &Value) -> DriverError {
+    let Some(message) = status["message"].as_str().filter(|m| !m.trim().is_empty()) else {
+        return error(ErrorCode::Database, "Databricks SQL statement failed");
+    };
+    let sqlstate = message.split_once("SQLSTATE: ").and_then(|(_, rest)| {
+        let state: String = rest
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        (state.len() == 5).then_some(state)
+    });
+    let vendor_code = status["error_code"].as_str().map(str::to_owned);
+    let code = match vendor_code.as_deref() {
+        Some("PERMISSION_DENIED") => ErrorCode::PermissionDenied,
+        Some("UNAUTHENTICATED") => ErrorCode::Authentication,
+        _ => ErrorCode::Database,
+    };
+    DriverError::from_server(
+        code,
+        message.to_owned(),
+        ServerDiagnostic {
+            sqlstate,
+            vendor_code,
+            position: None,
+        },
+    )
+}
 fn protocol() -> DriverError {
     error(ErrorCode::Protocol, "Invalid Databricks API response")
 }
@@ -784,12 +813,7 @@ impl Session for DatabricksSession {
                         response = self.client.request(Method::GET, &path, &[], None).await?;
                     }
                     Some("CANCELED") => return Err(DriverError::cancelled()),
-                    _ => {
-                        return Err(error(
-                            ErrorCode::Database,
-                            "Databricks SQL statement failed",
-                        ));
-                    }
+                    _ => return Err(statement_error(&response["status"]["error"])),
                 }
             }
             // Statements without a result (USE, DDL) may leave the column
@@ -1132,6 +1156,25 @@ mod tests {
         ] {
             assert_eq!(use_statement(other), None, "{other}");
         }
+    }
+
+    #[test]
+    fn a_failed_statement_keeps_the_warehouse_message_and_codes() {
+        let error = statement_error(&json!({
+            "error_code": "BAD_REQUEST",
+            "message": "[TABLE_OR_VIEW_NOT_FOUND] The table or view `missing` cannot be found. SQLSTATE: 42P01; line 1 pos 14"
+        }));
+        assert_eq!(error.code, ErrorCode::Database);
+        assert!(error.message.contains("`missing` cannot be found"));
+        let server = error.server.unwrap();
+        assert_eq!(server.sqlstate.as_deref(), Some("42P01"));
+        assert_eq!(server.vendor_code.as_deref(), Some("BAD_REQUEST"));
+        let denied = statement_error(&json!({"error_code":"PERMISSION_DENIED","message":"no"}));
+        assert_eq!(denied.code, ErrorCode::PermissionDenied);
+        // Without a message the error stays generic.
+        let bare = statement_error(&json!(null));
+        assert_eq!(bare.message, "Databricks SQL statement failed");
+        assert_eq!(bare.server, None);
     }
 
     #[tokio::test]

@@ -11,6 +11,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::{collections::HashSet, future::Future, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
+/// Classifies an SQLx error. A database error keeps the server's own message
+/// and its error number and SQLSTATE; errors from the connection keep the
+/// operating system's reason. Anything else (such as configuration, which may
+/// hold the connection URL) gets a fixed message.
 fn map_error(error: sqlx::Error) -> DriverError {
     if matches!(&error, sqlx::Error::Protocol(message) if message.contains("RSA auth backend disabled"))
     {
@@ -19,19 +23,43 @@ fn map_error(error: sqlx::Error) -> DriverError {
             "This MySQL authentication method requires TLS; select required or verify-identity",
         );
     }
-    let code = match &error {
-        sqlx::Error::Database(db) => match db.code().as_deref() {
-            Some("28P01" | "28000" | "1045") => ErrorCode::Authentication,
-            Some("42501" | "1142" | "1044") => ErrorCode::PermissionDenied,
-            _ => ErrorCode::Database,
-        },
-        sqlx::Error::Io(_) | sqlx::Error::Tls(_) => ErrorCode::Connection,
-        _ => ErrorCode::Protocol,
-    };
-    DriverError::new(
-        code,
-        "Database operation failed; check connectivity, permissions and SQL",
-    )
+    match &error {
+        sqlx::Error::Database(db) => {
+            // SQLx reports the SQLSTATE as the code; the MySQL error number is
+            // the precise one (1045 access denied, 1142 table access denied).
+            let number = db
+                .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+                .map(|my| my.number());
+            let code = match (number, db.code().as_deref()) {
+                (Some(1045 | 1698), _) | (_, Some("28000")) => ErrorCode::Authentication,
+                (Some(1044 | 1142 | 1143 | 1227 | 1370), _) | (_, Some("42501")) => {
+                    ErrorCode::PermissionDenied
+                }
+                _ => ErrorCode::Database,
+            };
+            DriverError::from_server(
+                code,
+                db.message().to_owned(),
+                ServerDiagnostic {
+                    sqlstate: db.code().map(|state| state.into_owned()),
+                    vendor_code: number.map(|number| number.to_string()),
+                    position: None,
+                },
+            )
+        }
+        sqlx::Error::Io(io) => DriverError::new(
+            ErrorCode::Connection,
+            format!("Could not reach the server: {io}"),
+        ),
+        sqlx::Error::Tls(tls) => DriverError::new(
+            ErrorCode::Connection,
+            format!("The TLS connection failed: {tls}"),
+        ),
+        _ => DriverError::new(
+            ErrorCode::Protocol,
+            "Database operation failed; check connectivity, permissions and SQL",
+        ),
+    }
 }
 /// How long a session may take to cancel a statement on the server, or to
 /// read what is left of a result, before it is closed.

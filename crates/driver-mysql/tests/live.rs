@@ -254,6 +254,11 @@ async fn live_connection_queries_metadata_and_timeout() {
         .await
         .unwrap_err();
     assert_eq!(failed.code, ErrorCode::Database);
+    // The server's own message, error number and SQLSTATE reach the user.
+    assert!(failed.message.contains("jykre_missing_table"), "{failed:?}");
+    let server = failed.server.clone().unwrap();
+    assert_eq!(server.vendor_code.as_deref(), Some("1146"));
+    assert_eq!(server.sqlstate.as_deref(), Some("42S02"));
     assert_kept(&mut session).await;
     // A long result cut by the row limit, then one cancelled while its rows
     // stream: the rest is drained or stopped, and the session is kept.

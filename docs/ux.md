@@ -139,6 +139,5 @@ interactive elements expose a role, a label and their state. Details are in
 | Standard | Current code |
 | --- | --- |
 | Elapsed time and cancel for runs over 2 s | The Run button cancels, but the footer shows "Running…" without the elapsed time |
-| Error title, suggested action and **Copy details** | Errors show the message only |
-| Syntax error position marked in the editor | Not implemented |
+| Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Shortcuts as actions in one keymap | Only the three run shortcuts are actions ([UI guidelines](ui-guidelines.md#known-deviations)) |

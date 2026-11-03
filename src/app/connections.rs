@@ -223,7 +223,10 @@ impl AppView {
                     Ok(_) => {
                         Feedback::new(Tone::Success, tr!("Connection established successfully."))
                     }
-                    Err(error) => Feedback::new(Tone::Error, error.to_string()),
+                    Err(error) => Feedback::new(
+                        Tone::Error,
+                        jykre::error_report::ErrorReport::new(&error).summary(),
+                    ),
                 });
                 cx.notify();
             });
