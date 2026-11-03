@@ -397,6 +397,14 @@ impl GroupedTabs {
         cx.notify();
     }
 
+    /// Moves keyboard focus to the selected tab, for example after the host
+    /// closed one from the keyboard.
+    pub fn focus_active(&self, window: &mut Window, cx: &mut App) {
+        if let Some(tab) = self.model.active {
+            self.focus_tab(tab, window, cx);
+        }
+    }
+
     fn focus_tab(&self, tab: TabId, window: &mut Window, cx: &mut App) {
         if let Some(tab) = self.model.tab(tab) {
             window.focus(&tab.content.focus, cx);
@@ -739,19 +747,23 @@ impl GroupedTabs {
                             .bg(tab_separator_color),
                     )
                 })
+                // The selected tab always shows its close button and it is the
+                // next Tab stop after the tab; the others show it on hover.
                 .child(
                     div()
                         .absolute()
                         .right(px(4.))
                         .top(px(7.))
-                        .invisible()
-                        .group_hover(hover_group, |style| style.visible())
+                        .when(!selected, |this| {
+                            this.invisible()
+                                .group_hover(hover_group, |style| style.visible())
+                        })
                         .child(
                             Button::new(("close-tab", tab_id.0))
                                 .ghost()
                                 .xsmall()
                                 .size(px(24.))
-                                .tab_stop(false)
+                                .tab_stop(selected)
                                 .icon(IconName::Close)
                                 .accessibility_label(tr!("Close {0}", tab.title))
                                 .tooltip(tr!("Close {0}", tab.title))

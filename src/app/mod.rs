@@ -66,7 +66,10 @@ actions!(
         /// Ctrl+Shift+Enter: the same, in a new result tab.
         ExecuteCurrentQueryInNewResult,
         /// Ctrl+Alt+Enter: every statement in the tab, one result tab each.
-        ExecuteAllQueries
+        ExecuteAllQueries,
+        /// Ctrl+W or Ctrl+F4: closes the query tab on screen, asking first
+        /// when it is running or has SQL that is not saved.
+        CloseActiveTab
     ]
 );
 
@@ -510,7 +513,13 @@ impl AppView {
         } else {
             "SELECT * FROM orders LIMIT 100;"
         };
-        self.add_query(group, &title, sql, window, cx);
+        // The new tab takes the keyboard, so its shortcuts (run, close) work
+        // at once.
+        if let Some(tab) = self.add_query(group, &title, sql, window, cx)
+            && let Some(panel) = self.panels.get(&tab)
+        {
+            panel.update(cx, |panel, cx| panel.focus_editor(window, cx));
+        }
     }
 
     /// The tab group of the connection at `index`. Connections outlive their
@@ -546,28 +555,53 @@ impl AppView {
         }
     }
 
-    /// Closes a tab, asking first when a query is running in it, since
-    /// closing cancels the query.
+    /// Closes a tab, asking first when a query is running in it (closing
+    /// cancels it) or when its SQL is not saved (closing loses it).
     fn request_close(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let busy = self
-            .panels
-            .get(&tab)
-            .is_some_and(|panel| panel.read(cx).is_busy());
-        if !busy {
-            let _ = self.tabs.update(cx, |tabs, cx| tabs.close_tab(tab, cx));
-            return;
-        }
+        let (busy, unsaved) = self.panels.get(&tab).map_or((false, false), |panel| {
+            let panel = panel.read(cx);
+            (panel.is_busy(), panel.has_unsaved_sql())
+        });
         let tabs = self.tabs.downgrade();
+        let close = move |window: Option<&mut Window>, cx: &mut App| {
+            let _ = tabs.update(cx, |tabs, cx| {
+                let _ = tabs.close_tab(tab, cx);
+                if let Some(window) = window {
+                    tabs.focus_active(window, cx);
+                }
+            });
+        };
+        let (title, description, ok) = match (busy, unsaved) {
+            (false, false) => {
+                close(Some(window), cx);
+                return;
+            }
+            (true, false) => (
+                tr!("A query is running in this tab.").to_string(),
+                tr!("Closing the tab cancels the query.").to_string(),
+                tr!("Close and cancel"),
+            ),
+            (false, true) => (
+                tr!("Close the tab without saving its SQL?").to_string(),
+                tr!("The SQL is not in the saved queries, so closing the tab loses it.")
+                    .to_string(),
+                tr!("Close without saving"),
+            ),
+            (true, true) => (
+                tr!("A query is running in this tab.").to_string(),
+                tr!("Closing the tab cancels the query and loses its SQL, which is not in the saved queries.")
+                    .to_string(),
+                tr!("Close and cancel"),
+            ),
+        };
         confirm(
             window,
             cx,
-            tr!("A query is running in this tab.").into(),
-            tr!("Closing the tab cancels the query.").into(),
-            tr!("Close and cancel"),
+            title,
+            description,
+            ok,
             tr!("Keep the tab"),
-            move |cx| {
-                let _ = tabs.update(cx, |tabs, cx| tabs.close_tab(tab, cx));
-            },
+            move |cx| close(None, cx),
         );
     }
 
@@ -1340,6 +1374,14 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ExecuteAllQueries, _, cx| {
                 this.with_active_panel(cx, Workspace::execute_all);
             }))
+            .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
+                if this.connection_open || this.command_open {
+                    return;
+                }
+                if let Some(tab) = this.tabs.read(cx).active_tab() {
+                    this.request_close(tab, window, cx);
+                }
+            }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     if this.command_open {
@@ -1511,6 +1553,10 @@ pub fn run() {
                 Some(&editor),
             ),
             KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, Some(&editor)),
+            KeyBinding::new("ctrl-w", CloseActiveTab, None),
+            KeyBinding::new("ctrl-f4", CloseActiveTab, None),
+            KeyBinding::new("ctrl-w", CloseActiveTab, Some(&editor)),
+            KeyBinding::new("ctrl-f4", CloseActiveTab, Some(&editor)),
         ]);
         Theme::change(ThemeMode::Dark, None, cx);
         Theme::update(cx, |theme| {

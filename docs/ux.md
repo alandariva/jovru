@@ -78,6 +78,7 @@ Rules:
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | New query on the active connection | `Ctrl N` |
+| Close the query tab (asks when it runs or has unsaved SQL) | `Ctrl W`, `Ctrl F4` |
 | Show or hide the explorer | `Ctrl B` |
 | Show or hide the assistant | `Ctrl Shift B` |
 | SQL font size: larger, smaller, reset | `Ctrl +`, `Ctrl -`, `Ctrl 0` |

@@ -349,5 +349,9 @@
   "The statement changed in the editor since it ran.": "A instrução mudou no editor desde que foi executada.",
   "The statement timed out": "A instrução excedeu o tempo limite",
   "Transaction conflict": "Conflito de transação",
-  "Unexpected answer from the server": "Resposta inesperada do servidor"
+  "Unexpected answer from the server": "Resposta inesperada do servidor",
+  "Close the tab without saving its SQL?": "Fechar a aba sem salvar o SQL?",
+  "Close without saving": "Fechar sem salvar",
+  "Closing the tab cancels the query and loses its SQL, which is not in the saved queries.": "Fechar a aba cancela a consulta e perde o SQL, que não está nas consultas salvas.",
+  "The SQL is not in the saved queries, so closing the tab loses it.": "O SQL não está nas consultas salvas, então fechar a aba o perde."
 }

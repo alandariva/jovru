@@ -90,6 +90,9 @@ pub struct Workspace {
     line_count: usize,
     /// SQL as last saved to the library, if this tab is saved.
     saved_sql: Option<String>,
+    /// The SQL the tab opened with; closing loses nothing while the editor
+    /// still holds it.
+    opened_sql: Option<String>,
     notice: Option<Feedback>,
     filter_open: bool,
     filter: Entity<InputState>,
@@ -248,6 +251,7 @@ impl Workspace {
             statement_lines: jykre::sql::statement_lines(sql).into(),
             line_count: sql.split('\n').count(),
             saved_sql: None,
+            opened_sql: Some(sql.to_string()),
             notice: None,
             filter_open: false,
             chat_scroll: ScrollHandle::new(),
@@ -1846,12 +1850,23 @@ impl Workspace {
             sql: self.editor_sql.clone(),
             saved_sql: self.saved_sql.clone(),
             timeout_seconds: jykre::workspace_state::TabState::store_timeout(self.timeout),
+            opened_sql: self.opened_sql.clone(),
         }
+    }
+
+    /// Closing the tab would lose SQL that is not in the library.
+    pub fn has_unsaved_sql(&self) -> bool {
+        jykre::workspace_state::has_unsaved_sql(
+            &self.editor_sql,
+            self.saved_sql.as_deref(),
+            self.opened_sql.as_deref(),
+        )
     }
 
     /// Restores what [`Workspace::state`] kept.
     pub fn restore(&mut self, state: &jykre::workspace_state::TabState) {
         self.saved_sql = state.saved_sql.clone();
+        self.opened_sql = state.opened_sql.clone();
         self.timeout = state.timeout(self.timeout);
     }
 
@@ -1943,6 +1958,12 @@ impl Workspace {
         self.results.clear();
         self.show_active(cx);
         self.messages.clear();
+    }
+
+    /// Puts the keyboard in the SQL editor.
+    pub fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor
+            .update(cx, |editor, cx| editor.focus(window, cx));
     }
 
     pub fn toggle_assistant(&mut self, cx: &mut Context<Self>) {

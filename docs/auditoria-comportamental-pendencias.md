@@ -72,6 +72,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Evidência no projeto:** `src/app/mod.rs` (`request_close`); `src/grouped_tabs/mod.rs` (botão Close, `tab_stop(false)`); `src/workspace_state.rs`
 - **Confiança:** Confirmado
 - **Nota:** Parcial — confirmação para query rodando foi implementada.
+- **Situação:** Corrigido. Fechar pergunta também quando o SQL não está na biblioteca e difere do que a aba abriu (`TabState::has_unsaved_sql`; o SQL de abertura persiste como `opened_sql`). `Ctrl+W` e `Ctrl+F4` são a action `CloseActiveTab`; o X da aba selecionada fica sempre visível e é o próximo Tab stop, e o foco volta para a aba que fica selecionada. `Ctrl+N` agora foca o editor da aba nova (antes o foco ficava num editor fora da tela e nenhum atalho respondia).
 
 ## N010 — Separação de instruções ignora o dialeto
 

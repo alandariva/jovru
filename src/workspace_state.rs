@@ -35,6 +35,9 @@ pub struct TabState {
     pub saved_sql: Option<String>,
     /// Statement timeout in seconds; `0` waits as long as it takes.
     pub timeout_seconds: Option<u64>,
+    /// The SQL the tab opened with (a template or a table preview), which
+    /// closing the tab does not lose. `None` for tabs from older versions.
+    pub opened_sql: Option<String>,
 }
 
 impl TabState {
@@ -50,6 +53,22 @@ impl TabState {
     pub fn store_timeout(timeout: Option<Duration>) -> Option<u64> {
         Some(timeout.map_or(0, |timeout| timeout.as_secs().max(1)))
     }
+
+    /// Closing the tab would lose SQL the user wrote: it is not blank, not
+    /// the SQL the tab opened with and not the version saved in the library.
+    pub fn has_unsaved_sql(&self) -> bool {
+        has_unsaved_sql(
+            &self.sql,
+            self.saved_sql.as_deref(),
+            self.opened_sql.as_deref(),
+        )
+    }
+}
+
+/// See [`TabState::has_unsaved_sql`].
+pub fn has_unsaved_sql(sql: &str, saved: Option<&str>, opened: Option<&str>) -> bool {
+    let same = |other: Option<&str>| other.is_some_and(|other| other.trim() == sql.trim());
+    !sql.trim().is_empty() && !same(saved) && !same(opened)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -88,6 +107,7 @@ impl WorkspaceState {
                 sql: text(tab, "sql"),
                 saved_sql: tab["saved_sql"].as_str().map(str::to_owned),
                 timeout_seconds: tab["timeout_seconds"].as_u64(),
+                opened_sql: tab["opened_sql"].as_str().map(str::to_owned),
             })
             .collect();
         let mut history = entries("history");
@@ -121,6 +141,7 @@ impl WorkspaceState {
                 "sql": tab.sql,
                 "saved_sql": tab.saved_sql,
                 "timeout_seconds": tab.timeout_seconds,
+                "opened_sql": tab.opened_sql,
             })).collect::<Vec<_>>(),
             "active": self.active,
             "saved_queries": entries(&self.saved_queries),
@@ -149,6 +170,7 @@ mod tests {
                 sql: "SELECT 'é';".into(),
                 saved_sql: Some("SELECT 'é';".into()),
                 timeout_seconds: TabState::store_timeout(None),
+                opened_sql: Some("SELECT 1;".into()),
             }],
             active: Some(0),
             saved_queries: vec![QueryEntry {
@@ -178,6 +200,26 @@ mod tests {
             }
         );
         assert_eq!(WorkspaceState::from_value(None).tabs.len(), 0);
+    }
+
+    #[test]
+    fn only_sql_the_user_wrote_and_did_not_save_counts_as_unsaved() {
+        let tab = |sql: &str, saved: Option<&str>, opened: Option<&str>| TabState {
+            sql: sql.into(),
+            saved_sql: saved.map(Into::into),
+            opened_sql: opened.map(Into::into),
+            ..TabState::default()
+        };
+        // The template a new tab opens with, or a blank editor, loses nothing.
+        assert!(!tab("SELECT 1;", None, Some("SELECT 1;")).has_unsaved_sql());
+        assert!(!tab("  \n", None, Some("SELECT 1;")).has_unsaved_sql());
+        assert!(!tab("SELECT 1;\n", None, Some("SELECT 1;")).has_unsaved_sql());
+        // Edited SQL is unsaved until the library has this version.
+        assert!(tab("SELECT 2;", None, Some("SELECT 1;")).has_unsaved_sql());
+        assert!(!tab("SELECT 2;", Some("SELECT 2;"), Some("SELECT 1;")).has_unsaved_sql());
+        assert!(tab("SELECT 3;", Some("SELECT 2;"), None).has_unsaved_sql());
+        // A tab from an older version has no template: its SQL counts.
+        assert!(tab("SELECT 1;", None, None).has_unsaved_sql());
     }
 
     #[test]
