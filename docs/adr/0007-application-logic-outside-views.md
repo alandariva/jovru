@@ -59,5 +59,6 @@ Implemented on 2026-11-02 in the order above, one commit per step.
   `relation_name` to leave the database out. `backend::preview_sql` takes the
   driver.
 - The run state machine is `jykre::query::QueryRun`. `Cancelling` waits for
-  the driver's outcome; a new run may supersede a run that is still stopping.
+  the driver's outcome, and no new run starts until it arrives: the stopping
+  run may still change data on the server.
 - The grid step was implemented as decided in ADR-0012.

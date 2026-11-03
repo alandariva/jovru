@@ -148,6 +148,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Bloquear Run até o cancelamento terminar, ou exibir os dois jobs.
 - **Evidência no projeto:** `src/query.rs` (`start`); `src/app/workspace.rs` (`execute_queries`)
 - **Confiança:** Confirmado no Jykre; Provável na comparação (as ferramentas de referência não documentam o caso explicitamente)
+- **Situação:** Corrigido. `QueryRun::start` recusa qualquer run ativo, inclusive `Cancelling`; nenhuma segunda sessão é aberta enquanto a anterior para. Run, atalhos e gutter avisam “The previous run is still stopping…”; o botão mostra “Stopping…” e o aviso some quando o desfecho chega.
 
 ## N018 — Consultas salvas colidem por título
 

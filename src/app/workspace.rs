@@ -305,6 +305,29 @@ impl Workspace {
         }
     }
 
+    /// The previous run was asked to stop but has not ended: it may still
+    /// change data, so nothing new starts until it does.
+    fn still_cancelling(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.run.state() != &RunState::Cancelling {
+            return false;
+        }
+        self.notice = Some(Feedback::new(Tone::Info, stopping_notice()));
+        cx.notify();
+        true
+    }
+
+    /// Once the stopping run has ended, its notice no longer applies.
+    fn clear_stopping_notice(&mut self) {
+        if !self.run.is_active()
+            && self
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.text == stopping_notice())
+        {
+            self.notice = None;
+        }
+    }
+
     /// Asks the run to stop. The footer reports the cancellation; there is
     /// no second message.
     fn stop_execution(&mut self, cx: &mut Context<Self>) {
@@ -462,6 +485,9 @@ impl Workspace {
     }
 
     fn execute_queries(&mut self, scope: Scope, placement: Placement, cx: &mut Context<Self>) {
+        if self.still_cancelling(cx) {
+            return;
+        }
         if self.fetching {
             self.notice = Some(Feedback::new(
                 Tone::Info,
@@ -472,7 +498,7 @@ impl Workspace {
         }
         let sql = self.editor.read(cx).text().to_string();
         let Some(plan) = self.run.start(&sql, scope) else {
-            if !self.run.is_running() {
+            if !self.run.is_active() {
                 self.notice = Some(Feedback::new(
                     Tone::Info,
                     tr!("There is no SQL statement to execute."),
@@ -492,11 +518,11 @@ impl Workspace {
         self.notice = None;
         self.show_active(cx);
         if let Some(input) = self.input.clone() {
-            // A superseded run that is still stopping keeps its own token.
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
             self.run.begin_all(id);
-            // A superseded run still holds its session; this one opens another.
+            // The previous run has ended (a stopping one blocks new runs), so
+            // its session is back unless it was lost.
             let (session, lease) = self.lease_session();
             let options = self.options();
             cx.spawn(async move |weak, cx| {
@@ -581,6 +607,7 @@ impl Workspace {
                             this.end_unfinished(&tabs, Some(report));
                         }
                     }
+                    this.clear_stopping_notice();
                     this.show_active(cx);
                 });
                 // The tab closed while the run was out: its session goes too.
@@ -881,17 +908,21 @@ impl Workspace {
                     .child(
                         primary_button(
                             "execute",
-                            if self.run.is_running() {
-                                I::Square
-                            } else {
-                                I::Play
+                            match self.run.state() {
+                                RunState::Running { .. } => I::Square,
+                                RunState::Cancelling => I::LoaderCircle,
+                                _ => I::Play,
                             },
-                            if self.run.is_running() {
-                                tr!("Stop")
-                            } else {
-                                tr!("Run")
+                            match self.run.state() {
+                                RunState::Running { .. } => tr!("Stop"),
+                                // Waits for the stopping run before another starts.
+                                RunState::Cancelling => tr!("Stopping…"),
+                                _ => tr!("Run"),
                             },
                         )
+                        .when(self.run.state() == &RunState::Cancelling, |s| {
+                            s.opacity(0.6).cursor_default()
+                        })
                         .tooltip(|window, cx| {
                             Tooltip::new(tr!(
                                 "Run the statement at the cursor or the selection · Ctrl+Enter\nIn a new result · Ctrl+Shift+Enter\nRun all statements · Ctrl+Alt+Enter"
@@ -2045,6 +2076,11 @@ impl Workspace {
                 )
             })
     }
+}
+
+/// Why a run did not start: the previous one is still stopping.
+fn stopping_notice() -> String {
+    tr!("The previous run is still stopping. Run again when it ends.").into()
 }
 
 /// The icon, colour and words for how a result tab ended.

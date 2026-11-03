@@ -168,10 +168,11 @@ impl QueryRun {
     }
 
     /// Starts a run of the statements of `sql` that `scope` picks. Returns
-    /// `None` when there is nothing to run or a run is still `Running`. A run
-    /// that is only `Cancelling` is superseded.
+    /// `None` when there is nothing to run or a run is still active: one
+    /// that is `Cancelling` may still change data on the server, so the next
+    /// run waits until its outcome arrives.
     pub fn start(&mut self, sql: &str, scope: Scope) -> Option<Plan> {
-        if self.is_running() {
+        if self.is_active() {
             return None;
         }
         let ranges = sql::statements(sql);
@@ -209,10 +210,6 @@ impl QueryRun {
             return None;
         }
         self.sql = sql.to_owned();
-        // A superseded run's statuses are settled before the new one starts.
-        if self.state == RunState::Cancelling {
-            self.settle_cancelled();
-        }
         self.sync();
         self.statuses.resize(ranges.len(), StatementStatus::Ready);
         self.current = RunId(self.current.0 + 1);
@@ -600,16 +597,20 @@ mod tests {
     }
 
     #[test]
-    fn a_new_run_supersedes_one_that_is_stopping() {
+    fn a_new_run_waits_until_the_stopping_one_ends() {
         let (mut run, old) = started(TWO);
         run.cancel();
+        // The stopping run may still change data: nothing new starts.
+        assert_eq!(run.start(TWO, Scope::Statement(0)), None);
+        assert_eq!(run.start(TWO, Scope::All), None);
+        assert_eq!(run.state(), &RunState::Cancelling);
+        // Its outcome ends it, and then the next run starts.
+        let late = Outcome::Failed(DriverError::new(ErrorCode::Connection, "late"));
+        assert!(!run.finish(old.id, late));
+        assert_eq!(run.state(), &RunState::Cancelled);
         let new = run.start(TWO, Scope::Statement(0)).expect("a new run");
         assert_ne!(old.id, new.id);
         assert!(run.begin_all(new.id));
-        // The stale outcome changes nothing.
-        let stale = Outcome::Failed(DriverError::new(ErrorCode::Connection, "late"));
-        assert!(!run.finish(old.id, stale));
-        assert!(run.is_running());
         assert_eq!(run.statuses(), [Running, Cancelled]);
         let outcome = Outcome::Batch {
             completed: 1,
