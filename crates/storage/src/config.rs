@@ -199,6 +199,23 @@ impl ConfigRepository {
         self.set_setting(&metadata_scope_key(id), scope).await
     }
 
+    /// What the explorer showed expanded for a connection, stored as the
+    /// setting `connection.<id>.explorer`. The application owns its shape.
+    pub async fn explorer_state(
+        &self,
+        id: ConnectionId,
+    ) -> DriverResult<Option<serde_json::Value>> {
+        self.setting(&explorer_key(id)).await
+    }
+
+    pub async fn set_explorer_state(
+        &self,
+        id: ConnectionId,
+        state: &serde_json::Value,
+    ) -> DriverResult<()> {
+        self.set_setting(&explorer_key(id), state).await
+    }
+
     pub async fn setting(&self, key: &str) -> DriverResult<Option<serde_json::Value>> {
         let value: Option<String> =
             sqlx::query_scalar("SELECT value_json FROM settings WHERE key=?")
@@ -223,4 +240,8 @@ fn row_limit_key(id: ConnectionId) -> String {
 
 fn metadata_scope_key(id: ConnectionId) -> String {
     format!("connection.{id}.metadata_scope")
+}
+
+fn explorer_key(id: ConnectionId) -> String {
+    format!("connection.{id}.explorer")
 }

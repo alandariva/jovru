@@ -126,13 +126,16 @@ fn statement_splitting(c: &mut Criterion) {
     });
 }
 
-/// A cache of 500,101 objects: one database, 100 schemas of 5,000 tables.
-async fn large_cache(dir: &std::path::Path) -> (MetadataRepository, ObjectPath) {
-    let config = ConnectionConfig {
+fn large_cache_config() -> ConnectionConfig {
+    ConnectionConfig {
         driver: DriverKind::Postgres,
         options: serde_json::json!({"host":"localhost","user":"fixture","database":"fixture","sslMode":"disable"}),
-    };
-    let repository = MetadataRepository::open(dir, ConnectionId::new(), &config)
+    }
+}
+
+/// A cache of 500,101 objects: one database, 100 schemas of 5,000 tables.
+async fn large_cache(dir: &std::path::Path, id: ConnectionId) -> (MetadataRepository, ObjectPath) {
+    let repository = MetadataRepository::open(dir, id, &large_cache_config())
         .await
         .expect("a cache in a temporary folder");
     let database = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "fixture");
@@ -178,13 +181,40 @@ fn metadata_paging(c: &mut Criterion) {
         .build()
         .expect("a runtime");
     let dir = std::env::temp_dir().join(format!("jykre-bench-{}", ConnectionId::new()));
-    let (repository, schema) = runtime.block_on(large_cache(&dir));
+    let id = ConnectionId::new();
+    let (repository, schema) = runtime.block_on(large_cache(&dir, id));
     let mut group = c.benchmark_group("metadata paging, 500,000 objects");
+    group.sample_size(20);
+    // What expanding a node cost when every read opened the cache.
+    group.bench_function("open the cache and read a first page", |b| {
+        let config = large_cache_config();
+        b.iter(|| {
+            runtime.block_on(async {
+                let reader = MetadataRepository::open(&dir, id, &config).await?;
+                let page = reader.children(black_box(&schema), None, 200).await;
+                reader.close().await;
+                page
+            })
+        })
+    });
+    // Expanding now reads through the cache kept open.
     group.bench_function("first page of 200 children", |b| {
-        b.iter(|| runtime.block_on(repository.children(black_box(&schema), 0, 200)))
+        b.iter(|| runtime.block_on(repository.children(black_box(&schema), None, 200)))
+    });
+    // The cursor where the 25th page starts, as "Load more" keeps it.
+    let after = runtime.block_on(async {
+        let mut after = None;
+        for _ in 0..24 {
+            after = repository
+                .children(&schema, after.as_ref(), 200)
+                .await
+                .expect("a page")
+                .next;
+        }
+        after
     });
     group.bench_function("page of 200 children at offset 4,800", |b| {
-        b.iter(|| runtime.block_on(repository.children(black_box(&schema), 4_800, 200)))
+        b.iter(|| runtime.block_on(repository.children(black_box(&schema), after.as_ref(), 200)))
     });
     group.finish();
     runtime.block_on(repository.close());

@@ -4,7 +4,10 @@ use crate::logging;
 use crate::metadata_scope::{EtaEstimator, MetadataScope, RefreshPhase, RefreshProgress};
 use crate::result::{ResultBuilder, ResultData, ResultLimit};
 use crate::tr;
-use jykre_storage::{MetadataRepository, PendingRefresh, RefreshStatus};
+use jykre_storage::{
+    ChildPage, MetadataRepository, PageCursor, PageRequest, PendingRefresh, RefreshStatus,
+};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::{
     future::Future,
@@ -17,12 +20,102 @@ use tracing::Instrument as _;
 /// ([Performance](../docs/performance.md#budgets)).
 const CACHE_READ_BUDGET: Duration = Duration::from_millis(50);
 
+/// Children read per page when a node is expanded or "Load more" is used.
+pub const CHILD_PAGE: u32 = 200;
+
+/// Pages of the explorer tree read from one snapshot of the cache.
 pub struct MetadataSnapshot {
-    pub objects: Vec<MetadataObject>,
+    /// Each page read, with the node it belongs to, in the order asked.
+    pub pages: Vec<(ObjectPath, ChildPage)>,
     pub statuses: Vec<RefreshStatus>,
     pub version: i64,
+    /// The cache was corrupted and recreated when this read opened it.
     pub recovered: bool,
-    pub pages: Vec<(ObjectPath, u32, bool)>,
+}
+
+impl MetadataSnapshot {
+    /// Whether the cache holds nothing at the root.
+    pub fn is_empty(&self) -> bool {
+        self.pages
+            .iter()
+            .all(|(parent, page)| !parent.0.is_empty() || page.objects.is_empty())
+    }
+}
+
+type CacheKey = (PathBuf, ConnectionId);
+
+fn caches() -> std::sync::MutexGuard<'static, HashMap<CacheKey, MetadataRepository>> {
+    static CACHES: OnceLock<std::sync::Mutex<HashMap<CacheKey, MetadataRepository>>> =
+        OnceLock::new();
+    CACHES
+        .get_or_init(Default::default)
+        .lock()
+        // The map stays consistent even if a holder panicked: entries are
+        // only inserted or removed whole.
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The connection's metadata cache, kept open between operations. Only the
+/// first use after start, after the profile changed or after a failed read
+/// opens the file and checks it (`quick_check`). Returns whether this call
+/// opened it.
+async fn cache(
+    dir: &Path,
+    id: ConnectionId,
+    config: &ConnectionConfig,
+) -> DriverResult<(MetadataRepository, bool)> {
+    let key = (dir.to_path_buf(), id);
+    let kept = caches()
+        .get(&key)
+        .filter(|repository| repository.belongs_to(config))
+        .cloned();
+    if let Some(repository) = kept {
+        return Ok((repository, false));
+    }
+    let repository = MetadataRepository::open(dir, id, config).await?;
+    caches().insert(key, repository.clone());
+    Ok((repository, true))
+}
+
+/// Keeps `repository` as the connection's open cache, as `prepare` left it.
+fn keep_cache(dir: &Path, id: ConnectionId, repository: MetadataRepository) {
+    caches().insert((dir.to_path_buf(), id), repository);
+}
+
+/// Forgets the connection's open cache after a failed read, so the next
+/// read opens and checks the file again.
+fn forget_cache(dir: &Path, id: ConnectionId) {
+    caches().remove(&(dir.to_path_buf(), id));
+}
+
+/// Closes every cache kept open under `dir`, so its files can be removed.
+pub async fn release_caches(dir: &Path) {
+    let released: Vec<_> = {
+        let mut caches = caches();
+        let keys: Vec<_> = caches
+            .keys()
+            .filter(|(folder, _)| folder == dir)
+            .cloned()
+            .collect();
+        keys.iter().filter_map(|key| caches.remove(key)).collect()
+    };
+    for repository in released {
+        repository.close().await;
+    }
+}
+
+/// Reconciles the connection's cache with its saved profile (a changed
+/// configuration empties it) and keeps it open for the reads that follow.
+/// Returns whether the cache was corrupted and recreated.
+pub async fn prepare_cache(
+    dir: &Path,
+    id: ConnectionId,
+    config: &ConnectionConfig,
+) -> DriverResult<bool> {
+    let repository = MetadataRepository::prepare(dir, id, config).await?;
+    let recovered = repository.recovered;
+    keep_cache(dir, id, repository);
+    Ok(recovered)
 }
 
 pub async fn cached_metadata(
@@ -31,9 +124,19 @@ pub async fn cached_metadata(
     config: &ConnectionConfig,
     recover: bool,
 ) -> DriverResult<MetadataSnapshot> {
-    cached_metadata_pages(dir, id, config, recover, vec![(ObjectPath::default(), 200)]).await
+    cached_metadata_pages(
+        dir,
+        id,
+        config,
+        recover,
+        vec![(ObjectPath::default(), CHILD_PAGE)],
+    )
+    .await
 }
 
+/// Reads the first `count` children (at least one page) of each node in
+/// `pages` from one snapshot of the cache, with the refresh statuses: what
+/// the explorer shows again after a refresh or at start.
 pub async fn cached_metadata_pages(
     dir: &Path,
     id: ConnectionId,
@@ -42,60 +145,82 @@ pub async fn cached_metadata_pages(
     pages: Vec<(ObjectPath, u32)>,
 ) -> DriverResult<MetadataSnapshot> {
     let started = Instant::now();
-    let repository = MetadataRepository::open(dir, id, config).await?;
-    if recover {
-        repository.recover_interrupted().await?;
-    }
-    let version = repository.version().await?;
-    let mut objects = Vec::new();
-    let mut loaded_pages = Vec::new();
-    for (parent, count) in pages {
-        let count = count.clamp(200, 100_000);
-        let mut loaded = Vec::new();
-        while loaded.len() <= count as usize {
-            let take = (count + 1 - loaded.len() as u32).min(500);
-            if take == 0 {
-                break;
-            }
-            let page = repository
-                .children(&parent, loaded.len() as u32, take)
-                .await?;
-            let end = page.len() < take as usize;
-            loaded.extend(page);
-            if end {
-                break;
-            }
+    let result = async {
+        let (repository, opened) = cache(dir, id, config).await?;
+        if recover {
+            repository.recover_interrupted().await?;
         }
-        let more = loaded.len() > count as usize;
-        loaded.truncate(count as usize);
-        loaded_pages.push((parent, count, more));
-        objects.extend(loaded);
+        let requests: Vec<_> = pages
+            .into_iter()
+            .map(|(parent, count)| PageRequest {
+                parent,
+                after: None,
+                limit: count.clamp(CHILD_PAGE, 100_000),
+            })
+            .collect();
+        let (version, read) = repository.pages(&requests).await?;
+        let statuses = repository.statuses().await?;
+        tracing::debug!(
+            connection_id = %id,
+            pages = requests.len(),
+            objects = read.iter().map(|page| page.objects.len()).sum::<usize>(),
+            "explorer pages read from the cache"
+        );
+        Ok(MetadataSnapshot {
+            pages: requests
+                .into_iter()
+                .map(|request| request.parent)
+                .zip(read)
+                .collect(),
+            statuses,
+            version,
+            recovered: opened && repository.recovered,
+        })
     }
-    objects.sort_by(|a, b| {
-        a.path
-            .0
-            .iter()
-            .map(|part| &part.name)
-            .cmp(b.path.0.iter().map(|part| &part.name))
-    });
-    objects.dedup_by(|a, b| a.path == b.path);
-    let statuses = repository.statuses().await?;
-    if repository.version().await? != version {
-        repository.close().await;
-        return Err(DriverError::validation(tr!(
-            "The cache changed while reading. Expand the node again."
-        )));
+    .await;
+    if result.is_err() {
+        forget_cache(dir, id);
     }
-    let snapshot = MetadataSnapshot {
-        objects,
-        statuses,
-        version,
-        recovered: repository.recovered,
-        pages: loaded_pages,
-    };
-    repository.close().await;
+    logging::timing("explorer pages from cache", started, CACHE_READ_BUDGET);
+    result
+}
+
+/// Reads the next page of `parent`'s children after `after` (its first
+/// page when `None`) and the cache version it was read from. Only that page
+/// is read, whatever the pages already loaded.
+pub async fn cached_children(
+    dir: &Path,
+    id: ConnectionId,
+    config: &ConnectionConfig,
+    parent: ObjectPath,
+    after: Option<PageCursor>,
+) -> DriverResult<(i64, ChildPage)> {
+    let started = Instant::now();
+    let depth = parent.0.len();
+    let result = async {
+        let (repository, _) = cache(dir, id, config).await?;
+        let (version, mut pages) = repository
+            .pages(&[PageRequest {
+                parent,
+                after,
+                limit: CHILD_PAGE,
+            }])
+            .await?;
+        let page = pages.pop().unwrap_or_default();
+        tracing::debug!(
+            connection_id = %id,
+            depth,
+            objects = page.objects.len(),
+            "explorer page read from the cache"
+        );
+        Ok((version, page))
+    }
+    .await;
+    if result.is_err() {
+        forget_cache(dir, id);
+    }
     logging::timing("expand from cache", started, CACHE_READ_BUDGET);
-    Ok(snapshot)
+    result
 }
 
 pub async fn search_metadata(
@@ -105,9 +230,13 @@ pub async fn search_metadata(
     query: &str,
 ) -> DriverResult<Vec<MetadataObject>> {
     let started = Instant::now();
-    let repository = MetadataRepository::open(dir, id, config).await?;
-    let result = repository.search(query, 200).await;
-    repository.close().await;
+    let result = match cache(dir, id, config).await {
+        Ok((repository, _)) => repository.search(query, 200).await,
+        Err(error) => Err(error),
+    };
+    if result.is_err() {
+        forget_cache(dir, id);
+    }
     logging::timing("metadata search", started, CACHE_READ_BUDGET);
     result
 }
@@ -187,7 +316,7 @@ async fn refresh_metadata_in(
     cancel: &CancellationToken,
 ) -> DriverResult<(i64, usize)> {
     driver.validate_connection(&input.config)?;
-    let repository = MetadataRepository::open(dir, id, &input.config).await?;
+    let (repository, _) = cache(dir, id, &input.config).await?;
     let mut staged = repository.begin(scope).await?;
     let mut sink = StagedMetadata {
         pending: &mut staged,
@@ -209,14 +338,9 @@ async fn refresh_metadata_in(
     };
     if let Err(error) = published {
         staged.fail(&error).await?;
-        drop(staged);
-        repository.close().await;
         return Err(error);
     }
-    let version = published?;
-    drop(staged);
-    repository.close().await;
-    Ok((version, received))
+    Ok((published?, received))
 }
 
 /// What reading a choice of namespaces did. Each namespace is published on
@@ -436,10 +560,8 @@ async fn apply_selection_with(
                 subtrees.push(rule);
             }
         }
-        let repository = MetadataRepository::open(dir, id, &input.config).await?;
-        let retained = repository.retain(&subtrees, &nodes).await;
-        repository.close().await;
-        retained?;
+        let (repository, _) = cache(dir, id, &input.config).await?;
+        repository.retain(&subtrees, &nodes).await?;
         Ok(outcome)
     }
     .instrument(span.clone())
@@ -841,7 +963,11 @@ mod tests {
         drop(pending);
         repository.close().await;
         let first = cached_metadata(&dir, id, &config, true).await.unwrap();
-        assert_eq!(first.objects, vec![db.clone()]);
+        assert_eq!(first.pages.len(), 1);
+        assert_eq!(first.pages[0].1.objects, vec![db.clone()]);
+        assert!(!first.is_empty());
+        // The cache stays open for the reads that follow.
+        assert!(caches().contains_key(&(dir.clone(), id)));
         let expanded = cached_metadata_pages(
             &dir,
             id,
@@ -851,13 +977,18 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(expanded.objects.len(), 201);
-        assert!(
-            expanded
-                .pages
-                .iter()
-                .any(|(parent, _, more)| *parent == db.path && *more)
-        );
+        let (parent, page) = &expanded.pages[1];
+        assert_eq!(*parent, db.path);
+        assert_eq!(page.objects.len(), 200);
+        // The next page is read on its own, from where the first ended.
+        let (version, rest) =
+            cached_children(&dir, id, &config, db.path.clone(), page.next.clone())
+                .await
+                .unwrap();
+        assert_eq!(version, expanded.version);
+        assert_eq!(rest.objects.len(), 50);
+        assert_eq!(rest.objects[0].name, "table_200");
+        assert!(rest.next.is_none());
         let search = search_metadata(&dir, id, &config, "table_249")
             .await
             .unwrap();
@@ -872,8 +1003,17 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(expanded.objects.len(), 251);
-        assert!(!expanded.pages.iter().any(|(_, _, more)| *more));
+        assert_eq!(expanded.pages[1].1.objects.len(), 250);
+        assert!(expanded.pages.iter().all(|(_, page)| page.next.is_none()));
+        // Another configuration is not served from the open cache, and the
+        // failed read lets the next one open and check the file again.
+        let mut other = config.clone();
+        other.options["user"] = serde_json::json!("another-fixture-user");
+        assert!(cached_metadata(&dir, id, &other, false).await.is_err());
+        assert!(!caches().contains_key(&(dir.clone(), id)));
+        assert!(cached_metadata(&dir, id, &config, false).await.is_ok());
+        release_caches(&dir).await;
+        assert!(!caches().contains_key(&(dir.clone(), id)));
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -1585,17 +1725,19 @@ mod tests {
         let mut paths = Vec::new();
         let mut parents = vec![ObjectPath::default()];
         while let Some(parent) = parents.pop() {
-            let mut offset = 0;
+            let mut after = None;
             loop {
-                let page = repository.children(&parent, offset, 500).await.unwrap();
-                offset += page.len() as u32;
-                let end = page.len() < 500;
-                for object in page {
+                let page = repository
+                    .children(&parent, after.as_ref(), 500)
+                    .await
+                    .unwrap();
+                for object in page.objects {
                     parents.push(object.path.clone());
                     paths.push(object.path);
                 }
-                if end {
-                    break;
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
                 }
             }
         }
@@ -1676,6 +1818,7 @@ mod tests {
         assert!(driver.read.lock().unwrap().is_empty());
         let paths = cached(&dir, id).await;
         assert!(paths.iter().all(|path| path.is_within(&main)), "{paths:?}");
+        release_caches(&dir).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1709,6 +1852,7 @@ mod tests {
         assert!(outcome.cancelled);
         assert_eq!(outcome.refreshed, 1);
         assert!(cached(&dir, id).await.contains(&schema("main", "c")));
+        release_caches(&dir).await;
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -3,6 +3,7 @@ use sqlx::{Connection, Row, SqliteConnection};
 use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 const SCHEMA: &str = r#"
@@ -59,6 +60,164 @@ fn key(path: &ObjectPath) -> DriverResult<String> {
         .map(|parts| parts.join("/"))
 }
 
+/// The order a node's children are listed in, by kind: tables before views
+/// and views before materialized views, whatever their stored text. Kinds
+/// not listed come last, ordered by their text.
+const KIND_ORDER: [ObjectKind; 9] = [
+    ObjectKind::Database,
+    ObjectKind::Catalog,
+    ObjectKind::Schema,
+    ObjectKind::Table,
+    ObjectKind::View,
+    ObjectKind::MaterializedView,
+    ObjectKind::Column,
+    ObjectKind::ForeignKey,
+    ObjectKind::Partition,
+];
+
+/// Where a stored kind sorts among a node's children: its position in
+/// [`KIND_ORDER`], then its text for kinds not listed.
+fn kind_rank(kind: &str) -> (usize, &str) {
+    static TEXTS: OnceLock<Vec<String>> = OnceLock::new();
+    let texts = TEXTS.get_or_init(|| {
+        KIND_ORDER
+            .iter()
+            .filter_map(|kind| serde_json::to_string(kind).ok())
+            .collect()
+    });
+    let rank = texts
+        .iter()
+        .position(|text| text == kind)
+        .unwrap_or(KIND_ORDER.len());
+    (rank, kind)
+}
+
+/// Where the next page of a node's children starts: just after the last
+/// child of the previous page, in the order pages are read (kind as in
+/// [`KIND_ORDER`], then ordinal, name and key). A page read from a cursor
+/// costs the same at any depth, unlike an offset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PageCursor {
+    kind: String,
+    ordinal: Option<i64>,
+    name: String,
+    path_key: String,
+}
+
+/// One page of a node's children; `next` is where the following page
+/// starts, `None` after the last child.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChildPage {
+    pub objects: Vec<MetadataObject>,
+    pub next: Option<PageCursor>,
+}
+
+/// A page to read with [`MetadataRepository::pages`]: up to `limit`
+/// children of `parent`, after `after` (from the first when `None`).
+#[derive(Clone, Debug)]
+pub struct PageRequest {
+    pub parent: ObjectPath,
+    pub after: Option<PageCursor>,
+    pub limit: u32,
+}
+
+/// The kinds stored under a node, found by skipping through the
+/// `objects_parent` index one kind at a time rather than reading children.
+const CHILD_KINDS: &str = "WITH RECURSIVE kinds(kind) AS (SELECT (SELECT min(kind) FROM objects WHERE parent_key IS ?1) UNION ALL SELECT (SELECT min(kind) FROM objects WHERE parent_key IS ?1 AND kind>kinds.kind) FROM kinds WHERE kinds.kind IS NOT NULL) SELECT kind FROM kinds WHERE kind IS NOT NULL";
+
+/// Reads up to `limit` children of `parent` after `after`. It reads only
+/// the kinds the node holds, each in its turn and, within a kind, the
+/// children without an ordinal (relations) before those with one (columns),
+/// so every query walks the `objects_parent` index from the cursor instead
+/// of skipping rows.
+async fn read_children(
+    connection: &mut SqliteConnection,
+    parent: &ObjectPath,
+    after: Option<&PageCursor>,
+    limit: u32,
+) -> DriverResult<ChildPage> {
+    let parent = if parent.0.is_empty() {
+        None
+    } else {
+        Some(key(parent)?)
+    };
+    let mut kinds: Vec<String> = sqlx::query_scalar(CHILD_KINDS)
+        .bind(parent.clone())
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(sql_error)?;
+    kinds.sort_by(|a, b| kind_rank(a).cmp(&kind_rank(b)));
+    if let Some(cursor) = after {
+        let from = kind_rank(&cursor.kind);
+        kinds.retain(|kind| kind_rank(kind) >= from);
+    }
+    // One more than asked tells whether another page follows.
+    let wanted = limit as usize + 1;
+    let mut rows: Vec<(String, PageCursor)> = Vec::new();
+    for kind in kinds {
+        let within = after.filter(|cursor| cursor.kind == kind);
+        let mut steps = Vec::with_capacity(2);
+        if within.is_none_or(|cursor| cursor.ordinal.is_none()) {
+            let (name, path_key) = within.map_or((String::new(), String::new()), |cursor| {
+                (cursor.name.clone(), cursor.path_key.clone())
+            });
+            steps.push(
+                sqlx::query("SELECT object_json,kind,ordinal,name,path_key FROM objects WHERE parent_key IS ? AND kind=? AND ordinal IS NULL AND (name,path_key)>(?,?) ORDER BY name,path_key LIMIT ?")
+                    .bind(parent.clone()).bind(kind.clone()).bind(name).bind(path_key),
+            );
+        }
+        let (ordinal, name, path_key) = match within {
+            Some(PageCursor {
+                ordinal: Some(ordinal),
+                name,
+                path_key,
+                ..
+            }) => (*ordinal, name.clone(), path_key.clone()),
+            _ => (i64::MIN, String::new(), String::new()),
+        };
+        steps.push(
+            sqlx::query("SELECT object_json,kind,ordinal,name,path_key FROM objects WHERE parent_key IS ? AND kind=? AND ordinal IS NOT NULL AND (ordinal,name,path_key)>(?,?,?) ORDER BY ordinal,name,path_key LIMIT ?")
+                .bind(parent.clone()).bind(kind).bind(ordinal).bind(name).bind(path_key),
+        );
+        for step in steps {
+            if rows.len() >= wanted {
+                break;
+            }
+            let found = step
+                .bind((wanted - rows.len()) as i64)
+                .fetch_all(&mut *connection)
+                .await
+                .map_err(sql_error)?;
+            for row in found {
+                rows.push((
+                    row.try_get("object_json").map_err(sql_error)?,
+                    PageCursor {
+                        kind: row.try_get("kind").map_err(sql_error)?,
+                        ordinal: row.try_get("ordinal").map_err(sql_error)?,
+                        name: row.try_get("name").map_err(sql_error)?,
+                        path_key: row.try_get("path_key").map_err(sql_error)?,
+                    },
+                ));
+            }
+        }
+        if rows.len() >= wanted {
+            break;
+        }
+    }
+    let more = rows.len() > limit as usize;
+    rows.truncate(limit as usize);
+    let next = if more {
+        rows.last().map(|(_, cursor)| cursor.clone())
+    } else {
+        None
+    };
+    let objects = rows
+        .into_iter()
+        .map(|(value, _)| serde_json::from_str(&value).map_err(json_error))
+        .collect::<DriverResult<_>>()?;
+    Ok(ChildPage { objects, next })
+}
+
 /// Adds the namespace nodes on `path` (each prefix of length `1..=depth`)
 /// that the cache does not hold yet. A namespace is fully described by its
 /// path, so a refresh of a schema can publish under a database or catalog
@@ -110,6 +269,14 @@ async fn writer_lock_within(path: &Path, patience: std::time::Duration) -> Drive
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
         }
     }
+}
+
+/// The configuration a cache belongs to, as stored in `metadata_info`.
+fn identity(config: &ConnectionConfig) -> DriverResult<String> {
+    serde_json::to_string(&canonical(
+        serde_json::to_value(config).map_err(json_error)?,
+    ))
+    .map_err(json_error)
 }
 
 fn canonical(value: serde_json::Value) -> serde_json::Value {
@@ -314,10 +481,7 @@ impl MetadataRepository {
             }
         };
         schema(&pool, SCHEMA).await?;
-        let identity = serde_json::to_string(&canonical(
-            serde_json::to_value(config).map_err(json_error)?,
-        ))
-        .map_err(json_error)?;
+        let identity = identity(config)?;
         let mut tx = pool.begin().await.map_err(sql_error)?;
         sqlx::query("INSERT OR IGNORE INTO metadata_info(singleton,identity) VALUES(1,?)")
             .bind(&identity)
@@ -372,6 +536,13 @@ impl MetadataRepository {
             run_lock_path,
             recovered,
         })
+    }
+
+    /// Whether this cache was opened for `config`'s identity, so a reader
+    /// kept open can serve it. After the profile changes, the cache must be
+    /// opened again.
+    pub fn belongs_to(&self, config: &ConnectionConfig) -> bool {
+        identity(config).is_ok_and(|identity| identity == self.identity)
     }
 
     /// Called once at application startup, never when opening a second reader.
@@ -447,26 +618,51 @@ impl MetadataRepository {
         });
         Ok(found)
     }
+    /// One page of up to `limit` (1 to 500) children of `parent`, starting
+    /// after `after` (the first child when `None`). Reads only that page.
     pub async fn children(
         &self,
         parent: &ObjectPath,
-        offset: u32,
+        after: Option<&PageCursor>,
         limit: u32,
-    ) -> DriverResult<Vec<MetadataObject>> {
+    ) -> DriverResult<ChildPage> {
         if !(1..=500).contains(&limit) {
             return Err(DriverError::validation("Invalid metadata page."));
         }
-        let parent = if parent.0.is_empty() {
-            None
-        } else {
-            Some(key(parent)?)
-        };
-        let values: Vec<String> = sqlx::query_scalar("SELECT object_json FROM objects WHERE parent_key IS ? ORDER BY kind,ordinal,name,path_key LIMIT ? OFFSET ?")
-            .bind(parent).bind(limit).bind(offset).fetch_all(&self.pool).await.map_err(sql_error)?;
-        values
-            .into_iter()
-            .map(|value| serde_json::from_str(&value).map_err(json_error))
-            .collect()
+        let mut connection = self.pool.acquire().await.map_err(sql_error)?;
+        read_children(&mut connection, parent, after, limit).await
+    }
+
+    /// Reads the pages in `requests` (each up to 100,000 children) and the
+    /// cache version from one snapshot of the file, so a refresh that
+    /// publishes meanwhile cannot mix two reads.
+    pub async fn pages(&self, requests: &[PageRequest]) -> DriverResult<(i64, Vec<ChildPage>)> {
+        if requests
+            .iter()
+            .any(|request| !(1..=100_000).contains(&request.limit))
+        {
+            return Err(DriverError::validation("Invalid metadata page."));
+        }
+        let mut tx = self.pool.begin().await.map_err(sql_error)?;
+        let version: i64 =
+            sqlx::query_scalar("SELECT version FROM metadata_info WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(sql_error)?;
+        let mut pages = Vec::with_capacity(requests.len());
+        for request in requests {
+            pages.push(
+                read_children(
+                    &mut tx,
+                    &request.parent,
+                    request.after.as_ref(),
+                    request.limit,
+                )
+                .await?,
+            );
+        }
+        tx.rollback().await.map_err(sql_error)?;
+        Ok((version, pages))
     }
     pub async fn statuses(&self) -> DriverResult<Vec<RefreshStatus>> {
         let rows = sqlx::query("SELECT scope_json,state,last_attempt_at,last_success_at,version,message FROM scope_status ORDER BY last_run,length(scope_key)").fetch_all(&self.pool).await.map_err(sql_error)?;

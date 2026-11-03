@@ -12,6 +12,7 @@ mod state;
 mod ui;
 mod workspace;
 
+use connections::ExplorerEntry;
 use demo::{ORDER_COLUMNS, SALES_SQL, TABLES, table_sql};
 use gpui_kit::assets::IconName as I;
 use gpui_kit::base::FocusTrapElement as _;
@@ -23,6 +24,7 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
+use jykre::explorer::{Tree, TreeRow};
 use jykre::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId, TabId};
 use jykre::refresh_queue::RefreshQueue;
 use jykre::{backend, connection_store, drivers::*, result::DEFAULT_ROW_LIMIT};
@@ -30,7 +32,6 @@ use jykre_secrets::SystemSecretStore;
 use jykre_storage::{ConfigRepository, RefreshStatus};
 use layout::{ASSISTANT_WIDTH, EXPLORER_WIDTH, splitter};
 use std::collections::HashMap;
-use std::collections::HashSet;
 use ui::*;
 use workspace::{Workspace, WorkspaceEvent};
 
@@ -99,11 +100,17 @@ struct Connection {
     name: String,
     profile: Option<ConnectionProfile>,
     metadata_statuses: Vec<RefreshStatus>,
-    metadata_version: i64,
-    metadata_pages: HashMap<ObjectPath, u32>,
-    metadata_more: HashSet<ObjectPath>,
-    cache_loading: bool,
-    search_results: Vec<MetadataObject>,
+    /// The explorer tree read from the cache, page by page.
+    tree: Tree,
+    /// When each chosen namespace was last read in full.
+    ages: HashMap<ObjectPath, std::time::SystemTime>,
+    /// The rows of the current explorer search.
+    search_rows: Vec<TreeRow>,
+    /// Bumped whenever `search_rows` changes.
+    search_revision: u64,
+    /// Bumped by every expand or collapse, so only the last of a burst is
+    /// saved.
+    expanded_revision: usize,
     refresh_generation: usize,
     detail: String,
     color: u32,
@@ -112,8 +119,6 @@ struct Connection {
     input: Option<ResolvedConnection>,
     /// Rows kept per statement in this connection's tabs.
     row_limit: u32,
-    metadata: Vec<MetadataObject>,
-    collapsed: HashSet<ObjectPath>,
     /// Scope being refreshed and how to cancel it.
     refreshing: Option<(ObjectPath, CancellationToken)>,
     /// Refreshes asked for while another runs, started in order.
@@ -147,7 +152,13 @@ struct AppView {
     schema_open: bool,
     tables_open: bool,
     orders_open: bool,
-    explorer_scroll: ScrollHandle,
+    /// The explorer's virtualized list: connections and the rows of their
+    /// trees, built only while on screen.
+    explorer_list: ListState,
+    explorer_entries: Vec<ExplorerEntry>,
+    /// What the entries were built from, so they are rebuilt only when a
+    /// tree, an expansion or a search changes.
+    explorer_signature: Vec<(bool, bool, u64)>,
     search: Entity<InputState>,
     command: Entity<InputState>,
     command_open: bool,
@@ -302,7 +313,9 @@ impl AppView {
             schema_open: true,
             tables_open: true,
             orders_open: true,
-            explorer_scroll: ScrollHandle::new(),
+            explorer_list: ListState::new(0, ListAlignment::Top, px(200.)),
+            explorer_entries: Vec::new(),
+            explorer_signature: Vec::new(),
             search,
             command,
             command_open: false,
@@ -415,11 +428,11 @@ impl AppView {
                     name: name.into(),
                     profile: None,
                     metadata_statuses: Vec::new(),
-                    metadata_version: 0,
-                    metadata_pages: HashMap::new(),
-                    metadata_more: HashSet::new(),
-                    cache_loading: false,
-                    search_results: Vec::new(),
+                    tree: Tree::default(),
+                    ages: HashMap::new(),
+                    search_rows: Vec::new(),
+                    search_revision: 0,
+                    expanded_revision: 0,
                     refresh_generation: 0,
                     detail: detail.into(),
                     color,
@@ -427,8 +440,6 @@ impl AppView {
                     expanded: app.connections.is_empty(),
                     input: None,
                     row_limit: DEFAULT_ROW_LIMIT,
-                    metadata: Vec::new(),
-                    collapsed: HashSet::new(),
                     refreshing: None,
                     refresh_queue: RefreshQueue::default(),
                     scope: jykre::metadata_scope::MetadataScope::default(),
@@ -958,10 +969,7 @@ impl AppView {
                     column()
                         .id("connection-tree")
                         .flex_1()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.explorer_scroll)
-                        .vertical_scrollbar(&self.explorer_scroll)
-                        .pb_3()
+                        .min_h_0()
                         .when(self.connections_loading, |s| {
                             s.child(
                                 row()
@@ -995,9 +1003,15 @@ impl AppView {
                                 )
                             },
                         )
-                        .children(self.connections.iter().enumerate().map(
-                            |(index, connection)| self.connection_tree(index, connection, cx),
-                        )),
+                        .child({
+                            let view = cx.entity();
+                            list(self.explorer_list.clone(), move |entry, _, cx| {
+                                view.update(cx, |this, cx| this.explorer_entry(entry, cx))
+                            })
+                            .flex_1()
+                            .pb_3()
+                        })
+                        .vertical_scrollbar(&self.explorer_list),
                 )
             })
             .when(self.section != Section::Explorer, |s| {
@@ -1425,6 +1439,7 @@ impl Render for AppView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         probe::frame_started();
         probe::rendered("AppView");
+        self.sync_explorer(cx);
         column()
             .id("jykre")
             .relative()

@@ -5,10 +5,29 @@ use jykre::metadata_scope::{MetadataScope, RefreshPhase, RefreshProgress, format
 use jykre::refresh_queue::{Queued, RefreshJob};
 use jykre::result::{DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT};
 use jykre::{cell_format, tr};
-use jykre_storage::RefreshState;
+use jykre_storage::{PageCursor, RefreshState};
+use std::time::SystemTime;
 
 /// A context-menu command run against the app view.
 type MenuAction = Box<dyn Fn(&mut AppView, &mut Window, &mut Context<AppView>)>;
+
+/// One entry of the explorer list: a connection with its details, or a row
+/// of its tree.
+#[derive(Clone, Debug)]
+pub(super) enum ExplorerEntry {
+    Connection(usize),
+    Row(usize, TreeRow),
+}
+
+impl ExplorerEntry {
+    /// What identifies the entry from one frame to the next.
+    fn key(&self) -> (usize, Option<u64>) {
+        match self {
+            Self::Connection(index) => (*index, None),
+            Self::Row(index, row) => (*index, Some(row.id())),
+        }
+    }
+}
 
 impl AppView {
     pub(super) fn invalidate_connection_test(&mut self) {
@@ -427,36 +446,12 @@ impl AppView {
         .detach();
     }
 
+    /// Shows a fresh read of the tree; expanded nodes stay expanded, and
+    /// those it did not cover are read next ([`AppView::load_missing`]).
     fn apply_cache(connection: &mut Connection, snapshot: backend::MetadataSnapshot) {
-        let loaded: HashSet<_> = snapshot
-            .pages
-            .iter()
-            .map(|(parent, _, _)| parent.clone())
-            .collect();
-        for object in &snapshot.objects {
-            if !loaded.contains(&object.path)
-                && !connection
-                    .metadata
-                    .iter()
-                    .any(|old| old.path == object.path)
-            {
-                connection.collapsed.insert(object.path.clone());
-            }
-        }
-        connection.metadata_pages = snapshot
-            .pages
-            .iter()
-            .map(|(parent, count, _)| (parent.clone(), *count))
-            .collect();
-        connection.metadata_more = snapshot
-            .pages
-            .into_iter()
-            .filter(|(_, _, more)| *more)
-            .map(|(parent, _, _)| parent)
-            .collect();
-        connection.metadata = snapshot.objects;
+        connection.tree.replace(snapshot.version, snapshot.pages);
+        connection.ages = jykre::explorer::namespace_ages(&snapshot.statuses);
         connection.metadata_statuses = snapshot.statuses;
-        connection.metadata_version = snapshot.version;
         if snapshot.recovered {
             connection.notice = Some(tr!("The corrupted cache was preserved and recreated. Refresh the metadata to explore again.").into());
         }
@@ -473,6 +468,7 @@ impl AppView {
             row_limit,
             scope,
             cache,
+            expanded,
             warning,
         } = loaded;
         let color = match input.config.driver {
@@ -493,15 +489,13 @@ impl AppView {
             color,
             group,
             expanded: true,
-            metadata: Vec::new(),
+            tree: Tree::default(),
+            ages: HashMap::new(),
             metadata_statuses: Vec::new(),
-            metadata_version: 0,
-            metadata_pages: HashMap::new(),
-            metadata_more: HashSet::new(),
-            cache_loading: false,
-            search_results: Vec::new(),
+            search_rows: Vec::new(),
+            search_revision: 0,
+            expanded_revision: 0,
             refresh_generation: 0,
-            collapsed: HashSet::new(),
             refreshing: None,
             refresh_queue: RefreshQueue::default(),
             scope,
@@ -509,12 +503,13 @@ impl AppView {
             status: Feedback::new(Tone::Info, ""),
             notice: warning.clone(),
         };
+        connection.tree.set_expanded(expanded);
         if let Some(cache) = cache {
             Self::apply_cache(&mut connection, cache);
         }
         if connection.scope.is_pending() {
             connection.status = Feedback::new(Tone::Info, tr!("Nothing is introspected yet."));
-        } else if connection.metadata.is_empty() {
+        } else if connection.tree.is_empty() {
             connection.status = Feedback::new(
                 Tone::Info,
                 tr!("No saved metadata. Use refresh to fetch it from the server."),
@@ -525,7 +520,10 @@ impl AppView {
         }
         self.connections.push(connection);
         self.refresh_connection_choices(cx);
-        self.connections.len() - 1
+        let index = self.connections.len() - 1;
+        // What the previous session left expanded.
+        self.load_missing(index, cx);
+        index
     }
 
     pub(super) fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -613,7 +611,7 @@ impl AppView {
                         let read = if loaded
                             .cache
                             .as_ref()
-                            .is_none_or(|cache| cache.objects.is_empty())
+                            .is_none_or(backend::MetadataSnapshot::is_empty)
                         {
                             selection.clone()
                         } else {
@@ -631,7 +629,7 @@ impl AppView {
                                     snapshot.connection = loaded.profile.name.clone();
                                 }
                             }
-                            connection.search_results.clear();
+                            connection.set_search_rows(Vec::new());
                             connection.name = loaded.profile.name.clone();
                             connection.profile = Some(loaded.profile);
                             connection.input = Some(loaded.input.clone());
@@ -641,10 +639,9 @@ impl AppView {
                             if let Some(cache) = loaded.cache {
                                 Self::apply_cache(connection, cache);
                             } else {
-                                connection.metadata.clear();
+                                connection.tree.clear();
+                                connection.ages.clear();
                                 connection.metadata_statuses.clear();
-                                connection.metadata_pages.clear();
-                                connection.metadata_more.clear();
                             }
                             connection.notice = loaded.warning.clone();
                             connection.status = match loaded.warning {
@@ -680,6 +677,9 @@ impl AppView {
                         }
                         if !this.search.read(cx).value().is_empty() {
                             this.search_cache(false, cx);
+                        }
+                        if editing.is_some() {
+                            this.load_missing(index, cx);
                         }
                         if apply {
                             this.refresh_selection(index, read, cx);
@@ -727,27 +727,10 @@ impl AppView {
             ))
             .await;
             let pages = weak
-                .update(cx, |this, _| {
-                    this.connections[index]
-                        .metadata_pages
-                        .iter()
-                        .map(|(parent, count)| (parent.clone(), *count))
-                        .collect::<Vec<_>>()
-                })
+                .update(cx, |this, _| this.connections[index].tree.loaded())
                 .unwrap_or_default();
             let snapshot = backend::run(async move {
-                backend::cached_metadata_pages(
-                    &dir,
-                    id,
-                    &input.config,
-                    false,
-                    if pages.is_empty() {
-                        vec![(ObjectPath::default(), 200)]
-                    } else {
-                        pages
-                    },
-                )
-                .await
+                backend::cached_metadata_pages(&dir, id, &input.config, false, pages).await
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
@@ -772,6 +755,7 @@ impl AppView {
                 if !this.search.read(cx).value().is_empty() {
                     this.search_cache(false, cx);
                 }
+                this.load_missing(index, cx);
                 this.start_next_refresh(index, cx);
                 cx.notify();
             });
@@ -925,27 +909,10 @@ impl AppView {
             ))
             .await;
             let pages = weak
-                .update(cx, |this, _| {
-                    this.connections[index]
-                        .metadata_pages
-                        .iter()
-                        .map(|(parent, count)| (parent.clone(), *count))
-                        .collect::<Vec<_>>()
-                })
+                .update(cx, |this, _| this.connections[index].tree.loaded())
                 .unwrap_or_default();
             let snapshot = backend::run(async move {
-                backend::cached_metadata_pages(
-                    &dir,
-                    id,
-                    &input.config,
-                    false,
-                    if pages.is_empty() {
-                        vec![(ObjectPath::default(), 200)]
-                    } else {
-                        pages
-                    },
-                )
-                .await
+                backend::cached_metadata_pages(&dir, id, &input.config, false, pages).await
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
@@ -980,6 +947,7 @@ impl AppView {
                 if !this.search.read(cx).value().is_empty() {
                     this.search_cache(false, cx);
                 }
+                this.load_missing(index, cx);
                 this.start_next_refresh(index, cx);
                 cx.notify();
             });
@@ -1007,6 +975,9 @@ impl AppView {
     ) {
         let handle = self.node_handle(index, path, cx);
         self.explorer_selected = Some((index, path.clone()));
+        // The list builds only rows on screen, so the node is scrolled in
+        // before it takes the keyboard.
+        self.reveal_explorer_node(index, path);
         window.focus(&handle, cx);
         cx.notify();
     }
@@ -1022,18 +993,20 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         use jykre::explorer::TreeMove;
-        let query = self.search.read(cx).value().to_lowercase();
+        let searching = !self.search.read(cx).value().is_empty();
         let connection = &self.connections[index];
-        let source = if query.is_empty() {
-            &connection.metadata
+        let rows = if searching {
+            connection.search_rows.as_slice()
         } else {
-            &connection.search_results
+            connection.tree.rows()
         };
-        let nodes = jykre::explorer::visible(source, &connection.collapsed, &query);
+        let nodes: Vec<_> = rows.iter().filter_map(TreeRow::object).collect();
         let Some(current) = nodes.iter().position(|node| node.path == *path) else {
             return;
         };
-        match jykre::explorer::step(&nodes, &connection.collapsed, current, key) {
+        // A search shows every match open.
+        let open = |node: &MetadataObject| searching || connection.tree.is_expanded(&node.path);
+        match jykre::explorer::step(&nodes, open, current, key) {
             TreeMove::Focus(at) => {
                 let target = nodes[at].path.clone();
                 self.select_node(index, &target, window, cx);
@@ -1043,16 +1016,183 @@ impl AppView {
         }
     }
 
+    /// Expands or collapses a node, reading its first page of children from
+    /// the cache when they were not read yet.
     fn toggle_node(&mut self, index: usize, path: &ObjectPath, cx: &mut Context<Self>) {
-        if self.connections[index].cache_loading {
-            return;
+        if self.connections[index].tree.toggle(path) {
+            self.load_children(index, path.clone(), None, cx);
         }
-        if self.connections[index].collapsed.remove(path) {
-            self.load_cached_children(index, path.clone(), false, cx);
-        } else {
-            self.connections[index].collapsed.insert(path.clone());
-        }
+        self.save_expanded_soon(index, cx);
         cx.notify();
+    }
+
+    /// Reads the next page of a node's children ("Load more").
+    fn load_more(&mut self, index: usize, parent: ObjectPath, cx: &mut Context<Self>) {
+        let Some(after) = self.connections[index].tree.cursor(&parent).cloned() else {
+            return;
+        };
+        self.load_children(index, parent, Some(after), cx);
+    }
+
+    /// Reads one page of `parent`'s children, only that page, and adds it to
+    /// the tree. A page from another cache version (a refresh published in
+    /// between) reads the tree again instead.
+    fn load_children(
+        &mut self,
+        index: usize,
+        parent: ObjectPath,
+        after: Option<PageCursor>,
+        cx: &mut Context<Self>,
+    ) {
+        let connection = &mut self.connections[index];
+        let Some(profile) = connection.profile.clone() else {
+            return;
+        };
+        connection.tree.set_loading(&parent, true);
+        let generation = connection.refresh_generation;
+        let dir = connection_store::data_dir();
+        cx.spawn(async move |weak, cx| {
+            let read = parent.clone();
+            let result = backend::run(async move {
+                backend::cached_children(&dir, profile.id, &profile.config, read, after).await
+            })
+            .await;
+            let _ = weak.update(cx, |this, cx| {
+                let connection = &mut this.connections[index];
+                if connection.refresh_generation != generation {
+                    connection.tree.set_loading(&parent, false);
+                    return;
+                }
+                match result {
+                    Ok((version, page)) => {
+                        if !connection.tree.append(version, parent, page) {
+                            this.reload_tree(index, cx);
+                        }
+                    }
+                    Err(error) => {
+                        connection.tree.set_loading(&parent, false);
+                        connection.status = Feedback::new(Tone::Error, error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Reads again everything the tree shows, from one snapshot of the cache.
+    fn reload_tree(&mut self, index: usize, cx: &mut Context<Self>) {
+        let connection = &self.connections[index];
+        let Some(profile) = connection.profile.clone() else {
+            return;
+        };
+        let pages = connection.tree.loaded();
+        let generation = connection.refresh_generation;
+        let dir = connection_store::data_dir();
+        cx.spawn(async move |weak, cx| {
+            let result = backend::run(async move {
+                backend::cached_metadata_pages(&dir, profile.id, &profile.config, false, pages)
+                    .await
+            })
+            .await;
+            let _ = weak.update(cx, |this, cx| {
+                let connection = &mut this.connections[index];
+                if connection.refresh_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        Self::apply_cache(connection, snapshot);
+                        this.load_missing(index, cx);
+                    }
+                    Err(error) => connection.status = Feedback::new(Tone::Error, error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Reads, in one go, the children of the nodes that are expanded but
+    /// were not read: after a restart, or after the tree was read again.
+    pub(super) fn load_missing(&mut self, index: usize, cx: &mut Context<Self>) {
+        let connection = &mut self.connections[index];
+        let missing = connection.tree.missing();
+        let Some(profile) = connection.profile.clone().filter(|_| !missing.is_empty()) else {
+            return;
+        };
+        for path in &missing {
+            connection.tree.set_loading(path, true);
+        }
+        let generation = connection.refresh_generation;
+        let pages: Vec<_> = missing
+            .iter()
+            .map(|path| (path.clone(), backend::CHILD_PAGE))
+            .collect();
+        let dir = connection_store::data_dir();
+        cx.spawn(async move |weak, cx| {
+            let result = backend::run(async move {
+                backend::cached_metadata_pages(&dir, profile.id, &profile.config, false, pages)
+                    .await
+            })
+            .await;
+            let _ = weak.update(cx, |this, cx| {
+                let connection = &mut this.connections[index];
+                for path in &missing {
+                    connection.tree.set_loading(path, false);
+                }
+                if connection.refresh_generation != generation {
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        let version = snapshot.version;
+                        let fresh = snapshot
+                            .pages
+                            .into_iter()
+                            .all(|(parent, page)| connection.tree.append(version, parent, page));
+                        if !fresh {
+                            this.reload_tree(index, cx);
+                        }
+                    }
+                    Err(error) => connection.status = Feedback::new(Tone::Error, error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Saves what the explorer shows expanded for the next session, once
+    /// the clicks of a burst are over.
+    fn save_expanded_soon(&mut self, index: usize, cx: &mut Context<Self>) {
+        let connection = &mut self.connections[index];
+        let Some(id) = connection.profile.as_ref().map(|profile| profile.id) else {
+            return;
+        };
+        connection.expanded_revision += 1;
+        let revision = connection.expanded_revision;
+        let dir = connection_store::data_dir();
+        cx.spawn(async move |weak, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let Ok(Some(expanded)) = weak.update(cx, |this, _| {
+                let connection = &this.connections[index];
+                (connection.expanded_revision == revision).then(|| connection.tree.expanded())
+            }) else {
+                return;
+            };
+            let result = backend::run(async move {
+                connection_store::save_expanded(&dir, id, &expanded).await
+            })
+            .await;
+            if let Err(error) = result {
+                // Losing the expanded nodes is not worth interrupting anyone.
+                tracing::warn!(connection_id = %id, error_code = ?error.code, "explorer state not saved");
+            }
+        })
+        .detach();
     }
 
     fn open_relation(
@@ -1080,62 +1220,6 @@ impl AppView {
         self.add_query(group, &title, &sql, window, cx);
     }
 
-    fn load_cached_children(
-        &mut self,
-        index: usize,
-        parent: ObjectPath,
-        more: bool,
-        cx: &mut Context<Self>,
-    ) {
-        let connection = &mut self.connections[index];
-        if connection.cache_loading || (!more && connection.metadata_pages.contains_key(&parent)) {
-            return;
-        }
-        let Some(profile) = connection.profile.clone() else {
-            return;
-        };
-        let count = connection
-            .metadata_pages
-            .get(&parent)
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(200);
-        let mut pages = connection.metadata_pages.clone();
-        pages.insert(parent, count);
-        connection.cache_loading = true;
-        let version = connection.metadata_version;
-        let generation = connection.refresh_generation;
-        let dir = connection_store::data_dir();
-        cx.spawn(async move |weak, cx| {
-            let result = backend::run(async move {
-                backend::cached_metadata_pages(
-                    &dir,
-                    profile.id,
-                    &profile.config,
-                    false,
-                    pages.into_iter().collect(),
-                )
-                .await
-            })
-            .await;
-            let _ = weak.update(cx, |this, cx| {
-                let connection = &mut this.connections[index];
-                connection.cache_loading = false;
-                if connection.refresh_generation != generation
-                    || connection.metadata_version != version
-                {
-                    return;
-                }
-                match result {
-                    Ok(snapshot) => Self::apply_cache(connection, snapshot),
-                    Err(error) => connection.status = Feedback::new(Tone::Error, error.to_string()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
     pub(super) fn search_cache(&mut self, palette: bool, cx: &mut Context<Self>) {
         let query = if palette {
             self.command.read(cx).value().to_string()
@@ -1154,11 +1238,12 @@ impl AppView {
         };
         if !palette && query.is_empty() {
             for connection in &mut self.connections {
-                connection.search_results.clear();
+                connection.set_search_rows(Vec::new());
             }
             cx.notify();
             return;
         }
+        let lowered = query.to_lowercase();
         let profiles: Vec<_> = self
             .connections
             .iter()
@@ -1212,7 +1297,7 @@ impl AppView {
                     this.command_matches.clear();
                 } else {
                     for connection in &mut this.connections {
-                        connection.search_results.clear();
+                        connection.set_search_rows(Vec::new());
                     }
                 }
                 match result {
@@ -1230,7 +1315,11 @@ impl AppView {
                                     ));
                                 }
                             } else {
-                                this.connections[index].search_results = objects;
+                                // The search is limited, so its rows are built
+                                // once here, not while drawing.
+                                this.connections[index].set_search_rows(
+                                    jykre::explorer::search_rows(&objects, &lowered),
+                                );
                             }
                         }
                     }
@@ -1250,6 +1339,9 @@ impl AppView {
         .detach();
     }
 
+    /// The connection's line in the explorer and, while it is expanded, its
+    /// details, status and actions. Its nodes are separate list entries
+    /// ([`AppView::explorer_row`]).
     pub(super) fn live_connection_tree(
         &self,
         index: usize,
@@ -1258,18 +1350,11 @@ impl AppView {
     ) -> Div {
         let query = self.search.read(cx).value().to_lowercase();
         let expanded = connection.expanded || !query.is_empty();
-        let source = if query.is_empty() {
-            &connection.metadata
-        } else {
-            &connection.search_results
-        };
-        let objects = jykre::explorer::visible(source, &connection.collapsed, &query);
         let weak = cx.weak_entity();
-        let refreshing = connection
+        let refreshing_all = connection
             .refreshing
             .as_ref()
-            .map(|(scope, _)| scope.clone());
-        let refreshing_all = refreshing.as_ref().is_some_and(|scope| scope.0.is_empty());
+            .is_some_and(|(scope, _)| scope.0.is_empty());
         let queued_all = connection.refresh_queue.waits_for_selection();
         column()
             .flex_none()
@@ -1455,269 +1540,108 @@ impl AppView {
                             )),
                         ),
                 )
-                .children(objects.into_iter().enumerate().map(|(row_index, object)| {
-                    let path = object.path.clone();
-                    // Keys and partitions refresh with their table.
-                    let refresh_path = jykre::explorer::refresh_scope(&path);
-                    let f5_path = refresh_path.clone();
-                    let toggle_path = path.clone();
-                    let key_path = path.clone();
-                    let menu_path = path.clone();
-                    let relation = object.kind.is_relation();
-                    let opens = jykre::explorer::opens(object);
-                    let expandable = jykre::explorer::expandable(object);
-                    let detail = jykre::explorer::detail(object);
-                    let described =
-                        matches!(object.kind, ObjectKind::Column | ObjectKind::ForeignKey)
-                            || object.comment.is_some();
-                    let described_object = object.clone();
-                    let collapsed = connection.collapsed.contains(&path);
-                    let freshness = connection.node_freshness(&path);
-                    let refreshing_this = refreshing.as_ref() == Some(&path);
-                    let queued_this = connection.refresh_queue.waits_for(&path);
-                    let refresh_queued = connection.refresh_queue.waits_for(&refresh_path);
-                    let name = object.name.clone();
-                    let selected = self
-                        .explorer_selected
-                        .as_ref()
-                        .is_some_and(|(at, chosen)| *at == index && *chosen == path);
-                    let focus = self.node_handle(index, &path, cx);
-                    let node_id = path
-                        .0
-                        .iter()
-                        .map(|part| part.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join("/");
-                    row()
-                        .id(ElementId::Name(
-                            format!("node-row-{index}-{node_id}").into(),
-                        ))
-                        .pl(px(12. + (path.0.len() - 1) as f32 * 14.))
-                        .pr_1()
-                        .h(px(32.))
-                        .when(relation, |s| {
-                            s.child(
-                                icon_button(
-                                    ElementId::Name(
-                                        format!("toggle-node-{index}-{row_index}").into(),
-                                    ),
-                                    if collapsed {
-                                        I::ChevronRight
-                                    } else {
-                                        I::ChevronDown
-                                    },
-                                    tr!("Expand or collapse columns"),
-                                )
-                                .size(px(20.))
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| this.toggle_node(index, &toggle_path, cx),
-                                )),
-                            )
-                        })
-                        .child(
-                            div()
-                                .id(ElementId::Name(format!("node-{index}-{row_index}").into()))
-                                .role(Role::TreeItem)
-                                .aria_label(format!(
-                                    "{} {}",
-                                    if relation {
-                                        tr!("Table")
-                                    } else {
-                                        tr!("Expand")
-                                    },
-                                    object.name
-                                ))
-                                .aria_selected(selected)
-                                .track_focus(&focus)
-                                .tab_index(0)
-                                .when(selected, |s| s.bg(rgb(SURFACE)))
-                                .focus_visible(|s| s.bg(rgb(HOVER)))
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .flex_1()
-                                .min_w_0()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(rgb(HOVER)))
-                                .child(icon(
-                                    match object.kind {
-                                        ObjectKind::View => I::Eye,
-                                        ObjectKind::MaterializedView => I::TableProperties,
-                                        _ if relation => I::Table2,
-                                        ObjectKind::Column if object.primary_key.is_some() => {
-                                            I::KeyRound
-                                        }
-                                        ObjectKind::Column => I::Columns3,
-                                        ObjectKind::ForeignKey => I::Link,
-                                        ObjectKind::Partition => I::Layers,
-                                        _ if collapsed => I::ChevronRight,
-                                        _ => I::ChevronDown,
-                                    },
-                                    if object.primary_key.is_some() {
-                                        AMBER
-                                    } else {
-                                        MUTED
-                                    },
-                                ))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(14.))
-                                        .child(object.name.clone()),
-                                )
-                                .when_some(detail, |s, detail| {
-                                    s.child(
-                                        div()
-                                            .flex_none()
-                                            .max_w(px(140.))
-                                            .truncate()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(FAINT))
-                                            .child(detail),
-                                    )
-                                })
-                                // Built only when shown, not for every node.
-                                .when(described, |s| {
-                                    s.tooltip(move |window, cx| {
-                                        Tooltip::new(jykre::explorer::description(
-                                            &described_object,
-                                        ))
-                                        .build(window, cx)
-                                    })
-                                })
-                                // F5 refreshes the focused node, or cancels its refresh;
-                                // the arrows move through the tree.
-                                .on_key_down(cx.listener(
-                                    move |this, event: &KeyDownEvent, window, cx| {
-                                        let keystroke = &event.keystroke;
-                                        if keystroke.key == "f5" {
-                                            this.toggle_refresh(index, f5_path.clone(), cx);
-                                        } else if let Some(key) =
-                                            jykre::explorer::TreeKey::from_key(&keystroke.key)
-                                                .filter(|_| !keystroke.modifiers.modified())
-                                        {
-                                            this.tree_key(index, &key_path, key, window, cx);
-                                        } else {
-                                            return;
-                                        }
-                                        window.prevent_default();
-                                        cx.stop_propagation();
-                                    },
-                                ))
-                                // A click selects; a double click or Enter opens a
-                                // table, so a stray click never opens a tab.
-                                .on_click(cx.listener(
-                                    move |this, event: &ClickEvent, window, cx| {
-                                        this.select_node(index, &path, window, cx);
-                                        if opens {
-                                            if event.is_keyboard() || event.click_count() >= 2 {
-                                                this.open_relation(index, &path, window, cx);
-                                            }
-                                        } else if expandable {
-                                            this.toggle_node(index, &path, cx);
-                                        }
-                                    },
-                                )),
-                        )
-                        // Refresh lives in the context menu; only a running refresh
-                        // shows here, as a spinner that cancels it, and a waiting
-                        // one as a label.
-                        .when(queued_this, |s| s.child(queued_label()))
-                        .when(refreshing_this, |s| {
-                            s.child(
-                                spinner_button(
-                                    ElementId::Name(
-                                        format!("cancel-node-refresh-{index}-{row_index}").into(),
-                                    ),
-                                    ElementId::Name(
-                                        format!("node-refresh-spinner-{index}-{row_index}").into(),
-                                    ),
-                                    tr!("Cancel refresh"),
-                                )
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.toggle_refresh(index, refresh_path.clone(), cx)
-                                    },
-                                )),
-                            )
-                        })
-                        .context_menu({
-                            let weak = weak.clone();
-                            move |menu, _, _| {
-                                let run = |action: MenuAction| {
-                                    let weak = weak.clone();
-                                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                        let _ =
-                                            weak.update(cx, |this, cx| action(this, window, cx));
-                                    }
-                                };
-                                let open_path = menu_path.clone();
-                                let refresh_path = jykre::explorer::refresh_scope(&menu_path);
-                                let copy_name = name.clone();
-                                menu.item(if opens {
-                                    PopupMenuItem::new(tr!("Open preview"))
-                                        .icon(I::SquareTerminal)
-                                        .on_click(run(Box::new(move |this, window, cx| {
-                                            this.open_relation(index, &open_path, window, cx)
-                                        })))
-                                } else {
-                                    PopupMenuItem::new(if collapsed {
-                                        tr!("Expand")
-                                    } else {
-                                        tr!("Collapse")
-                                    })
-                                    .icon(if collapsed {
-                                        I::ChevronRight
-                                    } else {
-                                        I::ChevronDown
-                                    })
-                                    .on_click(run(Box::new(move |this, _, cx| {
-                                        this.toggle_node(index, &open_path, cx)
-                                    })))
-                                })
-                                .item(
-                                    PopupMenuItem::new(if refreshing_this {
-                                        tr!("Cancel refresh")
-                                    } else if refresh_queued {
-                                        tr!("Take out of the queue")
-                                    } else {
-                                        tr!("Refresh")
-                                    })
-                                    .icon(I::RefreshCw)
-                                    .on_click(run(Box::new(move |this, _, cx| {
-                                        this.toggle_refresh(index, refresh_path.clone(), cx)
-                                    }))),
-                                )
-                                .separator()
-                                .item(PopupMenuItem::new(tr!("Copy name")).icon(I::Copy).on_click(
-                                    move |_, _, cx: &mut App| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_name.to_string(),
-                                        ))
-                                    },
-                                ))
-                                .separator()
-                                .label(freshness.clone())
-                            }
-                        })
-                }))
-                .children(
-                    connection
-                        .metadata_more
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, parent)| {
-                            parent.0.is_empty() || !connection.collapsed.contains(*parent)
-                        })
-                        .map(|(page_index, parent)| {
-                            let parent = parent.clone();
-                            button(
-                                ElementId::Name(
-                                    format!("metadata-more-{index}-{page_index}").into(),
-                                ),
-                                I::Plus,
-                                tr!("Load more objects"),
-                            )
+            })
+    }
+
+    /// Rebuilds the explorer's list entries when a tree, an expansion or a
+    /// search changed since the last frame, replacing only the entries that
+    /// changed. Otherwise it costs one comparison per connection.
+    pub(super) fn sync_explorer(&mut self, cx: &App) {
+        let searching = !self.search.read(cx).value().is_empty();
+        let signature: Vec<_> = self
+            .connections
+            .iter()
+            .map(|connection| {
+                (
+                    connection.expanded || searching,
+                    searching,
+                    if searching {
+                        connection.search_revision
+                    } else {
+                        connection.tree.revision()
+                    },
+                )
+            })
+            .collect();
+        if signature == self.explorer_signature {
+            return;
+        }
+        self.explorer_signature = signature;
+        let mut entries = Vec::with_capacity(self.explorer_entries.len());
+        for (index, connection) in self.connections.iter().enumerate() {
+            entries.push(ExplorerEntry::Connection(index));
+            if connection.input.is_none() || !(connection.expanded || searching) {
+                continue;
+            }
+            let rows = if searching {
+                connection.search_rows.as_slice()
+            } else {
+                connection.tree.rows()
+            };
+            entries.extend(
+                rows.iter()
+                    .cloned()
+                    .map(|row| ExplorerEntry::Row(index, row)),
+            );
+        }
+        let old: Vec<_> = self
+            .explorer_entries
+            .iter()
+            .map(ExplorerEntry::key)
+            .collect();
+        let new: Vec<_> = entries.iter().map(ExplorerEntry::key).collect();
+        let (range, count) = jykre::explorer::changed_range(&old, &new);
+        self.explorer_list.splice(range, count);
+        self.explorer_entries = entries;
+    }
+
+    /// The element of one explorer list entry.
+    pub(super) fn explorer_entry(&mut self, entry: usize, cx: &mut Context<Self>) -> AnyElement {
+        match self.explorer_entries.get(entry).cloned() {
+            Some(ExplorerEntry::Connection(index)) => match self.connections.get(index) {
+                Some(connection) => self
+                    .connection_tree(index, connection, cx)
+                    .into_any_element(),
+                None => div().into_any_element(),
+            },
+            Some(ExplorerEntry::Row(index, row)) if index < self.connections.len() => {
+                self.explorer_row(index, &row, cx)
+            }
+            _ => div().into_any_element(),
+        }
+    }
+
+    /// Scrolls the explorer so the node is on screen.
+    fn reveal_explorer_node(&self, index: usize, path: &ObjectPath) {
+        let found = self.explorer_entries.iter().position(|entry| match entry {
+            &ExplorerEntry::Row(at, ref row) => {
+                at == index && row.object().is_some_and(|object| object.path == *path)
+            }
+            ExplorerEntry::Connection(_) => false,
+        });
+        if let Some(found) = found {
+            self.explorer_list.scroll_to_reveal_item(found);
+        }
+    }
+
+    /// One row of a connection's tree in the explorer list: a node, or
+    /// "Load more" after a node's children read so far. Only rows on screen
+    /// are built, each frame.
+    pub(super) fn explorer_row(
+        &self,
+        index: usize,
+        entry: &TreeRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let object = match entry {
+            TreeRow::Node { object, .. } => object.clone(),
+            TreeRow::More { parent, id } => {
+                let parent = parent.clone();
+                return div()
+                    .pl(px(12. + parent.0.len() as f32 * 14.))
+                    .py_1()
+                    .child(
+                        button(("metadata-more", *id), I::Plus, tr!("Load more objects"))
                             .child(label(
                                 parent
                                     .0
@@ -1725,14 +1649,254 @@ impl AppView {
                                     .map(|part| part.name.clone())
                                     .unwrap_or_else(|| tr!("Connection").into()),
                             ))
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    this.load_cached_children(index, parent.clone(), true, cx)
-                                },
-                            ))
-                        }),
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.load_more(index, parent.clone(), cx)
+                            })),
+                    )
+                    .into_any_element();
+            }
+        };
+        let connection = &self.connections[index];
+        let id = entry.id();
+        let weak = cx.weak_entity();
+        let path = object.path.clone();
+        let searching = !self.search.read(cx).value().is_empty();
+        // Keys and partitions refresh with their table.
+        let refresh_path = jykre::explorer::refresh_scope(&path);
+        let relation = object.kind.is_relation();
+        let opens = jykre::explorer::opens(&object);
+        let expandable = jykre::explorer::expandable(&object);
+        let detail = jykre::explorer::detail(&object);
+        let described = matches!(object.kind, ObjectKind::Column | ObjectKind::ForeignKey)
+            || object.comment.is_some();
+        let collapsed = !searching && !connection.tree.is_expanded(&path);
+        let refreshing = connection.refreshing.as_ref().map(|(scope, _)| scope);
+        let refreshing_this = refreshing == Some(&path);
+        let queued_this = connection.refresh_queue.waits_for(&path);
+        let refresh_queued = connection.refresh_queue.waits_for(&refresh_path);
+        let age = connection.ages.get(&path).map(|at| {
+            jykre::explorer::format_age(SystemTime::now().duration_since(*at).unwrap_or_default())
+        });
+        let selected = self
+            .explorer_selected
+            .as_ref()
+            .is_some_and(|(at, chosen)| *at == index && *chosen == path);
+        let focus = self.node_handle(index, &path, cx);
+        row()
+            .id(("node-row", id))
+            .pl(px(12. + (path.0.len() - 1) as f32 * 14.))
+            .pr_1()
+            .h(px(32.))
+            .when(relation, |s| {
+                let path = path.clone();
+                s.child(
+                    icon_button(
+                        "toggle-node",
+                        if collapsed {
+                            I::ChevronRight
+                        } else {
+                            I::ChevronDown
+                        },
+                        tr!("Expand or collapse columns"),
+                    )
+                    .size(px(20.))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.toggle_node(index, &path, cx)),
+                    ),
                 )
             })
+            .child({
+                let f5_path = refresh_path.clone();
+                let key_path = path.clone();
+                let click_path = path.clone();
+                let described_object = object.clone();
+                div()
+                    .id("node")
+                    .role(Role::TreeItem)
+                    .aria_label(format!(
+                        "{} {}",
+                        if relation {
+                            tr!("Table")
+                        } else {
+                            tr!("Expand")
+                        },
+                        object.name
+                    ))
+                    .aria_selected(selected)
+                    .track_focus(&focus)
+                    .tab_index(0)
+                    .when(selected, |s| s.bg(rgb(SURFACE)))
+                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_1()
+                    .min_w_0()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(HOVER)))
+                    .child(icon(
+                        match object.kind {
+                            ObjectKind::View => I::Eye,
+                            ObjectKind::MaterializedView => I::TableProperties,
+                            _ if relation => I::Table2,
+                            ObjectKind::Column if object.primary_key.is_some() => I::KeyRound,
+                            ObjectKind::Column => I::Columns3,
+                            ObjectKind::ForeignKey => I::Link,
+                            ObjectKind::Partition => I::Layers,
+                            _ if collapsed => I::ChevronRight,
+                            _ => I::ChevronDown,
+                        },
+                        if object.primary_key.is_some() {
+                            AMBER
+                        } else {
+                            MUTED
+                        },
+                    ))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(14.))
+                            .child(object.name.clone()),
+                    )
+                    .when_some(detail, |s, detail| {
+                        s.child(
+                            div()
+                                .flex_none()
+                                .max_w(px(140.))
+                                .truncate()
+                                .text_size(px(12.))
+                                .text_color(rgb(FAINT))
+                                .child(detail),
+                        )
+                    })
+                    // Built only when shown, not for every node.
+                    .when(described, |s| {
+                        s.tooltip(move |window, cx| {
+                            Tooltip::new(jykre::explorer::description(&described_object))
+                                .build(window, cx)
+                        })
+                    })
+                    // F5 refreshes the focused node, or cancels its refresh;
+                    // the arrows move through the tree.
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        let keystroke = &event.keystroke;
+                        if keystroke.key == "f5" {
+                            this.toggle_refresh(index, f5_path.clone(), cx);
+                        } else if let Some(key) = jykre::explorer::TreeKey::from_key(&keystroke.key)
+                            .filter(|_| !keystroke.modifiers.modified())
+                        {
+                            this.tree_key(index, &key_path, key, window, cx);
+                        } else {
+                            return;
+                        }
+                        window.prevent_default();
+                        cx.stop_propagation();
+                    }))
+                    // A click selects; a double click or Enter opens a
+                    // table, so a stray click never opens a tab.
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.select_node(index, &click_path, window, cx);
+                        if opens {
+                            if event.is_keyboard() || event.click_count() >= 2 {
+                                this.open_relation(index, &click_path, window, cx);
+                            }
+                        } else if expandable {
+                            this.toggle_node(index, &click_path, cx);
+                        }
+                    }))
+            })
+            // How old the read of a chosen namespace is.
+            .when_some(age, |s, age| {
+                s.child(
+                    div()
+                        .flex_none()
+                        .px_1()
+                        .text_size(px(12.))
+                        .text_color(rgb(FAINT))
+                        .child(age),
+                )
+            })
+            // Refresh lives in the context menu; only a running refresh
+            // shows here, as a spinner that cancels it, and a waiting one
+            // as a label.
+            .when(queued_this, |s| s.child(queued_label()))
+            .when(refreshing_this, |s| {
+                let refresh_path = refresh_path.clone();
+                s.child(
+                    spinner_button(
+                        "cancel-node-refresh",
+                        "node-refresh-spinner",
+                        tr!("Cancel refresh"),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_refresh(index, refresh_path.clone(), cx)
+                    })),
+                )
+            })
+            .context_menu(move |menu, _, cx| {
+                let run = |action: MenuAction| {
+                    let weak = weak.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let _ = weak.update(cx, |this, cx| action(this, window, cx));
+                    }
+                };
+                let open_path = path.clone();
+                let refresh_path = refresh_path.clone();
+                let copy_name = object.name.clone();
+                // Read when the menu opens, not for every node and frame.
+                let freshness = weak
+                    .upgrade()
+                    .and_then(|view| {
+                        view.read(cx)
+                            .connections
+                            .get(index)
+                            .map(|connection| connection.node_freshness(&path))
+                    })
+                    .unwrap_or_default();
+                menu.item(if opens {
+                    PopupMenuItem::new(tr!("Open preview"))
+                        .icon(I::SquareTerminal)
+                        .on_click(run(Box::new(move |this, window, cx| {
+                            this.open_relation(index, &open_path, window, cx)
+                        })))
+                } else {
+                    PopupMenuItem::new(if collapsed {
+                        tr!("Expand")
+                    } else {
+                        tr!("Collapse")
+                    })
+                    .icon(if collapsed {
+                        I::ChevronRight
+                    } else {
+                        I::ChevronDown
+                    })
+                    .on_click(run(Box::new(move |this, _, cx| {
+                        this.toggle_node(index, &open_path, cx)
+                    })))
+                })
+                .item(
+                    PopupMenuItem::new(if refreshing_this {
+                        tr!("Cancel refresh")
+                    } else if refresh_queued {
+                        tr!("Take out of the queue")
+                    } else {
+                        tr!("Refresh")
+                    })
+                    .icon(I::RefreshCw)
+                    .on_click(run(Box::new(move |this, _, cx| {
+                        this.toggle_refresh(index, refresh_path.clone(), cx)
+                    }))),
+                )
+                .separator()
+                .item(PopupMenuItem::new(tr!("Copy name")).icon(I::Copy).on_click(
+                    move |_, _, cx: &mut App| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_name.to_string()))
+                    },
+                ))
+                .separator()
+                .label(freshness)
+            })
+            .into_any_element()
     }
 
     pub(super) fn connection_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2131,6 +2295,12 @@ impl Drop for AppView {
 impl Connection {
     /// Cancels the running refresh and forgets the waiting ones; a result
     /// still on its way is discarded by the new generation.
+    /// Shows the rows of a search, or none.
+    fn set_search_rows(&mut self, rows: Vec<TreeRow>) {
+        self.search_rows = rows;
+        self.search_revision += 1;
+    }
+
     fn stop_refreshes(&mut self) {
         if let Some((_, cancel)) = self.refreshing.take() {
             cancel.cancel();

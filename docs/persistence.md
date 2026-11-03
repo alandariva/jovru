@@ -55,6 +55,12 @@ and read once the connections are loaded. A tab whose connection no longer
 exists reopens in a group of its own, without a connection. A value that
 cannot be read starts an empty workspace. Results are never stored.
 
+`connection.<connection-id>.explorer` keeps what the explorer shows expanded
+for that connection (`{"expanded": [paths]}`), written half a second after a
+burst of expanding and collapsing. Keyed by the connection's ID, it survives
+a rename. At start the expanded nodes are read again from the cache in one
+snapshot; a value that cannot be read starts collapsed.
+
 `config_json` holds the driver's non-sensitive options; drivers reject
 password and token fields there. `revision` provides optimistic concurrency:
 a save names the revision it edited, so a change made in another window is
@@ -75,6 +81,19 @@ The cache records the identity of the configuration it was read from.
 `MetadataRepository::prepare` reconciles it after the user saves a changed
 profile; background readers use `open`, which never replaces another
 configuration's identity.
+
+Each connection's cache stays open while the application runs
+(`backend` keeps one `MetadataRepository` per connection), so expanding,
+searching and refreshing do not reopen the file. It is opened, and checked
+with `quick_check`, at start, after the profile's identity changed and after
+a failed read.
+
+Children are read a page at a time with a cursor (`PageCursor`), in a fixed
+order of kinds (namespaces, tables, views, materialized views, columns,
+foreign keys, partitions) and then by ordinal, name and key. Every query
+walks the `objects_parent` index from the cursor, so a page costs the same
+at any depth. `pages` reads several pages and the cache version from one
+snapshot.
 
 ## Atomic metadata refresh
 

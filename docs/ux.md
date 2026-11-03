@@ -72,6 +72,8 @@ Each state has one consistent representation.
 | Reading the chosen metadata | Below the connection in the explorer | A bar with "Reading n of total: name", the percentage and the time left (estimated after the first namespace); the connection's `↻` spins and cancels |
 | Nothing chosen to introspect | The connection in the explorer | "Nothing is introspected yet." and **Choose what to introspect**, which opens the connection settings |
 | Metadata state per scope | Explorer node and its tooltip | Last success time, failure message, permission warnings |
+| Age of a chosen namespace | After the namespace's name in the explorer | How long ago it was last read in full ("3 days ago"), as of the moment it is drawn |
+| Explorer expansion | The explorer | The nodes left expanded come back after a restart, read from the local cache; "Load more" after a node reads its next page only |
 | What a node is | Explorer node | Icon by kind (table, view, materialized view, column, key column, foreign key, partition), the column's type or what a key references after the name, and a tooltip with nullability, primary key position, default and comment |
 | Demo versus server data | Footer badge | `MOCK` or `SQL` |
 

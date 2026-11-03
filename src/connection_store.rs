@@ -48,6 +48,8 @@ pub struct LoadedConnection {
     /// What the user chose to introspect; pending when nothing was chosen.
     pub scope: MetadataScope,
     pub cache: Option<MetadataSnapshot>,
+    /// Explorer nodes the previous session left expanded.
+    pub expanded: Vec<ObjectPath>,
     pub warning: Option<String>,
 }
 
@@ -258,12 +260,14 @@ async fn load_from(
                 MetadataScope::default()
             }
         };
+        let expanded = stored_expanded(repository, profile.id).await;
         loaded.push(LoadedConnection {
             profile,
             input,
             row_limit,
             scope,
             cache,
+            expanded,
             warning,
         });
     }
@@ -400,12 +404,15 @@ async fn save_to(
         config: profile.config.clone(),
         credentials,
     };
+    // The explorer keeps its own expanded nodes while the connection is
+    // edited; nothing is read back here.
     Ok(LoadedConnection {
         profile,
         input,
         row_limit,
         scope,
         cache,
+        expanded: Vec::new(),
         warning,
     })
 }
@@ -499,17 +506,47 @@ async fn stored_scope(
     Ok((scope, true))
 }
 
+/// Opens the connection's cache once, reconciled with its saved profile,
+/// and reads its root; the cache stays open for the explorer.
 async fn prepare_cache(
     dir: &Path,
     profile: &ConnectionProfile,
     recover: bool,
 ) -> DriverResult<MetadataSnapshot> {
-    let repository = MetadataRepository::prepare(dir, profile.id, &profile.config).await?;
-    let recovered = repository.recovered;
-    repository.close().await;
+    let recovered = backend::prepare_cache(dir, profile.id, &profile.config).await?;
     let mut snapshot = backend::cached_metadata(dir, profile.id, &profile.config, recover).await?;
     snapshot.recovered |= recovered;
     Ok(snapshot)
+}
+
+/// The explorer nodes a connection left expanded. A missing or unreadable
+/// list only means starting collapsed.
+async fn stored_expanded(repository: &ConfigRepository, id: ConnectionId) -> Vec<ObjectPath> {
+    match repository.explorer_state(id).await {
+        Ok(Some(value)) => {
+            serde_json::from_value::<Vec<ObjectPath>>(value["expanded"].clone()).unwrap_or_default()
+        }
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(connection_id = %id, error_code = ?error.code, "explorer state unavailable");
+            Vec::new()
+        }
+    }
+}
+
+/// Saves the explorer nodes a connection shows expanded, for the next
+/// session.
+pub async fn save_expanded(
+    dir: &Path,
+    id: ConnectionId,
+    expanded: &[ObjectPath],
+) -> DriverResult<()> {
+    let repository = ConfigRepository::open(dir).await?;
+    let result = repository
+        .set_explorer_state(id, &serde_json::json!({ "expanded": expanded }))
+        .await;
+    repository.close().await;
+    result
 }
 
 #[cfg(test)]

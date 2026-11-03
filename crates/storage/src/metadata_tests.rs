@@ -392,12 +392,20 @@ async fn a_scoped_refresh_into_an_empty_cache_publishes_its_namespace_ancestors(
         .unwrap();
     drop(run);
     let root = repository
-        .children(&ObjectPath::default(), 0, 10)
+        .children(&ObjectPath::default(), None, 10)
         .await
-        .unwrap();
+        .unwrap()
+        .objects;
     assert_eq!(root.len(), 1);
     assert_eq!(root[0].path, db);
-    assert_eq!(repository.children(&schema, 0, 10).await.unwrap(), [table]);
+    assert_eq!(
+        repository
+            .children(&schema, None, 10)
+            .await
+            .unwrap()
+            .objects,
+        [table]
+    );
     // A scope the server no longer has publishes nothing, not even ancestors.
     let other = ObjectPath::default()
         .child(ObjectKind::Database, "gone")
@@ -408,12 +416,100 @@ async fn a_scoped_refresh_into_an_empty_cache_publishes_its_namespace_ancestors(
         .unwrap();
     assert_eq!(
         repository
-            .children(&ObjectPath::default(), 0, 10)
+            .children(&ObjectPath::default(), None, 10)
             .await
             .unwrap()
+            .objects
             .len(),
         1
     );
+    repository.close().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn pages_follow_kind_order_and_continue_from_their_cursor() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db");
+    let mut objects = vec![db.clone()];
+    // Stored text would put materialized views first and views last.
+    for (kind, prefix, count) in [
+        (ObjectKind::View, "v", 3),
+        (ObjectKind::MaterializedView, "m", 2),
+        (ObjectKind::Table, "t", 5),
+    ] {
+        for index in 0..count {
+            objects.push(MetadataObject::new(
+                kind,
+                &db.path,
+                format!("{prefix}{index}"),
+            ));
+        }
+    }
+    let table = objects.last().unwrap().path.clone();
+    for ordinal in [3, 1, 2] {
+        let mut column = MetadataObject::new(ObjectKind::Column, &table, format!("c{ordinal}"));
+        column.ordinal = Some(ordinal);
+        objects.push(column);
+    }
+    let mut key = MetadataObject::new(ObjectKind::ForeignKey, &table, "fk");
+    key.ordinal = None;
+    objects.push(key);
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(objects).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    // Pages of three cross from one kind to the next without repeating or
+    // skipping a child.
+    let mut names = Vec::new();
+    let mut after = None;
+    loop {
+        let page = repository
+            .children(&db.path, after.as_ref(), 3)
+            .await
+            .unwrap();
+        names.extend(page.objects.into_iter().map(|object| object.name));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        names,
+        ["t0", "t1", "t2", "t3", "t4", "v0", "v1", "v2", "m0", "m1"]
+    );
+    // Columns follow their ordinal, then keys.
+    let (version, pages) = repository
+        .pages(&[
+            PageRequest {
+                parent: table.clone(),
+                after: None,
+                limit: 2,
+            },
+            PageRequest {
+                parent: ObjectPath::default(),
+                after: None,
+                limit: 10,
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(version, repository.version().await.unwrap());
+    let columns: Vec<_> = pages[0].objects.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(columns, ["c1", "c2"]);
+    let rest = repository
+        .children(&table, pages[0].next.as_ref(), 10)
+        .await
+        .unwrap();
+    let rest: Vec<_> = rest.objects.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(rest, ["c3", "fk"]);
+    assert_eq!(pages[1].objects, [db]);
+    assert!(pages[1].next.is_none());
     repository.close().await;
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -103,6 +103,7 @@ async fn profiles_round_trip_and_reject_embedded_credentials() {
         !String::from_utf8_lossy(&std::fs::read(dir.join("config.db")).unwrap())
             .contains("synthetic-secret")
     );
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -123,6 +124,7 @@ async fn legacy_migration_is_complete_idempotent_and_deletes_json_only_after_suc
     assert!(!legacy.exists());
     let second = load(&dir, &vault).await.unwrap().connections;
     assert_eq!(first[0].profile.id, second[0].profile.id);
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(&legacy, b"invalid json").unwrap();
@@ -146,6 +148,7 @@ async fn legacy_migration_is_complete_idempotent_and_deletes_json_only_after_suc
     let loaded = load(&dir, &vault).await.unwrap();
     assert_eq!(loaded.connections.len(), 1);
     assert!(loaded.problems.is_empty());
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -237,6 +240,7 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
         !String::from_utf8_lossy(&std::fs::read(dir.join("config.db")).unwrap())
             .contains("synthetic-vault-password")
     );
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -289,6 +293,49 @@ async fn row_limits_are_saved_per_connection_and_validated() {
         load(&dir, &vault).await.unwrap().connections[0].row_limit,
         25_000
     );
+    backend::release_caches(&dir).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn expanded_explorer_nodes_survive_a_restart() {
+    let (dir, profile) = fixture();
+    let vault = MemoryVault::default();
+    let saved = save(
+        &dir,
+        profile,
+        Credentials::default(),
+        preferences(DEFAULT_ROW_LIMIT),
+        &vault,
+    )
+    .await
+    .unwrap();
+    let id = saved.profile.id;
+    assert!(
+        load(&dir, &vault).await.unwrap().connections[0]
+            .expanded
+            .is_empty()
+    );
+    let schema = ObjectPath::default()
+        .child(ObjectKind::Database, "db/a")
+        .child(ObjectKind::Schema, "sales");
+    let expanded = [schema.parent().unwrap(), schema.clone()];
+    save_expanded(&dir, id, &expanded).await.unwrap();
+    assert_eq!(
+        load(&dir, &vault).await.unwrap().connections[0].expanded,
+        expanded
+    );
+    // An unreadable list starts collapsed instead of failing the load.
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    repository
+        .set_explorer_state(id, &serde_json::json!({"expanded": "not a list"}))
+        .await
+        .unwrap();
+    repository.close().await;
+    let loaded = load(&dir, &vault).await.unwrap().connections;
+    assert!(loaded[0].expanded.is_empty());
+    assert!(loaded[0].warning.is_none());
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -308,6 +355,7 @@ async fn connections_without_a_saved_row_limit_use_the_default() {
         .unwrap()
         .connections;
     assert_eq!(loaded[0].row_limit, DEFAULT_ROW_LIMIT);
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -393,6 +441,7 @@ async fn a_remembered_password_is_not_carried_to_another_driver() {
             .password
             .is_none()
     );
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -444,6 +493,7 @@ async fn a_missing_vault_entry_is_reported_and_warnings_add_up() {
             .profile
             .remember_password
     );
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -488,6 +538,7 @@ async fn an_invalid_profile_is_left_out_without_hiding_the_others() {
         .await
         .is_ok()
     );
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -517,6 +568,7 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
     let loaded = load(&dir, &vault).await.unwrap().connections.remove(0);
     assert_eq!(loaded.scope.include, [sales]);
     assert!(loaded.warning.is_none());
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(&dir).unwrap();
 
     // A cache written before choosing existed, with no saved choice.
@@ -557,5 +609,6 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
     let again = load(&dir, &vault).await.unwrap().connections.remove(0);
     assert_eq!(again.scope, derived.scope);
     assert!(again.warning.is_none());
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }

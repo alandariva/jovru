@@ -2,7 +2,7 @@
 
 Itens da auditoria do subsistema de metadados que **ainda não foram
 implementados**, ou foram implementados só em parte, em `release/0.1.0`
-(3 de novembro de 2026, atualizado depois da fase 1). As referências de
+(3 de novembro de 2026, atualizado depois da fase 2). As referências de
 mercado aparecem com nomes genéricos: "IDEs de banco de dados",
 "gerenciadores de banco de dados" e "ferramentas de referência".
 
@@ -13,10 +13,10 @@ achados já fechados aparecem só no resumo.
 
 | Situação | Quantidade | IDs |
 | --- | ---: | --- |
-| Fechados | 5 | MET-001, MET-007, MET-015, MET-018, MET-020 |
+| Fechados | 9 | MET-001, MET-007, MET-011, MET-012, MET-013, MET-015, MET-018, MET-020, MET-021 |
 | Parciais (ainda falta uma parte) | 7 | MET-002, MET-003, MET-004, MET-005, MET-006, MET-016, MET-017 |
-| Ainda abertos | 10 | MET-008 a MET-014, MET-019, MET-021, MET-022 |
-| **Pendências neste arquivo** | **17** | os parciais e os abertos |
+| Ainda abertos | 6 | MET-008, MET-009, MET-010, MET-014, MET-019, MET-022 |
+| **Pendências neste arquivo** | **13** | os parciais e os abertos |
 
 **O que já foi entregue**
 
@@ -54,14 +54,37 @@ achados já fechados aparecem só no resumo.
   verificavam.
 - **Parte de MET-017.** `RefreshStatus.state` é o enum
   `jykre_storage::RefreshState`, sem mudar o texto gravado.
+- **MET-011.** O cache de cada conexão fica aberto enquanto a aplicação
+  roda (registro em `backend`). Ele só é aberto, e verificado com
+  `quick_check`, no startup (uma vez por conexão, não mais duas), depois de
+  a identidade do perfil mudar ou depois de uma leitura com erro.
+- **MET-012.**
+  - Expandir lê só a página pedida (`backend::cached_children`), com
+    paginação por cursor (`PageCursor`).
+  - A versão do cache e as páginas vêm de uma única transação. Uma página
+    de outra versão faz a árvore ser relida, em vez de pedir "expanda de
+    novo".
+  - O merge usa um `HashSet` por nó.
+- **MET-013.**
+  - O explorer é uma lista virtualizada (`list` do GPUI) e só monta as
+    linhas na tela.
+  - As linhas vêm de `jykre::explorer::Tree`, recalculadas só quando a
+    árvore muda.
+  - A árvore guarda os nós expandidos.
+  - Os IDs das linhas são hashes do caminho estrutural.
+  - O texto de atualidade é montado só ao abrir o menu.
+  - A ordem de tipos é fixa: tabelas, views e depois views materializadas.
+- **MET-021.** Os nós expandidos ficam em `connection.<id>.explorer`, ao
+  lado do estado do workspace em `settings`, e voltam no startup, lidos do
+  cache de uma vez.
+- **Parte de MET-016.** Um selo de idade ("há 3 dias") ao lado de cada
+  namespace escolhido.
 
 **O que mais pesa agora**
 
 1. O editor ainda não usa os metadados (**MET-008**).
 2. O contexto de execução de cada aba continua invisível (**MET-009**).
 3. Nada acontece depois de um DDL (**MET-010**).
-4. Há custos de leitura do cache no caminho interativo (**MET-011**,
-   **MET-012**, **MET-013**).
 
 ---
 
@@ -139,55 +162,6 @@ achados já fechados aparecem só no resumo.
   no explorer em até 2 s, sem ação manual.
 
 ## P1: Desempenho do cache e do explorer
-
-### MET-011: cada leitura do cache abre um pool e roda `quick_check`
-
-- **Situação atual:**
-  - `MetadataRepository::open` abre um pool SQLite e executa
-    `PRAGMA quick_check` a cada expansão, busca e refresh. No startup, isso
-    acontece duas vezes por conexão.
-  - O benchmark `metadata_paging` mede só `children()` com o repositório já
-    aberto.
-- **O que falta:**
-  - Um repositório de vida longa por conexão.
-  - `quick_check` só no startup ou depois de um erro.
-  - Um benchmark de abertura com 500 mil objetos.
-- **Critério de aceitação:** expandir um nó a partir do cache fica em até
-  50 ms p95 com 500 mil objetos, contando a abertura.
-
-### MET-012: expandir relê todas as páginas, e o merge é quadrático na UI
-
-- **Situação atual:**
-  - `load_cached_children` relê todas as páginas já abertas, com
-    `LIMIT/OFFSET`.
-  - `apply_cache` compara cada objeto novo com todos os carregados, O(N·M),
-    na thread de UI.
-- **O que falta:**
-  - Ler só a página pedida.
-  - Paginação por cursor.
-  - Merge com `HashSet<ObjectPath>` ou fora da thread de UI.
-- **Critério de aceitação:** expandir o 50º nó não relê as 49 páginas
-  anteriores (verificado por log).
-
-### MET-013: o render do explorer recalcula a árvore a cada frame
-
-Amplia a N038 da auditoria comportamental.
-
-- **Situação atual:**
-  - `explorer::visible` roda no render, em O(N × |collapsed|).
-  - O texto de atualidade de cada nó é montado a cada frame.
-  - IDs de elemento são feitos com `format!`, e o ID que junta nomes com `/`
-    pode colidir (`a/b` + `c` contra `a` + `b/c`).
-  - A árvore não é virtualizada.
-  - Views materializadas aparecem antes das tabelas, porque a ordem segue o
-    texto do tipo.
-- **O que falta:**
-  - Uma lista achatada e virtualizada, recalculada só quando a árvore muda.
-  - Guardar o conjunto de nós expandidos em vez dos recolhidos.
-  - Textos montados sob demanda e IDs estáveis.
-  - Uma ordem de tipos definida (tabelas, views, views materializadas).
-- **Critério de aceitação:** frame do explorer em até 16 ms com 5 mil nós
-  expandidos (frame probe).
 
 ### MET-014: busca sem índice, só ASCII e frágil
 
@@ -284,12 +258,12 @@ Amplia a N038 da auditoria comportamental.
   - Listar os outros databases do servidor, como opção. Cada database exige
     uma conexão própria.
 
-### MET-016 (parcial): estado e atualidade
+### MET-016 (parcial): revalidação ao abrir a conexão
 
-- **Já feito:** barra de progresso com o tempo restante ao ler a seleção.
+- **Já feito:**
+  - Barra de progresso com o tempo restante ao ler a seleção.
+  - Selo de idade ao lado de cada namespace escolhido.
 - **O que falta:**
-  - Um selo de idade por namespace escolhido (por exemplo, "há 3 dias"). Hoje
-    a idade só aparece no menu de contexto.
   - Revalidação opcional ao abrir a conexão, só dos namespaces escolhidos e
     só acima de um limite de idade configurável. Desligada por padrão.
   - Sem polling.
@@ -317,19 +291,16 @@ Amplia a N038 da auditoria comportamental.
   - Um nó "sem acesso".
   - Avaliar `include_browse` no Unity Catalog (não verificado).
 
-### MET-021: reiniciar perde a expansão do explorer
-
-- **Situação atual:** só a raiz é carregada no startup. Os nós expandidos e
-  a seleção do explorer não são guardados.
-- **O que falta:** persistir os caminhos expandidos por conexão, junto com
-  o estado do workspace.
-
 ### MET-022: o cache guarda o caminho três vezes
 
 - **Situação atual:** cada objeto grava `path_key` (JSON em hexadecimal),
   `path_json` e `object_json`, que repete o caminho.
-- **O que falta:** medir o tamanho do arquivo com 500 mil objetos antes de
-  mudar. A mudança exige migração e ADR.
+- **Medido uma vez:** o cache sintético do benchmark (500.101 objetos, só nomes,
+  sem colunas) ocupa 2,3 GiB entre arquivo e WAL logo depois de publicado.
+  A medição ainda não separa o WAL do arquivo depois do checkpoint, nem
+  quanto cabe a cada coluna.
+- **O que falta:** separar essas partes antes de decidir. A mudança exige
+  migração e ADR.
 
 ### Diálogo de conexão
 
@@ -349,15 +320,14 @@ Amplia a N038 da auditoria comportamental.
 | Verificação visual do explorer (ícones por tipo, tipo da coluna, tooltips, partições, selo **Padrão**, barra de progresso e tempo restante) | Não feita |
 | Databricks com CLI autenticado e workspace de teste: descoberta de catálogos e schemas, `table_constraints` na listagem de tabelas, views materializadas | Não feita (só mock HTTP) |
 | Tempo da nova consulta `pg_catalog` em um catálogo grande | Não medido |
-| Benchmark de abertura do cache com 500 mil objetos (MET-011) | Não existe |
+| Frame do explorer com 5 mil nós expandidos (critério do MET-013) | Não medido; o explorer não foi aberto nesta fase |
+| Abertura a frio do cache com 500 mil objetos (MET-011) | Cerca de 700 ms (benchmark, release), por causa do `quick_check`. Acontece uma vez por conexão, no startup e fora da thread de UI; expandir não abre mais o arquivo |
 | ADR-0015 e ADR-0016 | *Proposed*; aguardam aceitação do mantenedor |
 
 ## Ordem sugerida
 
-1. **MET-011, MET-012 e MET-013.** Custos no caminho interativo. Medir antes
-   e depois.
-2. **MET-009 e MET-010.** Contexto por aba e atualização depois de DDL, que
+1. **MET-009 e MET-010.** Contexto por aba e atualização depois de DDL, que
    preparam o editor.
-3. **MET-008.** Autocomplete, hover e ir para a definição.
-4. **MET-002, MET-003 e MET-004.** Escala da introspecção.
-5. **MET-005 e MET-014,** depois o restante de P3.
+2. **MET-008.** Autocomplete, hover e ir para a definição.
+3. **MET-002, MET-003 e MET-004.** Escala da introspecção.
+4. **MET-005 e MET-014,** depois o restante de P3.

@@ -23,7 +23,7 @@ numbers.
 | Copy of a selection | ≤ 100 ms for 500,000 cells; above that, show progress | About 85 ms for 100,000 × 5 cells | Heartbeat |
 | Cold start to an interactive window | ≤ 1.5 s | Not measured | Stopwatch and a startup timestamp |
 | Idle memory, no connection | ≤ 200 MB | Not measured | Task manager |
-| Expand an explorer node from the local cache | ≤ 50 ms p95 | Not measured | Timing around the cache read |
+| Expand an explorer node from the local cache | ≤ 50 ms p95 | 0.55 ms for a first page and 0.63 ms for the page after 4,800 children, in a cache of 500,000 objects kept open (benchmark, release, 2026-11-03); opening the file costs about 700 ms, once per connection at start. Not measured in the app | Timing around the cache read, benchmark |
 | Metadata search (`Ctrl Shift P`) over the local cache | ≤ 50 ms p95 | Not measured | Timing around the search |
 
 The numbers are initial targets. Changing a budget is a maintainer decision
@@ -126,8 +126,11 @@ The existing frame probe below remains the tool for the frame budget.
   regressions, not small slowdowns.
 - **Benchmarks.** `benches/hot_paths.rs` ([ADR-0010](adr/0010-benchmarks-with-criterion.md))
   measures building the grid view at 100,000 rows, converting 100,000 × 30
-  driver rows to result data, splitting a 10,000-statement script and paging
-  children from a cache of 500,000 objects. `cargo xtask check --full` runs
+  driver rows to result data, splitting a 10,000-statement script and, in a
+  cache of 500,000 objects, opening the file to read a first page (what every
+  expansion cost before the cache stayed open) and reading the first page and
+  the page after 4,800 children through the cache kept open.
+  `cargo xtask check --full` runs
   them in quick mode, only to prove they work. A task that touches one of
   these paths compares against a baseline and reports the result:
 
@@ -145,7 +148,7 @@ The existing frame probe below remains the tool for the frame budget.
 
 | Standard | Current code |
 | --- | --- |
-| Long collections are virtualized | The explorer tree, saved queries and history build all their children |
+| Long collections are virtualized | Saved queries and history build all their children |
 | Frequently changing regions are cached entities | The result grid is (`ResultGrid`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); the editor and the assistant still render inside `Workspace` |
 | A grid interaction renders only the grid ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md#how-to-validate)) | Not possible in GPUI 0.3.11: a notified view renders with all its ancestors, so hover, scroll and selection also render `AppView`, `GroupedTabs` and `Workspace`, about 1.5 ms of a 3.6–4.4 ms p50 grid frame. `.cached(...)` spares the grid when only the workspace changes: typing 15 characters rendered `Workspace` 15 times and `ResultGrid` never (frame probe, release, Windows, 2026-11-02). [ADR-0013](adr/0013-thin-ancestors-of-frequently-notified-views.md) (Proposed) replaces this validation with the frame budget and keeps the ancestors thin. The editor gutter no longer splits the script on every frame, which took grid frames to 57 ms with 1,000 statements |
 | Filters are debounced | The result filter rebuilds the grid view on every keystroke |
