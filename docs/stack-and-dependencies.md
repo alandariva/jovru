@@ -27,7 +27,7 @@ Databricks CLI.
 | --- | --- | --- |
 | PostgreSQL | 14 and 18 | `cargo xtask check --full` |
 | MySQL | 8.4 and 9.7 | `cargo xtask check --full` |
-| Databricks | SQL Warehouses with Unity Catalog | Manual check with an authenticated CLI ([Testing](testing.md)) |
+| Databricks | SQL Warehouses or running classic all-purpose clusters, with Unity Catalog | Local HTTP tests plus manual check with an authenticated CLI ([Testing](testing.md)) |
 
 ## Policy for new dependencies
 

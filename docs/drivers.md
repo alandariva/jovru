@@ -115,16 +115,53 @@ A metadata configuration needs only the authenticated profile name:
 }
 ```
 
-Optional fields: `cliPath`, `warehouseId`, `defaultCatalog` and
-`defaultSchema`. Optional text fields, when present, cannot be empty. SQL
-requires `warehouseId`; connection testing and introspection do not.
+Optional fields: `cliPath`, `compute`, `warehouseId`, `clusterId`, `computeName`,
+`defaultCatalog` and `defaultSchema`. Optional text fields cannot be empty.
+`compute` defaults to `warehouse` for existing profiles. SQL requires the ID
+matching the selected mode; IDs for both modes together are rejected.
 
-The profile provides the host through the configuration file and the token
-through the CLI; the token is kept only in memory. The driver does not use
+```json
+{"profile":"DEV","compute":"cluster","clusterId":"1234-example",
+ "computeName":"Analytics","defaultCatalog":"main","defaultSchema":"sales"}
+```
+
+The dialog uses an explicit **Load compute** action and a searchable select for
+warehouses or classic all-purpose clusters (name, stable ID and server state).
+It preserves the saved selection even offline or when the resource is missing
+from the refreshed list. Changing profile/CLI identity or compute type clears
+that selection. Editing preserves CLI path, catalog and schema. The explorer
+shows the selected resource name/ID alongside the profile.
+
+The profile field is a searchable select populated by **Load CLI profiles**,
+which runs `databricks auth profiles --skip-validate --output json` with the
+configured CLI executable and `DATABRICKS_CONFIG_FILE`. Listing is cancellable,
+limited to 60 seconds/1 MiB and exposes only workspace profile names and safe
+HTTPS hosts. Account-console hosts are excluded; workspace profiles carrying
+`account_id` and `workspace_id` are kept. The `valid` field from a skip-validate
+listing is not used to filter profiles. The saved name remains selected
+when unavailable/offline; choosing another profile clears the compute. Profile
+listing skips authentication; tests and SQL resolve the selected profile token.
+New forms initially show a selection prompt. After loading, they prefer the
+CLI's `default: true`, then a literal `DEFAULT` profile or the only available
+profile. With multiple profiles and no default, the user chooses explicitly.
+Refreshing an edited/saved connection never replaces its profile automatically.
+
+Connection setup obtains the selected profile's host from the same CLI metadata
+used by discovery, against the same canonical configuration file. Jykre does
+not parse INI syntax itself, so BOMs and section comments supported by the CLI
+work consistently. A missing selected workspace profile reports `NotFound`; a
+profile without a safe HTTPS workspace URL reports `Validation`. Another
+profile is never substituted. Host lookup skips authentication and has a
+60-second timeout and 1 MiB output bound.
+The token comes through the CLI and is kept only in memory. The driver does not use
 `Credentials.password`. SQL execution uses Statement Execution on a SQL
-Warehouse; metadata uses Unity Catalog REST, without opening a SQL session or
-starting compute. Classic compute, Serverless via Python and OAuth implemented
-inside the application are out of scope for now.
+Warehouse, or Command Execution API 1.2 on a running classic all-purpose
+cluster. A classic session creates and reuses a SQL context per tab, confirms
+readiness and destroys it on close. Context defaults are applied using quoted
+`USE` commands; user statements are sent unchanged. Metadata uses Unity
+Catalog REST without opening a SQL session or starting compute. Jobs clusters,
+non-warehouse serverless compute and OAuth implemented inside the app remain
+out of scope. A stopped classic cluster reports an actionable error.
 
 ## Contract flow
 
@@ -153,10 +190,11 @@ inside the application are out of scope for now.
   kept session before a run, within 5 seconds.
 - `Session::close` consumes the session and can report close failures.
   Relational sessions keep physical state (`USE`, `SET`, temporary tables,
-  transactions). Databricks keeps a logical catalog/schema context sent with
+  transactions). Databricks warehouses keep a logical catalog/schema context sent with
   each request, which follows successful `USE CATALOG`, `SET CATALOG` and
   `USE [SCHEMA | DATABASE]` statements, without promising transactions or
-  other SQL state between statements.
+  other SQL state between statements. Classic clusters keep their actual SQL
+  execution context, including successful context changes, between runs.
 - `Driver::introspect` takes an async `IntrospectionSink` and delivers batches.
   A sink failure stops the operation. Since batches may arrive before a
   failure, the consumer must publish a snapshot only after successful
@@ -249,17 +287,28 @@ respected.
 
 Databricks reads `DATABRICKS_CONFIG_FILE` or `.databrickscfg` in the home
 directory. Authenticate first with `databricks auth login --profile DEV`. The
-connection test checks Unity Catalog access without starting compute. SQL uses
+connection test checks Unity Catalog and configured compute access (classic
+clusters must be running), without starting compute or executing SQL. Warehouse SQL uses
 INLINE JSON_ARRAY and internal chunks from the same origin, read page by page.
 The submit request waits up to 5 seconds for the statement, then status is
 polled from 200 ms up to every 2 seconds. Inline results are capped at 25 MiB,
 so a statement asks the server for at most five pages of rows; a longer result
 reports that the rest was not read. The CLI token is reused for 5 minutes and
-asked again when a request is rejected with 401. External
+shared between sessions, discovery, testing and metadata, and refreshed before
+its reported expiration (30-second margin). Concurrent refreshes coalesce; a
+401 forces one refresh and retry. External
 links are not followed. The initial submission waits for the response with the
 statement ID, up to the CLI/HTTP limits, so it can be cancelled later, even if
 cancelled during that interval. Cancellation or timeout after submission
 requests remote cancellation. Metadata ignores `hive_metastore`.
+
+Classic execution submits a SQL command and polls its status. Cancellation or
+timeout cancels it and confirms a terminal status within five seconds; failed
+recovery destroys/discards the context. Classic results have the API's own
+server cap: returned rows are paged locally and `truncated` is propagated.
+Numbers and structured cells are preserved from raw JSON before decoding,
+avoiding decimal rounding. HTTP response bodies are bounded to 26 MiB,
+including the JSON envelope, for both modes.
 
 Real tests with dedicated disposable fixtures:
 
@@ -273,5 +322,19 @@ fixture password `jykre-test`. Ports and policy: [testing](testing.md). The
 Databricks HTTP tests use a local mock server; the real CLI and workspace must
 be validated in an authenticated environment.
 
+The separate native-CLI profile regression uses synthetic configurations only,
+without token resolution or network queries:
+
+```bash
+cargo test -p jykre-driver-databricks native_cli_profile_syntax -- --ignored
+```
+
+It checks connection setup for UTF-8 BOMs and section comments. It is ignored
+in the portable gate because the native Databricks CLI is an external prerequisite.
+
 References: [SQLx RawSql](https://docs.rs/sqlx/latest/sqlx/struct.RawSql.html) and
 [Databricks Statement Execution](https://docs.databricks.com/api/statement-execution/v1/statement-execution).
+Classic execution: [Command Execution](https://docs.databricks.com/api/command-execution/v2/create).
+Profile discovery: [Databricks CLI auth profiles implementation](https://github.com/databricks/cli/blob/main/cmd/auth/profiles.go).
+See the [2026-11-03 validation report](databricks-validation-2026-11-03.md) for
+completed checks, measurements and remaining visual/authenticated checks.

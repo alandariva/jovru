@@ -47,6 +47,8 @@ impl ErrorReport {
     }
 
     /// One line for a status: the title, the message and the action.
+    ///
+    /// For Databricks connection forms, use `with_databricks_auth` first.
     pub fn summary(&self) -> String {
         let mut text = format!("{}: {}", self.title, self.message.replace('\n', " "));
         if let Some(codes) = self.codes() {
@@ -57,6 +59,18 @@ impl ErrorReport {
             text.push_str(action);
         }
         text
+    }
+
+    /// Databricks authentication belongs to the CLI. Replace the relational
+    /// password hint using the error code, without inspecting its text.
+    pub fn with_databricks_auth(mut self) -> Self {
+        if self.code == ErrorCode::Authentication {
+            self.action = Some(
+                tr!("Sign in with Databricks CLI and check the selected profile and CLI path.")
+                    .into(),
+            );
+        }
+        self
     }
 
     /// The server's codes, as "SQLSTATE 42P01" or "1146 · SQLSTATE 42S02".
@@ -210,6 +224,18 @@ fn utc(seconds: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn databricks_authentication_suggests_the_cli_and_preserves_other_error_reports() {
+        let error = DriverError::new(ErrorCode::Authentication, "fixture failure");
+        let report = ErrorReport::new(&error).with_databricks_auth();
+        assert!(report.action.unwrap().contains("Databricks CLI"));
+        let error = DriverError::new(ErrorCode::PermissionDenied, "fixture failure");
+        assert_eq!(
+            ErrorReport::new(&error).action,
+            ErrorReport::new(&error).with_databricks_auth().action
+        );
+    }
     use crate::drivers::ServerDiagnostic;
 
     fn server(sqlstate: &str, position: Option<usize>) -> DriverError {

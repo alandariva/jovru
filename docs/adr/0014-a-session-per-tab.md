@@ -43,6 +43,9 @@ statement was interrupted may be in an unknown protocol state.
 - Databricks Statement Execution has no server session: the driver keeps the
   catalog and schema and follows successful `USE CATALOG`, `SET CATALOG` and
   `USE [SCHEMA | DATABASE]` statements.
+- Classic Databricks clusters use a real SQL Command Execution context per
+  tab, with readiness checks, confirmed cancellation and explicit destruction
+  ([ADR-0005 amendment](0005-databricks-through-cli-and-rest.md)).
 
 ## Alternatives considered
 

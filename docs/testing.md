@@ -141,6 +141,10 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
 - A Databricks change requires, besides the local HTTP tests, a check with an
   authenticated CLI and test workspace. Record commands and results, without
   passwords or tokens.
+  Cover warehouse and running classic cluster selection, saved selection on
+  reopen, explicit discovery/cancellation, SQL, context reuse and cancellation.
+  Local HTTP fixtures cover these protocols, expiration/concurrent token refresh,
+  exact classic JSON cells and failed recovery without real credentials.
 - UI changes require opening the app and checking the affected flow, tabs,
   content preservation, shortcuts, focus and dividers where relevant. Record
   that check separately. Use `JYKRE_CONFIG_DIR` with an isolated folder and

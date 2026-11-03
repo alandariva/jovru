@@ -1,11 +1,14 @@
-//! Databricks scaffold: CLI OAuth, SQL Warehouse Statement Execution, and
+//! CLI OAuth, SQL Warehouse and classic cluster execution, and
 //! independent Unity Catalog REST metadata.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod config;
-pub use config::DatabricksConfig;
+pub use auth::{CliProfile, list_profiles};
+pub use config::{ComputeKind, DatabricksConfig};
+pub use runtime::{ComputeResource, list_compute};
 
 use jykre_core::*;
+mod auth;
 mod runtime;
 
 #[derive(Debug, Default)]

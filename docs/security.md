@@ -84,6 +84,14 @@ These rules apply to any output, including the logs ([Reliability](reliability.m
 
 ## External processes (Databricks CLI)
 
+The authentication cache is scoped by CLI profile, canonical configuration
+file, executable and HTTPS workspace origin. It never mixes workspace tokens.
+Idle entries are pruned on cache access; token refreshes are serialized and
+expired/rejected tokens are discarded. The CLI receives the same explicit
+configuration file used to resolve the workspace. HTTP pools are shared within
+that identity. Compute names/IDs are non-sensitive profile options; tokens
+never reach connection options or the select's state.
+
 - The CLI runs with **arguments as a vector** (`Command::new(path).args(...)`),
   never through a shell, so a profile name cannot inject a command.
 - The executable comes from the configuration (`cliPath`) or the `PATH`.

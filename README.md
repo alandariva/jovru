@@ -47,8 +47,12 @@ Demo connections and results are labelled as such and never reach a server.
 - Add a connection with `+` in the explorer. **Test connection** reaches the
   server; saving validates the configuration and starts reading metadata.
 - PostgreSQL/MySQL take host, port, database, user, password and TLS mode.
-  Databricks uses an already authenticated CLI profile, with an optional
-  Warehouse ID for metadata that becomes required for SQL.
+  Databricks uses an authenticated CLI profile. Choose SQL Warehouse or classic
+  cluster, then **Load compute** to select a resource by name/ID. Reopening the
+  connection restores the saved selection. A compute is required only for SQL;
+  classic all-purpose clusters must already be running.
+  **Load CLI profiles** populates the profile select from the Databricks CLI;
+  profile discovery skips authentication until the selected profile is used.
 - **Remember password** is optional and uses the operating system vault
   (Windows Credential Manager, macOS Keychain, Linux Secret Service). Without
   it, the password lives only in the session. If the vault fails, the UI says
@@ -144,7 +148,8 @@ deleted only after the import is verified.
 
 The GPUI-independent backend implements PostgreSQL and MySQL with SQLx, SQL
 execution in sessions kept per tab and metadata via `information_schema`.
-Databricks uses CLI profiles, the Statement Execution API and Unity Catalog REST.
+Databricks uses CLI profiles, Statement Execution for warehouses, Command
+Execution for classic all-purpose clusters, and Unity Catalog REST for metadata.
 `jykre::drivers::builtin_registry()` registers the three adapters.
 
 ```bash
@@ -161,7 +166,8 @@ cargo run --example connect --locked
 ```
 
 For Databricks use `"driver":"databricks"` and `"options":{"profile":"DEV"}`.
-SQL also needs `warehouseId`; metadata does not. `JYKRE_METADATA=1` enables
+SQL also needs `warehouseId`, or `"compute":"cluster"` with `clusterId`;
+metadata does not. `JYKRE_METADATA=1` enables
 metadata reading in the example. Nothing is persisted.
 
 See [architecture, configuration and adding drivers](docs/drivers.md).

@@ -30,6 +30,18 @@ opens to the right of the query area.
 
 ## Always-visible states
 
+Databricks connections show their selected warehouse/classic cluster name and
+ID in the explorer and restore that selection immediately in the connection
+dialog. **Load compute** explicitly refreshes a searchable, virtualized select,
+shows loading time and can be cancelled. Refreshing never changes the selection
+silently. An unavailable saved resource remains labelled until changed by the
+user. Discovery and connection testing never start classic compute.
+The CLI profile is a searchable select as well. **Load CLI profiles** refreshes
+the names/hosts using the CLI without signing in to all profiles. Its saved
+selection survives failures; choosing a new profile clears the compute selection.
+New connection forms show a prompt until profiles are loaded. Initial selection
+honours the CLI's declared default instead of assuming the name `DEFAULT`.
+
 Each state has one consistent representation.
 
 | State | Where | Representation |

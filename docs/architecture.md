@@ -160,6 +160,9 @@ sequenceDiagram
   statement fills (`Placement`) and keeps each tab's pages; the next page is
   read with `backend::fetch` from the result the session keeps open.
 - Each tab keeps one session between runs ([ADR-0014](adr/0014-a-session-per-tab.md)).
+  Databricks warehouses keep logical catalog/schema state; classic clusters keep
+  a server SQL context. CLI authentication and HTTP pools are shared across
+  sessions by authentication identity ([ADR-0005](adr/0005-databricks-through-cli-and-rest.md)).
   The workspace hands it to the run and takes it back with the result; a
   session that comes back from a superseded run, or after the connection
   changed, is closed.

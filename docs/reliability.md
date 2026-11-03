@@ -52,11 +52,15 @@
 | PostgreSQL/MySQL introspection | 300 s |
 | Server-side cancel attempt after cancellation or timeout | 5 s |
 | Bringing a session back to a known state after a failure, or pinging a kept session | 5 s |
-| Databricks: test or open | 90 s |
+| Databricks: test, warehouse open or initial classic authentication/compute check | 90 s |
 | Databricks introspection | 300 s |
 | Databricks HTTP request | 30 s |
 | Databricks: first wait for a statement, inside its submit request | 5 s, then status polls from 200 ms up to every 2 s |
-| Databricks CLI token reuse | 5 min, or until a request is rejected with 401 (asked again once) |
+| Databricks compute discovery | 90 s, cancellable without starting compute |
+| Databricks CLI profile discovery | 60 s, cancellable; skips per-profile validation, output bounded to 1 MiB |
+| Databricks classic context creation/readiness | 90 s for readiness/setup, after the bounded submission obtains its ID; destroyed on failure/cancellation |
+| Databricks classic context destroy | 5 s, including recovery after an unconfirmed cancel |
+| Databricks CLI token reuse | At most 5 min or 30 s before reported expiry; shared by auth identity, one coordinated forced refresh on 401 |
 | Databricks CLI (token resolution) | 60 s |
 
 A new network operation gets an explicit timeout and a row in this table.

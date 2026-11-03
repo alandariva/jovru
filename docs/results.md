@@ -28,6 +28,11 @@ alongside:
 
 JSON, arrays, structs and unknown types arrive as text.
 
+Classic Databricks Command Execution preserves numeric JSON lexemes and
+structured cell text before general JSON decoding. Its returned result is
+bounded by the API's server cap and paged locally; a server-truncated result is
+shown as truncated rather than being rerun to obtain additional rows.
+
 ## Value presentation
 
 `cell_format` groups column types into families that decide colour and

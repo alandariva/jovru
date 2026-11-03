@@ -23,6 +23,8 @@ impl AppView {
             return;
         }
         self.connection_open = false;
+        self.connection_databricks
+            .update(cx, |form, _| form.cancel_discovery());
         self.invalidate_connection_test();
         cx.notify();
     }
@@ -77,17 +79,6 @@ impl AppView {
                     .unwrap_or("prefer")
                     .into(),
             ),
-            (
-                &self.connection_profile,
-                config.options["profile"]
-                    .as_str()
-                    .unwrap_or("DEFAULT")
-                    .into(),
-            ),
-            (
-                &self.connection_warehouse,
-                config.options["warehouseId"].as_str().unwrap_or("").into(),
-            ),
             (&self.connection_password, String::new()),
             (
                 &self.connection_row_limit,
@@ -97,6 +88,21 @@ impl AppView {
             ),
         ] {
             field.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+        let options = if config.driver == DriverKind::Databricks {
+            config.options.clone()
+        } else {
+            serde_json::json!({"profile":"DEFAULT"})
+        };
+        if let Err(error) = self.connection_databricks.update(cx, |form, cx| {
+            form.reset(
+                &options,
+                index.is_some() && config.driver == DriverKind::Databricks,
+                window,
+                cx,
+            )
+        }) {
+            self.connection_status = Some(Feedback::new(Tone::Error, error.to_string()));
         }
         self.connection_name
             .update(cx, |input, cx| input.focus(window, cx));
@@ -177,8 +183,7 @@ impl AppView {
             DriverKind::Databricks,
         ][self.driver];
         let options = if driver == DriverKind::Databricks {
-            let warehouse = self.connection_warehouse.read(cx).value().trim().to_owned();
-            serde_json::json!({"profile":self.connection_profile.read(cx).value().trim(),"warehouseId": if warehouse.is_empty() { None } else { Some(warehouse) }})
+            self.connection_databricks.read(cx).options(cx)?
         } else {
             let port: u16 = self
                 .connection_port
@@ -245,10 +250,15 @@ impl AppView {
                     Ok(_) => {
                         Feedback::new(Tone::Success, tr!("Connection established successfully."))
                     }
-                    Err(error) => Feedback::new(
-                        Tone::Error,
-                        jykre::error_report::ErrorReport::new(&error).summary(),
-                    ),
+                    Err(error) => {
+                        let report = jykre::error_report::ErrorReport::new(&error);
+                        let report = if this.driver == 2 {
+                            report.with_databricks_auth()
+                        } else {
+                            report
+                        };
+                        Feedback::new(Tone::Error, report.summary())
+                    }
                 });
                 cx.notify();
             });
@@ -415,11 +425,7 @@ impl AppView {
         let group = self.tabs.update(cx, |tabs, cx| {
             tabs.add_group(profile.name.clone(), rgb(color).into(), cx)
         });
-        let detail = input.config.options["host"]
-            .as_str()
-            .or(input.config.options["profile"].as_str())
-            .unwrap_or("")
-            .to_owned();
+        let detail = connection_detail(&input.config);
         let mut connection = Connection {
             name: profile.name.clone(),
             profile: Some(profile),
@@ -499,6 +505,8 @@ impl AppView {
         }
         self.connection_revision += 1;
         self.connection_saving = true;
+        self.connection_databricks
+            .update(cx, |form, cx| form.set_disabled(true, cx));
         self.connection_status = Some(Feedback::new(Tone::Info, tr!("Saving connection…")));
         let dir = connection_store::data_dir();
         cx.spawn_in(window, async move |weak, cx| {
@@ -515,6 +523,8 @@ impl AppView {
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connection_saving = false;
+                this.connection_databricks
+                    .update(cx, |form, cx| form.set_disabled(false, cx));
                 match result {
                     Err(error) => {
                         this.connection_status =
@@ -541,11 +551,7 @@ impl AppView {
                             connection.profile = Some(loaded.profile);
                             connection.input = Some(loaded.input.clone());
                             connection.row_limit = loaded.row_limit;
-                            connection.detail = loaded.input.config.options["host"]
-                                .as_str()
-                                .or(loaded.input.config.options["profile"].as_str())
-                                .unwrap_or("")
-                                .to_owned();
+                            connection.detail = connection_detail(&loaded.input.config);
                             if let Some(cache) = loaded.cache {
                                 Self::apply_cache(connection, cache);
                             } else {
@@ -1119,6 +1125,12 @@ impl AppView {
                         .px_3()
                         .gap_1()
                         .pb_2()
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(FAINT))
+                                .child(connection.detail.clone()),
+                        )
                         .when_some(connection.notice.clone(), |s, notice| {
                             s.child(
                                 div()
@@ -1412,7 +1424,7 @@ impl AppView {
                     button(("select-driver", index), I::Database, name).flex_1().when(self.driver == index, |s| s.bg(rgb(HOVER)).text_color(rgb(MINT)))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             // Re-selecting the current driver keeps the typed port and TLS mode.
-                            if this.connection_saving || this.driver == index { return; } this.driver = index; this.invalidate_connection_test();
+                            if this.connection_saving || this.driver == index { return; } this.driver = index; this.invalidate_connection_test(); this.connection_databricks.update(cx, |form,_| form.cancel_discovery());
                             this.connection_port.update(cx, |input, cx| input.set_value(if index == 1 { "3306" } else { "5432" }, window, cx));
                             this.connection_ssl.update(cx, |input, cx| input.set_value(if index == 1 { "preferred" } else { "prefer" }, window, cx));
                             cx.notify();
@@ -1429,13 +1441,10 @@ impl AppView {
                         .on_click(cx.listener(|this, _, _, cx| { if !this.connection_saving { this.remember_password = !this.remember_password; cx.notify(); } })))
                     .child(field(tr!("TLS mode"), &self.connection_ssl))
                     .child(label(if self.driver == 0 { tr!("TLS: disable, prefer, require, verify-ca or verify-full") } else { tr!("TLS: disabled, preferred, required, verify-ca or verify-identity") })))
-                .when(self.driver == 2, |s| s
-                    .child(field(tr!("Authenticated Databricks CLI profile"), &self.connection_profile))
-                    .child(field(tr!("SQL Warehouse ID"), &self.connection_warehouse))
-                    .child(label(tr!("A warehouse is required only for queries. Metadata uses Unity Catalog."))))
+                .when(self.driver == 2, |s| s.child(self.connection_databricks.clone()))
                 .child(field(tr!("Row limit per statement"), &self.connection_row_limit))
                 .child(label(tr!("Up to {0} rows. Reading also stops when a result reaches {1} MB.", cell_format::count(MAX_ROW_LIMIT as usize), DEFAULT_MEMORY_CEILING / (1024 * 1024))))
-                .child(label(if self.editing_connection.is_none() { tr!("Without remember password, the password stays only in this session.") } else if self.driver == 2 || self.form_keeps_password(cx) { tr!("An empty password keeps the one already available. Passwords are never written to SQLite.") } else { tr!("The driver, server or user changed, so the previous password is not used. Enter the password for this server.") }))
+                .when(self.driver != 2, |s| s.child(label(if self.editing_connection.is_none() { tr!("Without remember password, the password stays only in this session.") } else if self.form_keeps_password(cx) { tr!("An empty password keeps the one already available. Passwords are never written to SQLite.") } else { tr!("The driver, server or user changed, so the previous password is not used. Enter the password for this server.") })))
                 .when_some(self.connection_status.as_ref(), |s, status| s.child(feedback_line(status).id("connection-status").role(if status.tone == Tone::Error { Role::Alert } else { Role::Status }).aria_label(status.text.clone())))
                 .child(row().justify_between()
                     .child(button("test-connection", I::PlugZap, if self.connection_testing.is_some() { tr!("Testing…") } else { tr!("Test connection") })
@@ -1493,5 +1502,26 @@ impl Connection {
             state,
             success.unwrap_or(tr!("none"))
         )
+    }
+}
+
+// Resource labels are presentation only. The driver executes using the ID.
+fn connection_detail(config: &ConnectionConfig) -> String {
+    let base = config.options["host"]
+        .as_str()
+        .or(config.options["profile"].as_str())
+        .unwrap_or("");
+    let id = config.options["clusterId"]
+        .as_str()
+        .or(config.options["warehouseId"].as_str());
+    match id {
+        Some(id) => match config.options["computeName"]
+            .as_str()
+            .filter(|name| *name != id)
+        {
+            Some(name) => format!("{base} · {name} ({id})"),
+            None => format!("{base} · {id}"),
+        },
+        None => base.into(),
     }
 }

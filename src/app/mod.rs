@@ -1,5 +1,6 @@
 use jykre::tr;
 mod connections;
+mod databricks_connection;
 mod demo;
 mod layout;
 mod probe;
@@ -143,8 +144,7 @@ struct AppView {
     connection_row_limit: Entity<InputState>,
     connection_password: Entity<InputState>,
     connection_ssl: Entity<InputState>,
-    connection_profile: Entity<InputState>,
-    connection_warehouse: Entity<InputState>,
+    connection_databricks: Entity<databricks_connection::DatabricksForm>,
     connection_status: Option<Feedback>,
     /// Application-level problem (loading connections, saving preferences,
     /// searching) shown in the explorer until dismissed.
@@ -302,9 +302,8 @@ impl AppView {
                     .placeholder(tr!("Enter the password"))
             }),
             connection_ssl: cx.new(|cx| InputState::new(window, cx).default_value("prefer")),
-            connection_profile: cx.new(|cx| InputState::new(window, cx).default_value("DEFAULT")),
-            connection_warehouse: cx
-                .new(|cx| InputState::new(window, cx).placeholder(tr!("Optional for metadata"))),
+            connection_databricks: cx
+                .new(|cx| databricks_connection::DatabricksForm::new(window, cx)),
             connection_status: None,
             app_notice: None,
             command_searching: false,
@@ -344,8 +343,6 @@ impl AppView {
             &app.connection_user,
             &app.connection_password,
             &app.connection_ssl,
-            &app.connection_profile,
-            &app.connection_warehouse,
         ] {
             let subscription =
                 cx.subscribe_in(field, window, |this, _, event: &InputEvent, window, cx| {
@@ -363,6 +360,20 @@ impl AppView {
                 });
             app._subscriptions.push(subscription);
         }
+        app._subscriptions.push(cx.subscribe_in(
+            &app.connection_databricks,
+            window,
+            |this, _, event: &databricks_connection::FormEvent, window, cx| match event {
+                databricks_connection::FormEvent::Changed => {
+                    this.invalidate_connection_test();
+                    cx.notify();
+                }
+                databricks_connection::FormEvent::Submit if this.connection_open => {
+                    this.save_connection(window, cx)
+                }
+                _ => {}
+            },
+        ));
         if std::env::var_os("JYKRE_DEMO").is_some() {
             for (name, detail, color) in [
                 (tr!("PostgreSQL · Local"), "localhost:5432", MINT),

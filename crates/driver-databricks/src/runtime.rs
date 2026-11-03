@@ -1,10 +1,11 @@
-use crate::DatabricksConfig;
+use crate::{ComputeKind, DatabricksConfig, auth::Auth};
 use jykre_core::*;
 use reqwest::{Method, Url};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
-use std::{collections::HashSet, process::Stdio, time::Duration};
-use tokio::{io::AsyncReadExt, process::Command};
+use std::{collections::HashSet, sync::Arc, time::Duration};
+
+mod cluster;
 
 fn error(code: ErrorCode, message: &str) -> DriverError {
     DriverError::new(code, message)
@@ -38,7 +39,7 @@ fn statement_error(status: &Value) -> DriverError {
         },
     )
 }
-fn protocol() -> DriverError {
+pub(super) fn protocol() -> DriverError {
     error(ErrorCode::Protocol, "Invalid Databricks API response")
 }
 async fn bounded<T>(
@@ -49,170 +50,49 @@ async fn bounded<T>(
     tokio::select! { biased; _=cancel.cancelled()=>Err(DriverError::cancelled()), result=tokio::time::timeout(limit,work)=>result.map_err(|_|error(ErrorCode::Timeout,"Databricks operation timed out"))? }
 }
 
-async fn cli(config: &DatabricksConfig) -> DriverResult<SecretString> {
-    let executable = config
-        .cli_path
-        .clone()
-        .unwrap_or_else(|| "databricks".into());
-    if executable
-        .extension()
-        .is_some_and(|v| v.eq_ignore_ascii_case("bat") || v.eq_ignore_ascii_case("cmd"))
-    {
-        return Err(DriverError::validation(
-            "Use the native Databricks executable",
-        ));
-    }
-    let mut command = Command::new(executable);
-    command
-        .args(["auth", "token", "--profile", &config.profile])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000);
-    let mut child = command.spawn().map_err(|_| {
-        error(
-            ErrorCode::Authentication,
-            "Cannot launch Databricks CLI; install it and authenticate the profile",
-        )
-    })?;
-    let stdout = child.stdout.take().ok_or_else(protocol)?;
-    let mut bytes = Vec::new();
-    stdout
-        .take(65537)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| protocol())?;
-    if bytes.len() > 65536 {
-        return Err(protocol());
-    }
-    if !child.wait().await.map_err(|_| protocol())?.success() {
-        return Err(error(
-            ErrorCode::Authentication,
-            "Databricks CLI profile requires authentication",
-        ));
-    }
-    let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| protocol())?;
-    let token = value["access_token"].take();
-    let token = token
-        .as_str()
-        .filter(|v| !v.is_empty())
-        .ok_or_else(protocol)?;
-    Ok(SecretString::from(token.to_owned()))
-}
-
-/// How long a token from the CLI is reused before asking the CLI again. The
-/// CLI hands out tokens valid for much longer and refreshes them itself; a
-/// 401 also asks again, once.
-const TOKEN_REUSE: Duration = Duration::from_secs(300);
-
 #[derive(Debug)]
 struct Client {
     config: DatabricksConfig,
     origin: Url,
     http: reqwest::Client,
-    /// The last token from the CLI and when it was obtained.
-    cached: std::sync::Mutex<Option<(SecretString, tokio::time::Instant)>>,
+    auth: Arc<Auth>,
     #[cfg(test)]
     token: Option<SecretString>,
 }
 impl Client {
     async fn new(input: &ResolvedConnection) -> DriverResult<Self> {
+        Self::in_config_file(input, crate::auth::config_path()?).await
+    }
+
+    async fn in_config_file(
+        input: &ResolvedConnection,
+        path: std::path::PathBuf,
+    ) -> DriverResult<Self> {
         let config = DatabricksConfig::parse(&input.config.options)?;
-        let path = std::env::var_os("DATABRICKS_CONFIG_FILE")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                std::env::var_os("USERPROFILE")
-                    .or_else(|| std::env::var_os("HOME"))
-                    .map(|v| std::path::PathBuf::from(v).join(".databrickscfg"))
-            })
-            .ok_or_else(|| {
-                error(
-                    ErrorCode::Validation,
-                    "Cannot locate Databricks CLI configuration",
-                )
-            })?;
-        let content = tokio::fs::read_to_string(path).await.map_err(|_| {
+        let path = tokio::fs::canonicalize(path).await.map_err(|_| {
             error(
                 ErrorCode::Authentication,
                 "Cannot read Databricks CLI profiles",
             )
         })?;
-        let mut selected = false;
-        let mut host = None;
-        for line in content.lines().map(str::trim) {
-            if line.starts_with('#') || line.starts_with(';') {
-                continue;
-            }
-            if let Some(section) = line.strip_prefix('[').and_then(|v| v.strip_suffix(']')) {
-                selected = section.trim() == config.profile;
-            } else if selected
-                && let Some((key, value)) = line.split_once('=')
-                && key.trim() == "host"
-            {
-                host = Some(value.trim().to_owned());
-            }
-        }
-        let host = host.ok_or_else(|| {
-            error(
-                ErrorCode::Validation,
-                "CLI profile must specify a workspace host",
-            )
-        })?;
-        let host = if host.contains("://") {
-            host
-        } else {
-            format!("https://{host}")
-        };
-        let origin = Url::parse(&host).map_err(|_| protocol())?;
-        if origin.scheme() != "https"
-            || origin.host_str().is_none()
-            || origin.path() != "/"
-            || !origin.username().is_empty()
-            || origin.password().is_some()
-            || origin.query().is_some()
-            || origin.fragment().is_some()
-        {
-            return Err(DriverError::validation(
-                "Databricks host must be an HTTPS workspace origin",
-            ));
-        }
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|_| protocol())?;
+        let origin = crate::auth::workspace_origin(&config, &path).await?;
+        let auth = Auth::shared(&config, path, &origin)?;
+        let http = auth.http.clone();
         Ok(Self {
             config,
             origin,
             http,
-            cached: std::sync::Mutex::new(None),
+            auth,
             #[cfg(test)]
             token: None,
         })
     }
-    /// The CLI's token, launching the CLI only when the cached one is older
-    /// than [`TOKEN_REUSE`] or was rejected.
-    async fn token(&self, fresh: bool) -> DriverResult<SecretString> {
+    async fn token(&self, rejected: Option<u64>) -> DriverResult<(SecretString, u64)> {
         #[cfg(test)]
         if let Some(token) = &self.token {
-            return Ok(token.clone());
+            return Ok((token.clone(), 0));
         }
-        if !fresh
-            && let Ok(cached) = self.cached.lock()
-            && let Some((token, at)) = cached.as_ref()
-            && at.elapsed() < TOKEN_REUSE
-        {
-            return Ok(token.clone());
-        }
-        let token = tokio::time::timeout(Duration::from_secs(60), cli(&self.config))
-            .await
-            .map_err(|_| error(ErrorCode::Timeout, "CLI authentication timed out"))??;
-        if let Ok(mut cached) = self.cached.lock() {
-            *cached = Some((token.clone(), tokio::time::Instant::now()));
-        }
-        Ok(token)
+        self.auth.token(rejected).await
     }
     async fn request(
         &self,
@@ -230,9 +110,14 @@ impl Client {
         }
         // A rejected token may only have expired: ask the CLI again, once.
         // A 401 means the request was not processed, so repeating it is safe.
-        let mut response = self.send(&method, &url, query, &body, false).await?;
+        let (mut response, mut generation) = self.send(&method, &url, query, &body, None).await?;
         if response.status().as_u16() == 401 {
-            response = self.send(&method, &url, query, &body, true).await?;
+            (response, generation) = self
+                .send(&method, &url, query, &body, Some(generation))
+                .await?;
+            if response.status().as_u16() == 401 {
+                self.auth.invalidate(generation).await;
+            }
         }
         if !response.status().is_success() {
             return Err(error(
@@ -246,7 +131,33 @@ impl Client {
                 "Databricks rejected the API request",
             ));
         }
-        response.json().await.map_err(|_| protocol())
+        // Bound the wire payload too: a single large cell must not bypass the
+        // result builder's memory ceiling. Inline SQL responses cap at 25 MiB.
+        const MAX_RESPONSE: usize = 26 * 1024 * 1024;
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_RESPONSE as u64)
+        {
+            return Err(error(
+                ErrorCode::Protocol,
+                "Databricks response exceeds the inline result limit",
+            ));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| protocol())? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE {
+                return Err(error(
+                    ErrorCode::Protocol,
+                    "Databricks response exceeds the inline result limit",
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if path == "/api/1.2/commands/status" {
+            cluster::decode_response(&bytes)
+        } else {
+            serde_json::from_slice(&bytes).map_err(|_| protocol())
+        }
     }
     async fn send(
         &self,
@@ -254,9 +165,9 @@ impl Client {
         url: &Url,
         query: &[(String, String)],
         body: &Option<Value>,
-        fresh_token: bool,
-    ) -> DriverResult<reqwest::Response> {
-        let token = self.token(fresh_token).await?;
+        rejected: Option<u64>,
+    ) -> DriverResult<(reqwest::Response, u64)> {
+        let (token, generation) = self.token(rejected).await?;
         let mut request = self
             .http
             .request(method.clone(), url.clone())
@@ -265,7 +176,7 @@ impl Client {
         if let Some(body) = body {
             request = request.json(body);
         }
-        request.send().await.map_err(|e| {
+        let response = request.send().await.map_err(|e| {
             error(
                 if e.is_timeout() {
                     ErrorCode::Timeout
@@ -274,7 +185,8 @@ impl Client {
                 },
                 "Databricks request failed",
             )
-        })
+        })?;
+        Ok((response, generation))
     }
     async fn pages(
         &self,
@@ -302,12 +214,149 @@ impl Client {
         Ok(result)
     }
 }
+
+/// A resource visible to the CLI profile. Its ID, rather than its name, is
+/// used for execution; a name is only a label and can change on the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComputeResource {
+    pub id: String,
+    pub name: String,
+    pub state: String,
+}
+
+/// Lists warehouses or classic all-purpose clusters without starting compute.
+/// The operation is cancellable and limited to 90 seconds.
+pub async fn list_compute(
+    options: &Value,
+    cancel: CancellationToken,
+) -> DriverResult<Vec<ComputeResource>> {
+    let config = DatabricksConfig::parse(options)?;
+    bounded(&cancel, Duration::from_secs(90), async {
+        let client = Client::new(&ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Databricks,
+                options: options.clone(),
+            },
+            credentials: Credentials::default(),
+        })
+        .await?;
+        compute_resources(&client, config.compute).await
+    })
+    .await
+}
+
+async fn compute_resources(
+    client: &Client,
+    kind: ComputeKind,
+) -> DriverResult<Vec<ComputeResource>> {
+    let (path, key, id_key, name_key) = match kind {
+        ComputeKind::Warehouse => ("/api/2.0/sql/warehouses", "warehouses", "id", "name"),
+        ComputeKind::Cluster => (
+            "/api/2.1/clusters/list",
+            "clusters",
+            "cluster_id",
+            "cluster_name",
+        ),
+    };
+    let mut query = if kind == ComputeKind::Cluster {
+        vec![("page_size".into(), "100".into())]
+    } else {
+        Vec::new()
+    };
+    let mut seen_pages = HashSet::new();
+    let mut seen_ids = HashSet::new();
+    let mut resources = Vec::new();
+    loop {
+        let response = client.request(Method::GET, path, &query, None).await?;
+        if let Some(items) = response.get(key) {
+            for item in items.as_array().ok_or_else(protocol)? {
+                if kind == ComputeKind::Cluster && !classic_cluster(item) {
+                    continue;
+                }
+                let id = item[id_key]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(protocol)?;
+                if seen_ids.insert(id.to_owned()) {
+                    resources.push(ComputeResource {
+                        id: id.to_owned(),
+                        name: item[name_key]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(id)
+                            .to_owned(),
+                        state: item["state"].as_str().unwrap_or("UNKNOWN").to_owned(),
+                    });
+                }
+            }
+        }
+        let Some(next) = response["next_page_token"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+        else {
+            break;
+        };
+        if !seen_pages.insert(next.to_owned()) {
+            return Err(protocol());
+        }
+        query.retain(|(key, _)| key != "page_token");
+        query.push(("page_token".into(), next.to_owned()));
+    }
+    resources.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+    Ok(resources)
+}
+
+fn classic_cluster(item: &Value) -> bool {
+    matches!(item["cluster_source"].as_str(), None | Some("UI" | "API"))
+        && item["kind"].as_str() != Some("SERVERLESS")
+}
+
+async fn check_compute(client: &Client) -> DriverResult<()> {
+    let Some(id) = client.config.compute_id() else {
+        return Ok(());
+    };
+    match client.config.compute {
+        ComputeKind::Warehouse => {
+            client
+                .request(
+                    Method::GET,
+                    &format!("/api/2.0/sql/warehouses/{id}"),
+                    &[],
+                    None,
+                )
+                .await?;
+        }
+        ComputeKind::Cluster => {
+            let info = client
+                .request(
+                    Method::GET,
+                    "/api/2.1/clusters/get",
+                    &[("cluster_id".into(), id.into())],
+                    None,
+                )
+                .await?;
+            if !classic_cluster(&info) {
+                return Err(DriverError::validation(
+                    "Command Execution requires a classic all-purpose cluster",
+                ));
+            }
+            if !matches!(info["state"].as_str(), Some("RUNNING" | "RESIZING")) {
+                return Err(error(
+                    ErrorCode::Connection,
+                    "Start the selected classic cluster in Databricks before running queries",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 pub async fn test(
     input: &ResolvedConnection,
     cancel: CancellationToken,
 ) -> DriverResult<ServerInfo> {
     bounded(&cancel, Duration::from_secs(90), async {
         let client = Client::new(input).await?;
+        check_compute(&client).await?;
         client
             .request(
                 Method::GET,
@@ -326,14 +375,19 @@ pub async fn open(
     input: &ResolvedConnection,
     cancel: CancellationToken,
 ) -> DriverResult<Box<dyn Session>> {
-    bounded(&cancel, Duration::from_secs(90), async {
+    let client = bounded(&cancel, Duration::from_secs(90), async {
         let client = Client::new(input).await?;
-        let _ = tokio::time::timeout(Duration::from_secs(60), cli(&client.config))
-            .await
-            .map_err(|_| error(ErrorCode::Timeout, "CLI timed out"))??;
-        Ok(Box::new(DatabricksSession::new(client)) as Box<dyn Session>)
+        client.token(None).await?;
+        if client.config.compute == ComputeKind::Cluster {
+            check_compute(&client).await?;
+        }
+        Ok(client)
     })
-    .await
+    .await?;
+    match client.config.compute {
+        ComputeKind::Warehouse => Ok(Box::new(DatabricksSession::new(client)) as Box<dyn Session>),
+        ComputeKind::Cluster => cluster::open(client, &cancel).await,
+    }
 }
 fn name(value: &Value) -> DriverResult<&str> {
     value["name"]
@@ -921,15 +975,169 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
-    async fn fixture(
+
+    // Native CLI coverage is separate from the credential-free portable gate.
+    // This test lists synthetic profiles only; it never authenticates or queries.
+    #[tokio::test]
+    #[ignore = "requires native Databricks CLI; cargo test -p jykre-driver-databricks native_cli_profile_syntax -- --ignored"]
+    async fn native_cli_profile_syntax_resolves_bom_and_section_comments() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("jykre-cli-profile-{}-{stamp}", std::process::id()));
+        tokio::fs::create_dir(&dir).await.unwrap();
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Databricks,
+                options: json!({"profile":"fixture"}),
+            },
+            credentials: Credentials::default(),
+        };
+        for (index, content) in [
+            "\u{feff}[fixture]\nhost = https://fixture.invalid\n",
+            "[fixture] ; workspace comment\nhost = https://fixture.invalid\n",
+            "[__settings__]\ndefault_profile = fixture\n[fixture]\nhost = https://fixture.invalid\naccount_id = 00000000-0000-0000-0000-000000000000\nworkspace_id = 100\n",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = dir.join(format!("profile-{index}.cfg"));
+            tokio::fs::write(&path, content).await.unwrap();
+            let result = Client::in_config_file(&input, path.clone()).await;
+            tokio::fs::remove_file(path).await.unwrap();
+            assert_eq!(result.unwrap().origin.as_str(), "https://fixture.invalid/");
+        }
+        tokio::fs::remove_dir(dir).await.unwrap();
+    }
+    #[tokio::test]
+    async fn discovery_paginates_filters_job_clusters_and_never_starts_compute() {
+        let (client,task) = fixture(vec![
+            (200,json!({"clusters":[
+                {"cluster_id":"z","cluster_name":"Zeta","cluster_source":"UI","state":"TERMINATED"},
+                {"cluster_id":"job","cluster_name":"Job","cluster_source":"JOB","state":"RUNNING"}
+            ],"next_page_token":"next"})),
+            (200,json!({"clusters":[
+                {"cluster_id":"a","cluster_name":"Alpha","cluster_source":"API","state":"RUNNING"},
+                {"cluster_id":"z","cluster_name":"Zeta","cluster_source":"UI","state":"TERMINATED"}
+            ]})),
+        ]).await;
+        let resources = compute_resources(&client, ComputeKind::Cluster)
+            .await
+            .unwrap();
+        assert_eq!(
+            resources.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "z"]
+        );
+        assert_eq!(resources[1].state, "TERMINATED");
+        let requests = task.await.unwrap();
+        assert!(requests[1].contains("page_token=next"));
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.starts_with("GET /api/2.1/clusters/list"))
+        );
+    }
+    #[tokio::test]
+    async fn warehouses_are_listed_and_discovery_rejects_cycles() {
+        let (client, task) = fixture(vec![(
+            200,
+            json!({"warehouses":[{"id":"warehouse","name":"Analytics","state":"STOPPED"}]}),
+        )])
+        .await;
+        assert_eq!(
+            compute_resources(&client, ComputeKind::Warehouse)
+                .await
+                .unwrap()[0]
+                .name,
+            "Analytics"
+        );
+        assert!(task.await.unwrap()[0].starts_with("GET /api/2.0/sql/warehouses"));
+        let (client, task) = fixture(vec![
+            (200, json!({"clusters":[],"next_page_token":"cycle"})),
+            (200, json!({"clusters":[],"next_page_token":"cycle"})),
+        ])
+        .await;
+        assert_eq!(
+            compute_resources(&client, ComputeKind::Cluster)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Protocol
+        );
+        task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn selected_compute_is_checked_without_submitting_sql() {
+        let (mut client, task) = fixture(vec![(
+            200,
+            json!({"state":"TERMINATED","cluster_source":"UI"}),
+        )])
+        .await;
+        client.config = DatabricksConfig::parse(
+            &json!({"profile":"fixture","compute":"cluster","clusterId":"classic"}),
+        )
+        .unwrap();
+        assert_eq!(
+            check_compute(&client).await.unwrap_err().code,
+            ErrorCode::Connection
+        );
+        assert!(task.await.unwrap()[0].starts_with("GET /api/2.1/clusters/get?cluster_id=classic"));
+    }
+    #[tokio::test]
+    async fn unauthorized_refresh_is_retried_once_and_other_failures_are_not_replayed() {
+        let (client, task) = fixture(vec![(401, json!({})), (401, json!({}))]).await;
+        assert_eq!(
+            client
+                .request(
+                    Method::POST,
+                    "/api/1.2/commands/execute",
+                    &[],
+                    Some(json!({}))
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Authentication
+        );
+        assert_eq!(task.await.unwrap().len(), 2);
+        let (client, task) = fixture(vec![(500, json!({}))]).await;
+        assert_eq!(
+            client
+                .request(
+                    Method::POST,
+                    "/api/1.2/commands/execute",
+                    &[],
+                    Some(json!({}))
+                )
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Database
+        );
+        assert_eq!(task.await.unwrap().len(), 1);
+    }
+    pub(super) async fn fixture(
         responses: Vec<(u16, Value)>,
+    ) -> (Client, tokio::task::JoinHandle<Vec<String>>) {
+        fixture_with_hook(responses, |_| {}).await
+    }
+
+    pub(super) async fn fixture_with_hook(
+        responses: Vec<(u16, Value)>,
+        hook: impl Fn(usize) + Send + 'static,
     ) -> (Client, tokio::task::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             let mut requests = Vec::new();
             for (status, body) in responses {
-                let (mut stream, _) = listener.accept().await.unwrap();
+                let (mut stream, _) =
+                    tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
                 let mut bytes = Vec::new();
                 let mut buf = [0u8; 4096];
                 loop {
@@ -954,6 +1162,7 @@ mod tests {
                 requests.push(String::from_utf8(bytes).unwrap());
                 let body = body.to_string();
                 stream.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                hook(requests.len());
             }
             requests
         });
@@ -968,7 +1177,12 @@ mod tests {
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .unwrap(),
-                cached: std::sync::Mutex::new(None),
+                auth: Auth::shared(
+                    &DatabricksConfig::parse(&json!({"profile":"fixture"})).unwrap(),
+                    "fixture.cfg".into(),
+                    &Url::parse("https://fixture.invalid/").unwrap(),
+                )
+                .unwrap(),
                 token: Some(SecretString::from("test-token".to_owned())),
             },
             task,
