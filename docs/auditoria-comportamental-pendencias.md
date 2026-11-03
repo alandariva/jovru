@@ -213,6 +213,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Não indexar nulos no texto do filtro, ou ter critério explícito “is null”.
 - **Evidência no projeto:** `src/grid.rs` (`GridView::new`)
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. O filtro compara apenas valores: um NULL real nunca casa (nem com “null”), e o texto `'NULL'` continua casando.
 
 ## N024 — O botão Explain não executa EXPLAIN
 

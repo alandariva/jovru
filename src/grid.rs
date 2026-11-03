@@ -59,13 +59,15 @@ pub struct GridKey {
 
 impl GridView {
     pub fn new(result: &ResultData, key: GridKey) -> Self {
-        // NULL matches as the text it shows, so a filter for "null" finds it.
+        // The filter matches values, not how the grid draws them: a NULL has
+        // no text, so it never matches (not even a filter for "null"), while
+        // the text 'NULL' does.
         let mut rows: Vec<_> = (0..result.row_count())
             .filter(|row| {
                 key.filter.is_empty()
-                    || result
-                        .row(*row)
-                        .any(|cell| cell.unwrap_or("NULL").to_lowercase().contains(&key.filter))
+                    || result.row(*row).any(|cell| {
+                        cell.is_some_and(|cell| cell.to_lowercase().contains(&key.filter))
+                    })
             })
             .collect();
         if !key.descending {
@@ -263,6 +265,22 @@ mod tests {
         let info = GridView::new(&result, key(0, "info", true));
         assert_eq!(selected_cells(selection, &info.rows), 0);
         assert_eq!(selected_cells(selection, &all.rows), 5);
+    }
+
+    #[test]
+    fn the_filter_matches_values_and_never_a_null() {
+        let columns = vec![ResultColumn::new("note", "text")];
+        let result = ResultData::from_rows(
+            columns,
+            [Some("NULL"), None, Some("nullable"), Some("other")]
+                .into_iter()
+                .map(|cell| std::iter::once(cell)),
+        );
+        let rows = |filter: &str| GridView::new(&result, key(0, filter, true)).rows;
+        // The text 'NULL' and 'nullable' match; the real NULL does not.
+        assert_eq!(rows("null"), [0, 2]);
+        assert_eq!(rows("ull"), [0, 2]);
+        assert_eq!(rows(""), [0, 1, 2, 3]);
     }
 
     /// Shaped like the `sales.event_log` seed, without a database.

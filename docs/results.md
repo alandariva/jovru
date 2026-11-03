@@ -130,7 +130,8 @@ alignment only; the value itself is never converted.
 - Right-clicking outside the selection selects the cell under the pointer
   first, so the context menu acts on what is under it.
 - The filter bar matches text in any column, ignoring case, and stops hiding
-  rows when it is closed.
+  rows when it is closed. It matches values, not how they are drawn: a NULL
+  never matches, even a filter for "null", while the text 'NULL' does.
 
 ## Copying
 
