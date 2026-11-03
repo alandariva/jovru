@@ -332,12 +332,16 @@ pub struct SessionRun {
 ///
 /// The run is logged at `info` with its duration, statement count, rows and
 /// error code; SQL text only at `trace`.
+///
+/// `progress`, when given, receives the position of each statement as it is
+/// sent to the server, so the UI can tell which one is running.
 pub async fn query(
     input: ResolvedConnection,
     session: Option<Box<dyn Session>>,
     requests: Vec<QueryRequest>,
     memory_ceiling: usize,
     cancel: CancellationToken,
+    progress: Option<Progress>,
 ) -> DriverResult<SessionRun> {
     let driver = match builtin_registry().and_then(|registry| registry.get(input.config.driver)) {
         Ok(driver) => driver,
@@ -346,8 +350,20 @@ pub async fn query(
             return Err(error);
         }
     };
-    query_with(driver, input, session, requests, memory_ceiling, cancel).await
+    query_with(
+        driver,
+        input,
+        session,
+        requests,
+        memory_ceiling,
+        cancel,
+        progress,
+    )
+    .await
 }
+
+/// Positions of the statements of a run, sent as each one starts.
+pub type Progress = tokio::sync::mpsc::UnboundedSender<usize>;
 
 /// [`query`] with a given driver.
 pub async fn query_with(
@@ -357,6 +373,7 @@ pub async fn query_with(
     requests: Vec<QueryRequest>,
     memory_ceiling: usize,
     cancel: CancellationToken,
+    progress: Option<Progress>,
 ) -> DriverResult<SessionRun> {
     let span = tracing::info_span!(
         "query",
@@ -364,9 +381,17 @@ pub async fn query_with(
         statements = requests.len()
     );
     let started = Instant::now();
-    let run = run_statements(driver, input, session, requests, memory_ceiling, cancel)
-        .instrument(span.clone())
-        .await;
+    let run = run_statements(
+        driver,
+        input,
+        session,
+        requests,
+        memory_ceiling,
+        cancel,
+        progress,
+    )
+    .instrument(span.clone())
+    .await;
     let _entered = span.enter();
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &run.batch {
@@ -395,6 +420,7 @@ async fn run_statements(
     requests: Vec<QueryRequest>,
     memory_ceiling: usize,
     cancel: CancellationToken,
+    progress: Option<Progress>,
 ) -> SessionRun {
     let mut run = SessionRun {
         batch: Err(DriverError::cancelled()),
@@ -433,6 +459,10 @@ async fn run_statements(
     let mut failure = None;
     for (index, request) in requests.into_iter().enumerate() {
         tracing::trace!(statement = index, sql = %request.sql, "statement");
+        if let Some(progress) = &progress {
+            // The UI may be gone; the run goes on regardless.
+            let _ = progress.send(index);
+        }
         let start = Instant::now();
         let mut builder = ResultBuilder::new(request.options.max_rows, memory_ceiling);
         match session
@@ -807,6 +837,7 @@ mod tests {
             requests,
             crate::result::DEFAULT_MEMORY_CEILING,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap()
@@ -814,6 +845,42 @@ mod tests {
         .unwrap();
         assert_eq!(batch.completed.len(), 2);
         captured.text()
+    }
+
+    #[tokio::test]
+    async fn progress_reports_each_statement_as_it_starts() {
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({"host":"localhost","user":"fixture","database":"fixture","sslMode":"disable"}),
+            },
+            credentials: Credentials::default(),
+        };
+        let requests = ["SELECT 1", "SELECT 2", "SELECT 3"]
+            .into_iter()
+            .map(|sql| QueryRequest {
+                sql: sql.into(),
+                options: ExecutionOptions::default(),
+            })
+            .collect();
+        let (progress, mut started) = tokio::sync::mpsc::unbounded_channel();
+        let run = query_with(
+            Arc::new(EchoDriver { rows: 1 }),
+            input,
+            None,
+            requests,
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+            Some(progress),
+        )
+        .await
+        .unwrap();
+        assert_eq!(run.batch.unwrap().completed.len(), 3);
+        let mut positions = Vec::new();
+        while let Ok(position) = started.try_recv() {
+            positions.push(position);
+        }
+        assert_eq!(positions, [0, 1, 2]);
     }
 
     #[tokio::test]
@@ -858,6 +925,7 @@ mod tests {
             vec![request],
             crate::result::DEFAULT_MEMORY_CEILING,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap()
@@ -1049,6 +1117,7 @@ mod tests {
             requests,
             crate::result::DEFAULT_MEMORY_CEILING,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1135,6 +1204,7 @@ mod tests {
             }],
             crate::result::DEFAULT_MEMORY_CEILING,
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();

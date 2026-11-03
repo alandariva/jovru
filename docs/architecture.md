@@ -142,9 +142,10 @@ sequenceDiagram
     participant W as Workspace (UI thread)
     participant R as backend::run (Tokio)
     participant D as Driver session
-    W->>W: QueryRun::start splits statements and marks them Running
-    W->>R: backend::query(connection, tab session, requests, cancel)
+    W->>W: QueryRun::start splits statements; queue_all marks them Pending
+    W->>R: backend::query(connection, tab session, requests, cancel, progress)
     R->>D: ping the kept session (or open one), execute each statement
+    R-->>W: progress: the position of each statement as it starts (statement_started)
     D-->>R: columns and rows through RowSink (bounded by the row limit)
     R->>R: convert rows to display data, drop driver cells
     R-->>W: completed results and the first error

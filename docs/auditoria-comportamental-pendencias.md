@@ -187,6 +187,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Callbacks por instrução: Pending → Running → Success/Error.
 - **Evidência no projeto:** `src/app/workspace.rs` (`begin_all`); `src/query.rs`; `src/backend.rs`
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. `backend::query` recebe um canal `Progress` e envia a posição de cada instrução quando a manda ao servidor. `QueryRun::queue_all` marca o lote como `Pending` (relógio no gutter) e `statement_started` move a instrução atual para Running e as anteriores para Success; parar cancela a atual e as que esperam. Stop no gutter ainda para o lote inteiro, que é uma única execução.
 
 ## N022 — Filtrar a grade apaga a seleção
 

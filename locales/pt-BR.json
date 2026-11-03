@@ -362,5 +362,6 @@
   "The connection {0} is not valid and is not shown: {1}": "A conexão {0} não é válida e não é exibida: {1}",
   "The saved row limit could not be read; the default is used: {0}": "O limite de linhas salvo não pôde ser lido; o padrão é usado: {0}",
   "Stopping…": "Parando…",
-  "The previous run is still stopping. Run again when it ends.": "A execução anterior ainda está parando. Execute de novo quando ela terminar."
+  "The previous run is still stopping. Run again when it ends.": "A execução anterior ainda está parando. Execute de novo quando ela terminar.",
+  "Waiting for the statements before it · stop the run": "Aguardando as instruções anteriores · parar a execução"
 }

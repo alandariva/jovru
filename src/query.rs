@@ -30,6 +30,8 @@ pub enum Scope {
 pub enum StatementStatus {
     #[default]
     Ready,
+    /// Part of the active run, waiting for the statements before it.
+    Pending,
     Running,
     Success,
     Error,
@@ -235,16 +237,32 @@ impl QueryRun {
         true
     }
 
-    /// Marks every planned statement as running, for runs executed as one
-    /// batch.
-    pub fn begin_all(&mut self, id: RunId) -> bool {
+    /// Marks every planned statement as waiting, for runs executed as one
+    /// batch; [`QueryRun::statement_started`] then follows the server.
+    pub fn queue_all(&mut self, id: RunId) -> bool {
         if !self.accepts(id) {
             return false;
         }
         for index in self.planned.clone() {
-            self.set(index, StatementStatus::Running);
+            self.set(index, StatementStatus::Pending);
         }
         true
+    }
+
+    /// The statement at `position` in the plan was sent to the server: it
+    /// shows as running, and the ones before it, which finished, as done.
+    /// Ignored for a run that is no longer current or is stopping.
+    pub fn statement_started(&mut self, id: RunId, position: usize) {
+        if id != self.current || !self.is_running() {
+            return;
+        }
+        for (at, index) in self.planned.clone().into_iter().enumerate() {
+            match at.cmp(&position) {
+                std::cmp::Ordering::Less => self.set(index, StatementStatus::Success),
+                std::cmp::Ordering::Equal => self.set(index, StatementStatus::Running),
+                std::cmp::Ordering::Greater => {}
+            }
+        }
     }
 
     /// Requests cancellation of a running run. The run is `Cancelling` until
@@ -255,7 +273,7 @@ impl QueryRun {
         }
         self.state = RunState::Cancelling;
         for status in &mut self.statuses {
-            if *status == StatementStatus::Running {
+            if matches!(*status, StatementStatus::Running | StatementStatus::Pending) {
                 *status = StatementStatus::Cancelled;
             }
         }
@@ -285,6 +303,12 @@ impl QueryRun {
             }
             Some(error) => {
                 self.set(index, StatementStatus::Error);
+                // The statements after it never run.
+                for later in std::mem::take(&mut self.planned) {
+                    if self.status(later) == StatementStatus::Pending {
+                        self.set(later, StatementStatus::Ready);
+                    }
+                }
                 self.state = RunState::Failed {
                     error: tr!("Error in query {0}: {1}", index + 1, error),
                 };
@@ -384,7 +408,7 @@ impl QueryRun {
         for index in std::mem::take(&mut self.planned) {
             if matches!(
                 self.status(index),
-                StatementStatus::Running | StatementStatus::Cancelled
+                StatementStatus::Pending | StatementStatus::Running | StatementStatus::Cancelled
             ) {
                 self.set(index, StatementStatus::Cancelled);
             }
@@ -429,14 +453,14 @@ fn carry_statuses(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use StatementStatus::{Cancelled, Error, Ready, Running, Success};
+    use StatementStatus::{Cancelled, Error, Pending, Ready, Running, Success};
 
     const TWO: &str = "SELECT 1;\nSELECT 2;";
 
     fn started(sql: &str) -> (QueryRun, Plan) {
         let mut run = QueryRun::new(sql);
         let plan = run.start(sql, Scope::All).expect("statements to run");
-        assert!(run.begin_all(plan.id));
+        assert!(run.queue_all(plan.id));
         (run, plan)
     }
 
@@ -513,14 +537,47 @@ mod tests {
         assert!(matches!(run.state(), RunState::Running { .. }));
         // A running run is not restarted.
         assert_eq!(run.start(TWO, Scope::All), None);
-        assert!(run.begin_all(plan.id));
+        assert!(run.queue_all(plan.id));
+        assert_eq!(run.statuses(), [Ready, Pending]);
+        run.statement_started(plan.id, 0);
         assert_eq!(run.statuses(), [Ready, Running]);
+    }
+
+    #[test]
+    fn statements_wait_then_run_one_at_a_time() {
+        let sql = "SELECT 1; SELECT 2; SELECT 3;";
+        let (mut run, plan) = started(sql);
+        assert_eq!(run.statuses(), [Pending, Pending, Pending]);
+        run.statement_started(plan.id, 0);
+        assert_eq!(run.statuses(), [Running, Pending, Pending]);
+        run.statement_started(plan.id, 1);
+        assert_eq!(run.statuses(), [Success, Running, Pending]);
+        // A stale run's progress changes nothing.
+        let stale = RunId(plan.id.0 - 1);
+        run.statement_started(stale, 2);
+        assert_eq!(run.statuses(), [Success, Running, Pending]);
+        // Stopping cancels the running and the waiting statements, and
+        // late progress no longer moves them.
+        assert!(run.cancel());
+        assert_eq!(run.statuses(), [Success, Cancelled, Cancelled]);
+        run.statement_started(plan.id, 2);
+        assert_eq!(run.statuses(), [Success, Cancelled, Cancelled]);
+        assert_eq!(run.state(), &RunState::Cancelling);
+        // The failure of the second leaves the third ready.
+        let (mut run, plan) = started(sql);
+        run.statement_started(plan.id, 1);
+        let outcome = Outcome::Batch {
+            completed: 1,
+            error: Some(DriverError::new(ErrorCode::Database, "boom")),
+        };
+        assert!(run.finish(plan.id, outcome));
+        assert_eq!(run.statuses(), [Success, Error, Ready]);
     }
 
     #[test]
     fn a_successful_batch_is_done() {
         let (mut run, plan) = started(TWO);
-        assert_eq!(run.statuses(), [Running, Running]);
+        assert_eq!(run.statuses(), [Pending, Pending]);
         let outcome = Outcome::Batch {
             completed: 2,
             error: None,
@@ -610,8 +667,8 @@ mod tests {
         assert_eq!(run.state(), &RunState::Cancelled);
         let new = run.start(TWO, Scope::Statement(0)).expect("a new run");
         assert_ne!(old.id, new.id);
-        assert!(run.begin_all(new.id));
-        assert_eq!(run.statuses(), [Running, Cancelled]);
+        assert!(run.queue_all(new.id));
+        assert_eq!(run.statuses(), [Pending, Cancelled]);
         let outcome = Outcome::Batch {
             completed: 1,
             error: None,
@@ -686,8 +743,9 @@ mod tests {
     #[test]
     fn edits_during_a_run_apply_when_it_ends() {
         let (mut run, plan) = started(TWO);
+        run.statement_started(plan.id, 1);
         run.edit("SELECT 1;\nSELECT 20;");
-        assert_eq!(run.statuses(), [Running, Running]);
+        assert_eq!(run.statuses(), [Success, Running]);
         let outcome = Outcome::Batch {
             completed: 2,
             error: None,

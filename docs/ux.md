@@ -35,7 +35,7 @@ Each state has one consistent representation.
 | State | Where | Representation |
 | --- | --- | --- |
 | Query running | Footer, results area, Run button | Spinner, "Running…", the Run button turns into Cancel |
-| Statement status | Editor gutter | Running, success, error or cancelled per statement |
+| Statement status | Editor gutter | Waiting, running, success, error or cancelled per statement; only the statement on the server shows as running |
 | Row limit reached | Footer | Amber warning with the limit in its tooltip |
 | Run cancelling | Footer | Spinner and "Cancelling…" until the driver stops; the previous result stays and a new run may start |
 | Run cancelled / failed | Footer (and the results area for errors) | Cancel or error icon with a short text |
@@ -65,6 +65,7 @@ Rules:
 ## Confirmations
 
 - Closing a tab with a running query asks first: closing cancels the query.
+  Closing one whose SQL is not in the saved queries asks too: closing loses it.
 - Moving a tab to another connection (dragging it to another group, or
   choosing a connection in the editor toolbar) asks first: its results and
   session belong to the previous connection.

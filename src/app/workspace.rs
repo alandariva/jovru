@@ -520,11 +520,26 @@ impl Workspace {
         if let Some(input) = self.input.clone() {
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
-            self.run.begin_all(id);
+            self.run.queue_all(id);
             // The previous run has ended (a stopping one blocks new runs), so
             // its session is back unless it was lost.
             let (session, lease) = self.lease_session();
             let options = self.options();
+            // The gutter follows the server: each statement shows as running
+            // when the backend sends it, the later ones as waiting.
+            let (progress, mut started) = tokio::sync::mpsc::unbounded_channel::<usize>();
+            cx.spawn(async move |weak, cx| {
+                while let Some(position) = started.recv().await {
+                    let alive = weak.update(cx, |this, cx| {
+                        this.run.statement_started(id, position);
+                        cx.notify();
+                    });
+                    if alive.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
             cx.spawn(async move |weak, cx| {
                 let requests = queries
                     .iter()
@@ -541,6 +556,7 @@ impl Workspace {
                     requests,
                     DEFAULT_MEMORY_CEILING,
                     cancel,
+                    Some(progress),
                 ))
                 .await;
                 let mut pending = Some(result);
@@ -620,6 +636,7 @@ impl Workspace {
             .detach();
             return;
         }
+        self.run.queue_all(id);
         cx.spawn(async move |weak, cx| {
             for (position, (index, sql)) in queries.into_iter().enumerate() {
                 let tab = tabs[position];
@@ -2195,6 +2212,11 @@ fn run_button(
 ) -> AnyElement {
     let (symbol, color, title) = match status {
         StatementStatus::Ready => (I::Play, MINT, tr!("Run this query")),
+        StatementStatus::Pending => (
+            I::Clock,
+            FAINT,
+            tr!("Waiting for the statements before it · stop the run"),
+        ),
         StatementStatus::Running => (I::Square, 0xe7bd7b, tr!("Stop execution")),
         StatementStatus::Success => (I::CircleCheck, MINT, tr!("Success · run again")),
         StatementStatus::Error => (I::CircleX, 0xef8b91, tr!("Error · run again")),
@@ -2215,7 +2237,10 @@ fn run_button(
         .child(icon(symbol, color))
         .on_click(move |_, _, cx| {
             let _ = workspace.update(cx, |this, cx| {
-                if this.run.status(index) == StatementStatus::Running {
+                if matches!(
+                    this.run.status(index),
+                    StatementStatus::Running | StatementStatus::Pending
+                ) {
                     this.stop_execution(cx);
                 } else {
                     this.execute_queries(Scope::Statement(index), Placement::ReplaceLast, cx);
