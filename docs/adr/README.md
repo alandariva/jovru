@@ -35,3 +35,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0010](0010-benchmarks-with-criterion.md) | Benchmarks with `criterion` for hot paths | Accepted (implemented) |
 | [0011](0011-workspace-lints.md) | Workspace-wide lints for panics, output and async locks | Accepted (implemented) |
 | [0012](0012-result-grid-as-a-cached-entity.md) | Result grid as its own cached entity | Accepted (implemented) |
+| [0013](0013-thin-ancestors-of-frequently-notified-views.md) | Thin ancestors for frequently notified views | Proposed |
