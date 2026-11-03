@@ -60,6 +60,16 @@ pub enum GroupedTabsEvent {
     NewTabRequested(TabGroupId),
     SelectionChanged(Option<TabId>),
     TabClosed(TabId),
+    /// With [`GroupedTabs::set_confirm_changes`], the user asked to close a
+    /// tab; the host confirms and calls [`GroupedTabs::close_tab`].
+    CloseRequested(TabId),
+    /// With [`GroupedTabs::set_confirm_changes`], the user dropped a tab in
+    /// another place; the host confirms and calls [`GroupedTabs::move_tab`].
+    MoveRequested {
+        tab: TabId,
+        group: TabGroupId,
+        index: usize,
+    },
     TabMoved {
         tab: TabId,
         from: TabGroupId,
@@ -160,6 +170,8 @@ pub struct GroupedTabs {
     picker: Option<Entity<TabPicker>>,
     picker_open: bool,
     picker_subscription: Option<Subscription>,
+    /// Closing and moving tabs by hand ask the host first.
+    confirm_changes: bool,
 }
 
 impl EventEmitter<GroupedTabsEvent> for GroupedTabs {}
@@ -180,7 +192,16 @@ impl GroupedTabs {
             picker: None,
             picker_open: false,
             picker_subscription: None,
+            confirm_changes: false,
         }
+    }
+
+    /// Makes the close button and drag and drop emit
+    /// [`GroupedTabsEvent::CloseRequested`] and
+    /// [`GroupedTabsEvent::MoveRequested`] instead of acting, so the host can
+    /// ask the user first.
+    pub fn set_confirm_changes(&mut self, confirm: bool) {
+        self.confirm_changes = confirm;
     }
 
     pub fn add_group(
@@ -290,6 +311,12 @@ impl GroupedTabs {
 
     pub fn active_tab(&self) -> Option<TabId> {
         self.model.active
+    }
+
+    /// The group `tab` is in.
+    pub fn group_of(&self, tab: TabId) -> Option<TabGroupId> {
+        let (group, _) = self.model.location(tab)?;
+        Some(self.model.groups[group].id)
     }
 
     pub fn group_ids(&self) -> impl Iterator<Item = TabGroupId> + '_ {
@@ -500,8 +527,16 @@ impl GroupedTabs {
         {
             let index =
                 final_drop_index((self.model.groups[source_group].id, source_index), target);
-            let _ = self.move_tab(drag.tab, target.group, index, cx);
-            self.focus_tab(drag.tab, window, cx);
+            if self.confirm_changes {
+                cx.emit(GroupedTabsEvent::MoveRequested {
+                    tab: drag.tab,
+                    group: target.group,
+                    index,
+                });
+            } else {
+                let _ = self.move_tab(drag.tab, target.group, index, cx);
+                self.focus_tab(drag.tab, window, cx);
+            }
         }
         self.drop_target = None;
         self.dragging = None;
@@ -722,6 +757,10 @@ impl GroupedTabs {
                                 .tooltip(tr!("Close {0}", tab.title))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
+                                    if this.confirm_changes {
+                                        cx.emit(GroupedTabsEvent::CloseRequested(tab_id));
+                                        return;
+                                    }
                                     let focused = this.bar_focus.contains_focused(window, cx);
                                     let _ = this.close_tab(tab_id, cx);
                                     if focused && let Some(next) = this.model.active {

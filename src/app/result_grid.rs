@@ -35,6 +35,9 @@ pub struct ResultGrid {
     filter: String,
     descending: bool,
     numbers_pt_br: bool,
+    /// Position in the whole result of this page's first row, for the row
+    /// numbers.
+    first_row: usize,
     cache: GridCache,
     selection: Option<CellSelection>,
     /// The selected count last reported, so unchanged counts are not sent.
@@ -51,6 +54,7 @@ impl ResultGrid {
             result,
             version: 0,
             sales,
+            first_row: 0,
             filter: String::new(),
             descending: true,
             numbers_pt_br: false,
@@ -64,9 +68,21 @@ impl ResultGrid {
 
     /// Shows another result and clears the selection. The grid keeps a
     /// shared handle; it never copies the data.
-    pub fn set_result(&mut self, result: Rc<ResultData>, sales: bool, cx: &mut Context<Self>) {
+    /// Shows one page of a result whose first row is row `first_row` (zero
+    /// based) of the whole result.
+    pub fn set_page(
+        &mut self,
+        result: Rc<ResultData>,
+        sales: bool,
+        first_row: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if Rc::ptr_eq(&self.result, &result) && self.first_row == first_row && self.sales == sales {
+            return;
+        }
         self.result = result;
         self.sales = sales;
+        self.first_row = first_row;
         self.version += 1;
         self.select(None, cx);
         cx.notify();
@@ -410,7 +426,7 @@ impl ResultGrid {
                                 this.select(Some(selection), cx);
                                 window.focus(&this.focus, cx);
                             }))
-                            .child((index + 1).to_string()),
+                            .child((self.first_row + index + 1).to_string()),
                     )
                     .children(cells.iter().enumerate().map(|(col, raw)| {
                         let family = grid.families[col];
@@ -439,7 +455,7 @@ impl ResultGrid {
                             .aria_selected(selected)
                             .aria_label(tr!(
                                 "Row {0}, {1}: {2}",
-                                index + 1,
+                                self.first_row + index + 1,
                                 self.result
                                     .columns()
                                     .get(col)

@@ -5,13 +5,14 @@ mod layout;
 mod probe;
 mod result_grid;
 mod sql;
+mod state;
 mod ui;
 mod workspace;
 
 use demo::{ORDER_COLUMNS, SALES_SQL, TABLES, table_sql};
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::{
-    ActiveTheme, Sizable, Theme, ThemeMode, TitleBar,
+    ActiveTheme, Sizable, Theme, ThemeMode, TitleBar, WindowExt as _,
     input::{Input, InputEvent, InputState},
     resizable::{ResizableState, h_resizable, resizable_panel},
     scroll::ScrollableElement,
@@ -28,12 +29,43 @@ use std::collections::HashSet;
 use ui::*;
 use workspace::{Workspace, WorkspaceEvent};
 
+/// Asks the user to confirm an action in a dialog drawn with the
+/// application's theme; `on_ok` runs only when they confirm.
+fn confirm(
+    window: &mut Window,
+    cx: &mut App,
+    title: String,
+    description: String,
+    ok: &'static str,
+    cancel: &'static str,
+    on_ok: impl Fn(&mut App) + 'static,
+) {
+    let on_ok = std::rc::Rc::new(on_ok);
+    window.open_alert_dialog(cx, move |alert, _, _| {
+        let on_ok = on_ok.clone();
+        alert
+            .title(title.clone())
+            .description(description.clone())
+            .confirm()
+            .ok_text(ok)
+            .cancel_text(cancel)
+            .width(px(440.))
+            .on_ok(move |_, _, cx| {
+                on_ok(cx);
+                true
+            })
+    });
+}
+
 actions!(
     jykre,
     [
-        /// Ctrl+Enter: the selection, or the statement at the cursor.
+        /// Ctrl+Enter: the selection, or the statement at the cursor, in place
+        /// of the last result tab created.
         ExecuteCurrentQuery,
-        /// Ctrl+Shift+Enter: every statement in the tab.
+        /// Ctrl+Shift+Enter: the same, in a new result tab.
+        ExecuteCurrentQueryInNewResult,
+        /// Ctrl+Alt+Enter: every statement in the tab, one result tab each.
         ExecuteAllQueries
     ]
 );
@@ -123,12 +155,25 @@ struct AppView {
     connection_testing: Option<CancellationToken>,
     connection_revision: usize,
     editing_connection: Option<usize>,
+    /// The open tabs, saved queries and history are written to `config.db`
+    /// once the last session's were restored (never in the demo).
+    persist_state: bool,
+    /// Bumped by every change, so only the last of a burst is written.
+    state_revision: usize,
+    /// Groups for restored tabs whose connection no longer exists, by the
+    /// connection's name.
+    orphan_groups: Vec<(String, TabGroupId)>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl AppView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let tabs = cx.new(GroupedTabs::new);
+        let tabs = cx.new(|cx| {
+            let mut tabs = GroupedTabs::new(cx);
+            // Closing a busy tab or moving one to another connection asks first.
+            tabs.set_confirm_changes(true);
+            tabs
+        });
         let explorer_split = cx.new(|_| ResizableState::default());
         let assistant_split = cx.new(|_| ResizableState::default());
         let explorer_resize = cx.observe(&explorer_split, |_, _, cx| cx.notify());
@@ -138,6 +183,12 @@ impl AppView {
                 GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
                 GroupedTabsEvent::TabClosed(tab) => {
                     this.panels.remove(tab);
+                    this.save_state_soon(cx);
+                }
+                GroupedTabsEvent::SelectionChanged(_) => this.save_state_soon(cx),
+                GroupedTabsEvent::CloseRequested(tab) => this.request_close(*tab, window, cx),
+                GroupedTabsEvent::MoveRequested { tab, group, index } => {
+                    this.request_move(*tab, *group, *index, window, cx)
                 }
                 GroupedTabsEvent::TabMoved { tab, from, to, .. } if from != to => {
                     if let (Some(panel), Some(connection)) = (
@@ -155,6 +206,7 @@ impl AppView {
                             )
                         });
                     }
+                    this.save_state_soon(cx);
                 }
                 _ => {}
             });
@@ -248,7 +300,12 @@ impl AppView {
             connection_testing: None,
             connection_revision: 0,
             editing_connection: None,
+            persist_state: false,
+            state_revision: 0,
+            orphan_groups: Vec::new(),
             _subscriptions: vec![
+                // The last edits are written before the application exits.
+                cx.on_app_quit(|this, cx| this.save_state_now(cx)),
                 tab_subscription,
                 search_subscription,
                 command_subscription,
@@ -345,18 +402,11 @@ impl AppView {
         sql: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        // Connections outlive their tab groups. Recreate the group on demand
-        // when opening a query after its last tab was closed or moved away.
-        let mut group = group;
-        if !self.tabs.read(cx).group_ids().any(|id| id == group)
-            && let Some(connection) = self.connections.iter_mut().find(|c| c.group == group)
-        {
-            group = self.tabs.update(cx, |tabs, cx| {
-                tabs.add_group(connection.name.clone(), rgb(connection.color).into(), cx)
-            });
-            connection.group = group;
-        }
+    ) -> Option<TabId> {
+        let group = match self.connections.iter().position(|c| c.group == group) {
+            Some(index) => self.ensure_group(index, cx),
+            None => group,
+        };
         let connection = self
             .connections
             .iter()
@@ -381,52 +431,71 @@ impl AppView {
         {
             panel.update(cx, |panel, cx| panel.set_connection(input, row_limit, cx));
         }
-        let subscription = cx.subscribe(&panel, |this, _, event: &WorkspaceEvent, cx| {
-            match event {
-                WorkspaceEvent::Saved {
-                    saved,
-                    title,
-                    connection,
-                    sql,
-                } => {
-                    this.saved_queries
-                        .retain(|query| query.title != *title || query.connection != *connection);
-                    if *saved {
-                        this.saved_queries.push(QuerySnapshot {
-                            title: title.clone(),
-                            connection: connection.clone(),
-                            sql: sql.clone(),
+        let subscription = cx.subscribe_in(
+            &panel,
+            window,
+            |this, panel_entity, event: &WorkspaceEvent, window, cx| {
+                match event {
+                    WorkspaceEvent::Saved {
+                        saved,
+                        title,
+                        connection,
+                        sql,
+                    } => {
+                        this.saved_queries.retain(|query| {
+                            query.title != *title || query.connection != *connection
                         });
+                        if *saved {
+                            this.saved_queries.push(QuerySnapshot {
+                                title: title.clone(),
+                                connection: connection.clone(),
+                                sql: sql.clone(),
+                            });
+                        }
+                    }
+                    WorkspaceEvent::Executed {
+                        title,
+                        connection,
+                        sql,
+                    } => {
+                        state::record(
+                            &mut this.history,
+                            QuerySnapshot {
+                                title: title.clone(),
+                                connection: connection.clone(),
+                                sql: sql.clone(),
+                            },
+                        );
+                    }
+                    WorkspaceEvent::Changed => {}
+                    WorkspaceEvent::ConnectionRequested(name) => {
+                        let name = name.clone();
+                        if let Some(tab) = this.tab_of(panel_entity)
+                            && let Some(index) =
+                                this.connections.iter().position(|c| c.name == name)
+                        {
+                            let group = this.ensure_group(index, cx);
+                            this.request_move(tab, group, usize::MAX, window, cx);
+                        }
                     }
                 }
-                WorkspaceEvent::Executed {
-                    title,
-                    connection,
-                    sql,
-                } => {
-                    this.history.insert(
-                        0,
-                        QuerySnapshot {
-                            title: title.clone(),
-                            connection: connection.clone(),
-                            sql: sql.clone(),
-                        },
-                    );
-                    this.history.truncate(30);
-                }
-            }
-            cx.notify();
-        });
+                this.save_state_soon(cx);
+                cx.notify();
+            },
+        );
         self._subscriptions.push(subscription);
         // The group exists: it was recreated above when it had been closed.
         let Ok(tab) = self.tabs.update(cx, |tabs, cx| {
             tabs.add_tab(group, title.to_string(), panel.clone(), cx)
         }) else {
             tracing::error!("could not add a query tab: its group does not exist");
-            return;
+            return None;
         };
         self.panels.insert(tab, panel);
+        self.refresh_connection_choices(cx);
+        self.save_state_soon(cx);
         cx.notify();
+        Some(tab)
     }
 
     fn new_query(&mut self, group: TabGroupId, window: &mut Window, cx: &mut Context<Self>) {
@@ -442,6 +511,122 @@ impl AppView {
             "SELECT * FROM orders LIMIT 100;"
         };
         self.add_query(group, &title, sql, window, cx);
+    }
+
+    /// The tab group of the connection at `index`. Connections outlive their
+    /// tab groups, so the group is recreated when its last tab was closed or
+    /// moved away.
+    fn ensure_group(&mut self, index: usize, cx: &mut Context<Self>) -> TabGroupId {
+        let group = self.connections[index].group;
+        if self.tabs.read(cx).group_ids().any(|id| id == group) {
+            return group;
+        }
+        let connection = &mut self.connections[index];
+        let group = self.tabs.update(cx, |tabs, cx| {
+            tabs.add_group(connection.name.clone(), rgb(connection.color).into(), cx)
+        });
+        connection.group = group;
+        group
+    }
+
+    fn tab_of(&self, panel: &Entity<Workspace>) -> Option<TabId> {
+        self.panels
+            .iter()
+            .find(|(_, candidate)| *candidate == panel)
+            .map(|(tab, _)| *tab)
+    }
+
+    /// Offers every query tab the connections it can switch to.
+    pub(super) fn refresh_connection_choices(&self, cx: &mut Context<Self>) {
+        let names: Vec<String> = self.connections.iter().map(|c| c.name.clone()).collect();
+        for panel in self.panels.values() {
+            panel.update(cx, |panel, cx| {
+                panel.set_connection_choices(names.clone(), cx)
+            });
+        }
+    }
+
+    /// Closes a tab, asking first when a query is running in it, since
+    /// closing cancels the query.
+    fn request_close(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let busy = self
+            .panels
+            .get(&tab)
+            .is_some_and(|panel| panel.read(cx).is_busy());
+        if !busy {
+            let _ = self.tabs.update(cx, |tabs, cx| tabs.close_tab(tab, cx));
+            return;
+        }
+        let tabs = self.tabs.downgrade();
+        confirm(
+            window,
+            cx,
+            tr!("A query is running in this tab.").into(),
+            tr!("Closing the tab cancels the query.").into(),
+            tr!("Close and cancel"),
+            tr!("Keep the tab"),
+            move |cx| {
+                let _ = tabs.update(cx, |tabs, cx| tabs.close_tab(tab, cx));
+            },
+        );
+    }
+
+    /// Moves a tab, asking first when the move changes the connection it
+    /// runs on (its results and session belong to the previous one).
+    fn request_move(
+        &mut self,
+        tab: TabId,
+        group: TabGroupId,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let same_group = self.tabs.read(cx).group_of(tab) == Some(group);
+        let Some(panel) = self.panels.get(&tab) else {
+            return;
+        };
+        let (from, busy) = {
+            let panel = panel.read(cx);
+            (panel.connection_name().to_owned(), panel.is_busy())
+        };
+        let to = self
+            .connections
+            .iter()
+            .find(|connection| connection.group == group)
+            .map(|connection| connection.name.clone());
+        if same_group || to.as_deref() == Some(from.as_str()) {
+            let _ = self
+                .tabs
+                .update(cx, |tabs, cx| tabs.move_tab(tab, group, index, cx));
+            return;
+        }
+        let to = to.unwrap_or_else(|| tr!("Without connection").to_owned());
+        let message = tr!("Run this tab on {0}?", to);
+        let detail = if busy {
+            tr!(
+                "The tab moves from {0} to {1}. Its SQL stays; the running query is cancelled and the results and session on {0} are closed.",
+                from,
+                to
+            )
+        } else {
+            tr!(
+                "The tab moves from {0} to {1}. Its SQL stays; the results and session on {0} are closed.",
+                from,
+                to
+            )
+        };
+        let tabs = self.tabs.downgrade();
+        confirm(
+            window,
+            cx,
+            message,
+            detail,
+            tr!("Switch connection"),
+            tr!("Cancel"),
+            move |cx| {
+                let _ = tabs.update(cx, |tabs, cx| tabs.move_tab(tab, group, index, cx));
+            },
+        );
     }
 
     /// Runs `action` on the active tab's workspace, unless a dialog or the
@@ -797,7 +982,7 @@ impl AppView {
                     s.child(label(if self.section == Section::Saved {
                         tr!("Your library")
                     } else {
-                        tr!("In this session")
+                        tr!("Recent runs")
                     }))
                     .when(queries.is_empty(), |s| {
                         s.child(div().p_3().text_size(px(14.)).text_color(rgb(MUTED)).child(
@@ -1147,6 +1332,11 @@ impl Render for AppView {
             .on_action(cx.listener(|this, _: &ExecuteCurrentQuery, _, cx| {
                 this.with_active_panel(cx, Workspace::execute_current);
             }))
+            .on_action(
+                cx.listener(|this, _: &ExecuteCurrentQueryInNewResult, _, cx| {
+                    this.with_active_panel(cx, Workspace::execute_current_in_new_result);
+                }),
+            )
             .on_action(cx.listener(|this, _: &ExecuteAllQueries, _, cx| {
                 this.with_active_panel(cx, Workspace::execute_all);
             }))
@@ -1312,9 +1502,15 @@ pub fn run() {
         let editor = format!("{} > Input", workspace::SQL_EDITOR_CONTEXT);
         cx.bind_keys([
             KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, None),
-            KeyBinding::new("ctrl-shift-enter", ExecuteAllQueries, None),
+            KeyBinding::new("ctrl-shift-enter", ExecuteCurrentQueryInNewResult, None),
+            KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, None),
             KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, Some(&editor)),
-            KeyBinding::new("ctrl-shift-enter", ExecuteAllQueries, Some(&editor)),
+            KeyBinding::new(
+                "ctrl-shift-enter",
+                ExecuteCurrentQueryInNewResult,
+                Some(&editor),
+            ),
+            KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, Some(&editor)),
         ]);
         Theme::change(ThemeMode::Dark, None, cx);
         Theme::update(cx, |theme| {

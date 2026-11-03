@@ -6,16 +6,23 @@ use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::{ActiveTheme, Sizable, tooltip::Tooltip};
+use gpui_kit::component::{
+    ActiveTheme, Sizable,
+    button::{Button, ButtonVariants},
+    menu::{DropdownMenu as _, PopupMenuItem},
+    tooltip::Tooltip,
+};
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::tr;
 use jykre::{
     backend, cell_format,
     drivers::*,
-    query::{Outcome, QueryRun, RunId, RunState, Scope, StatementStatus},
+    query::{Outcome, QueryRun, RunState, Scope, StatementStatus},
     result::{DEFAULT_MEMORY_CEILING, DEFAULT_ROW_LIMIT, ResultData, ResultLimit},
+    result_tabs::{Completed, Placement, ResultId, ResultState, ResultTab, ResultTabs},
 };
 use std::rc::Rc;
+use std::time::Duration;
 
 /// Key context of the SQL editor, for the run shortcuts.
 pub const SQL_EDITOR_CONTEXT: &str = "SqlEditor";
@@ -39,13 +46,14 @@ pub struct Workspace {
     /// tables and transactions carry over. Out with the run while one is
     /// running; `None` until the first run or after it was lost.
     session: Option<Box<dyn Session>>,
-    /// The run whose session the tab keeps when it comes back. A session
-    /// returned by any other run (superseded, or begun on another connection)
-    /// is closed.
-    session_run: Option<RunId>,
+    /// The lease of the run or page read that has the session out. A session
+    /// that comes back under any other lease (a superseded run, or one begun
+    /// on another connection) is closed.
+    session_lease: Option<u64>,
+    next_lease: u64,
+    /// The next page of a result is being read; runs wait for it.
+    fetching: bool,
     cancellation: CancellationToken,
-    elapsed_ms: u128,
-    rows_affected: Option<u64>,
     numbers_pt_br: bool,
     editor: Entity<EditorState>,
     assistant_split: Entity<ResizableState>,
@@ -56,12 +64,15 @@ pub struct Workspace {
     database: String,
     connection_color: u32,
     title: SharedString,
-    /// Shared with the views that read it; replaced, never copied.
-    result: Rc<ResultData>,
-    /// The demo result has a chart and an assistant analysis.
-    sales: bool,
+    /// One result tab per statement run, each read page by page.
+    results: ResultTabs,
     /// Rows kept per statement, from the connection.
     row_limit: u32,
+    /// How long one statement may run; `None` waits for it as long as it
+    /// takes.
+    timeout: Option<Duration>,
+    /// The connections this tab can switch to, by name.
+    connection_choices: Vec<String>,
     /// The result grid, its own entity ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
     grid: Entity<ResultGrid>,
     /// Visible cells selected in the grid, as it last reported.
@@ -69,8 +80,6 @@ pub struct Workspace {
     result_view: ResultView,
     assistant_open: bool,
     messages: Vec<Message>,
-    /// A result is loaded (from a run or the demo), whatever the run state.
-    has_result: bool,
     /// The run state and the status of each statement in the editor.
     run: QueryRun,
     editor_sql: String,
@@ -81,8 +90,6 @@ pub struct Workspace {
     /// SQL as last saved to the library, if this tab is saved.
     saved_sql: Option<String>,
     notice: Option<Feedback>,
-    /// The limit that stopped the last statement's result, if any.
-    limit: Option<ResultLimit>,
     filter_open: bool,
     filter: Entity<InputState>,
     chat_scroll: ScrollHandle,
@@ -129,9 +136,25 @@ impl Workspace {
                     .update(cx, |grid, cx| grid.set_filter(&filter, cx));
             }
         });
-        let result = Rc::new(sample_result(sql));
         let sales = demo::is_sales(sql);
-        let grid = cx.new(|cx| ResultGrid::new(result.clone(), sales, cx));
+        let mut results = ResultTabs::new(DEFAULT_MEMORY_CEILING);
+        // The demo's sales tab opens with its result and chart.
+        if sql == SALES_SQL {
+            let id = results.begin(&[sql.to_owned()], Placement::New)[0];
+            results.complete(
+                id,
+                Completed {
+                    data: sample_result(sql),
+                    sales,
+                    ..Completed::default()
+                },
+            );
+        }
+        let first = results
+            .active()
+            .and_then(ResultTab::current)
+            .map_or_else(|| Rc::new(ResultData::default()), |page| page.data.clone());
+        let grid = cx.new(|cx| ResultGrid::new(first, sales, cx));
         // The grid notifies only itself; the workspace keeps the little it
         // shows: the selected count and notices.
         let grid_subscription =
@@ -157,16 +180,17 @@ impl Workspace {
                 this.statement_lines = jykre::sql::statement_lines(&sql).into();
                 this.line_count = sql.split('\n').count();
                 this.editor_sql = sql;
+                cx.emit(WorkspaceEvent::Changed);
             }
             cx.notify();
         });
         Self {
             input: None,
             session: None,
-            session_run: None,
+            session_lease: None,
+            next_lease: 0,
+            fetching: false,
             cancellation: CancellationToken::new(),
-            elapsed_ms: 0,
-            rows_affected: None,
             numbers_pt_br: false,
             editor,
             assistant_split,
@@ -190,9 +214,10 @@ impl Workspace {
                 MINT
             },
             title: title.to_string().into(),
-            result,
-            sales,
+            results,
             row_limit: DEFAULT_ROW_LIMIT,
+            timeout: ExecutionOptions::default().timeout,
+            connection_choices: Vec::new(),
             grid,
             selected_cells: 0,
             result_view: ResultView::Table,
@@ -217,14 +242,12 @@ impl Workspace {
             } else {
                 Vec::new()
             },
-            has_result: sql == SALES_SQL,
             run: QueryRun::new(sql),
             editor_sql: sql.to_string(),
             statement_lines: jykre::sql::statement_lines(sql).into(),
             line_count: sql.split('\n').count(),
             saved_sql: None,
             notice: None,
-            limit: None,
             filter_open: false,
             chat_scroll: ScrollHandle::new(),
             _subscriptions: vec![
@@ -239,8 +262,26 @@ impl Workspace {
     }
 
     /// Ctrl+Enter: the selected text when there is a selection, otherwise the
-    /// statement at the cursor. Stops the run while one is running.
+    /// statement at the cursor, in place of the last result tab created.
+    /// Stops the run while one is running.
     pub fn execute_current(&mut self, cx: &mut Context<Self>) {
+        self.run_current(Placement::ReplaceLast, cx);
+    }
+
+    /// Ctrl+Shift+Enter: as [`Workspace::execute_current`], in a new result
+    /// tab.
+    pub fn execute_current_in_new_result(&mut self, cx: &mut Context<Self>) {
+        self.run_current(Placement::New, cx);
+    }
+
+    /// Ctrl+Alt+Enter: every statement in the tab, in order, whatever the
+    /// cursor or selection, one result tab each in place of the open ones.
+    /// Stops the run while one is running.
+    pub fn execute_all(&mut self, cx: &mut Context<Self>) {
+        self.toggle_run(Scope::All, Placement::ReplaceAll, cx);
+    }
+
+    fn run_current(&mut self, placement: Placement, cx: &mut Context<Self>) {
         let editor = self.editor.read(cx);
         let selection = editor.selected_range();
         let scope = if selection.is_empty() {
@@ -248,20 +289,14 @@ impl Workspace {
         } else {
             Scope::Selection(selection)
         };
-        self.toggle_run(scope, cx);
+        self.toggle_run(scope, placement, cx);
     }
 
-    /// Ctrl+Shift+Enter: every statement in the tab, in order, whatever the
-    /// cursor or selection. Stops the run while one is running.
-    pub fn execute_all(&mut self, cx: &mut Context<Self>) {
-        self.toggle_run(Scope::All, cx);
-    }
-
-    fn toggle_run(&mut self, scope: Scope, cx: &mut Context<Self>) {
+    fn toggle_run(&mut self, scope: Scope, placement: Placement, cx: &mut Context<Self>) {
         if self.run.is_running() {
             self.stop_execution(cx);
         } else {
-            self.execute_queries(scope, cx);
+            self.execute_queries(scope, placement, cx);
         }
     }
 
@@ -274,12 +309,162 @@ impl Workspace {
         }
     }
 
-    /// A result is shown: loaded, and the last run did not fail.
+    /// The result tab on screen has rows or a completed statement to show.
     fn has_results(&self) -> bool {
-        self.has_result && !matches!(self.run.state(), RunState::Failed { .. })
+        self.results
+            .active()
+            .is_some_and(|tab| tab.state == ResultState::Done)
     }
 
-    fn execute_queries(&mut self, scope: Scope, cx: &mut Context<Self>) {
+    /// The page on screen, if any.
+    fn current_page(&self) -> Option<&jykre::result_tabs::Page> {
+        self.results.active().and_then(ResultTab::current)
+    }
+
+    /// Shows the active result tab's page in the grid, and frees on the
+    /// database runtime the pages nothing holds any more.
+    fn show_active(&mut self, cx: &mut Context<Self>) {
+        let (data, sales, first_row) = match self.results.active() {
+            Some(tab) => match tab.current() {
+                Some(page) => (page.data.clone(), tab.sales, page.first_row),
+                None => (Rc::new(ResultData::default()), false, 0),
+            },
+            None => (Rc::new(ResultData::default()), false, 0),
+        };
+        self.grid
+            .update(cx, |grid, cx| grid.set_page(data, sales, first_row, cx));
+        for page in self.results.take_dropped() {
+            if let Ok(page) = Rc::try_unwrap(page) {
+                backend::release(page);
+            }
+        }
+        cx.notify();
+    }
+
+    /// A new lease for taking the session out with a run or a page read.
+    fn lease_session(&mut self) -> (Option<Box<dyn Session>>, u64) {
+        self.next_lease += 1;
+        self.session_lease = Some(self.next_lease);
+        (self.session.take(), self.next_lease)
+    }
+
+    /// Keeps a session that comes back under the current lease and closes
+    /// any other.
+    fn return_session(&mut self, lease: u64, session: Option<Box<dyn Session>>) {
+        let Some(session) = session else {
+            return;
+        };
+        if self.session_lease == Some(lease) {
+            if let Some(previous) = self.session.replace(session) {
+                backend::close_in_background(previous);
+            }
+        } else {
+            backend::close_in_background(session);
+        }
+    }
+
+    fn options(&self) -> ExecutionOptions {
+        ExecutionOptions {
+            max_rows: self.row_limit,
+            timeout: self.timeout,
+            ..ExecutionOptions::default()
+        }
+    }
+
+    /// Shows the next page of the active result tab, reading it from the
+    /// open result when it is not held yet.
+    fn next_page(&mut self, cx: &mut Context<Self>) {
+        if !self.results.next_page() {
+            self.show_active(cx);
+            return;
+        }
+        if self.run.is_active() || self.fetching {
+            return;
+        }
+        let Some(tab) = self.results.active() else {
+            return;
+        };
+        let (id, columns) = (tab.id, tab.columns());
+        let (session, lease) = self.lease_session();
+        let Some(session) = session else {
+            self.results.page_failed(id);
+            self.show_active(cx);
+            return;
+        };
+        self.fetching = true;
+        self.cancellation = CancellationToken::new();
+        let cancel = self.cancellation.clone();
+        let options = self.options();
+        cx.notify();
+        cx.spawn(async move |weak, cx| {
+            let result = backend::run(backend::fetch(
+                session,
+                columns,
+                options,
+                DEFAULT_MEMORY_CEILING,
+                cancel,
+            ))
+            .await;
+            let mut pending = Some(result);
+            let _ = weak.update(cx, |this, cx| {
+                let Some(result) = pending.take() else {
+                    return;
+                };
+                this.fetching = false;
+                let page = match result {
+                    Ok(run) => {
+                        this.return_session(lease, run.session);
+                        if this.session.is_none() && this.session_lease == Some(lease) {
+                            this.session_notice(false, true);
+                        }
+                        run.page
+                    }
+                    Err(error) => Err(error),
+                };
+                match page {
+                    Ok(page) => this.results.add_page(
+                        id,
+                        Completed {
+                            data: page.data,
+                            limit: page.limit,
+                            has_more: page.has_more,
+                            elapsed_ms: page.elapsed_ms,
+                            ..Completed::default()
+                        },
+                    ),
+                    Err(error) => {
+                        this.results.page_failed(id);
+                        this.notice = Some(Feedback::new(
+                            Tone::Error,
+                            tr!("The next page could not be read: {0}", error),
+                        ));
+                    }
+                }
+                this.show_active(cx);
+            });
+            if let Some(Ok(run)) = pending
+                && let Some(session) = run.session
+            {
+                backend::close_in_background(session);
+            }
+        })
+        .detach();
+    }
+
+    fn previous_page(&mut self, cx: &mut Context<Self>) {
+        self.results.previous_page();
+        self.show_active(cx);
+    }
+
+    fn execute_queries(&mut self, scope: Scope, placement: Placement, cx: &mut Context<Self>) {
+        if self.fetching {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!("Reading the next page. Run again when it arrives."),
+            ));
+            cx.notify();
+            return;
+        }
         let sql = self.editor.read(cx).text().to_string();
         let Some(plan) = self.run.start(&sql, scope) else {
             if !self.run.is_running() {
@@ -293,25 +478,19 @@ impl Workspace {
         };
         let id = plan.id;
         let queries = plan.statements;
-        // A new run releases the previous result before the next one arrives.
-        self.sales = false;
-        self.set_result(ResultData::default(), cx);
-        self.has_result = false;
-        self.limit = None;
+        let texts: Vec<String> = queries.iter().map(|(_, sql)| sql.clone()).collect();
+        let tabs = self.results.begin(&texts, placement);
+        self.result_view = ResultView::Table;
         self.notice = None;
-        cx.notify();
+        self.show_active(cx);
         if let Some(input) = self.input.clone() {
             // A superseded run that is still stopping keeps its own token.
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
             self.run.begin_all(id);
             // A superseded run still holds its session; this one opens another.
-            let session = self.session.take();
-            self.session_run = Some(id);
-            let options = ExecutionOptions {
-                max_rows: self.row_limit,
-                ..ExecutionOptions::default()
-            };
+            let (session, lease) = self.lease_session();
+            let options = self.options();
             cx.spawn(async move |weak, cx| {
                 let requests = queries
                     .iter()
@@ -338,16 +517,10 @@ impl Workspace {
                     };
                     let result = match result {
                         Ok(run) => {
-                            if this.session_run == Some(id) {
+                            if this.session_lease == Some(lease) {
                                 this.session_notice(run.reopened, run.ended);
-                                if let Some(previous) =
-                                    std::mem::replace(&mut this.session, run.session)
-                                {
-                                    backend::close_in_background(previous);
-                                }
-                            } else if let Some(stale) = run.session {
-                                backend::close_in_background(stale);
                             }
+                            this.return_session(lease, run.session);
                             run.batch
                         }
                         Err(error) => Err(error),
@@ -355,33 +528,50 @@ impl Workspace {
                     match result {
                         Ok(batch) => {
                             let completed = batch.completed.len();
-                            let elapsed_ms =
-                                batch.completed.iter().map(|result| result.elapsed_ms).sum();
+                            let failure = batch.error.as_ref().map(ToString::to_string);
                             let outcome = Outcome::Batch {
                                 completed,
                                 error: batch.error,
                             };
                             if this.run.finish(id, outcome) {
-                                this.elapsed_ms = elapsed_ms;
-                                for ((_, sql), result) in queries.iter().zip(batch.completed) {
-                                    this.rows_affected = result.outcome.rows_affected;
-                                    this.limit = result.limit;
-                                    this.set_result(result.data, cx);
-                                    this.has_result = true;
-                                    this.result_view = ResultView::Table;
+                                for ((tab, (_, sql)), result) in
+                                    tabs.iter().zip(&queries).zip(batch.completed)
+                                {
+                                    this.results.complete(
+                                        *tab,
+                                        Completed {
+                                            data: result.data,
+                                            limit: result.limit,
+                                            has_more: result.has_more,
+                                            rows_affected: result.outcome.rows_affected,
+                                            elapsed_ms: result.elapsed_ms,
+                                            sales: false,
+                                        },
+                                    );
                                     cx.emit(WorkspaceEvent::Executed {
                                         title: this.title.to_string(),
                                         connection: this.connection.to_string(),
                                         sql: sql.clone(),
                                     });
                                 }
+                                let ran = completed + usize::from(failure.is_some());
+                                this.results.settle(&tabs[..ran.min(tabs.len())]);
+                                if let Some(failure) = failure
+                                    && let Some(tab) = tabs.get(completed)
+                                {
+                                    this.results.fail(*tab, failure);
+                                }
+                                this.results.discard(&tabs[ran.min(tabs.len())..]);
+                            } else {
+                                this.end_unfinished(&tabs);
                             }
                         }
                         Err(error) => {
                             this.run.finish(id, Outcome::Failed(error));
+                            this.end_unfinished(&tabs);
                         }
                     }
-                    cx.notify();
+                    this.show_active(cx);
                 });
                 // The tab closed while the run was out: its session goes too.
                 if let Some(Ok(run)) = pending
@@ -394,7 +584,8 @@ impl Workspace {
             return;
         }
         cx.spawn(async move |weak, cx| {
-            for (index, sql) in queries {
+            for (position, (index, sql)) in queries.into_iter().enumerate() {
+                let tab = tabs[position];
                 let active = weak
                     .update(cx, |this, cx| {
                         cx.notify();
@@ -402,6 +593,10 @@ impl Workspace {
                     })
                     .unwrap_or(false);
                 if !active {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.end_unfinished(&tabs);
+                        this.show_active(cx);
+                    });
                     return;
                 }
                 cx.background_executor()
@@ -409,26 +604,30 @@ impl Workspace {
                     .await;
                 let keep_running = weak
                     .update(cx, |this, cx| {
-                        cx.notify();
                         let error = jykre::sql::preview_error(&sql);
-                        if !this.run.finish_statement(id, index, error) {
-                            if error.is_some() {
-                                this.has_result = false;
-                            }
-                            return false;
+                        let shown = this.run.finish_statement(id, index, error);
+                        if shown {
+                            this.results.complete(
+                                tab,
+                                Completed {
+                                    data: sample_result(&sql),
+                                    sales: demo::is_sales(&sql),
+                                    ..Completed::default()
+                                },
+                            );
+                            cx.emit(WorkspaceEvent::Executed {
+                                title: this.title.to_string(),
+                                connection: this.connection.to_string(),
+                                sql,
+                            });
+                        } else if let Some(error) = error {
+                            this.results.fail(tab, error.to_owned());
+                            this.results.discard(&tabs[position + 1..]);
+                        } else {
+                            this.end_unfinished(&tabs);
                         }
-                        this.sales = demo::is_sales(&sql);
-                        this.set_result(sample_result(&sql), cx);
-                        this.limit = None;
-                        this.rows_affected = None;
-                        this.has_result = true;
-                        this.result_view = ResultView::Table;
-                        cx.emit(WorkspaceEvent::Executed {
-                            title: this.title.to_string(),
-                            connection: this.connection.to_string(),
-                            sql,
-                        });
-                        true
+                        this.show_active(cx);
+                        shown
                     })
                     .unwrap_or(false);
                 if !keep_running {
@@ -441,6 +640,21 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// The tabs of a run that ended without results: cancelled, superseded or
+    /// failed as a whole. A whole-run error shows in its first tab.
+    fn end_unfinished(&mut self, tabs: &[ResultId]) {
+        if let RunState::Failed { error } = self.run.state()
+            && let Some(first) = tabs.first()
+        {
+            self.results.fail(*first, error.clone());
+            self.results.discard(&tabs[1..]);
+            return;
+        }
+        for tab in tabs {
+            self.results.cancel(*tab);
+        }
     }
 
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -499,12 +713,90 @@ impl Workspace {
         });
         self.messages.push(Message {
             user: false,
-            text: if self.sales { answer.into() } else { tr!("The query runs in the context of {0}. The sample preview has {1} columns and {2} rows. Use the editor to adjust the filters and run it to see the sample. This demo's assistant has a complete analysis flow in the Revenue by category tab.", self.connection, self.result.column_count(), self.result.row_count()) },
-            sql: if self.sales { sql } else { None },
+            text: if self.sales() { answer.into() } else {
+                let (columns, rows) = self.current_page().map_or((0, 0), |page| (page.data.column_count(), page.data.row_count()));
+                tr!("The query runs in the context of {0}. The sample preview has {1} columns and {2} rows. Use the editor to adjust the filters and run it to see the sample. This demo's assistant has a complete analysis flow in the Revenue by category tab.", self.connection, columns, rows)
+            },
+            sql: if self.sales() { sql } else { None },
         });
         self.assistant_open = true;
         self.chat_scroll.scroll_to_bottom();
         cx.notify();
+    }
+
+    /// The connection this tab runs on. Choosing another asks the host,
+    /// which confirms with the user before moving the tab.
+    fn connection_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = cx.entity().downgrade();
+        let current = self.connection.to_string();
+        let choices = self.connection_choices.clone();
+        Button::new("tab-connection")
+            .ghost()
+            .small()
+            .icon(I::Database)
+            .label(current.clone())
+            .dropdown_caret(true)
+            .accessibility_label(tr!("Connection: {0}", current))
+            .tooltip(tr!("Connection of this tab"))
+            .dropdown_menu(move |mut menu, _, _| {
+                for name in &choices {
+                    let workspace = workspace.clone();
+                    let chosen = name.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(name.clone())
+                            .checked(*name == current)
+                            .on_click(move |_, _, cx| {
+                                let _ = workspace.update(cx, |this, cx| {
+                                    if *this.connection != *chosen {
+                                        cx.emit(WorkspaceEvent::ConnectionRequested(
+                                            chosen.clone(),
+                                        ));
+                                    }
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+    }
+
+    /// Sets the connections the toolbar offers.
+    pub fn set_connection_choices(&mut self, choices: Vec<String>, cx: &mut Context<Self>) {
+        if self.connection_choices != choices {
+            self.connection_choices = choices;
+            cx.notify();
+        }
+    }
+
+    /// The statement timeout of this tab, chosen from a short list.
+    fn timeout_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = cx.entity().downgrade();
+        let current = self.timeout;
+        Button::new("statement-timeout")
+            .ghost()
+            .small()
+            .icon(I::Clock)
+            .label(timeout_label(current))
+            .dropdown_caret(true)
+            .accessibility_label(tr!("Statement timeout: {0}", timeout_label(current)))
+            .tooltip(tr!("Statement timeout"))
+            .dropdown_menu(move |mut menu, _, _| {
+                for option in TIMEOUTS {
+                    let workspace = workspace.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new(timeout_label(option))
+                            .checked(option == current)
+                            .on_click(move |_, _, cx| {
+                                let _ = workspace.update(cx, |this, cx| {
+                                    this.timeout = option;
+                                    cx.emit(WorkspaceEvent::Changed);
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
     }
 
     fn toolbar(&self, cx: &mut Context<Self>) -> Div {
@@ -534,7 +826,7 @@ impl Workspace {
                         )
                         .tooltip(|window, cx| {
                             Tooltip::new(tr!(
-                                "Run the statement at the cursor or the selection · Ctrl+Enter\nRun all statements · Ctrl+Shift+Enter"
+                                "Run the statement at the cursor or the selection · Ctrl+Enter\nIn a new result · Ctrl+Shift+Enter\nRun all statements · Ctrl+Alt+Enter"
                             ))
                             .build(window, cx)
                         })
@@ -568,7 +860,10 @@ impl Workspace {
                             }
                             cx.notify();
                         }),
-                    )),
+                    ))
+                    .child(divider())
+                    .child(self.connection_menu(cx))
+                    .child(self.timeout_menu(cx)),
             )
             .child(
                 row()
@@ -791,11 +1086,12 @@ impl Workspace {
     }
 
     fn result_panel(&self, cx: &mut Context<Self>) -> Div {
-        let tabs = [
+        let views = [
             (ResultView::Table, I::Table2, tr!("Results")),
             (ResultView::Chart, I::ChartColumn, tr!("Chart")),
             (ResultView::Messages, I::Terminal, tr!("Messages")),
         ];
+        let active = self.results.active_index();
         column()
             .size_full()
             .border_t_1()
@@ -806,30 +1102,96 @@ impl Workspace {
                     .h(px(42.))
                     .flex_none()
                     .px_3()
+                    .gap_2()
                     .justify_between()
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child(row().gap_1().children(tabs.into_iter().enumerate().map(
-                        |(i, (view, name, title))| {
-                            button(("result-mode", i), name, title)
-                                .when(self.result_view == view, |s| {
-                                    s.bg(rgb(SURFACE)).text_color(rgb(TEXT))
-                                })
-                                .when(
-                                    view == ResultView::Table
-                                        && self.has_results()
-                                        && !self.run.is_running(),
-                                    |s| s.child(badge(self.result.row_count().to_string(), MINT)),
-                                )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.result_view = view;
-                                    cx.notify();
-                                }))
-                        },
-                    )))
+                    // One tab per statement result; the close button keeps
+                    // the tab strip from growing without end.
                     .child(
                         row()
+                            .id("result-tabs")
+                            .role(Role::TabList)
+                            .aria_label(tr!("Results"))
+                            .flex_1()
+                            .min_w_0()
                             .gap_1()
+                            .overflow_x_scroll()
+                            .children(self.results.tabs().iter().enumerate().map(
+                                |(index, tab)| {
+                                    let (symbol, color, status) = result_status(tab);
+                                    let running = tab.state == ResultState::Running;
+                                    row()
+                                        .id(("result-tab", index))
+                                        .role(Role::Tab)
+                                        .aria_selected(index == active)
+                                        .aria_label(tr!("Result {0}: {1}", tab.number, status))
+                                        .focusable()
+                                        .tab_index(0)
+                                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                                        .flex_none()
+                                        .h(px(28.))
+                                        .pl_2()
+                                        .pr_1()
+                                        .gap_1()
+                                        .rounded(px(5.))
+                                        .cursor_pointer()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(if index == active { TEXT } else { MUTED }))
+                                        .when(index == active, |s| s.bg(rgb(SURFACE)))
+                                        .hover(|s| s.bg(rgb(HOVER)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.results.select(index);
+                                            this.show_active(cx);
+                                        }))
+                                        .map(|s| {
+                                            if running {
+                                                s.child(spinning_icon(
+                                                    ("result-tab-spinner", index),
+                                                    symbol,
+                                                    color,
+                                                ))
+                                            } else {
+                                                s.child(icon(symbol, color))
+                                            }
+                                        })
+                                        .child(tr!("Result {0}", tab.number))
+                                        .when(!running, |s| {
+                                            s.child(
+                                                icon_button(
+                                                    ("close-result", index),
+                                                    I::X,
+                                                    tr!("Close result"),
+                                                )
+                                                .size(px(20.))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.results.close(index);
+                                                    this.show_active(cx);
+                                                    cx.stop_propagation();
+                                                })),
+                                            )
+                                        })
+                                },
+                            )),
+                    )
+                    .child(
+                        row()
+                            .flex_none()
+                            .gap_1()
+                            .children(views.into_iter().enumerate().map(
+                                |(i, (view, symbol, title))| {
+                                    icon_button(("result-mode", i), symbol, title)
+                                        .aria_selected(self.result_view == view)
+                                        .when(self.result_view == view, |s| {
+                                            s.bg(rgb(SURFACE)).text_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.result_view = view;
+                                            cx.notify();
+                                        }))
+                                },
+                            ))
+                            .child(divider())
                             .child(
                                 button("format-numbers", I::Settings, tr!("pt-BR numbers"))
                                     .when(self.numbers_pt_br, |s| {
@@ -869,20 +1231,22 @@ impl Workspace {
                                 icon_button(
                                     "export-results",
                                     I::Download,
-                                    tr!("Copy results as CSV"),
+                                    tr!("Copy this page as CSV"),
                                 )
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
-                                        if !this.has_results() {
+                                        let Some(page) =
+                                            this.current_page().filter(|_| this.has_results())
+                                        else {
                                             this.notice = Some(Feedback::new(
                                                 Tone::Info,
                                                 tr!("Run a query before copying the results."),
                                             ));
                                             cx.notify();
                                             return;
-                                        }
+                                        };
                                         let _timer = jykre::logging::UiTimer::start("copy CSV");
-                                        let csv = cell_format::result_csv(&this.result);
+                                        let csv = cell_format::result_csv(&page.data);
                                         cx.write_to_clipboard(ClipboardItem::new_string(csv));
                                         this.notice = Some(Feedback::new(
                                             Tone::Success,
@@ -915,167 +1279,201 @@ impl Workspace {
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
-                    .child(if self.run.is_running() {
-                        column()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .child(spinning_icon("running-spinner", I::LoaderCircle, MINT))
-                            .child(label(if self.input.is_some() {
-                                tr!("Running on the server…")
-                            } else {
-                                tr!("Preparing the demo…")
-                            }))
-                            .into_any_element()
-                    } else if let RunState::Failed { error } = self.run.state() {
-                        column()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .p_4()
-                            .child(icon(I::CircleX, RED))
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(RED))
-                                    .child(error.clone()),
-                            )
-                            .into_any_element()
-                    } else if !self.has_result {
-                        column()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .gap_3()
-                            .child(icon(I::Terminal, FAINT))
-                            .child(div().text_size(px(14.)).child(tr!("Ready to explore")))
-                            .child(label(tr!("Run the query to see the results.")))
-                            .child(
-                                button("empty-run", I::Play, tr!("Run query"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.execute_current(cx))),
-                            )
-                            .into_any_element()
-                    } else {
-                        match self.result_view {
-                            // A cached view reuses the grid's last frame
-                            // while only the workspace changes.
-                            ResultView::Table => self
-                                .grid
-                                .clone()
-                                .cached(StyleRefinement::default().size_full())
-                                .into_any_element(),
-                            ResultView::Chart => self.result_chart(cx),
-                            ResultView::Messages => self.result_messages(),
+                    .child(self.result_body(cx)),
+            )
+            .child(self.result_footer(cx))
+    }
+
+    /// The active result tab: rows, the statement's outcome, its error or
+    /// the empty state.
+    fn result_body(&self, cx: &mut Context<Self>) -> AnyElement {
+        let centered = || {
+            column()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .p_4()
+        };
+        let Some(tab) = self.results.active() else {
+            return centered()
+                .child(icon(I::Terminal, FAINT))
+                .child(div().text_size(px(14.)).child(tr!("Ready to explore")))
+                .child(label(tr!("Run the query to see the results.")))
+                .child(
+                    button("empty-run", I::Play, tr!("Run query"))
+                        .on_click(cx.listener(|this, _, _, cx| this.execute_current(cx))),
+                )
+                .into_any_element();
+        };
+        match &tab.state {
+            ResultState::Running => centered()
+                .child(spinning_icon("running-spinner", I::LoaderCircle, MINT))
+                .child(label(if self.input.is_some() {
+                    tr!("Running on the server…")
+                } else {
+                    tr!("Preparing the demo…")
+                }))
+                .into_any_element(),
+            ResultState::Failed(error) => centered()
+                .id("result-error")
+                .role(Role::Alert)
+                .aria_label(error.clone())
+                .child(icon(I::CircleX, RED))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(RED))
+                        .child(error.clone()),
+                )
+                .into_any_element(),
+            ResultState::Cancelled => centered()
+                .child(icon(I::Ban, AMBER))
+                .child(label(tr!("Execution cancelled")))
+                .into_any_element(),
+            ResultState::Done => match self.result_view {
+                ResultView::Chart => self.result_chart(cx),
+                ResultView::Messages => self.result_messages(),
+                ResultView::Table
+                    if self
+                        .current_page()
+                        .is_some_and(|page| page.data.column_count() > 0) =>
+                {
+                    // A cached view reuses the grid's last frame while only
+                    // the workspace changes.
+                    self.grid
+                        .clone()
+                        .cached(StyleRefinement::default().size_full())
+                        .into_any_element()
+                }
+                ResultView::Table => centered()
+                    .child(icon(I::CircleCheck, MINT))
+                    .child(label(match tab.rows_affected {
+                        Some(affected) => tr!("{0} rows affected", affected),
+                        None => tr!("Statement completed").into(),
+                    }))
+                    .into_any_element(),
+            },
+        }
+    }
+
+    /// The single place that reports how the result on screen ended, with
+    /// its pages.
+    fn result_footer(&self, cx: &mut Context<Self>) -> Div {
+        let tab = self.results.active();
+        let state = self.run.state();
+        let (symbol, color, text, detail): (I, u32, String, Option<String>) =
+            if matches!(state, RunState::Running { .. }) {
+                (I::LoaderCircle, AMBER, tr!("Running…").into(), None)
+            } else if *state == RunState::Cancelling {
+                (I::LoaderCircle, AMBER, tr!("Cancelling…").into(), None)
+            } else if self.fetching {
+                (
+                    I::LoaderCircle,
+                    AMBER,
+                    tr!("Reading the next page…").into(),
+                    None,
+                )
+            } else if let Some(tab) = tab {
+                match &tab.state {
+                    ResultState::Failed(_) => match state {
+                        RunState::Failed { error } => (
+                            I::CircleX,
+                            RED,
+                            tr!("Query error").into(),
+                            Some(error.clone()),
+                        ),
+                        _ => (I::CircleX, RED, tr!("Query error").into(), None),
+                    },
+                    ResultState::Cancelled => {
+                        (I::Ban, AMBER, tr!("Execution cancelled").into(), None)
+                    }
+                    ResultState::Running => (I::LoaderCircle, AMBER, tr!("Running…").into(), None),
+                    ResultState::Done => page_summary(tab),
+                }
+            } else {
+                (I::Clock, FAINT, tr!("Waiting to run").into(), None)
+            };
+        let spinning = self.run.is_active() || self.fetching;
+        let pages = tab.filter(|tab| {
+            tab.state == ResultState::Done
+                && (tab.has_next() || tab.has_previous() || tab.page_number() > 1)
+        });
+        row()
+            .h(px(36.))
+            .flex_none()
+            .px_3()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .justify_between()
+            .child(
+                row()
+                    .id("run-status")
+                    .role(Role::Status)
+                    .aria_label(text.clone())
+                    .gap_2()
+                    .when_some(detail, |s, detail| {
+                        s.tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx))
+                    })
+                    .map(|s| {
+                        if spinning {
+                            s.child(spinning_icon("run-status-spinner", symbol, color))
+                        } else {
+                            s.child(icon(symbol, color))
                         }
-                    }),
+                    })
+                    .child(div().text_size(px(12.)).text_color(rgb(color)).child(text))
+                    .when_some(
+                        tab.filter(|tab| tab.state == ResultState::Done && !spinning),
+                        |s, tab| {
+                            s.child(label("·"))
+                                .child(label(format!("{} ms", tab.elapsed_ms)))
+                        },
+                    ),
             )
             .child(
                 row()
-                    .h(px(36.))
-                    .flex_none()
-                    .px_3()
-                    .border_t_1()
-                    .border_color(rgb(BORDER))
-                    .justify_between()
-                    .child({
-                        let rows = match self.result.row_count() {
-                            1 => tr!("1 row").to_string(),
-                            count => tr!("{0} rows", count),
-                        };
-                        // The footer is the single place that reports how the last run
-                        // ended; errors also fill the results area with their message.
-                        let state = self.run.state();
-                        let (symbol, color, text, detail): (I, u32, String, Option<String>) = if let RunState::Running { .. } = state
-                        {
-                            (I::LoaderCircle, AMBER, tr!("Running…").into(), None)
-                        } else if *state == RunState::Cancelling {
-                            (I::LoaderCircle, AMBER, tr!("Cancelling…").into(), None)
-                        } else if let RunState::Failed { .. } = state {
-                            (I::CircleX, RED, tr!("Query error").into(), None)
-                        } else if *state == RunState::Cancelled {
-                            (I::Ban, AMBER, tr!("Execution cancelled").into(), None)
-                        } else if let (true, Some(limit)) = (self.has_result, self.limit) {
-                            // The footer says which limit stopped reading.
-                            let (text, detail) = match limit {
-                                ResultLimit::Rows(rows_limit) => (
-                                    tr!("{0} · row limit reached", rows),
-                                    tr!(
-                                        "Limit of {0} rows reached. Refine the SQL to get other rows.",
-                                        cell_format::count(rows_limit as usize)
-                                    ),
-                                ),
-                                ResultLimit::Memory(bytes) => (
-                                    tr!("{0} · memory limit reached", rows),
-                                    tr!(
-                                        "The result reached the memory limit of {0} MB before the row limit. Refine the SQL to get other rows.",
-                                        bytes / (1024 * 1024)
-                                    ),
-                                ),
-                            };
-                            (I::TriangleAlert, AMBER, text, Some(detail))
-                        } else if self.has_result {
-                            let text = match self.rows_affected {
-                                Some(affected) => {
-                                    tr!("{0} · {1} rows affected", rows, affected)
-                                }
-                                None => rows,
-                            };
-                            (I::CircleCheck, MINT, text, None)
-                        } else {
-                            (I::Clock, FAINT, tr!("Waiting to run").into(), None)
-                        };
-                        row()
-                            .id("run-status")
-                            .role(Role::Status)
-                            .aria_label(text.clone())
-                            .gap_2()
-                            .when_some(detail, |s, detail| {
-                                s.tooltip(move |window, cx| {
-                                    Tooltip::new(detail.clone()).build(window, cx)
-                                })
-                            })
-                            .map(|s| {
-                                if self.run.is_active() {
-                                    s.child(spinning_icon("run-status-spinner", symbol, color))
-                                } else {
-                                    s.child(icon(symbol, color))
-                                }
-                            })
-                            .child(div().text_size(px(12.)).text_color(rgb(color)).child(text))
-                            .when(
-                                self.has_results() && !self.run.is_active() && *self.run.state() != RunState::Cancelled,
-                                |s| {
-                                    s.child(label("·"))
-                                        .child(label(format!("{} ms", self.elapsed_ms)))
-                                },
-                            )
+                    .gap_2()
+                    .when(self.has_results() && !self.run.is_running(), |s| {
+                        let selected = self.selected_cells;
+                        s.when(selected > 1, |s| {
+                            s.child(label(tr!("{0} cells selected", selected)))
+                                .child(label("·"))
+                        })
                     })
-                    .child(
-                        row()
-                            .when(self.has_results() && !self.run.is_running(), |s| {
-                                let selected = self.selected_cells;
-                                s.when(selected > 1, |s| {
-                                    s.child(label(tr!("{0} cells selected", selected)))
-                                        .child(label("·"))
-                                })
-                            })
-                            .child(label(if self.input.is_some() {
-                                tr!("Server results")
-                            } else {
-                                tr!("Demo data")
-                            }))
-                            .child(badge(
-                                if self.input.is_some() { "SQL" } else { "MOCK" },
-                                FAINT,
-                            )),
-                    ),
+                    .when_some(pages, |s, tab| {
+                        s.child(
+                            icon_button("previous-page", I::ChevronLeft, tr!("Previous page"))
+                                .when(!tab.has_previous() || spinning, |s| s.opacity(0.4))
+                                .on_click(cx.listener(|this, _, _, cx| this.previous_page(cx))),
+                        )
+                        .child(label(tr!("Page {0}", tab.page_number())))
+                        .child(
+                            icon_button("next-page", I::ChevronRight, tr!("Next page"))
+                                .when(!tab.has_next() || spinning, |s| s.opacity(0.4))
+                                .on_click(cx.listener(|this, _, _, cx| this.next_page(cx))),
+                        )
+                        .child(label("·"))
+                    })
+                    .child(label(if self.input.is_some() {
+                        tr!("Server results")
+                    } else {
+                        tr!("Demo data")
+                    }))
+                    .child(badge(
+                        if self.input.is_some() { "SQL" } else { "MOCK" },
+                        FAINT,
+                    )),
             )
     }
 
+    /// The result on screen is the demo's, with a chart and an analysis.
+    fn sales(&self) -> bool {
+        self.results.active().is_some_and(|tab| tab.sales)
+    }
+
     fn result_chart(&self, _: &mut Context<Self>) -> AnyElement {
-        if !self.sales {
+        if !self.sales() {
             return column()
                 .size_full()
                 .items_center()
@@ -1149,35 +1547,53 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// Every statement of the result tabs, with how it ended.
     fn result_messages(&self) -> AnyElement {
         column()
+            .id("result-messages")
+            .size_full()
+            .overflow_y_scroll()
             .p_5()
             .gap_3()
-            .child(
-                row()
-                    .child(icon(I::CircleCheck, MINT))
-                    .child(tr!("Query completed")),
-            )
-            .child(label(tr!(
-                "{0} run(s) in this session · {1} rows · {2} ms",
-                self.run.executions(),
-                self.result.row_count(),
-                self.elapsed_ms
-            )))
             .child(label(if self.input.is_some() {
-                tr!(
-                    "Server execution · limit of {0} rows per statement · 300 s timeout",
-                    cell_format::count(self.row_limit as usize)
-                )
+                match self.timeout {
+                    Some(timeout) => tr!(
+                        "Server execution · {0} rows per page · {1} timeout",
+                        cell_format::count(self.row_limit as usize),
+                        timeout_label(Some(timeout))
+                    ),
+                    None => tr!(
+                        "Server execution · {0} rows per page · no timeout",
+                        cell_format::count(self.row_limit as usize)
+                    ),
+                }
             } else {
                 tr!("Visual demo results.").into()
             }))
-            .child(label(match self.run.state() {
-                RunState::Failed { error } => error.clone(),
-                _ if self.input.is_some() => {
-                    tr!("{0} rows affected", self.rows_affected.unwrap_or(0))
-                }
-                _ => tr!("No changes to a real database.").into(),
+            .children(self.results.tabs().iter().map(|tab| {
+                let (symbol, color, status) = result_status(tab);
+                column()
+                    .gap_1()
+                    .child(
+                        row()
+                            .gap_2()
+                            .child(icon(symbol, color))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .child(tr!("Result {0}", tab.number)),
+                            )
+                            .child(label(status)),
+                    )
+                    .child(
+                        div()
+                            .pl(px(24.))
+                            .text_size(px(12.))
+                            .text_color(rgb(FAINT))
+                            .font_family("Cascadia Code")
+                            .truncate()
+                            .child(tab.sql.replace('\n', " ")),
+                    )
             }))
             .into_any_element()
     }
@@ -1194,7 +1610,7 @@ impl Workspace {
                         .on_click(cx.listener(|this, _, _, cx| { this.assistant_open = false; cx.notify(); })))))
             .child(row().px_4().h(px(37.)).flex_none().gap_2().border_b_1().border_color(rgb(BORDER))
                 .child(icon(I::Layers, FAINT)).child(label(tr!("Context")))
-                .child(badge(tr!("Current SQL"), MUTED)).child(badge(if self.sales { tr!("3 tables") } else { tr!("1 query") }, MUTED)))
+                .child(badge(tr!("Current SQL"), MUTED)).child(badge(if self.sales() { tr!("3 tables") } else { tr!("1 query") }, MUTED)))
             .child(column().id("ai-conversation").flex_1().overflow_y_scroll().track_scroll(&self.chat_scroll).vertical_scrollbar(&self.chat_scroll).px_4().py_4().gap_5()
                 .child(row().gap_2().child(div().h(px(1.)).flex_1().bg(rgb(BORDER)))
                     .child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Context of this query")))
@@ -1221,7 +1637,7 @@ impl Workspace {
                                     this.notice = Some(Feedback::new(Tone::Info, tr!("Suggestion inserted. Review the SQL before running it."))); cx.notify();
                                 })))))
                 }))
-                .when(self.has_result && self.sales, |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
+                .when(self.has_results() && self.sales(), |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
                     .child(row().child(icon(I::Lightbulb, MINT)).child(div().text_size(px(14.)).text_color(rgb(MINT)).font_weight(FontWeight::MEDIUM).child(tr!("A look at the data"))))
                     .child(div().text_size(px(14.)).line_height(relative(1.55)).text_color(rgb(0xb8c8c1)).child(tr!("Electronics and Home account for 52.7% of the quarter's revenue.")))
                     .child(button("ai-show-chart", I::ChartColumn, tr!("View distribution")).px_0().text_color(rgb(MINT))
@@ -1242,6 +1658,10 @@ impl Workspace {
 }
 
 pub enum WorkspaceEvent {
+    /// State worth saving changed (SQL, timeout, result tabs).
+    Changed,
+    /// The user chose another connection for this tab in the toolbar.
+    ConnectionRequested(String),
     Saved {
         saved: bool,
         title: String,
@@ -1270,9 +1690,8 @@ impl Workspace {
         } else {
             self.abandon_run();
             self.input = None;
-            self.has_result = false;
-            self.sales = false;
-            self.set_result(sample_result(""), cx);
+            self.results.clear();
+            self.show_active(cx);
         }
         self.notice = Some(Feedback::new(
             Tone::Warning,
@@ -1283,6 +1702,28 @@ impl Workspace {
 
     pub fn connection_name(&self) -> &str {
         self.connection.as_ref()
+    }
+
+    /// What this tab keeps between sessions.
+    pub fn state(&self) -> jykre::workspace_state::TabState {
+        jykre::workspace_state::TabState {
+            title: self.title.to_string(),
+            connection: self.connection.to_string(),
+            sql: self.editor_sql.clone(),
+            saved_sql: self.saved_sql.clone(),
+            timeout_seconds: jykre::workspace_state::TabState::store_timeout(self.timeout),
+        }
+    }
+
+    /// Restores what [`Workspace::state`] kept.
+    pub fn restore(&mut self, state: &jykre::workspace_state::TabState) {
+        self.saved_sql = state.saved_sql.clone();
+        self.timeout = state.timeout(self.timeout);
+    }
+
+    /// A statement or a page read is in progress.
+    pub fn is_busy(&self) -> bool {
+        self.run.is_active() || self.fetching
     }
 
     pub fn update_connection(
@@ -1315,7 +1756,9 @@ impl Workspace {
     fn abandon_run(&mut self) {
         self.cancellation.cancel();
         self.run.reset();
-        self.session_run = None;
+        self.results.cancel_running();
+        self.session_lease = None;
+        self.fetching = false;
         if let Some(session) = self.session.take() {
             backend::close_in_background(session);
         }
@@ -1363,26 +1806,9 @@ impl Workspace {
             .to_owned();
         self.input = Some(input);
         self.assistant_open = false;
-        self.has_result = false;
-        self.limit = None;
-        self.sales = false;
-        self.set_result(ResultData::default(), cx);
+        self.results.clear();
+        self.show_active(cx);
         self.messages.clear();
-    }
-
-    /// Replaces the result. The previous one is freed on the database runtime
-    /// when nothing else holds it, so a large result never stalls a frame.
-    fn set_result(&mut self, result: ResultData, cx: &mut Context<Self>) {
-        let result = Rc::new(result);
-        let sales = self.sales;
-        // The grid lets go of the previous result first, so this is its last
-        // holder.
-        self.grid
-            .update(cx, |grid, cx| grid.set_result(result.clone(), sales, cx));
-        let previous = std::mem::replace(&mut self.result, result);
-        if let Ok(previous) = Rc::try_unwrap(previous) {
-            backend::release(previous);
-        }
     }
 
     pub fn toggle_assistant(&mut self, cx: &mut Context<Self>) {
@@ -1466,6 +1892,101 @@ impl Workspace {
     }
 }
 
+/// The icon, colour and words for how a result tab ended.
+fn result_status(tab: &ResultTab) -> (I, u32, String) {
+    match &tab.state {
+        ResultState::Running => (I::LoaderCircle, AMBER, tr!("Running…").into()),
+        ResultState::Failed(error) => (I::CircleX, RED, error.clone()),
+        ResultState::Cancelled => (I::Ban, AMBER, tr!("Execution cancelled").into()),
+        ResultState::Done => {
+            let (_, _, text, _) = page_summary(tab);
+            (I::CircleCheck, MINT, text)
+        }
+    }
+}
+
+/// The footer text for a completed result's page: its rows (as a range when
+/// the result has several pages), the rows affected and the limit that ended
+/// reading, with an explanation for the tooltip.
+fn page_summary(tab: &ResultTab) -> (I, u32, String, Option<String>) {
+    let Some(page) = tab.current() else {
+        return (
+            I::CircleCheck,
+            MINT,
+            match tab.rows_affected {
+                Some(affected) => tr!("{0} rows affected", affected),
+                None => tr!("Statement completed").into(),
+            },
+            None,
+        );
+    };
+    let count = page.data.row_count();
+    let paged = tab.page_number() > 1 || tab.has_next();
+    let rows = if paged && count == 1 {
+        tr!("Row {0}", cell_format::count(page.first_row + 1))
+    } else if paged && count > 0 {
+        tr!(
+            "Rows {0}–{1}",
+            cell_format::count(page.first_row + 1),
+            cell_format::count(page.first_row + count)
+        )
+    } else {
+        match count {
+            1 => tr!("1 row").to_string(),
+            count => tr!("{0} rows", cell_format::count(count)),
+        }
+    };
+    match tab.limit {
+        Some(ResultLimit::Memory(bytes)) => (
+            I::TriangleAlert,
+            AMBER,
+            tr!("{0} · memory limit reached", rows),
+            Some(tr!(
+                "The page reached the memory limit of {0} MB before the row limit, so the rest of the result was not read. Refine the SQL to get other rows.",
+                bytes / (1024 * 1024)
+            )),
+        ),
+        _ if tab.rest_closed() => (
+            I::TriangleAlert,
+            AMBER,
+            tr!("{0} · more rows were not read", rows),
+            Some(
+                tr!(
+                    "The session ran another statement, which closed this result. Run the statement again to read further pages."
+                )
+                .into(),
+            ),
+        ),
+        _ => {
+            let text = match tab.rows_affected {
+                Some(affected) => tr!("{0} · {1} rows affected", rows, affected),
+                None => rows,
+            };
+            (I::CircleCheck, MINT, text, None)
+        }
+    }
+}
+
+/// The statement timeouts a tab can choose; the default is five minutes.
+const TIMEOUTS: [Option<Duration>; 6] = [
+    Some(Duration::from_secs(30)),
+    Some(Duration::from_secs(60)),
+    Some(Duration::from_secs(300)),
+    Some(Duration::from_secs(900)),
+    Some(Duration::from_secs(3600)),
+    None,
+];
+
+/// How a statement timeout reads in the toolbar and messages.
+fn timeout_label(timeout: Option<Duration>) -> String {
+    match timeout.map(|timeout| timeout.as_secs()) {
+        None => tr!("No timeout").into(),
+        Some(seconds) if seconds % 3600 == 0 => tr!("{0} h", seconds / 3600),
+        Some(seconds) if seconds % 60 == 0 => tr!("{0} min", seconds / 60),
+        Some(seconds) => tr!("{0} s", seconds),
+    }
+}
+
 /// The gutter button of the statement at `index`: it runs that statement,
 /// or stops the run while the statement is running.
 fn run_button(
@@ -1498,7 +2019,7 @@ fn run_button(
                 if this.run.status(index) == StatementStatus::Running {
                     this.stop_execution(cx);
                 } else {
-                    this.execute_queries(Scope::Statement(index), cx);
+                    this.execute_queries(Scope::Statement(index), Placement::ReplaceLast, cx);
                 }
             });
         })

@@ -281,9 +281,18 @@ impl ResultBuilder {
         }
     }
 
+    /// A builder for the next page of a result whose columns arrived with
+    /// the first page.
+    pub fn page(columns: Vec<ResultColumn>, max_rows: u32, max_bytes: usize) -> Self {
+        let mut builder = Self::new(max_rows, max_bytes);
+        builder.data = ResultData::new(columns);
+        builder
+    }
+
     /// The result and the limit that stopped it, if any. A result with
     /// exactly `max_rows` rows did not hit the row limit; only a row beyond
-    /// it does, so ask the driver for `max_rows + 1` rows.
+    /// it does. Drivers stop at the limit themselves and say whether more
+    /// rows exist, so this marks only rows the driver sent beyond it.
     pub fn finish(mut self) -> (ResultData, Option<ResultLimit>) {
         self.data.shrink_to_fit();
         (self.data, self.limit)

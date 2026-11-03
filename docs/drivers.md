@@ -139,6 +139,13 @@ inside the application are out of scope for now.
   must stop delivering data. The sink is synchronous and must not do blocking
   I/O. `Cell` distinguishes NULL from text and keeps exact decimals as strings;
   temporal and binary types also have their own representations.
+- A result is read page by page. `Session::execute` delivers up to
+  `max_rows` rows; when more exist, `DriverOutcome::has_more` is set and the
+  result stays open: `Session::fetch` reads the next page, and running,
+  pinging or closing anything else discards it. `DriverOutcome::truncated`
+  says the driver stopped before the end and the rest cannot be read.
+  PostgreSQL and MySQL keep the connection in a task of its own that holds
+  the row stream between pages.
 - A session lives as long as its tab and runs many statements. A failed
   statement does not end it: the driver restores the protocol (cancelling the
   statement on the server when it may still run) or closes the session.
@@ -243,7 +250,12 @@ respected.
 Databricks reads `DATABRICKS_CONFIG_FILE` or `.databrickscfg` in the home
 directory. Authenticate first with `databricks auth login --profile DEV`. The
 connection test checks Unity Catalog access without starting compute. SQL uses
-INLINE JSON_ARRAY, polling and internal chunks from the same origin. External
+INLINE JSON_ARRAY and internal chunks from the same origin, read page by page.
+The submit request waits up to 5 seconds for the statement, then status is
+polled from 200 ms up to every 2 seconds. Inline results are capped at 25 MiB,
+so a statement asks the server for at most five pages of rows; a longer result
+reports that the rest was not read. The CLI token is reused for 5 minutes and
+asked again when a request is rejected with 401. External
 links are not followed. The initial submission waits for the response with the
 statement ID, up to the CLI/HTTP limits, so it can be cancelled later, even if
 cancelled during that interval. Cancellation or timeout after submission

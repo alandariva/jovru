@@ -291,6 +291,9 @@ pub struct QueryResult {
     pub elapsed_ms: u128,
     /// The limit that stopped reading, if any.
     pub limit: Option<ResultLimit>,
+    /// More rows are readable with [`fetch`] until the session runs
+    /// anything else.
+    pub has_more: bool,
 }
 
 pub struct QueryBatch {
@@ -428,19 +431,16 @@ async fn run_statements(
     };
     let mut results = Vec::new();
     let mut failure = None;
-    for (index, mut request) in requests.into_iter().enumerate() {
+    for (index, request) in requests.into_iter().enumerate() {
         tracing::trace!(statement = index, sql = %request.sql, "statement");
         let start = Instant::now();
         let mut builder = ResultBuilder::new(request.options.max_rows, memory_ceiling);
-        // One row beyond the limit tells a result of exactly the limit from a
-        // longer one; the builder does not keep that row.
-        request.options.max_rows = request.options.max_rows.saturating_add(1);
         match session
             .execute(&request, &mut builder, cancel.clone())
             .await
         {
             Ok(outcome) => {
-                let (data, limit) = builder.finish();
+                let (data, limit) = page_limit(builder, &outcome, request.options.max_rows);
                 tracing::debug!(
                     statement = index,
                     sql_len = request.sql.len(),
@@ -451,6 +451,7 @@ async fn run_statements(
                     "statement finished"
                 );
                 results.push(QueryResult {
+                    has_more: outcome.has_more,
                     data,
                     outcome,
                     elapsed_ms: start.elapsed().as_millis(),
@@ -480,6 +481,66 @@ async fn run_statements(
         error: failure,
     });
     run
+}
+
+/// The page's data and the limit that ended it: the memory ceiling when the
+/// builder stopped reading, the row limit when the driver says rows are left
+/// (readable with [`fetch`]) or that it could not read them.
+fn page_limit(
+    builder: ResultBuilder,
+    outcome: &DriverOutcome,
+    max_rows: u32,
+) -> (ResultData, Option<ResultLimit>) {
+    let (data, limit) = builder.finish();
+    let limit =
+        limit.or((outcome.has_more || outcome.truncated).then_some(ResultLimit::Rows(max_rows)));
+    (data, limit)
+}
+
+/// What reading another page leaves behind.
+pub struct PageRun {
+    pub page: DriverResult<QueryResult>,
+    /// The session for the tab's next run, or `None` when it was closed.
+    pub session: Option<Box<dyn Session>>,
+}
+
+/// Reads the next page of the result the tab's session left open, with the
+/// columns of its first page. Running anything else on the session first
+/// discards that result.
+pub async fn fetch(
+    mut session: Box<dyn Session>,
+    columns: Vec<crate::result::ResultColumn>,
+    options: ExecutionOptions,
+    memory_ceiling: usize,
+    cancel: CancellationToken,
+) -> DriverResult<PageRun> {
+    let start = Instant::now();
+    let mut builder = ResultBuilder::page(columns, options.max_rows, memory_ceiling);
+    let page = session
+        .fetch(&options, &mut builder, cancel)
+        .await
+        .map(|outcome| {
+            let (data, limit) = page_limit(builder, &outcome, options.max_rows);
+            tracing::debug!(
+                rows = data.row_count(),
+                bytes = data.memory_bytes(),
+                "page read"
+            );
+            QueryResult {
+                has_more: outcome.has_more,
+                data,
+                outcome,
+                elapsed_ms: start.elapsed().as_millis(),
+                limit,
+            }
+        });
+    let session = if session.is_open() {
+        Some(session)
+    } else {
+        close_session(Some(session)).await;
+        None
+    };
+    Ok(PageRun { page, session })
 }
 
 /// Closes a tab's session within a short deadline; a close failure only
@@ -673,10 +734,14 @@ mod tests {
             }]);
             for _ in 0..self.rows.min(request.options.max_rows) {
                 if sink.row(vec![Cell::Text("synthetic-cell-value".into())]) == SinkControl::Stop {
-                    break;
+                    return Ok(DriverOutcome::default());
                 }
             }
-            Ok(DriverOutcome::default())
+            // Like a driver: the rows left past the limit stay readable.
+            Ok(DriverOutcome {
+                has_more: self.rows > request.options.max_rows,
+                ..DriverOutcome::default()
+            })
         }
 
         async fn close(self: Box<Self>) -> DriverResult<()> {
@@ -825,6 +890,24 @@ mod tests {
         settings: Vec<String>,
         open: bool,
         dead: bool,
+        /// Rows of the open result not read yet (`ROWS n` opens one).
+        pending: u32,
+        next: u32,
+    }
+
+    impl StateSession {
+        fn page(&mut self, max_rows: u32, sink: &mut dyn RowSink) -> DriverOutcome {
+            let count = self.pending.min(max_rows);
+            for _ in 0..count {
+                self.next += 1;
+                sink.row(vec![Cell::Text(self.next.to_string())]);
+            }
+            self.pending -= count;
+            DriverOutcome {
+                has_more: self.pending > 0,
+                ..DriverOutcome::default()
+            }
+        }
     }
 
     #[async_trait]
@@ -835,6 +918,18 @@ mod tests {
             sink: &mut dyn RowSink,
             _: CancellationToken,
         ) -> DriverResult<DriverOutcome> {
+            // A new statement discards the open result.
+            self.pending = 0;
+            if let Some(rows) = request.sql.strip_prefix("ROWS ") {
+                sink.columns(vec![ColumnInfo {
+                    name: "n".into(),
+                    data_type: "int".into(),
+                    nullable: Some(false),
+                }]);
+                self.pending = rows.parse().unwrap_or(0);
+                self.next = 0;
+                return Ok(self.page(request.options.max_rows, sink));
+            }
             match request.sql.as_str() {
                 "FAIL" => return Err(DriverError::new(ErrorCode::Database, "synthetic")),
                 "LOSE" => {
@@ -855,6 +950,18 @@ mod tests {
                 self.settings.join(",")
             ))]);
             Ok(DriverOutcome::default())
+        }
+
+        async fn fetch(
+            &mut self,
+            options: &ExecutionOptions,
+            sink: &mut dyn RowSink,
+            _: CancellationToken,
+        ) -> DriverResult<DriverOutcome> {
+            if self.pending == 0 {
+                return Err(DriverError::validation("No result has more rows to read"));
+            }
+            Ok(self.page(options.max_rows, sink))
         }
 
         fn is_open(&self) -> bool {
@@ -900,6 +1007,8 @@ mod tests {
                 settings: Vec::new(),
                 open: true,
                 dead: self.dead.load(Ordering::SeqCst),
+                pending: 0,
+                next: 0,
             }))
         }
         async fn introspect(
@@ -1000,5 +1109,78 @@ mod tests {
         assert!(run.batch.is_err() && cells.is_empty());
         let (_, cells) = run_on(&driver, run.session, &["SELECT"]).await;
         assert_eq!(cells, ["2:"]);
+    }
+
+    #[tokio::test]
+    async fn the_next_page_comes_from_the_open_result() {
+        let driver = Arc::new(StateDriver::default());
+        let options = ExecutionOptions {
+            max_rows: 2,
+            ..ExecutionOptions::default()
+        };
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({}),
+            },
+            credentials: Credentials::default(),
+        };
+        let run = query_with(
+            driver.clone(),
+            input,
+            None,
+            vec![QueryRequest {
+                sql: "ROWS 5".into(),
+                options: options.clone(),
+            }],
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let first = &run.batch.as_ref().unwrap().completed[0];
+        assert!(first.has_more);
+        assert_eq!(first.limit, Some(ResultLimit::Rows(2)));
+        let columns = first.data.columns().to_vec();
+        let mut session = run.session.unwrap();
+        let mut pages = vec![first.data.value(1, 0).unwrap().to_owned()];
+        loop {
+            let page = fetch(
+                session,
+                columns.clone(),
+                options.clone(),
+                crate::result::DEFAULT_MEMORY_CEILING,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            session = page.session.unwrap();
+            let page = page.page.unwrap();
+            pages.push(
+                page.data
+                    .value(page.data.row_count() - 1, 0)
+                    .unwrap()
+                    .to_owned(),
+            );
+            assert_eq!(page.data.columns(), columns.as_slice());
+            if !page.has_more {
+                assert_eq!(page.limit, None);
+                break;
+            }
+        }
+        // Pages of 2, 2 and 1 rows, read in order without running the
+        // statement again.
+        assert_eq!(pages, ["2", "4", "5"]);
+        let done = fetch(
+            session,
+            columns,
+            options,
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(done.page.unwrap_err().code, ErrorCode::Validation);
+        assert!(done.session.is_some());
     }
 }

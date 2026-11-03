@@ -19,7 +19,10 @@
 - **A session per tab** ([ADR-0014](adr/0014-a-session-per-tab.md)). A tab
   opens a session on its first run and keeps it until the tab closes, its
   connection changes or the session is lost, so state such as the current
-  schema, temporary tables and an open transaction carries over between runs.
+  schema and temporary tables carries over between runs (only autocommit is
+  supported; see [Architecture](architecture.md#known-deviations)). While a
+  result has more pages, the session keeps it open until the tab runs
+  anything else.
   A failed statement keeps the session. After a cancellation, a timeout or an
   interruption by a limit the driver cancels the statement on the server and
   brings the protocol back to a known state, within 5 seconds, or closes the
@@ -44,13 +47,15 @@
 | Operation | Timeout |
 | --- | --- |
 | PostgreSQL/MySQL: connect, test, open a session | 15 s per step |
-| Statement execution (all drivers) | `ExecutionOptions.timeout`, default 300 s; `None` disables it |
+| Statement execution (all drivers), and each further page | `ExecutionOptions.timeout`, chosen per tab: default 300 s; `None` disables it |
 | PostgreSQL/MySQL introspection | 300 s |
 | Server-side cancel attempt after cancellation or timeout | 5 s |
 | Bringing a session back to a known state after a failure, or pinging a kept session | 5 s |
 | Databricks: test or open | 90 s |
 | Databricks introspection | 300 s |
 | Databricks HTTP request | 30 s |
+| Databricks: first wait for a statement, inside its submit request | 5 s, then status polls from 200 ms up to every 2 s |
+| Databricks CLI token reuse | 5 min, or until a request is rejected with 401 (asked again once) |
 | Databricks CLI (token resolution) | 60 s |
 
 A new network operation gets an explicit timeout and a row in this table.

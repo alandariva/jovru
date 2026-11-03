@@ -21,6 +21,8 @@ flowchart TB
         Format[cell_format]
         Sql[sql: statements, tokens, format]
         Query[query: run state machine]
+        Results[result_tabs: result tabs and pages]
+        State[workspace_state: tabs, saved queries, history]
         I18n[i18n]
         Tabs[grouped_tabs component]
         Drivers[drivers: registry composition]
@@ -150,9 +152,12 @@ sequenceDiagram
     W->>W: keep the session; QueryRun::finish discards a superseded or cancelled run; publish result and statuses
 ```
 
-- `Ctrl Enter` runs the selection, split into statements, or the statement at
-  the cursor (`sql::statement_at`); `Ctrl Shift Enter` and the gutter buttons
-  run all statements or one (`query::Scope`).
+- `Ctrl Enter` and `Ctrl Shift Enter` run the selection, split into
+  statements, or the statement at the cursor (`sql::statement_at`);
+  `Ctrl Alt Enter` and the gutter buttons run all statements or one
+  (`query::Scope`). `result_tabs::ResultTabs` decides which result tab each
+  statement fills (`Placement`) and keeps each tab's pages; the next page is
+  read with `backend::fetch` from the result the session keeps open.
 - Each tab keeps one session between runs ([ADR-0014](adr/0014-a-session-per-tab.md)).
   The workspace hands it to the run and takes it back with the result; a
   session that comes back from a superseded run, or after the connection
@@ -219,4 +224,9 @@ value, so they cannot disagree.
 
 ## Known deviations
 
-None at the moment.
+Technical debt the maintainer accepted for now:
+
+| Standard | Current code |
+| --- | --- |
+| Statements are split as the database splits them | `sql::statements` splits on `;` outside strings, identifiers, comments and dollar quotes only. A MySQL `CREATE PROCEDURE`/`TRIGGER` body (`BEGIN ... ; ... END`, `DELIMITER`) or a PostgreSQL `BEGIN ATOMIC ... END` body is split into several statements |
+| Transactions are a supported workflow | Only autocommit is supported. An explicit `BEGIN`/`START TRANSACTION` stays open in the tab's session, but nothing shows that a transaction is open, there are no commit or rollback controls, and closing the tab rolls it back without asking |

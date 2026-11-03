@@ -1,7 +1,7 @@
 use crate::{
     CancellationToken, ConnectionConfig, DriverError, DriverKind, DriverOutcome, DriverResult,
-    IntrospectionReport, MetadataObject, ObjectKind, ObjectPath, QueryRequest, ResolvedConnection,
-    RowSink, ServerInfo, SqlDialect,
+    ExecutionOptions, IntrospectionReport, MetadataObject, ObjectKind, ObjectPath, QueryRequest,
+    ResolvedConnection, RowSink, ServerInfo, SqlDialect,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,20 @@ pub trait Session: Debug + Send {
         sink: &mut dyn RowSink,
         cancel: CancellationToken,
     ) -> DriverResult<DriverOutcome>;
+
+    /// Reads the next page, up to `options.max_rows` rows, of the result the
+    /// last `execute` or `fetch` left open (`DriverOutcome::has_more`). Rows
+    /// arrive through `sink` as in `execute`, without columns. Fails with
+    /// `Validation` when no result is open.
+    async fn fetch(
+        &mut self,
+        options: &ExecutionOptions,
+        sink: &mut dyn RowSink,
+        cancel: CancellationToken,
+    ) -> DriverResult<DriverOutcome> {
+        let _ = (options, sink, cancel);
+        Err(DriverError::validation("No result has more rows to read"))
+    }
 
     /// Whether the session can run another statement. `false` once the
     /// connection was lost or could not be brought back to a known state;

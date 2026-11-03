@@ -62,12 +62,20 @@ Rules:
 - Errors of a run fill the results area with the message; they never open a
   modal dialog.
 
+## Confirmations
+
+- Closing a tab with a running query asks first: closing cancels the query.
+- Moving a tab to another connection (dragging it to another group, or
+  choosing a connection in the editor toolbar) asks first: its results and
+  session belong to the previous connection.
+
 ## Keyboard shortcuts
 
 | Action | Shortcut |
 | --- | --- |
-| Run the selection, or the statement at the cursor | `Ctrl Enter` |
-| Run every statement in the tab | `Ctrl Shift Enter` |
+| Run the selection, or the statement at the cursor, in place of the last result tab created | `Ctrl Enter` |
+| The same, in a new result tab | `Ctrl Shift Enter` |
+| Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | New query on the active connection | `Ctrl N` |
 | Show or hide the explorer | `Ctrl B` |
@@ -133,5 +141,4 @@ interactive elements expose a role, a label and their state. Details are in
 | Elapsed time and cancel for runs over 2 s | The Run button cancels, but the footer shows "Running…" without the elapsed time |
 | Error title, suggested action and **Copy details** | Errors show the message only |
 | Syntax error position marked in the editor | Not implemented |
-| Confirmation before closing a tab with a running query | Closing cancels the run without asking |
-| Shortcuts as actions in one keymap | Only `Ctrl Enter` and `Ctrl Shift Enter` are actions ([UI guidelines](ui-guidelines.md#known-deviations)) |
+| Shortcuts as actions in one keymap | Only the three run shortcuts are actions ([UI guidelines](ui-guidelines.md#known-deviations)) |

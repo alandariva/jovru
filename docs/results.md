@@ -85,23 +85,33 @@ alignment only; the value itself is never converted.
 
 | Limit | Value |
 | --- | --- |
-| Rows per statement | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`). The backend asks the driver for one row more and does not keep it: only that row marks the limit as reached, so a result with exactly the limit is complete |
-| Memory per result | 256 MB (`DEFAULT_MEMORY_CEILING`); `ResultBuilder` stops reading even below the row limit |
-| Statement timeout | 300 s (`ExecutionOptions.timeout`) |
+| Rows per page | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`). The driver reads one row ahead, so a result with exactly the limit has no further page |
+| Memory per page | 256 MB (`DEFAULT_MEMORY_CEILING`); `ResultBuilder` stops reading even below the row limit, and the rest of the result is not read |
+| Memory per result tab | 256 MB of pages; the oldest pages are released first and can no longer be shown |
+| Statement timeout | Chosen per tab in the editor toolbar: 30 s, 1 min, 5 min (default), 15 min, 1 h or none (`ExecutionOptions.timeout`) |
 | Column width | 110 to 360 px, from the header and the first 200 rows |
 
 - The row limit is set in the connection dialog (**Row limit per statement**)
   and stored with the connection's preferences.
-- The footer says which limit applied: "row limit reached" or "memory limit
-  reached", with the limit in its tooltip.
+- A result is read page by page. The first page arrives with the run; the
+  footer's arrows show the previous or next page, and a page not read yet is
+  read from the result the session keeps open, never by running the
+  statement again. Running anything else in the tab closes that result, and
+  its tab then says that more rows were not read.
+- The footer shows the rows of the page ("Rows 1,001–2,000") and says when
+  the memory limit stopped reading, with the limit in its tooltip.
 
 ## Statements and results
 
-The standard:
-
-- Each statement that returns rows produces its own result, shown as
-  `Result 1`, `Result 2`, ...; **Messages** lists every statement with its
-  status, time, rows affected and error.
+- Each statement a run executes gets a result tab, `Result 1`, `Result 2`,
+  ...; **Messages** lists every result tab with its status, rows and error.
+  `Ctrl Enter` puts its result in the tab created last, `Ctrl Shift Enter`
+  opens a new tab and `Ctrl Alt Enter` replaces every tab with one per
+  statement. Result tabs can be closed.
+- A statement that fails shows its error in its own tab; the tabs of the
+  statements before it keep their results, and the statements after it do
+  not run.
+- A statement without rows shows the rows it affected.
 - Statements run in order and stop at the first failure. The message says how
   many completed and that they were not rolled back automatically.
 - The editor gutter shows each statement's status (running, success, error,
@@ -128,7 +138,7 @@ The standard:
   adds the column names first.
 - A single cell copies its exact value. Fields with tabs, line breaks or
   quotes are quoted with doubled quotes; NULL becomes an empty field.
-- **Copy results as CSV** copies the whole result with headers, `;` as the
+- **Copy this page as CSV** copies the page on screen with headers, `;` as the
   separator and every value quoted, using the original values regardless of
   presentation; NULL becomes an empty field.
 - Copies above 50 MiB ask for confirmation, and copying runs off the UI thread
@@ -157,5 +167,4 @@ format ([User experience](ux.md#feedback)).
 
 | Standard | Current code |
 | --- | --- |
-| One result per statement | A run with several statements shows only the last statement's result; **Messages** summarises the run |
 | Copy confirmation above 50 MiB, off the UI thread when large | Copies always run on the UI thread, without confirmation (about 85 ms for 500,000 cells) |

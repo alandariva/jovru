@@ -93,4 +93,11 @@ pub trait RowSink: Send {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DriverOutcome {
     pub rows_affected: Option<u64>,
+    /// The row limit ended this page with rows left. They stay readable with
+    /// `Session::fetch` until the session runs, pings or closes anything
+    /// else, which discards them.
+    pub has_more: bool,
+    /// The driver itself stopped reading before the end of the result (for
+    /// example, a server-side row cap), and the rows left cannot be read.
+    pub truncated: bool,
 }

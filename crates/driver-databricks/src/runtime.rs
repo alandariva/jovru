@@ -73,11 +73,18 @@ async fn cli(config: &DatabricksConfig) -> DriverResult<SecretString> {
     Ok(SecretString::from(token.to_owned()))
 }
 
+/// How long a token from the CLI is reused before asking the CLI again. The
+/// CLI hands out tokens valid for much longer and refreshes them itself; a
+/// 401 also asks again, once.
+const TOKEN_REUSE: Duration = Duration::from_secs(300);
+
 #[derive(Debug)]
 struct Client {
     config: DatabricksConfig,
     origin: Url,
     http: reqwest::Client,
+    /// The last token from the CLI and when it was obtained.
+    cached: std::sync::Mutex<Option<(SecretString, tokio::time::Instant)>>,
     #[cfg(test)]
     token: Option<SecretString>,
 }
@@ -151,18 +158,32 @@ impl Client {
             config,
             origin,
             http,
+            cached: std::sync::Mutex::new(None),
             #[cfg(test)]
             token: None,
         })
     }
-    async fn token(&self) -> DriverResult<SecretString> {
+    /// The CLI's token, launching the CLI only when the cached one is older
+    /// than [`TOKEN_REUSE`] or was rejected.
+    async fn token(&self, fresh: bool) -> DriverResult<SecretString> {
         #[cfg(test)]
         if let Some(token) = &self.token {
             return Ok(token.clone());
         }
-        tokio::time::timeout(Duration::from_secs(60), cli(&self.config))
+        if !fresh
+            && let Ok(cached) = self.cached.lock()
+            && let Some((token, at)) = cached.as_ref()
+            && at.elapsed() < TOKEN_REUSE
+        {
+            return Ok(token.clone());
+        }
+        let token = tokio::time::timeout(Duration::from_secs(60), cli(&self.config))
             .await
-            .map_err(|_| error(ErrorCode::Timeout, "CLI authentication timed out"))?
+            .map_err(|_| error(ErrorCode::Timeout, "CLI authentication timed out"))??;
+        if let Ok(mut cached) = self.cached.lock() {
+            *cached = Some((token.clone(), tokio::time::Instant::now()));
+        }
+        Ok(token)
     }
     async fn request(
         &self,
@@ -178,25 +199,12 @@ impl Client {
         if url.origin() != self.origin.origin() {
             return Err(protocol());
         }
-        let token = self.token().await?;
-        let mut request = self
-            .http
-            .request(method, url)
-            .query(query)
-            .bearer_auth(token.expose_secret());
-        if let Some(body) = body {
-            request = request.json(&body);
+        // A rejected token may only have expired: ask the CLI again, once.
+        // A 401 means the request was not processed, so repeating it is safe.
+        let mut response = self.send(&method, &url, query, &body, false).await?;
+        if response.status().as_u16() == 401 {
+            response = self.send(&method, &url, query, &body, true).await?;
         }
-        let response = request.send().await.map_err(|e| {
-            error(
-                if e.is_timeout() {
-                    ErrorCode::Timeout
-                } else {
-                    ErrorCode::Connection
-                },
-                "Databricks request failed",
-            )
-        })?;
         if !response.status().is_success() {
             return Err(error(
                 match response.status().as_u16() {
@@ -210,6 +218,34 @@ impl Client {
             ));
         }
         response.json().await.map_err(|_| protocol())
+    }
+    async fn send(
+        &self,
+        method: &Method,
+        url: &Url,
+        query: &[(String, String)],
+        body: &Option<Value>,
+        fresh_token: bool,
+    ) -> DriverResult<reqwest::Response> {
+        let token = self.token(fresh_token).await?;
+        let mut request = self
+            .http
+            .request(method.clone(), url.clone())
+            .query(query)
+            .bearer_auth(token.expose_secret());
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        request.send().await.map_err(|e| {
+            error(
+                if e.is_timeout() {
+                    ErrorCode::Timeout
+                } else {
+                    ErrorCode::Connection
+                },
+                "Databricks request failed",
+            )
+        })
     }
     async fn pages(
         &self,
@@ -447,15 +483,112 @@ struct DatabricksSession {
     client: Client,
     catalog: Option<String>,
     schema: Option<String>,
+    /// The rows of the last result not delivered yet, while it has more.
+    pending: Option<Pending>,
 }
+
+/// A result being read page by page. Its chunks stay on the server; only the
+/// rows of the current chunk are held here.
+#[derive(Debug)]
+struct Pending {
+    column_count: usize,
+    rows: std::collections::VecDeque<Value>,
+    next: Option<String>,
+    seen: HashSet<String>,
+    /// The server stopped at the requested row limit.
+    truncated: bool,
+}
+
+/// Results are read inline, which the API caps at 25 MiB, so a statement
+/// asks the server for this many pages at most.
+const SERVER_PAGES: u32 = 5;
+/// How long the first request waits for the statement before polling.
+const FIRST_WAIT: &str = "5s";
+/// Status polls start fast for short statements and slow down to this.
+const POLL_MAX: Duration = Duration::from_secs(2);
+
 impl DatabricksSession {
     fn new(client: Client) -> Self {
         Self {
             catalog: client.config.default_catalog.clone(),
             schema: client.config.default_schema.clone(),
             client,
+            pending: None,
         }
     }
+
+    /// Delivers up to `max_rows` rows of `pending`, reading further chunks
+    /// as needed, and keeps what is left for the next page.
+    async fn page(
+        &self,
+        pending: &mut Pending,
+        max_rows: u32,
+        sink: &mut dyn RowSink,
+    ) -> DriverResult<(DriverOutcome, bool)> {
+        let mut count = 0;
+        loop {
+            while let Some(row) = pending.rows.pop_front() {
+                if count >= max_rows {
+                    pending.rows.push_front(row);
+                    let outcome = DriverOutcome {
+                        has_more: true,
+                        ..DriverOutcome::default()
+                    };
+                    return Ok((outcome, true));
+                }
+                let values = row.as_array().ok_or_else(protocol)?;
+                if values.len() != pending.column_count {
+                    return Err(protocol());
+                }
+                let cells = values
+                    .iter()
+                    .map(|v| {
+                        if v.is_null() {
+                            Cell::Null
+                        } else {
+                            Cell::Text(
+                                v.as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| v.to_string()),
+                            )
+                        }
+                    })
+                    .collect();
+                count += 1;
+                if sink.row(cells) == SinkControl::Stop {
+                    return Ok((DriverOutcome::default(), false));
+                }
+            }
+            let Some(next) = pending.next.take() else {
+                let outcome = DriverOutcome {
+                    truncated: pending.truncated,
+                    ..DriverOutcome::default()
+                };
+                return Ok((outcome, false));
+            };
+            if !pending.seen.insert(next.clone()) {
+                return Err(protocol());
+            }
+            let chunk = self.client.request(Method::GET, &next, &[], None).await?;
+            pending.absorb(chunk)?;
+        }
+    }
+}
+
+impl Pending {
+    fn absorb(&mut self, mut chunk: Value) -> DriverResult<()> {
+        if let Some(rows) = chunk["data_array"].as_array_mut() {
+            self.rows.extend(rows.drain(..));
+        }
+        self.next = chunk["next_chunk_internal_link"]
+            .as_str()
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned);
+        Ok(())
+    }
+}
+
+impl DatabricksSession {
     fn apply(&mut self, change: UseStatement) {
         match change {
             UseStatement::Catalog(catalog) => {
@@ -582,10 +715,18 @@ impl Session for DatabricksSession {
         cancel: CancellationToken,
     ) -> DriverResult<DriverOutcome> {
         request.validate()?;
+        // A new statement ends the previous result; its chunks expire on the
+        // server.
+        self.pending = None;
         if cancel.is_cancelled() {
             return Err(DriverError::cancelled());
         }
-        let mut body = json!({"warehouse_id":self.client.config.warehouse_id,"statement":request.sql,"wait_timeout":"0s","format":"JSON_ARRAY","disposition":"INLINE","row_limit":request.options.max_rows});
+        let row_limit = request
+            .options
+            .max_rows
+            .saturating_mul(SERVER_PAGES)
+            .min(100_000);
+        let mut body = json!({"warehouse_id":self.client.config.warehouse_id,"statement":request.sql,"wait_timeout":FIRST_WAIT,"on_wait_timeout":"CONTINUE","format":"JSON_ARRAY","disposition":"INLINE","row_limit":row_limit});
         if let Some(catalog) = request
             .options
             .context
@@ -605,10 +746,20 @@ impl Session for DatabricksSession {
             body["schema"] = json!(schema);
         }
         let started = tokio::time::Instant::now();
-        let mut response = self
-            .client
-            .request(Method::POST, "/api/2.0/sql/statements", &[], Some(body))
-            .await?;
+        // The first request waits up to FIRST_WAIT for the statement, so
+        // short statements need no polling. A cancellation meanwhile still
+        // waits for the statement id, so the statement can be cancelled.
+        let (mut response, cancelled) = {
+            let submit =
+                self.client
+                    .request(Method::POST, "/api/2.0/sql/statements", &[], Some(body));
+            tokio::pin!(submit);
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => (submit.await?, true),
+                response = &mut submit => (response?, false),
+            }
+        };
         let id = response["statement_id"]
             .as_str()
             .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
@@ -620,11 +771,16 @@ impl Session for DatabricksSession {
             .timeout
             .map(|v| v.saturating_sub(started.elapsed()));
         let work = async {
+            if cancelled {
+                return Err(DriverError::cancelled());
+            }
+            let mut wait = Duration::from_millis(200);
             loop {
                 match response["status"]["state"].as_str() {
                     Some("SUCCEEDED") => break,
                     Some("PENDING" | "RUNNING") => {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        tokio::time::sleep(wait).await;
+                        wait = (wait * 2).min(POLL_MAX);
                         response = self.client.request(Method::GET, &path, &[], None).await?;
                     }
                     Some("CANCELED") => return Err(DriverError::cancelled()),
@@ -659,50 +815,21 @@ impl Session for DatabricksSession {
                     })
                 })
                 .collect::<DriverResult<Vec<_>>>()?;
-            let column_count = columns.len();
+            let mut pending = Pending {
+                column_count: columns.len(),
+                rows: Default::default(),
+                next: None,
+                seen: HashSet::new(),
+                truncated: response["manifest"]["truncated"].as_bool().unwrap_or(false),
+            };
             if sink.columns(columns) == SinkControl::Stop {
-                return Ok(DriverOutcome::default());
+                return Ok((DriverOutcome::default(), None));
             }
-            let mut chunk = response["result"].clone();
-            let mut count = 0;
-            let mut seen = HashSet::new();
-            loop {
-                for row in chunk["data_array"].as_array().into_iter().flatten() {
-                    let values = row.as_array().ok_or_else(protocol)?;
-                    if values.len() != column_count {
-                        return Err(protocol());
-                    }
-                    let cells = values
-                        .iter()
-                        .map(|v| {
-                            if v.is_null() {
-                                Cell::Null
-                            } else {
-                                Cell::Text(
-                                    v.as_str()
-                                        .map(str::to_owned)
-                                        .unwrap_or_else(|| v.to_string()),
-                                )
-                            }
-                        })
-                        .collect();
-                    count += 1;
-                    if sink.row(cells) == SinkControl::Stop || count >= request.options.max_rows {
-                        return Ok(DriverOutcome::default());
-                    }
-                }
-                let Some(next) = chunk["next_chunk_internal_link"]
-                    .as_str()
-                    .filter(|v| !v.is_empty())
-                else {
-                    break;
-                };
-                if !seen.insert(next.to_owned()) {
-                    return Err(protocol());
-                }
-                chunk = self.client.request(Method::GET, next, &[], None).await?;
-            }
-            Ok(DriverOutcome::default())
+            pending.absorb(response["result"].take())?;
+            let (outcome, more) = self
+                .page(&mut pending, request.options.max_rows, sink)
+                .await?;
+            Ok((outcome, more.then_some(pending)))
         };
         let outcome = match limit {
             Some(limit) => bounded(&cancel, limit, work).await,
@@ -715,14 +842,48 @@ impl Session for DatabricksSession {
         {
             self.apply(change);
         }
-        if outcome.is_err() {
-            let cancel_path = format!("{path}/cancel");
-            let cleanup = self
-                .client
-                .request(Method::POST, &cancel_path, &[], Some(json!({})));
-            let _ = tokio::time::timeout(Duration::from_secs(5), cleanup).await;
+        match outcome {
+            Ok((outcome, pending)) => {
+                self.pending = pending;
+                Ok(outcome)
+            }
+            Err(failure) => {
+                let cancel_path = format!("{path}/cancel");
+                let cleanup = self
+                    .client
+                    .request(Method::POST, &cancel_path, &[], Some(json!({})));
+                let _ = tokio::time::timeout(Duration::from_secs(5), cleanup).await;
+                Err(failure)
+            }
         }
-        outcome
+    }
+    async fn fetch(
+        &mut self,
+        options: &ExecutionOptions,
+        sink: &mut dyn RowSink,
+        cancel: CancellationToken,
+    ) -> DriverResult<DriverOutcome> {
+        let Some(mut pending) = self.pending.take() else {
+            return Err(DriverError::validation("No result has more rows to read"));
+        };
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let page = self.page(&mut pending, options.max_rows, sink);
+        let result = match options.timeout {
+            Some(limit) => bounded(&cancel, limit, page).await,
+            None => {
+                tokio::select! {biased;_=cancel.cancelled()=>Err(DriverError::cancelled()),result=page=>result}
+            }
+        };
+        let (outcome, more) = result?;
+        if more {
+            self.pending = Some(pending);
+        }
+        Ok(outcome)
+    }
+    async fn ping(&mut self) -> DriverResult<()> {
+        Ok(())
     }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         Ok(())
@@ -783,6 +944,7 @@ mod tests {
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .unwrap(),
+                cached: std::sync::Mutex::new(None),
                 token: Some(SecretString::from("test-token".to_owned())),
             },
             task,
@@ -867,6 +1029,72 @@ mod tests {
             v.to_ascii_lowercase()
                 .contains("authorization: bearer test-token")
         }));
+    }
+
+    #[tokio::test]
+    async fn results_are_read_page_by_page_across_chunks() {
+        let first = json!({"statement_id":"abc","status":{"state":"SUCCEEDED"},"manifest":{"truncated":true,"schema":{"columns":[{"name":"n","type_text":"INT"}]}},"result":{"data_array":[["1"],["2"],["3"]],"next_chunk_internal_link":"/api/2.0/sql/statements/abc/result/chunks/1"}});
+        let (client, task) = fixture(vec![
+            (200, first),
+            (401, json!({})),
+            (200, json!({"data_array":[["4"],["5"]]})),
+        ])
+        .await;
+        #[derive(Default)]
+        struct Rows(Vec<Row>);
+        impl RowSink for Rows {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                SinkControl::Continue
+            }
+            fn row(&mut self, r: Row) -> SinkControl {
+                self.0.push(r);
+                SinkControl::Continue
+            }
+        }
+        let options = ExecutionOptions {
+            max_rows: 2,
+            ..ExecutionOptions::default()
+        };
+        let mut session = DatabricksSession::new(client);
+        let mut rows = Rows::default();
+        let request = QueryRequest {
+            sql: "SELECT n".into(),
+            options: options.clone(),
+        };
+        let first = session
+            .execute(&request, &mut rows, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(first.has_more && rows.0.len() == 2);
+        // The rest of the first chunk, then the next chunk after a 401 that
+        // asks for a fresh token once.
+        let second = session
+            .fetch(&options, &mut rows, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(second.has_more && rows.0.len() == 4);
+        let third = session
+            .fetch(&options, &mut rows, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(!third.has_more && third.truncated);
+        let values: Vec<_> = rows.0.iter().map(|row| row[0].clone()).collect();
+        let expected: Vec<_> = (1..=5).map(|n| Cell::Text(n.to_string())).collect();
+        assert_eq!(values, expected);
+        assert!(
+            session
+                .fetch(&options, &mut rows, CancellationToken::new())
+                .await
+                .is_err()
+        );
+        let requests = task.await.unwrap();
+        let body: Value =
+            serde_json::from_str(&requests[0][requests[0].find("\r\n\r\n").unwrap() + 4..])
+                .unwrap();
+        assert_eq!(body["row_limit"], 2 * SERVER_PAGES);
+        assert_eq!(body["wait_timeout"], FIRST_WAIT);
+        assert!(requests[1].starts_with("GET /api/2.0/sql/statements/abc/result/chunks/1 "));
+        assert!(requests[2].starts_with("GET /api/2.0/sql/statements/abc/result/chunks/1 "));
     }
 
     #[test]

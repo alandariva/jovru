@@ -41,6 +41,15 @@ Preferences live in `settings` as JSON values: `editor.font_size`, and
 `connection.<connection-id>.row_limit` for each connection's row limit (a
 missing or out-of-range value reads as the default, 1,000).
 
+`workspace.state` keeps the workspace between sessions
+(`jykre::workspace_state`): the open query tabs in order (title, connection
+name, SQL, the SQL last saved to the library and the statement timeout), the
+tab on screen, the saved queries and the last 200 history entries. It is
+written half a second after changes settle and when the application quits,
+and read once the connections are loaded. A tab whose connection no longer
+exists reopens in a group of its own, without a connection. A value that
+cannot be read starts an empty workspace. Results are never stored.
+
 `config_json` holds the driver's non-sensitive options; drivers reject
 password and token fields there. `revision` provides optimistic concurrency:
 a save names the revision it edited, so a change made in another window is

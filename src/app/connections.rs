@@ -239,14 +239,15 @@ impl AppView {
                 let connections = connection_store::load(&dir, &SystemSecretStore).await?;
                 let repository = ConfigRepository::open(&dir).await?;
                 let font_size = repository.setting("editor.font_size").await?;
+                let state = super::state::read_state(&repository).await;
                 repository.close().await;
-                Ok((connections, font_size))
+                Ok((connections, font_size, state))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connections_loading = false;
                 match result {
-                    Ok((connections, font_size)) => {
+                    Ok((connections, font_size, state)) => {
                         if let Some(size) = font_size
                             .and_then(|value| value.as_f64())
                             .filter(|size| (12.0..=24.0).contains(size))
@@ -256,9 +257,21 @@ impl AppView {
                         for loaded in connections {
                             this.insert_connection(loaded, cx);
                         }
+                        // The demo keeps its fixed tabs and saves nothing.
+                        let restored = match state {
+                            _ if std::env::var_os("JYKRE_DEMO").is_some() => false,
+                            Ok(state) => this.restore_state(state, window, cx),
+                            Err(error) => {
+                                this.app_notice = Some(Feedback::new(
+                                    Tone::Error,
+                                    tr!("Could not read the tabs of the last session: {0}", error),
+                                ));
+                                false
+                            }
+                        };
                         // Without connections the explorer and the workspace show
                         // an empty state with the way forward; nothing pops up.
-                        if !this.connections.is_empty() && this.panels.is_empty() {
+                        if !restored && !this.connections.is_empty() && this.panels.is_empty() {
                             this.new_query(this.connections[0].group, window, cx);
                         }
                     }
@@ -395,6 +408,7 @@ impl AppView {
             connection.status = Feedback::new(Tone::Warning, warning);
         }
         self.connections.push(connection);
+        self.refresh_connection_choices(cx);
         self.connections.len() - 1
     }
 
@@ -517,6 +531,7 @@ impl AppView {
                         } else {
                             this.insert_connection(loaded, cx)
                         };
+                        this.refresh_connection_choices(cx);
                         this.connection_password
                             .update(cx, |input, cx| input.set_value("", window, cx));
                         this.connection_open = false;

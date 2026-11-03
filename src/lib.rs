@@ -14,4 +14,6 @@ pub mod logging;
 pub mod probe;
 pub mod query;
 pub mod result;
+pub mod result_tabs;
 pub mod sql;
+pub mod workspace_state;

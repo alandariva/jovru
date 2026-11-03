@@ -6,7 +6,10 @@ use sqlx::postgres::{PgConnectOptions, PgConnection, PgSslMode};
 use sqlx::{
     Column, Connection, Executor, Row as SqlRow, SqlSafeStr, Statement as _, TypeInfo, ValueRef,
 };
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{collections::HashSet, future::Future, time::Duration};
+use tokio::sync::{mpsc, oneshot};
 
 fn map_error(error: sqlx::Error) -> DriverError {
     let code = match &error {
@@ -107,20 +110,107 @@ pub async fn open(
             .map_err(map_error)? as i64)
     })
     .await?;
-    Ok(Box::new(DatabaseSession {
-        connection: Some(connection),
+    let (commands, receiver) = mpsc::channel(4);
+    let open = Arc::new(AtomicBool::new(true));
+    let server = Server {
         input: input.clone(),
         backend,
         database: PostgresConfig::parse(&input.config.options)?.database,
-    }))
+        open: open.clone(),
+    };
+    tokio::spawn(server.serve(connection, receiver));
+    Ok(Box::new(DatabaseSession { commands, open }))
 }
+
+/// Rows sent from the connection's task to the session handle. A bounded
+/// channel paces the reading; dropping the receiver asks the task to stop.
+const EVENT_BUFFER: usize = 256;
+
+enum Command {
+    Execute {
+        request: QueryRequest,
+        events: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    },
+    Fetch {
+        options: ExecutionOptions,
+        events: mpsc::Sender<Event>,
+        cancel: CancellationToken,
+    },
+    Ping {
+        reply: oneshot::Sender<DriverResult<()>>,
+    },
+    Close {
+        reply: oneshot::Sender<DriverResult<()>>,
+    },
+}
+
+enum Event {
+    Columns(Vec<ColumnInfo>),
+    Row(Row),
+    Done(DriverResult<DriverOutcome>),
+}
+
+/// The handle a tab holds. The connection lives in its own task, so a
+/// result can stay open between pages while the handle is free: the task
+/// keeps the row stream and waits for the next command.
 #[derive(Debug)]
 struct DatabaseSession {
-    input: ResolvedConnection,
-    backend: i64,
-    connection: Option<PgConnection>,
-    database: String,
+    commands: mpsc::Sender<Command>,
+    open: Arc<AtomicBool>,
 }
+
+fn session_closed() -> DriverError {
+    DriverError::new(
+        ErrorCode::Connection,
+        "Session closed; reconnect before executing",
+    )
+}
+
+impl DatabaseSession {
+    /// Sends a command whose rows arrive as events and forwards them to
+    /// `sink`. A sink that stops drops the receiver, which ends the result.
+    async fn stream(
+        &self,
+        command: Command,
+        mut events: mpsc::Receiver<Event>,
+        sink: &mut dyn RowSink,
+    ) -> DriverResult<DriverOutcome> {
+        self.commands
+            .send(command)
+            .await
+            .map_err(|_| session_closed())?;
+        while let Some(event) = events.recv().await {
+            match event {
+                Event::Columns(columns) => {
+                    if sink.columns(columns) == SinkControl::Stop {
+                        return Ok(DriverOutcome::default());
+                    }
+                }
+                Event::Row(row) => {
+                    if sink.row(row) == SinkControl::Stop {
+                        return Ok(DriverOutcome::default());
+                    }
+                }
+                Event::Done(outcome) => return outcome,
+            }
+        }
+        Err(session_closed())
+    }
+
+    async fn ask(
+        &self,
+        command: impl FnOnce(oneshot::Sender<DriverResult<()>>) -> Command,
+    ) -> DriverResult<()> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(command(reply))
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+}
+
 #[async_trait]
 impl Session for DatabaseSession {
     async fn execute(
@@ -133,17 +223,154 @@ impl Session for DatabaseSession {
         if cancel.is_cancelled() {
             return Err(DriverError::cancelled());
         }
-        let mut owned = self.connection.take().ok_or_else(|| {
-            DriverError::new(
-                ErrorCode::Connection,
-                "Session closed; reconnect before executing",
-            )
-        })?;
-        let connection = &mut owned;
-        let mut interrupted = false;
-        let operation = async {
-            if request
-                .options
+        let (events, receiver) = mpsc::channel(EVENT_BUFFER);
+        let command = Command::Execute {
+            request: request.clone(),
+            events,
+            cancel,
+        };
+        self.stream(command, receiver, sink).await
+    }
+    async fn fetch(
+        &mut self,
+        options: &ExecutionOptions,
+        sink: &mut dyn RowSink,
+        cancel: CancellationToken,
+    ) -> DriverResult<DriverOutcome> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (events, receiver) = mpsc::channel(EVENT_BUFFER);
+        let command = Command::Fetch {
+            options: options.clone(),
+            events,
+            cancel,
+        };
+        self.stream(command, receiver, sink).await
+    }
+    fn is_open(&self) -> bool {
+        self.open.load(Ordering::SeqCst)
+    }
+    async fn ping(&mut self) -> DriverResult<()> {
+        self.ask(|reply| Command::Ping { reply }).await
+    }
+    async fn close(self: Box<Self>) -> DriverResult<()> {
+        if !self.is_open() {
+            return Ok(());
+        }
+        self.ask(|reply| Command::Close { reply }).await
+    }
+}
+
+/// What the connection's task does after a statement.
+enum Flow {
+    /// Wait for the next command.
+    Ready,
+    /// A command arrived while a result was open; run it next.
+    Next(Command),
+    /// The handle is gone.
+    Closed,
+    /// The protocol cannot be trusted; close the connection.
+    Broken,
+}
+
+/// How reading a page ended.
+enum PageEnd {
+    Finished,
+    /// The page is full and at least one more row was read ahead.
+    Full,
+    /// The handle stopped listening.
+    Gone,
+}
+
+struct Server {
+    input: ResolvedConnection,
+    backend: i64,
+    database: String,
+    open: Arc<AtomicBool>,
+}
+
+impl Server {
+    async fn serve(self, mut connection: PgConnection, mut commands: mpsc::Receiver<Command>) {
+        let mut next = None;
+        loop {
+            let command = match next.take() {
+                Some(command) => command,
+                None => match commands.recv().await {
+                    Some(command) => command,
+                    None => break,
+                },
+            };
+            let flow = match command {
+                Command::Execute {
+                    request,
+                    events,
+                    cancel,
+                } => {
+                    self.execute(&mut connection, request, events, cancel, &mut commands)
+                        .await
+                }
+                Command::Fetch { events, .. } => {
+                    let _ = events
+                        .send(Event::Done(Err(DriverError::validation(
+                            "No result has more rows to read",
+                        ))))
+                        .await;
+                    Flow::Ready
+                }
+                Command::Ping { reply } => {
+                    match tokio::time::timeout(RECOVERY, resynchronize(&mut connection)).await {
+                        Ok(Ok(())) => {
+                            let _ = reply.send(Ok(()));
+                            Flow::Ready
+                        }
+                        outcome => {
+                            self.open.store(false, Ordering::SeqCst);
+                            let _ = reply.send(Err(match outcome {
+                                Ok(Err(error)) => map_error(error),
+                                _ => DriverError::new(
+                                    ErrorCode::Timeout,
+                                    "Database operation timed out",
+                                ),
+                            }));
+                            Flow::Broken
+                        }
+                    }
+                }
+                Command::Close { reply } => {
+                    self.open.store(false, Ordering::SeqCst);
+                    let _ = reply.send(connection.close().await.map_err(map_error));
+                    return;
+                }
+            };
+            match flow {
+                Flow::Ready => {}
+                Flow::Next(command) => next = Some(command),
+                Flow::Closed => break,
+                Flow::Broken => {
+                    self.open.store(false, Ordering::SeqCst);
+                    let _ = connection.close_hard().await;
+                    return;
+                }
+            }
+        }
+        self.open.store(false, Ordering::SeqCst);
+        let _ = tokio::time::timeout(RECOVERY, connection.close()).await;
+    }
+
+    /// Runs one statement and serves its pages until the result ends or
+    /// another command arrives.
+    async fn execute(
+        &self,
+        connection: &mut PgConnection,
+        request: QueryRequest,
+        mut events: mpsc::Sender<Event>,
+        mut cancel: CancellationToken,
+        commands: &mut mpsc::Receiver<Command>,
+    ) -> Flow {
+        let mut options = request.options.clone();
+        let columns = bounded(&cancel, options.timeout, async {
+            if options
                 .context
                 .catalog
                 .as_ref()
@@ -153,7 +380,7 @@ impl Session for DatabaseSession {
                     "PostgreSQL catalog cannot change within a session",
                 ));
             }
-            if let Some(schema) = &request.options.context.schema {
+            if let Some(schema) = &options.context.schema {
                 let sql = format!("SET search_path TO \"{}\"", schema.replace('"', "\"\""));
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
                     .execute(&mut *connection)
@@ -164,7 +391,7 @@ impl Session for DatabaseSession {
                 .prepare(sqlx::AssertSqlSafe(request.sql.as_str()).into_sql_str())
                 .await
                 .map_err(map_error)?;
-            let columns = description
+            Ok(description
                 .columns()
                 .iter()
                 .map(|c| ColumnInfo {
@@ -172,121 +399,188 @@ impl Session for DatabaseSession {
                     data_type: c.type_info().name().into(),
                     nullable: None,
                 })
-                .collect::<Vec<_>>();
-            if !columns.is_empty() && sink.columns(columns) == SinkControl::Stop {
-                interrupted = true;
-                return Ok(DriverOutcome::default());
-            }
-            let mut stream = sqlx::raw_sql(sqlx::AssertSqlSafe(request.sql.as_str()))
-                .fetch_many(&mut *connection);
-            let mut count = 0u32;
-            let mut affected = None;
-            while let Some(item) = stream.try_next().await.map_err(map_error)? {
-                match item {
-                    sqlx::Either::Left(result) => affected = Some(result.rows_affected()),
-                    sqlx::Either::Right(row) => {
-                        let mut cells = Vec::with_capacity(row.len());
-                        for index in 0..row.len() {
-                            let value = row.try_get_raw(index).map_err(map_error)?;
-                            if value.is_null() {
-                                cells.push(Cell::Null);
-                                continue;
-                            }
-                            let text = value.as_str().map_err(|_| {
-                                DriverError::new(
-                                    ErrorCode::Protocol,
-                                    "Invalid database text encoding",
-                                )
-                            })?;
-                            cells.push(Cell::Text(text.to_owned()));
-                        }
-                        count += 1;
-                        if sink.row(cells) == SinkControl::Stop || count >= request.options.max_rows
-                        {
-                            interrupted = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok(DriverOutcome {
-                rows_affected: if description.columns().is_empty() {
-                    affected
-                } else {
-                    None
-                },
-            })
+                .collect::<Vec<_>>())
+        })
+        .await;
+        let columns = match columns {
+            Ok(columns) => columns,
+            Err(error) => return self.fail(connection, error, &events).await,
         };
-        let outcome = bounded(&cancel, request.options.timeout, operation).await;
-        match &outcome {
-            Ok(_) if !interrupted => self.connection = Some(owned),
-            Err(error) if error.code == ErrorCode::Connection => {
-                let _ = owned.close_hard().await;
-            }
-            _ => {
-                // The server may still be producing this statement's rows:
-                // cancel it there, then read up to the next ReadyForQuery so
-                // the session is in a known state and can be kept. A cancel
-                // request that reaches an idle backend is ignored.
-                let running = interrupted
-                    || outcome.as_ref().is_err_and(|error| {
-                        matches!(
-                            error.code,
-                            ErrorCode::Cancelled | ErrorCode::Timeout | ErrorCode::Protocol
-                        )
-                    });
-                if running {
-                    let cancel_server = async {
-                        let mut control = connect(&self.input, &CancellationToken::new()).await?;
-                        sqlx::query("SELECT pg_cancel_backend($1)")
-                            .bind(self.backend as i32)
-                            .execute(&mut control)
-                            .await
-                            .map_err(map_error)?;
-                        Ok::<_, DriverError>(())
+        let returns_rows = !columns.is_empty();
+        if returns_rows && events.send(Event::Columns(columns)).await.is_err() {
+            return self.recover(connection, false).await;
+        }
+        let mut stream =
+            sqlx::raw_sql(sqlx::AssertSqlSafe(request.sql.as_str())).fetch_many(&mut *connection);
+        let mut ahead = None;
+        let mut affected = None;
+        loop {
+            let page = bounded(
+                &cancel,
+                options.timeout,
+                read_page(
+                    &mut stream,
+                    &mut ahead,
+                    &mut affected,
+                    options.max_rows,
+                    &events,
+                ),
+            )
+            .await;
+            match page {
+                Ok(PageEnd::Finished) => {
+                    drop(stream);
+                    let outcome = DriverOutcome {
+                        rows_affected: if returns_rows { None } else { affected },
+                        has_more: false,
+                        ..DriverOutcome::default()
                     };
-                    let _ = tokio::time::timeout(RECOVERY, cancel_server).await;
+                    let _ = events.send(Event::Done(Ok(outcome))).await;
+                    return Flow::Ready;
                 }
-                match tokio::time::timeout(RECOVERY, resynchronize(&mut owned)).await {
-                    Ok(Ok(())) => self.connection = Some(owned),
-                    _ => {
-                        let _ = owned.close_hard().await;
+                Ok(PageEnd::Full) => {
+                    let outcome = DriverOutcome {
+                        rows_affected: None,
+                        has_more: true,
+                        ..DriverOutcome::default()
+                    };
+                    if events.send(Event::Done(Ok(outcome))).await.is_err() {
+                        drop(stream);
+                        return self.recover(connection, true).await;
+                    }
+                    // The result stays open until the next command.
+                    match commands.recv().await {
+                        Some(Command::Fetch {
+                            options: next,
+                            events: next_events,
+                            cancel: next_cancel,
+                        }) => {
+                            options = next;
+                            events = next_events;
+                            cancel = next_cancel;
+                        }
+                        Some(other) => {
+                            drop(stream);
+                            return match self.recover(connection, true).await {
+                                Flow::Ready => Flow::Next(other),
+                                flow => flow,
+                            };
+                        }
+                        None => return Flow::Closed,
                     }
                 }
-            }
-        }
-        outcome
-    }
-    fn is_open(&self) -> bool {
-        self.connection.is_some()
-    }
-    async fn ping(&mut self) -> DriverResult<()> {
-        let mut connection = self.connection.take().ok_or_else(|| {
-            DriverError::new(
-                ErrorCode::Connection,
-                "Session closed; reconnect before executing",
-            )
-        })?;
-        match tokio::time::timeout(RECOVERY, resynchronize(&mut connection)).await {
-            Ok(Ok(())) => {
-                self.connection = Some(connection);
-                Ok(())
-            }
-            outcome => {
-                let _ = connection.close_hard().await;
-                Err(match outcome {
-                    Ok(Err(error)) => map_error(error),
-                    _ => DriverError::new(ErrorCode::Timeout, "Database operation timed out"),
-                })
+                Ok(PageEnd::Gone) => {
+                    drop(stream);
+                    return self.recover(connection, true).await;
+                }
+                Err(error) => {
+                    drop(stream);
+                    return self.fail(connection, error, &events).await;
+                }
             }
         }
     }
-    async fn close(mut self: Box<Self>) -> DriverResult<()> {
-        if let Some(connection) = self.connection.take() {
-            connection.close().await.map_err(map_error)?;
+
+    /// Brings the protocol back to a known state after a statement was left
+    /// unfinished (cancelling it on the server when it may still run), or
+    /// reports that the connection must be closed.
+    async fn recover(&self, connection: &mut PgConnection, running: bool) -> Flow {
+        if running {
+            // A cancel request that reaches an idle backend is ignored.
+            let cancel_server = async {
+                let mut control = connect(&self.input, &CancellationToken::new()).await?;
+                sqlx::query("SELECT pg_cancel_backend($1)")
+                    .bind(self.backend as i32)
+                    .execute(&mut control)
+                    .await
+                    .map_err(map_error)?;
+                Ok::<_, DriverError>(())
+            };
+            let _ = tokio::time::timeout(RECOVERY, cancel_server).await;
         }
-        Ok(())
+        match tokio::time::timeout(RECOVERY, resynchronize(connection)).await {
+            Ok(Ok(())) => Flow::Ready,
+            _ => Flow::Broken,
+        }
     }
+
+    /// Recovers after a failed statement and reports the error. A database
+    /// error keeps the session; a lost connection closes it.
+    async fn fail(
+        &self,
+        connection: &mut PgConnection,
+        error: DriverError,
+        events: &mpsc::Sender<Event>,
+    ) -> Flow {
+        let flow = if error.code == ErrorCode::Connection {
+            Flow::Broken
+        } else {
+            let running = matches!(
+                error.code,
+                ErrorCode::Cancelled | ErrorCode::Timeout | ErrorCode::Protocol
+            );
+            self.recover(connection, running).await
+        };
+        if matches!(flow, Flow::Broken) {
+            self.open.store(false, Ordering::SeqCst);
+        }
+        let _ = events.send(Event::Done(Err(error))).await;
+        flow
+    }
+}
+
+/// Sends up to `max_rows` rows, starting with the one read ahead last time,
+/// and reads one row ahead to tell a full page from the end of the result.
+async fn read_page<S>(
+    stream: &mut S,
+    ahead: &mut Option<Row>,
+    affected: &mut Option<u64>,
+    max_rows: u32,
+    events: &mpsc::Sender<Event>,
+) -> DriverResult<PageEnd>
+where
+    S: futures_util::Stream<
+            Item = Result<
+                sqlx::Either<sqlx::postgres::PgQueryResult, sqlx::postgres::PgRow>,
+                sqlx::Error,
+            >,
+        > + Unpin,
+{
+    let mut count = 0u32;
+    if let Some(row) = ahead.take() {
+        if events.send(Event::Row(row)).await.is_err() {
+            return Ok(PageEnd::Gone);
+        }
+        count = 1;
+    }
+    while let Some(item) = stream.try_next().await.map_err(map_error)? {
+        match item {
+            sqlx::Either::Left(result) => *affected = Some(result.rows_affected()),
+            sqlx::Either::Right(row) => {
+                let mut cells = Vec::with_capacity(row.len());
+                for index in 0..row.len() {
+                    let value = row.try_get_raw(index).map_err(map_error)?;
+                    if value.is_null() {
+                        cells.push(Cell::Null);
+                        continue;
+                    }
+                    let text = value.as_str().map_err(|_| {
+                        DriverError::new(ErrorCode::Protocol, "Invalid database text encoding")
+                    })?;
+                    cells.push(Cell::Text(text.to_owned()));
+                }
+                if count >= max_rows {
+                    *ahead = Some(cells);
+                    return Ok(PageEnd::Full);
+                }
+                if events.send(Event::Row(cells)).await.is_err() {
+                    return Ok(PageEnd::Gone);
+                }
+                count += 1;
+            }
+        }
+    }
+    Ok(PageEnd::Finished)
 }
 pub async fn introspect(
     input: &ResolvedConnection,

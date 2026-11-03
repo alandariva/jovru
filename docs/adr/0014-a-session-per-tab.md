@@ -33,6 +33,13 @@ statement was interrupted may be in an unknown protocol state.
   session still answers, checked before each run within 5 seconds). A session
   that does not answer is replaced and the tab says that session settings
   started over. A statement is never retried.
+- A result longer than one page stays open in the session; the next page is
+  read from it (`Session::fetch`) until the tab runs anything else. PostgreSQL
+  and MySQL keep the connection in a task of its own that holds the row
+  stream between pages.
+- Only autocommit is supported for now. An explicit transaction stays open in
+  the session but is not shown nor confirmed on close (technical debt, see
+  [Architecture](../architecture.md#known-deviations)).
 - Databricks Statement Execution has no server session: the driver keeps the
   catalog and schema and follows successful `USE CATALOG`, `SET CATALOG` and
   `USE [SCHEMA | DATABASE]` statements.
@@ -48,12 +55,13 @@ statement was interrupted may be in an unknown protocol state.
 
 ## Consequences
 
-- Positive: `USE`, `SET`, temporary tables and transactions apply to later runs
-  in the same tab; errors and the row limit keep them.
+- Positive: `USE`, `SET` and temporary tables apply to later runs in the same
+  tab; errors keep them, and long results are read page by page without
+  running the statement again.
 - Negative or costs: one ping per run; a result interrupted by the limit is
   drained (MySQL) or cancelled and drained (PostgreSQL) before the session is
-  reused; an open transaction stays open until the user ends it or the tab
-  closes.
+  reused; an explicit transaction stays open, unseen, until the user ends it
+  or the tab closes.
 - What becomes required: drivers report whether a session can be reused and
   recover or close it after every failure; tests check that state survives
   errors, timeouts, cancellations and interrupted reads.

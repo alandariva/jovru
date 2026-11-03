@@ -206,11 +206,34 @@ async fn live_connection_queries_metadata_and_timeout() {
         },
     };
     let mut limited = Sink::default();
-    session
+    let first = session
         .execute(&query, &mut limited, CancellationToken::new())
         .await
         .unwrap();
     assert_eq!(limited.rows.len(), 1);
+    assert!(first.has_more);
+    // The next page comes from the open result, not from running it again.
+    let mut rest = Sink::default();
+    let second = session
+        .fetch(&query.options, &mut rest, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(rest.rows.len(), 1);
+    assert_ne!(rest.rows[0], limited.rows[0]);
+    assert!(!second.has_more);
+    assert_eq!(
+        session
+            .fetch(&query.options, &mut rest, CancellationToken::new())
+            .await
+            .unwrap_err()
+            .code,
+        ErrorCode::Validation
+    );
+    // Another statement discards an open result and the session goes on.
+    session
+        .execute(&query, &mut Sink::default(), CancellationToken::new())
+        .await
+        .unwrap();
     assert_kept(&mut session).await;
 
     let mut session = driver
@@ -246,6 +269,20 @@ async fn live_connection_queries_metadata_and_timeout() {
         .await
         .unwrap();
     assert_eq!(limited.rows.len(), 10);
+    // Three more pages of the long result, in order.
+    for _ in 0..3 {
+        let outcome = session
+            .fetch(&big.options, &mut limited, CancellationToken::new())
+            .await
+            .unwrap();
+        assert!(outcome.has_more);
+    }
+    assert_eq!(limited.rows.len(), 40);
+    let firsts: Vec<_> = [0, 10, 20, 30].iter().map(|&i| limited.rows[i][0].clone()).collect();
+    assert_eq!(
+        firsts,
+        ["1", "11", "21", "31"].map(|n| Cell::Text(n.into())).to_vec()
+    );
     assert_kept(&mut session).await;
     struct CancelAfter(CancellationToken, usize);
     impl RowSink for CancelAfter {
