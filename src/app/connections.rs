@@ -122,6 +122,55 @@ impl AppView {
                 "A connection with this name already exists."
             )));
         }
+        let config = self.form_config(cx)?;
+        let driver = config.driver;
+        builtin_registry()?
+            .get(driver)?
+            .validate_connection(&config)?;
+        let password = self.connection_password.read(cx).unmask_value().to_string();
+        let credentials = if driver == DriverKind::Databricks {
+            Credentials::default()
+        } else if password.is_empty() {
+            // An empty password keeps the previous one only for the same
+            // server and user; it never goes to another driver or host.
+            self.editing_connection
+                .and_then(|index| self.connections[index].input.as_ref())
+                .filter(|input| connection_store::keeps_password(&input.config, &config))
+                .map(|input| input.credentials.clone())
+                .unwrap_or_default()
+        } else {
+            Credentials {
+                password: Some(SecretString::from(password)),
+            }
+        };
+        Ok((
+            name,
+            ResolvedConnection {
+                config,
+                credentials,
+            },
+        ))
+    }
+
+    /// Whether an empty password field would keep the edited connection's
+    /// password: the form still points at the same driver, server and user.
+    fn form_keeps_password(&self, cx: &App) -> bool {
+        let Some(index) = self.editing_connection else {
+            return false;
+        };
+        let previous = match &self.connections[index].input {
+            Some(input) => &input.config,
+            None => match &self.connections[index].profile {
+                Some(profile) => &profile.config,
+                None => return false,
+            },
+        };
+        self.form_config(cx)
+            .is_ok_and(|config| connection_store::keeps_password(previous, &config))
+    }
+
+    /// The driver and options typed in the form, before validation.
+    fn form_config(&self, cx: &App) -> DriverResult<ConnectionConfig> {
         let driver = [
             DriverKind::Postgres,
             DriverKind::MySql,
@@ -141,34 +190,7 @@ impl AppView {
             let database = self.connection_database.read(cx).value().trim().to_owned();
             serde_json::json!({"host":self.connection_host.read(cx).value().trim(),"port":port,"database":if driver == DriverKind::MySql && database.is_empty() { None } else { Some(database) },"user":self.connection_user.read(cx).value().trim(),"sslMode":self.connection_ssl.read(cx).value().trim()})
         };
-        let config = ConnectionConfig { driver, options };
-        builtin_registry()?
-            .get(driver)?
-            .validate_connection(&config)?;
-        let password = self.connection_password.read(cx).unmask_value().to_string();
-        let credentials = if driver == DriverKind::Databricks {
-            Credentials::default()
-        } else if password.is_empty() {
-            self.editing_connection
-                .and_then(|index| {
-                    self.connections[index]
-                        .input
-                        .as_ref()
-                        .map(|input| input.credentials.clone())
-                })
-                .unwrap_or_default()
-        } else {
-            Credentials {
-                password: Some(SecretString::from(password)),
-            }
-        };
-        Ok((
-            name,
-            ResolvedConnection {
-                config,
-                credentials,
-            },
-        ))
+        Ok(ConnectionConfig { driver, options })
     }
 
     /// The row limit typed in the form, between 1 and the maximum.
@@ -1320,7 +1342,7 @@ impl AppView {
                     .child(label(tr!("A warehouse is required only for queries. Metadata uses Unity Catalog."))))
                 .child(field(tr!("Row limit per statement"), &self.connection_row_limit))
                 .child(label(tr!("Up to {0} rows. Reading also stops when a result reaches {1} MB.", cell_format::count(MAX_ROW_LIMIT as usize), DEFAULT_MEMORY_CEILING / (1024 * 1024))))
-                .child(label(if self.editing_connection.is_some() { tr!("An empty password keeps the one already available. Passwords are never written to SQLite.") } else { tr!("Without remember password, the password stays only in this session.") }))
+                .child(label(if self.editing_connection.is_none() { tr!("Without remember password, the password stays only in this session.") } else if self.driver == 2 || self.form_keeps_password(cx) { tr!("An empty password keeps the one already available. Passwords are never written to SQLite.") } else { tr!("The driver, server or user changed, so the previous password is not used. Enter the password for this server.") }))
                 .when_some(self.connection_status.as_ref(), |s, status| s.child(feedback_line(status).id("connection-status").role(if status.tone == Tone::Error { Role::Alert } else { Role::Status }).aria_label(status.text.clone())))
                 .child(row().justify_between()
                     .child(button("test-connection", I::PlugZap, if self.connection_testing.is_some() { tr!("Testing…") } else { tr!("Test connection") })

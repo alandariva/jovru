@@ -31,6 +31,9 @@ document is the engineering standard.
    back.
 5. Turning off **Remember password**, or deleting a connection, removes the
    vault entry. A failure is reported to the user, without the secret.
+   Editing a connection with the password field empty keeps the previous
+   password only while the driver, host, port and user stay the same; any
+   other change sends no password and removes a remembered one.
 6. Connection URLs with an embedded password (`postgres://user:pass@host`) are
    not accepted; drivers reject URLs in the host field.
 

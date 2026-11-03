@@ -214,6 +214,21 @@ async fn save_to(
     let profile = repository.save(&profile).await?;
     repository.set_row_limit(profile.id, row_limit).await?;
     let mut warning = None;
+    // A password remembered for another driver, server or user is not
+    // reused: without a new one the vault entry goes.
+    let identity_changed = previous
+        .as_ref()
+        .is_some_and(|previous| !keeps_password(&previous.config, &profile.config));
+    if identity_changed
+        && credentials.password.is_none()
+        && previous
+            .as_ref()
+            .is_some_and(|previous| previous.remember_password)
+        && profile.remember_password
+        && secrets.delete(profile.id).await.is_err()
+    {
+        warning = Some(tr!("The previous password could not be removed from the vault. Enter the password for this server.").into());
+    }
     if profile.config.driver != DriverKind::Databricks && profile.remember_password {
         if let Some(password) = credentials.password.clone() {
             if let Err(error) = secrets.set(profile.id, password).await {
@@ -253,6 +268,24 @@ async fn save_to(
         cache,
         warning,
     })
+}
+
+/// Whether a password kept for `previous` may be sent to `next`: the same
+/// driver, host, port and user. Changing any of them points the credential
+/// at another identity, so an empty password field must not carry it over.
+pub fn keeps_password(previous: &ConnectionConfig, next: &ConnectionConfig) -> bool {
+    let text = |config: &ConnectionConfig, key: &str| -> String {
+        match &config.options[key] {
+            Value::String(value) => value.trim().to_owned(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        }
+    };
+    previous.driver == next.driver
+        && text(previous, "host").eq_ignore_ascii_case(&text(next, "host"))
+        && ["port", "user"]
+            .iter()
+            .all(|key| text(previous, key) == text(next, key))
 }
 
 /// Checks a row limit typed by the user.

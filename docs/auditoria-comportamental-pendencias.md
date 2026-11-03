@@ -109,6 +109,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Preservar senha só se host/usuário/driver continuarem compatíveis; troca de driver exige senha explícita.
 - **Evidência no projeto:** `src/app/connections.rs` (`form_connection`)
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. `connection_store::keeps_password` só deixa a senha vazia manter a anterior quando driver, host, porta e usuário são os mesmos; senão a credencial não é enviada e, se estava lembrada, sai do cofre ao salvar. O diálogo avisa quando a senha anterior não será usada.
 
 ## N013 — “Remember password” permanece ativo sem senha no vault
 

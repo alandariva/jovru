@@ -228,3 +228,76 @@ async fn connections_without_a_saved_row_limit_use_the_default() {
     assert_eq!(loaded[0].row_limit, DEFAULT_ROW_LIMIT);
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_password_is_kept_only_for_the_same_driver_server_and_user() {
+    let config = |driver, options: serde_json::Value| ConnectionConfig { driver, options };
+    let base = config(
+        DriverKind::Postgres,
+        serde_json::json!({"host":"db.local","port":5432,"user":"app","database":"a"}),
+    );
+    let same = config(
+        DriverKind::Postgres,
+        serde_json::json!({"host":" DB.local ","port":5432,"user":"app","database":"b"}),
+    );
+    assert!(keeps_password(&base, &same));
+    for other in [
+        config(
+            DriverKind::MySql,
+            serde_json::json!({"host":"db.local","port":5432,"user":"app"}),
+        ),
+        config(
+            DriverKind::Postgres,
+            serde_json::json!({"host":"other.local","port":5432,"user":"app"}),
+        ),
+        config(
+            DriverKind::Postgres,
+            serde_json::json!({"host":"db.local","port":5433,"user":"app"}),
+        ),
+        config(
+            DriverKind::Postgres,
+            serde_json::json!({"host":"db.local","port":5432,"user":"admin"}),
+        ),
+    ] {
+        assert!(!keeps_password(&base, &other), "{other:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_remembered_password_is_not_carried_to_another_driver() {
+    let (dir, mut profile) = fixture();
+    let vault = MemoryVault::default();
+    profile.remember_password = true;
+    let credentials = Credentials {
+        password: Some(SecretString::from("synthetic-postgres-password".to_owned())),
+    };
+    let saved = save(&dir, profile, credentials, 1_000, &vault)
+        .await
+        .unwrap();
+    assert_eq!(vault.passwords.lock().unwrap().len(), 1);
+    // The same server keeps it when the field is left empty.
+    let mut profile = saved.profile;
+    profile.config.options["database"] = serde_json::json!("other");
+    let saved = save(&dir, profile, Credentials::default(), 1_000, &vault)
+        .await
+        .unwrap();
+    assert_eq!(vault.passwords.lock().unwrap().len(), 1);
+    // Another driver does not: the vault entry goes.
+    let mut profile = saved.profile;
+    profile.config = ConnectionConfig {
+        driver: DriverKind::MySql,
+        options: serde_json::json!({"host":"localhost","user":"fixture","sslMode":"disabled"}),
+    };
+    save(&dir, profile, Credentials::default(), 1_000, &vault)
+        .await
+        .unwrap();
+    assert!(vault.passwords.lock().unwrap().is_empty());
+    assert!(
+        load(&dir, &vault).await.unwrap()[0]
+            .input
+            .credentials
+            .password
+            .is_none()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
