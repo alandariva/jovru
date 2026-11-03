@@ -63,6 +63,10 @@ pub struct Workspace {
     /// The run state and the status of each statement in the editor.
     run: QueryRun,
     editor_sql: String,
+    /// The line where each statement of `editor_sql` starts and its line
+    /// count, kept when the SQL changes so a frame never splits the script.
+    statement_lines: Rc<[usize]>,
+    line_count: usize,
     /// SQL as last saved to the library, if this tab is saved.
     saved_sql: Option<String>,
     notice: Option<Feedback>,
@@ -139,6 +143,8 @@ impl Workspace {
             let sql = editor.read(cx).text().to_string();
             if this.editor_sql != sql {
                 this.run.edit(&sql);
+                this.statement_lines = jykre::sql::statement_lines(&sql).into();
+                this.line_count = sql.split('\n').count();
                 this.editor_sql = sql;
             }
             cx.notify();
@@ -201,6 +207,8 @@ impl Workspace {
             has_result: sql == SALES_SQL,
             run: QueryRun::new(sql),
             editor_sql: sql.to_string(),
+            statement_lines: jykre::sql::statement_lines(sql).into(),
+            line_count: sql.split('\n').count(),
             saved_sql: None,
             notice: None,
             limit: None,
@@ -566,76 +574,56 @@ impl Workspace {
             )
     }
 
+    /// Run buttons beside the first line of each statement. Only statements
+    /// on screen get a button, and their lines come from `statement_lines`,
+    /// so a frame costs the same for a short query or a long script.
     fn query_gutter(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let editor = self.editor.clone();
-        let sql = editor.read(cx).text().to_string();
-        let buttons: Vec<_> = jykre::sql::statements(&sql)
-            .into_iter()
-            .enumerate()
-            .map(|(index, range)| {
-                let (symbol, color, title) = match self.run.status(index) {
-                    StatementStatus::Ready => (I::Play, MINT, tr!("Run this query")),
-                    StatementStatus::Running => (I::Square, 0xe7bd7b, tr!("Stop execution")),
-                    StatementStatus::Success => (I::CircleCheck, MINT, tr!("Success · run again")),
-                    StatementStatus::Error => (I::CircleX, 0xef8b91, tr!("Error · run again")),
-                    StatementStatus::Cancelled => (I::Play, FAINT, tr!("Cancelled · run again")),
-                };
-                let button = div()
-                    .id(("query-run", index))
-                    .role(Role::Button)
-                    .aria_label(tr!("Query {0}: {1}", index + 1, title))
-                    .cursor_pointer()
-                    .size(px(22.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(4.))
-                    .hover(|s| s.bg(rgb(HOVER)))
-                    .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
-                    .child(icon(symbol, color))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.run.status(index) == StatementStatus::Running {
-                            this.stop_execution(cx);
-                        } else {
-                            this.execute_queries(Some(index), cx);
-                        }
-                    }))
-                    .into_any_element();
-                (
-                    sql[..range.start].bytes().filter(|ch| *ch == b'\n').count(),
-                    button,
-                )
-            })
-            .collect();
+        let lines = self.statement_lines.clone();
+        let workspace = cx.weak_entity();
         canvas(
             move |bounds, window, cx| {
-                let mut visible = Vec::new();
-                for (line, mut button) in buttons {
-                    let geometry = {
-                        let state = editor.read(cx);
-                        if state.display_map().is_buffer_line_hidden(line) {
-                            continue;
-                        }
-                        // Paint-time bounds still belong to the previous frame here.
-                        // Use the editor's fresh prepaint snapshot so the gutter and
-                        // its hitboxes follow the same scroll offset as the SQL.
-                        state.prepaint_caret_geometry().map(|geometry| {
-                            let height = geometry.line_height();
-                            geometry.input_bounds().top()
-                                + geometry.scroll_offset().y
-                                + height
-                                    * state.display_map().buffer_line_to_display_row(line) as f32
-                                + (height - px(22.)) / 2.
-                        })
+                let on_screen: Vec<(usize, Pixels)> = {
+                    let state = editor.read(cx);
+                    // Paint-time bounds still belong to the previous frame here.
+                    // Use the editor's fresh prepaint snapshot so the gutter and
+                    // its hitboxes follow the same scroll offset as the SQL.
+                    let Some(geometry) = state.prepaint_caret_geometry() else {
+                        return Vec::new();
                     };
-                    if let Some(top) = geometry {
-                        if top < bounds.top() || top + px(22.) > bounds.bottom() {
-                            continue;
-                        }
-                        button.layout_as_root(AvailableSpace::min_size(), window, cx);
-                        button.prepaint_at(point(bounds.left(), top), window, cx);
-                        visible.push(button);
-                    }
+                    let height = geometry.line_height();
+                    let first = geometry.input_bounds().top()
+                        + geometry.scroll_offset().y
+                        + (height - px(22.)) / 2.;
+                    let map = state.display_map();
+                    lines
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, line)| !map.is_buffer_line_hidden(**line))
+                        .map(|(index, line)| {
+                            (
+                                index,
+                                first + height * map.buffer_line_to_display_row(*line) as f32,
+                            )
+                        })
+                        // Statements are in line order: after the first one
+                        // below the editor, none is on screen.
+                        .take_while(|(_, top)| *top < bounds.bottom())
+                        .filter(|(_, top)| {
+                            *top >= bounds.top() && *top + px(22.) <= bounds.bottom()
+                        })
+                        .collect()
+                };
+                let mut visible = Vec::with_capacity(on_screen.len());
+                for (index, top) in on_screen {
+                    let Some(this) = workspace.upgrade() else {
+                        break;
+                    };
+                    let status = this.read(cx).run.status(index);
+                    let mut button = run_button(index, status, workspace.clone());
+                    button.layout_as_root(AvailableSpace::min_size(), window, cx);
+                    button.prepaint_at(point(bounds.left(), top), window, cx);
+                    visible.push(button);
                 }
                 visible
             },
@@ -722,7 +710,7 @@ impl Workspace {
                             .gap_3()
                             .child(label("UTF-8"))
                             .child(label(tr!("Spaces: 4")))
-                            .child(label(match self.editor_sql.split('\n').count() {
+                            .child(label(match self.line_count {
                                 1 => tr!("1 line").to_string(),
                                 lines => tr!("{0} lines", lines),
                             })),
@@ -1378,6 +1366,45 @@ impl Workspace {
                 )
             })
     }
+}
+
+/// The gutter button of the statement at `index`: it runs that statement,
+/// or stops the run while the statement is running.
+fn run_button(
+    index: usize,
+    status: StatementStatus,
+    workspace: WeakEntity<Workspace>,
+) -> AnyElement {
+    let (symbol, color, title) = match status {
+        StatementStatus::Ready => (I::Play, MINT, tr!("Run this query")),
+        StatementStatus::Running => (I::Square, 0xe7bd7b, tr!("Stop execution")),
+        StatementStatus::Success => (I::CircleCheck, MINT, tr!("Success · run again")),
+        StatementStatus::Error => (I::CircleX, 0xef8b91, tr!("Error · run again")),
+        StatementStatus::Cancelled => (I::Play, FAINT, tr!("Cancelled · run again")),
+    };
+    div()
+        .id(("query-run", index))
+        .role(Role::Button)
+        .aria_label(tr!("Query {0}: {1}", index + 1, title))
+        .cursor_pointer()
+        .size(px(22.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .hover(|s| s.bg(rgb(HOVER)))
+        .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
+        .child(icon(symbol, color))
+        .on_click(move |_, _, cx| {
+            let _ = workspace.update(cx, |this, cx| {
+                if this.run.status(index) == StatementStatus::Running {
+                    this.stop_execution(cx);
+                } else {
+                    this.execute_queries(Some(index), cx);
+                }
+            });
+        })
+        .into_any_element()
 }
 
 impl Render for Workspace {

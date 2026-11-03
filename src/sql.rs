@@ -100,6 +100,26 @@ pub fn statements(sql: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+/// The zero-based line on which each of [`statements`] starts. One pass over
+/// the text, so a view can keep the result while the text is unchanged
+/// instead of counting lines on every frame.
+pub fn statement_lines(sql: &str) -> Vec<usize> {
+    let bytes = sql.as_bytes();
+    let mut line = 0;
+    let mut counted = 0;
+    statements(sql)
+        .into_iter()
+        .map(|range| {
+            line += bytes[counted..range.start]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count();
+            counted = range.start;
+            line
+        })
+        .collect()
+}
+
 /// Executable statements with runs of whitespace collapsed, so layout-only
 /// edits (new lines, indentation) do not count as a different statement.
 pub fn normalized_statements(sql: &str) -> Vec<String> {
@@ -323,7 +343,11 @@ pub fn format(sql: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TokenKind, format, normalized_statements, preview_error, statements, tokens};
+    use super::{
+        TokenKind, format, normalized_statements, preview_error, statement_lines, statements,
+        tokens,
+    };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn format_keeps_operators_literals_and_parameters_intact() {
@@ -366,6 +390,35 @@ mod tests {
         assert_eq!(&sql[queries[0].clone()], "SELECT 'a;''b', \"x;y\";");
         assert_eq!(&sql[queries[1].clone()], "SELECT $$a;b$$;");
         assert!(statements("-- comment\n/* only */ ;").is_empty());
+    }
+
+    #[test]
+    fn statement_lines_skip_comments_and_follow_multiline_literals() {
+        let sql =
+            "-- intro\nSELECT 1;\n\n/* a\n b */ SELECT 'x;\ny';\nSELECT\n  2; SELECT $$\n;$$;";
+        assert_eq!(statement_lines(sql), [1, 4, 6, 7]);
+        // The same lines as counting from the start for every statement.
+        let counted: Vec<_> = statements(sql)
+            .into_iter()
+            .map(|range| sql[..range.start].matches('\n').count())
+            .collect();
+        assert_eq!(statement_lines(sql), counted);
+        assert!(statement_lines("-- only a comment\n").is_empty());
+    }
+
+    #[test]
+    fn a_long_script_maps_its_statements_to_lines_within_budget() {
+        // Counting lines from the start for every statement is quadratic in
+        // the script; this is one pass, paid once per edit.
+        let script: String = (0..10_000)
+            .map(|index| format!("-- statement {index}\nSELECT 'a;b' FROM t{index};\n"))
+            .collect();
+        let start = Instant::now();
+        let lines = statement_lines(&script);
+        let elapsed = start.elapsed();
+        assert_eq!(lines.len(), 10_000);
+        assert_eq!(lines[9_999], 19_999);
+        assert!(elapsed < Duration::from_secs(1), "took {elapsed:?}");
     }
 
     #[test]
