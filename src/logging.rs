@@ -150,8 +150,42 @@ pub fn timing(operation: &'static str, started: Instant, expected: Duration) {
 #[cfg(test)]
 pub(crate) mod capture {
     //! Collects formatted log output in memory for tests.
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::Interest;
+    use tracing::{Event, Metadata};
     use tracing_subscriber::fmt::MakeWriter;
+
+    /// The global default while tests run: it records nothing and answers
+    /// `Interest::sometimes` for every callsite.
+    ///
+    /// `tracing-core` caches one interest per callsite for the whole process.
+    /// While a single dispatcher is registered it asks the default of the
+    /// thread that first reaches the callsite (`Dispatchers::rebuilder` in
+    /// `tracing-core` 0.1.36 `callsite.rs`), so a parallel test without a
+    /// capture would cache `never` from the empty global default, and the
+    /// capturing test would lose that event. With this subscriber the answer
+    /// is `sometimes`, and every event asks its own thread's dispatcher.
+    struct AskEveryEvent;
+
+    impl tracing::Subscriber for AskEveryEvent {
+        fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
+            Interest::sometimes()
+        }
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, _: &Event<'_>) {}
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+
+    static GLOBAL_DEFAULT: Once = Once::new();
 
     #[derive(Clone, Default)]
     pub struct Captured(Arc<Mutex<Vec<u8>>>);
@@ -184,6 +218,10 @@ pub(crate) mod capture {
 
     /// A JSON subscriber at `level` writing into the returned buffer.
     pub fn subscriber(level: tracing::Level) -> (impl tracing::Subscriber + Send + Sync, Captured) {
+        GLOBAL_DEFAULT.call_once(|| {
+            tracing::subscriber::set_global_default(AskEveryEvent)
+                .expect("tests install no other global subscriber");
+        });
         let captured = Captured::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -235,5 +273,23 @@ mod tests {
         assert!(line("slow").contains("\"WARN\""), "{text}");
         assert!(line("cache read").contains("\"DEBUG\""), "{text}");
         assert!(line("slow").contains("elapsed_ms"), "{text}");
+    }
+
+    #[test]
+    fn a_capture_sees_events_another_thread_reached_first() {
+        fn emit() {
+            tracing::info!("reached first by another thread");
+        }
+        let (subscriber, captured) = capture::subscriber(tracing::Level::INFO);
+        tracing::subscriber::with_default(subscriber, || {
+            std::thread::spawn(emit).join().unwrap();
+            emit();
+        });
+        let text = captured.text();
+        assert_eq!(
+            text.matches("reached first by another thread").count(),
+            1,
+            "{text}"
+        );
     }
 }
