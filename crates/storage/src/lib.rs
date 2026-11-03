@@ -2,7 +2,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 mod config;
 mod metadata;
-pub use config::ConfigRepository;
+pub use config::{ConfigRepository, UnreadableProfile};
 pub use metadata::{MetadataRepository, PendingRefresh, RefreshStatus};
 
 use jykre_core::*;

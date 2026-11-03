@@ -355,5 +355,10 @@
   "The driver, server or user changed, so the previous password is not used. Enter the password for this server.": "O driver, o servidor ou o usuário mudou, então a senha anterior não é usada. Digite a senha deste servidor.",
   "Connection saved without an available password, so Remember password was turned off. Enter the password before querying the server.": "Conexão salva sem uma senha disponível, então Lembrar senha foi desativado. Digite a senha antes de consultar o servidor.",
   "Connection saved. Could not store the password in the vault, so Remember password was turned off: {0}": "Conexão salva. Não foi possível guardar a senha no cofre, então Lembrar senha foi desativado: {0}",
-  "Remember password is on, but the vault has no password for this connection. Enter it again to query the server.": "Lembrar senha está ativado, mas o cofre não tem senha para esta conexão. Digite-a de novo para consultar o servidor."
+  "Remember password is on, but the vault has no password for this connection. Enter it again to query the server.": "Lembrar senha está ativado, mas o cofre não tem senha para esta conexão. Digite-a de novo para consultar o servidor.",
+  "A saved connection could not be read and is not shown: {0}": "Uma conexão salva não pôde ser lida e não é exibida: {0}",
+  "Could not read the editor font size; the default is used: {0}": "Não foi possível ler o tamanho da fonte do editor; o padrão é usado: {0}",
+  "The connection {0} could not be read and is not shown: {1}": "A conexão {0} não pôde ser lida e não é exibida: {1}",
+  "The connection {0} is not valid and is not shown: {1}": "A conexão {0} não é válida e não é exibida: {1}",
+  "The saved row limit could not be read; the default is used: {0}": "O limite de linhas salvo não pôde ser lido; o padrão é usado: {0}"
 }

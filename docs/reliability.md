@@ -13,6 +13,7 @@
 | Panic inside a backend task | The operation fails with `Internal` | Closing the application |
 | Corrupted metadata cache | The cache is set aside and recreated; the user is told to refresh | The application failing to start |
 | OS vault unavailable | The password is used for this session only; the UI says why | Falling back to a file |
+| A saved connection, the font size or the last session's tabs cannot be read at start | That item is left out or takes its default, and the explorer says which | Hiding the other connections or the restored tabs |
 
 ## Mechanisms
 

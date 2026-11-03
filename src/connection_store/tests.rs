@@ -55,7 +55,7 @@ fn fixture() -> (PathBuf, ConnectionProfile) {
 async fn profiles_round_trip_and_reject_embedded_credentials() {
     let (dir, mut profile) = fixture();
     let vault = MemoryVault::default();
-    assert!(load(&dir, &vault).await.unwrap().is_empty());
+    assert!(load(&dir, &vault).await.unwrap().connections.is_empty());
     let saved = save(&dir, profile.clone(), Credentials::default(), 1_000, &vault)
         .await
         .unwrap();
@@ -64,7 +64,7 @@ async fn profiles_round_trip_and_reject_embedded_credentials() {
     let saved = save(&dir, profile.clone(), Credentials::default(), 1_000, &vault)
         .await
         .unwrap();
-    let loaded = load(&dir, &vault).await.unwrap();
+    let loaded = load(&dir, &vault).await.unwrap().connections;
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].profile, saved.profile);
     profile = saved.profile;
@@ -93,19 +93,34 @@ async fn legacy_migration_is_complete_idempotent_and_deletes_json_only_after_suc
     )
     .unwrap();
     let vault = MemoryVault::default();
-    let first = load(&dir, &vault).await.unwrap();
+    let first = load(&dir, &vault).await.unwrap().connections;
     assert_eq!(first.len(), 1);
     assert!(!legacy.exists());
-    let second = load(&dir, &vault).await.unwrap();
+    let second = load(&dir, &vault).await.unwrap().connections;
     assert_eq!(first[0].profile.id, second[0].profile.id);
     std::fs::remove_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(&legacy, b"invalid json").unwrap();
-    assert!(load(&dir, &vault).await.is_err());
+    // An invalid legacy file is reported and kept, nothing is imported, and
+    // the start goes on with what SQLite has.
+    let loaded = load(&dir, &vault).await.unwrap();
+    assert!(loaded.connections.is_empty());
+    assert_eq!(loaded.problems.len(), 1);
     assert_eq!(std::fs::read(&legacy).unwrap(), b"invalid json");
     let repository = ConfigRepository::open(&dir).await.unwrap();
     assert!(repository.list().await.unwrap().is_empty());
+    assert!(!repository.legacy_imported().await.unwrap());
     repository.close().await;
+    // Once fixed, the next start imports it.
+    std::fs::write(
+        &legacy,
+        serde_json::to_vec(&serde_json::json!([{"name":profile.name,"config":profile.config}]))
+            .unwrap(),
+    )
+    .unwrap();
+    let loaded = load(&dir, &vault).await.unwrap();
+    assert_eq!(loaded.connections.len(), 1);
+    assert!(loaded.problems.is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -121,7 +136,7 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
         .unwrap();
     assert!(vault.passwords.lock().unwrap().is_empty());
     assert!(
-        load(&dir, &vault).await.unwrap()[0]
+        load(&dir, &vault).await.unwrap().connections[0]
             .input
             .credentials
             .password
@@ -133,7 +148,7 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
         .await
         .unwrap();
     assert!(
-        load(&dir, &vault).await.unwrap()[0]
+        load(&dir, &vault).await.unwrap().connections[0]
             .input
             .credentials
             .password
@@ -149,7 +164,12 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
         unavailable: true,
         ..Default::default()
     };
-    let mut profile = load(&dir, &vault).await.unwrap().remove(0).profile;
+    let mut profile = load(&dir, &vault)
+        .await
+        .unwrap()
+        .connections
+        .remove(0)
+        .profile;
     profile.remember_password = true;
     let saved = save(&dir, profile, credentials, 1_000, &unavailable)
         .await
@@ -159,12 +179,12 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     // The preference follows what the vault holds: nothing was stored.
     assert!(!saved.profile.remember_password);
     assert!(
-        !load(&dir, &vault).await.unwrap()[0]
+        !load(&dir, &vault).await.unwrap().connections[0]
             .profile
             .remember_password
     );
     assert!(
-        load(&dir, &unavailable).await.unwrap()[0]
+        load(&dir, &unavailable).await.unwrap().connections[0]
             .input
             .credentials
             .password
@@ -216,7 +236,10 @@ async fn row_limits_are_saved_per_connection_and_validated() {
         .await
         .unwrap();
     assert_eq!(saved.row_limit, 25_000);
-    assert_eq!(load(&dir, &vault).await.unwrap()[0].row_limit, 25_000);
+    assert_eq!(
+        load(&dir, &vault).await.unwrap().connections[0].row_limit,
+        25_000
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -231,7 +254,10 @@ async fn connections_without_a_saved_row_limit_use_the_default() {
         .await
         .unwrap();
     repository.close().await;
-    let loaded = load(&dir, &MemoryVault::default()).await.unwrap();
+    let loaded = load(&dir, &MemoryVault::default())
+        .await
+        .unwrap()
+        .connections;
     assert_eq!(loaded[0].row_limit, DEFAULT_ROW_LIMIT);
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -300,7 +326,7 @@ async fn a_remembered_password_is_not_carried_to_another_driver() {
         .unwrap();
     assert!(vault.passwords.lock().unwrap().is_empty());
     assert!(
-        load(&dir, &vault).await.unwrap()[0]
+        load(&dir, &vault).await.unwrap().connections[0]
             .input
             .credentials
             .password
@@ -322,11 +348,14 @@ async fn a_missing_vault_entry_is_reported_and_warnings_add_up() {
         .unwrap();
     assert!(saved.profile.remember_password);
     assert_eq!(saved.warning, None);
-    assert_eq!(load(&dir, &vault).await.unwrap()[0].warning, None);
+    assert_eq!(
+        load(&dir, &vault).await.unwrap().connections[0].warning,
+        None
+    );
     // The entry disappears outside the application (another tool, a reset
     // keyring): the preference says remember, so reopening says so.
     vault.passwords.lock().unwrap().clear();
-    let loaded = load(&dir, &vault).await.unwrap().remove(0);
+    let loaded = load(&dir, &vault).await.unwrap().connections.remove(0);
     assert!(loaded.input.credentials.password.is_none());
     assert!(
         loaded
@@ -344,7 +373,7 @@ async fn a_missing_vault_entry_is_reported_and_warnings_add_up() {
     assert!(!saved.profile.remember_password);
     assert!(saved.warning.is_some());
     assert!(
-        !load(&dir, &vault).await.unwrap()[0]
+        !load(&dir, &vault).await.unwrap().connections[0]
             .profile
             .remember_password
     );
@@ -357,4 +386,40 @@ fn warnings_are_collected_in_order() {
     add_warning(&mut warning, "First.");
     add_warning(&mut warning, "Second.");
     assert_eq!(warning.as_deref(), Some("First. Second."));
+}
+
+#[tokio::test]
+async fn an_invalid_profile_is_left_out_without_hiding_the_others() {
+    let (dir, good) = fixture();
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    repository.save(&good).await.unwrap();
+    // Saved by another version, with options this one rejects.
+    let mut bad = fixture().1;
+    bad.name = "Invalid fixture".into();
+    bad.config.options["sslMode"] = serde_json::json!("not-a-mode");
+    repository.save(&bad).await.unwrap();
+    repository.close().await;
+    let loaded = load(&dir, &MemoryVault::default()).await.unwrap();
+    assert_eq!(loaded.connections.len(), 1);
+    assert_eq!(loaded.connections[0].profile.name, good.name);
+    assert_eq!(loaded.problems.len(), 1);
+    assert!(
+        loaded.problems[0].contains("Invalid fixture"),
+        "{:?}",
+        loaded.problems
+    );
+    // Saving the valid one still works next to the invalid one.
+    let profile = loaded.connections[0].profile.clone();
+    assert!(
+        save(
+            &dir,
+            profile,
+            Credentials::default(),
+            500,
+            &MemoryVault::default()
+        )
+        .await
+        .is_ok()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }

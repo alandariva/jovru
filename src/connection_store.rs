@@ -80,7 +80,18 @@ fn legacy_profiles(bytes: &[u8]) -> DriverResult<Vec<ConnectionProfile>> {
         .collect()
 }
 
-pub async fn load(dir: &Path, secrets: &dyn SecretStore) -> DriverResult<Vec<LoadedConnection>> {
+/// The saved connections that could be opened, and what was left out.
+#[derive(Default)]
+pub struct LoadedConnections {
+    pub connections: Vec<LoadedConnection>,
+    /// One message per connection (or migration step) that could not be
+    /// loaded; the others are loaded regardless.
+    pub problems: Vec<String>,
+}
+
+/// Loads every saved connection. A profile that cannot be read or is no
+/// longer valid is left out with a problem, so it never hides the others.
+pub async fn load(dir: &Path, secrets: &dyn SecretStore) -> DriverResult<LoadedConnections> {
     let repository = ConfigRepository::open(dir).await?;
     let result = load_from(dir, secrets, &repository).await;
     repository.close().await;
@@ -91,42 +102,63 @@ async fn load_from(
     dir: &Path,
     secrets: &dyn SecretStore,
     repository: &ConfigRepository,
-) -> DriverResult<Vec<LoadedConnection>> {
+) -> DriverResult<LoadedConnections> {
+    let mut problems = Vec::new();
     let legacy = dir.join("connections.json");
     let bytes = match tokio::fs::read(&legacy).await {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => {
-            return Err(DriverError::new(
-                ErrorCode::Internal,
-                tr!("Could not read the legacy connections.json."),
-            ));
+            problems.push(tr!("Could not read the legacy connections.json.").to_owned());
+            None
         }
     };
-    if !repository.legacy_imported().await? {
-        let imported = bytes
-            .as_ref()
-            .map(|bytes| legacy_profiles(bytes))
-            .transpose()?
-            .unwrap_or_default();
-        repository.import_legacy(&imported).await?;
+    // A legacy file that cannot be read is kept and not imported, so the
+    // next start tries again; the connections already in SQLite still load.
+    let old = bytes.as_ref().map(|bytes| legacy_profiles(bytes));
+    if let Some(Err(error)) = &old {
+        problems.push(error.to_string());
     }
-    let profiles = repository.list().await?;
+    if !repository.legacy_imported().await? {
+        match &old {
+            Some(Err(_)) => {}
+            Some(Ok(imported)) => repository.import_legacy(imported).await?,
+            None => repository.import_legacy(&[]).await?,
+        }
+    }
+    let mut profiles = Vec::new();
+    for profile in repository.list_each().await? {
+        match profile {
+            Ok(profile) => profiles.push(profile),
+            Err(unreadable) => problems.push(match unreadable.name {
+                Some(name) => tr!(
+                    "The connection {0} could not be read and is not shown: {1}",
+                    name,
+                    unreadable.error
+                ),
+                None => tr!(
+                    "A saved connection could not be read and is not shown: {0}",
+                    unreadable.error
+                ),
+            }),
+        }
+    }
     let mut migration_warning = None;
-    if let Some(bytes) = bytes {
+    if let Some(Ok(old)) = old {
         // A previous crash may have committed SQLite before unlinking the JSON.
         // Delete only if every legacy profile is already represented identically.
-        let old = legacy_profiles(&bytes)?;
         if !old.iter().all(|old| {
             profiles
                 .iter()
                 .any(|new| new.name == old.name && new.config == old.config)
         }) {
-            return Err(DriverError::validation(tr!(
-                "The legacy JSON changed after the migration. It was preserved to avoid losing connections."
-            )));
-        }
-        if tokio::fs::remove_file(legacy).await.is_err() {
+            problems.push(
+                tr!(
+                    "The legacy JSON changed after the migration. It was preserved to avoid losing connections."
+                )
+                .to_owned(),
+            );
+        } else if tokio::fs::remove_file(legacy).await.is_err() {
             migration_warning = Some(
                 tr!("Migration completed; could not delete the legacy connections.json.")
                     .to_owned(),
@@ -136,9 +168,17 @@ async fn load_from(
     let registry = builtin_registry()?;
     let mut loaded = Vec::new();
     for profile in profiles {
-        registry
-            .get(profile.config.driver)?
-            .validate_connection(&profile.config)?;
+        if let Err(error) = registry
+            .get(profile.config.driver)
+            .and_then(|driver| driver.validate_connection(&profile.config))
+        {
+            problems.push(tr!(
+                "The connection {0} is not valid and is not shown: {1}",
+                profile.name,
+                error
+            ));
+            continue;
+        }
         let mut warning = migration_warning.clone();
         let credentials = if profile.remember_password
             && profile.config.driver != DriverKind::Databricks
@@ -179,7 +219,19 @@ async fn load_from(
             config: profile.config.clone(),
             credentials,
         };
-        let row_limit = stored_row_limit(repository, profile.id).await?;
+        let row_limit = match stored_row_limit(repository, profile.id).await {
+            Ok(limit) => limit,
+            Err(error) => {
+                add_warning(
+                    &mut warning,
+                    tr!(
+                        "The saved row limit could not be read; the default is used: {0}",
+                        error
+                    ),
+                );
+                DEFAULT_ROW_LIMIT
+            }
+        };
         loaded.push(LoadedConnection {
             profile,
             input,
@@ -188,7 +240,10 @@ async fn load_from(
             warning,
         });
     }
-    Ok(loaded)
+    Ok(LoadedConnections {
+        connections: loaded,
+        problems,
+    })
 }
 
 /// Saves a profile, its row limit and, when asked to remember it, its
@@ -217,10 +272,12 @@ async fn save_to(
     secrets: &dyn SecretStore,
     repository: &ConfigRepository,
 ) -> DriverResult<LoadedConnection> {
+    // Another profile that cannot be read does not block this one.
     let previous = repository
-        .list()
+        .list_each()
         .await?
         .into_iter()
+        .flatten()
         .find(|value| value.id == profile.id);
     let mut warning = None;
     // The vault is written before the profile, so `remember_password` is

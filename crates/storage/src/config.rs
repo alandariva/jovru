@@ -11,6 +11,14 @@ CREATE TABLE connections (
 CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL);
 "#;
 
+/// A stored profile that could not be read, with its name when that much
+/// is readable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreadableProfile {
+    pub name: Option<String>,
+    pub error: DriverError,
+}
+
 #[derive(Clone)]
 pub struct ConfigRepository {
     pool: SqlitePool,
@@ -47,31 +55,52 @@ impl ConfigRepository {
         self.pool.close().await;
     }
 
+    /// Every profile; fails when any one cannot be read. See
+    /// [`ConfigRepository::list_each`] to keep the readable ones.
     pub async fn list(&self) -> DriverResult<Vec<ConnectionProfile>> {
+        self.list_each()
+            .await?
+            .into_iter()
+            .map(|profile| profile.map_err(|unreadable| unreadable.error))
+            .collect()
+    }
+
+    /// Every profile in order, each read on its own: a row that cannot be
+    /// read (invalid JSON, a bad identity) does not hide the others.
+    pub async fn list_each(
+        &self,
+    ) -> DriverResult<Vec<Result<ConnectionProfile, UnreadableProfile>>> {
         let rows = sqlx::query(
             "SELECT id,name,config_json,remember_password,revision FROM connections ORDER BY rowid",
         )
         .fetch_all(&self.pool)
         .await
         .map_err(sql_error)?;
-        rows.into_iter()
+        Ok(rows
+            .into_iter()
             .map(|row| {
-                Ok(ConnectionProfile {
-                    id: row
-                        .try_get::<String, _>("id")
-                        .map_err(sql_error)?
-                        .parse()
-                        .map_err(|_| error("Invalid connection identity."))?,
-                    name: row.try_get("name").map_err(sql_error)?,
-                    config: serde_json::from_str(
-                        &row.try_get::<String, _>("config_json").map_err(sql_error)?,
-                    )
-                    .map_err(json_error)?,
-                    remember_password: row.try_get("remember_password").map_err(sql_error)?,
-                    revision: row.try_get("revision").map_err(sql_error)?,
+                let read = || -> DriverResult<ConnectionProfile> {
+                    Ok(ConnectionProfile {
+                        id: row
+                            .try_get::<String, _>("id")
+                            .map_err(sql_error)?
+                            .parse()
+                            .map_err(|_| error("Invalid connection identity."))?,
+                        name: row.try_get("name").map_err(sql_error)?,
+                        config: serde_json::from_str(
+                            &row.try_get::<String, _>("config_json").map_err(sql_error)?,
+                        )
+                        .map_err(json_error)?,
+                        remember_password: row.try_get("remember_password").map_err(sql_error)?,
+                        revision: row.try_get("revision").map_err(sql_error)?,
+                    })
+                };
+                read().map_err(|error| UnreadableProfile {
+                    name: row.try_get("name").ok(),
+                    error,
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Compare-and-swap prevents an obsolete editor from overwriting a newer profile.

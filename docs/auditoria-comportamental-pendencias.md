@@ -135,6 +135,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Carregar preferências e workspace à parte; isolar falhas por perfil.
 - **Evidência no projeto:** `src/connection_store.rs` (`load_from`); `src/app/connections.rs` (`load_connections`)
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. `ConfigRepository::list_each` lê cada perfil por si; `connection_store::load` devolve `LoadedConnections` com as conexões válidas e um problema por perfil ilegível ou inválido (um JSON legado inválido também vira problema e é preservado sem importar). Limite de linhas ilegível usa o padrão com aviso, e salvar não falha por causa de outro perfil. `load_connections` lê conexões, fonte e workspace separadamente e relata cada problema.
 
 ## N015 — É possível iniciar outra execução enquanto a anterior ainda cancela
 

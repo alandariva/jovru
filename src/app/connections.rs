@@ -257,55 +257,77 @@ impl AppView {
         cx.notify();
     }
 
+    /// Loads the connections, the editor font size and the last session's
+    /// tabs. Each is read on its own: a problem with one never hides the
+    /// others, and every problem is reported.
     pub(super) fn load_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = connection_store::data_dir();
         cx.spawn_in(window, async move |weak, cx| {
             let result = backend::run(async move {
-                let connections = connection_store::load(&dir, &SystemSecretStore).await?;
-                let repository = ConfigRepository::open(&dir).await?;
-                let font_size = repository.setting("editor.font_size").await?;
-                let state = super::state::read_state(&repository).await;
-                repository.close().await;
+                let connections = connection_store::load(&dir, &SystemSecretStore).await;
+                let (font_size, state) = match ConfigRepository::open(&dir).await {
+                    Ok(repository) => {
+                        let font_size = repository.setting("editor.font_size").await;
+                        let state = super::state::read_state(&repository).await;
+                        repository.close().await;
+                        (font_size, state)
+                    }
+                    Err(error) => (Err(error.clone()), Err(error)),
+                };
                 Ok((connections, font_size, state))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connections_loading = false;
-                match result {
-                    Ok((connections, font_size, state)) => {
+                let (connections, font_size, state) = match result {
+                    Ok(parts) => parts,
+                    Err(error) => (Err(error.clone()), Err(error.clone()), Err(error)),
+                };
+                let mut problems = Vec::new();
+                match font_size {
+                    Ok(font_size) => {
                         if let Some(size) = font_size
                             .and_then(|value| value.as_f64())
                             .filter(|size| (12.0..=24.0).contains(size))
                         {
                             Theme::update(cx, |theme| theme.mono_font_size = px(size as f32));
                         }
-                        for loaded in connections {
+                    }
+                    Err(error) => problems.push(tr!(
+                        "Could not read the editor font size; the default is used: {0}",
+                        error
+                    )),
+                }
+                match connections {
+                    Ok(loaded) => {
+                        problems.extend(loaded.problems);
+                        for loaded in loaded.connections {
                             this.insert_connection(loaded, cx);
-                        }
-                        // The demo keeps its fixed tabs and saves nothing.
-                        let restored = match state {
-                            _ if std::env::var_os("JYKRE_DEMO").is_some() => false,
-                            Ok(state) => this.restore_state(state, window, cx),
-                            Err(error) => {
-                                this.app_notice = Some(Feedback::new(
-                                    Tone::Error,
-                                    tr!("Could not read the tabs of the last session: {0}", error),
-                                ));
-                                false
-                            }
-                        };
-                        // Without connections the explorer and the workspace show
-                        // an empty state with the way forward; nothing pops up.
-                        if !restored && !this.connections.is_empty() && this.panels.is_empty() {
-                            this.new_query(this.connections[0].group, window, cx);
                         }
                     }
                     Err(error) => {
-                        this.app_notice = Some(Feedback::new(
-                            Tone::Error,
-                            tr!("Could not load the saved connections: {0}", error),
-                        ));
+                        problems.push(tr!("Could not load the saved connections: {0}", error))
                     }
+                }
+                // The demo keeps its fixed tabs and saves nothing.
+                let restored = match state {
+                    _ if std::env::var_os("JYKRE_DEMO").is_some() => false,
+                    Ok(state) => this.restore_state(state, window, cx),
+                    Err(error) => {
+                        problems.push(tr!(
+                            "Could not read the tabs of the last session: {0}",
+                            error
+                        ));
+                        false
+                    }
+                };
+                if !problems.is_empty() {
+                    this.app_notice = Some(Feedback::new(Tone::Error, problems.join(" ")));
+                }
+                // Without connections the explorer and the workspace show
+                // an empty state with the way forward; nothing pops up.
+                if !restored && !this.connections.is_empty() && this.panels.is_empty() {
+                    this.new_query(this.connections[0].group, window, cx);
                 }
                 cx.notify();
             });

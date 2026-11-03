@@ -69,3 +69,42 @@ async fn row_limits_are_kept_per_connection_and_survive_restart() {
     reopened.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn an_unreadable_profile_does_not_hide_the_others() {
+    let dir = std::env::temp_dir().join(format!("jykre-config-each-{}", ConnectionId::new()));
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    let profile = |name: &str| ConnectionProfile {
+        id: ConnectionId::new(),
+        name: name.into(),
+        config: ConnectionConfig {
+            driver: DriverKind::Postgres,
+            options: serde_json::json!({"host":"localhost","database":"fixture","user":"fixture"}),
+        },
+        remember_password: false,
+        revision: 0,
+    };
+    let good = repository.save(&profile("Good fixture")).await.unwrap();
+    repository.save(&profile("Broken fixture")).await.unwrap();
+    repository.close().await;
+    // Another version or a hand edit leaves a row that is not valid JSON.
+    let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}", dir.join("config.db").display()))
+        .await
+        .unwrap();
+    sqlx::query("UPDATE connections SET config_json='{' WHERE name='Broken fixture'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let reopened = ConfigRepository::open(&dir).await.unwrap();
+    let each = reopened.list_each().await.unwrap();
+    assert_eq!(each.len(), 2);
+    assert_eq!(each[0], Ok(good));
+    assert_eq!(
+        each[1].as_ref().unwrap_err().name.as_deref(),
+        Some("Broken fixture")
+    );
+    assert!(reopened.list().await.is_err());
+    reopened.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
