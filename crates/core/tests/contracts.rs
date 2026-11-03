@@ -464,3 +464,94 @@ fn generated_names_quote_every_structural_segment_with_the_driver_quote() {
         .child(ObjectKind::Column, "ignored");
     assert_eq!(driver.relation_name(&path), "\"c.1\".\"s\".\"t\"");
 }
+
+#[tokio::test]
+async fn namespace_levels_end_at_relations_and_discovery_defaults_to_not_implemented() {
+    let capabilities = |hierarchy: Vec<ObjectKind>| DriverCapabilities {
+        sql: true,
+        metadata: true,
+        transactions: false,
+        hierarchy,
+        default_port: None,
+        identifier_quote: '"',
+    };
+    use ObjectKind::*;
+    assert_eq!(
+        capabilities(vec![Database, Schema, Table, View, Column]).namespace_levels(),
+        [Database, Schema]
+    );
+    assert_eq!(
+        capabilities(vec![Catalog, Schema, Table, View, Column]).namespace_levels(),
+        [Catalog, Schema]
+    );
+    assert_eq!(
+        capabilities(vec![Database, Table, View, Column]).namespace_levels(),
+        [Database]
+    );
+    assert!(
+        capabilities(vec![Table, Column])
+            .namespace_levels()
+            .is_empty()
+    );
+    let driver: Arc<dyn Driver> = Arc::new(TestDriver::new("Test"));
+    let error = driver
+        .discover_namespaces(
+            &connection(),
+            &ObjectPath::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotImplemented);
+}
+
+#[test]
+fn objects_cached_before_keys_existed_still_read_and_new_kinds_keep_their_level() {
+    let old = json!({
+        "kind": "column",
+        "path": [{"kind": "table", "name": "orders"}, {"kind": "column", "name": "id"}],
+        "name": "id", "ordinal": 1, "data_type": "integer", "nullable": false, "comment": null
+    });
+    let column: MetadataObject = serde_json::from_value(old).unwrap();
+    assert_eq!(column.primary_key, None);
+    assert_eq!(column.references, None);
+    // Empty additions are left out of the stored form.
+    let stored = serde_json::to_value(&column).unwrap();
+    assert!(stored.get("primary_key").is_none() && stored.get("references").is_none());
+    let hierarchy = [
+        ObjectKind::Database,
+        ObjectKind::Schema,
+        ObjectKind::Table,
+        ObjectKind::View,
+        ObjectKind::Column,
+    ];
+    let schema = ObjectPath::default()
+        .child(ObjectKind::Database, "db")
+        .child(ObjectKind::Schema, "sales");
+    let summary = schema.child(ObjectKind::MaterializedView, "summary");
+    summary.validate_scope(&hierarchy).unwrap();
+    assert_eq!(
+        serde_json::to_value(ObjectKind::MaterializedView).unwrap(),
+        "materialized_view"
+    );
+    assert_eq!(summary.relation(), Some("summary"));
+    // A column or key reads its table; a partition reads itself.
+    let events = schema.child(ObjectKind::Table, "events");
+    assert_eq!(
+        events.child(ObjectKind::ForeignKey, "fk").relation_path(),
+        Some(events.clone())
+    );
+    assert_eq!(
+        events
+            .child(ObjectKind::Partition, "events_2026")
+            .relation_path(),
+        Some(schema.child(ObjectKind::Table, "events_2026"))
+    );
+    assert_eq!(schema.relation_path(), None);
+    let driver = TestDriver::new("Test");
+    assert_eq!(
+        driver.relation_name(&events.child(ObjectKind::Partition, "events_2026")),
+        "\"db\".\"sales\".\"events_2026\""
+    );
+    assert!(driver.default_namespaces(&connection().config).is_empty());
+}

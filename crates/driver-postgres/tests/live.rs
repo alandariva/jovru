@@ -383,3 +383,148 @@ async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
     .await
     .expect("live scenario exceeded its time budget");
 }
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_discovery_lists_the_database_and_its_schemas_only() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let input = input();
+        let cancel = CancellationToken::new();
+        let root = driver
+            .discover_namespaces(&input, &ObjectPath::default(), cancel.clone())
+            .await
+            .unwrap();
+        assert_eq!(root.len(), 1);
+        assert_eq!(root[0].kind, ObjectKind::Database);
+        assert_eq!(root[0].name, "jykre");
+        let schemas = driver
+            .discover_namespaces(&input, &root[0].path, cancel.clone())
+            .await
+            .unwrap();
+        assert!(schemas.iter().any(|schema| schema.name == "public"));
+        assert!(
+            schemas
+                .iter()
+                .all(|schema| schema.kind == ObjectKind::Schema
+                    && !schema.name.starts_with("pg_")
+                    && schema.name != "information_schema")
+        );
+        let public = schemas
+            .iter()
+            .find(|schema| schema.name == "public")
+            .unwrap();
+        assert!(
+            driver
+                .discover_namespaces(&input, &public.path, cancel.clone())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let other = ObjectPath::default().child(ObjectKind::Database, "another_database");
+        assert_eq!(
+            driver
+                .discover_namespaces(&input, &other, cancel)
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::Validation
+        );
+    })
+    .await
+    .expect("live discovery took too long");
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_metadata_has_exact_types_keys_comments_and_relation_kinds() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let input = input();
+        let cancel = CancellationToken::new();
+        let public = ObjectPath::default()
+            .child(ObjectKind::Database, "jykre")
+            .child(ObjectKind::Schema, "public");
+        assert_eq!(
+            driver.default_namespaces(&input.config),
+            std::slice::from_ref(&public)
+        );
+        let mut metadata = Metadata::default();
+        driver
+            .introspect_scoped(&input, &public, &mut metadata, cancel.clone())
+            .await
+            .unwrap();
+        let find = |path: &ObjectPath| {
+            let found = metadata.0.iter().find(|object| object.path == *path);
+            assert!(found.is_some(), "missing {path:?}");
+            found.cloned().unwrap()
+        };
+        let fixture = public.child(ObjectKind::Table, "gate_fixture");
+        assert_eq!(
+            find(&fixture).comment.as_deref(),
+            Some("Synthetic gate table")
+        );
+        let id = find(&fixture.child(ObjectKind::Column, "id"));
+        assert_eq!(id.primary_key, Some(1));
+        assert_eq!(id.nullable, Some(false));
+        assert_eq!(
+            find(&fixture.child(ObjectKind::Column, "amount"))
+                .data_type
+                .as_deref(),
+            Some("numeric(20,2)")
+        );
+        let label = find(&fixture.child(ObjectKind::Column, "label"));
+        assert_eq!(label.data_type.as_deref(), Some("character varying(80)"));
+        assert_eq!(label.comment.as_deref(), Some("Free text"));
+        assert_eq!(label.primary_key, None);
+        let child = public.child(ObjectKind::Table, "gate_child");
+        let created = find(&child.child(ObjectKind::Column, "created"));
+        assert!(
+            created
+                .default_value
+                .as_deref()
+                .is_some_and(|value| value.contains("CURRENT_DATE"))
+        );
+        assert_eq!(
+            find(&child.child(ObjectKind::Column, "tags"))
+                .data_type
+                .as_deref(),
+            Some("text[]")
+        );
+        let key = find(&child.child(ObjectKind::ForeignKey, "gate_child_fixture_id_fkey"));
+        assert_eq!(
+            key.references,
+            Some(ForeignKeyTarget {
+                relation: fixture.clone(),
+                columns: vec!["fixture_id".into()],
+                referenced: vec!["id".into()],
+            })
+        );
+        let totals = public.child(ObjectKind::MaterializedView, "gate_fixture_totals");
+        find(&totals.child(ObjectKind::Column, "total"));
+        let events = public.child(ObjectKind::Table, "gate_events");
+        find(&events.child(ObjectKind::Partition, "gate_events_2026"));
+        // A partition is listed under its table, not as a table of its own.
+        assert!(!metadata
+            .0
+            .iter()
+            .any(|object| object.kind == ObjectKind::Table && object.name == "gate_events_2026"));
+        assert_eq!(
+            driver.relation_name(&events.child(ObjectKind::Partition, "gate_events_2026")),
+            "\"public\".\"gate_events_2026\""
+        );
+        // Refreshing the partitioned table keeps its partitions.
+        let mut table = Metadata::default();
+        driver
+            .introspect_scoped(&input, &events, &mut table, cancel)
+            .await
+            .unwrap();
+        assert!(
+            table
+                .0
+                .iter()
+                .any(|object| object.kind == ObjectKind::Partition)
+        );
+    })
+    .await
+    .expect("live metadata took too long");
+}

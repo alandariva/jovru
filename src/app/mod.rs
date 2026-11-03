@@ -6,6 +6,7 @@ mod layout;
 pub mod performance;
 mod probe;
 mod result_grid;
+mod scope_picker;
 mod sql;
 mod state;
 mod ui;
@@ -76,6 +77,15 @@ actions!(
     ]
 );
 
+/// The part of the connection dialog on screen. The header, the driver and
+/// the footer with Test and Save stay visible in every one.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectionSection {
+    Connection,
+    Metadata,
+    Options,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
     Explorer,
@@ -105,6 +115,10 @@ struct Connection {
     collapsed: HashSet<ObjectPath>,
     /// Scope being refreshed and how to cancel it.
     refreshing: Option<(ObjectPath, CancellationToken)>,
+    /// What the user chose to introspect; pending until they choose.
+    scope: jykre::metadata_scope::MetadataScope,
+    /// How far reading the chosen namespaces got, while it runs.
+    progress: Option<jykre::metadata_scope::RefreshProgress>,
     status: Feedback,
     notice: Option<String>,
 }
@@ -135,6 +149,7 @@ struct AppView {
     command: Entity<InputState>,
     command_open: bool,
     connection_open: bool,
+    connection_section: ConnectionSection,
     connection_focus: FocusHandle,
     connection_name: Entity<InputState>,
     connection_host: Entity<InputState>,
@@ -146,6 +161,7 @@ struct AppView {
     connection_password: Entity<InputState>,
     connection_ssl: Entity<InputState>,
     connection_databricks: Entity<databricks_connection::DatabricksForm>,
+    connection_scope: Entity<scope_picker::ScopePicker>,
     connection_status: Option<Feedback>,
     /// Application-level problem (loading connections, saving preferences,
     /// searching) shown in the explorer until dismissed.
@@ -288,6 +304,7 @@ impl AppView {
             command,
             command_open: false,
             connection_open: false,
+            connection_section: ConnectionSection::Connection,
             connection_focus: cx.focus_handle(),
             connection_name,
             connection_host,
@@ -305,6 +322,7 @@ impl AppView {
             connection_ssl: cx.new(|cx| InputState::new(window, cx).default_value("prefer")),
             connection_databricks: cx
                 .new(|cx| databricks_connection::DatabricksForm::new(window, cx)),
+            connection_scope: cx.new(|cx| scope_picker::ScopePicker::new(window, cx)),
             connection_status: None,
             app_notice: None,
             command_searching: false,
@@ -375,6 +393,12 @@ impl AppView {
                 _ => {}
             },
         ));
+        app._subscriptions.push(cx.subscribe(
+            &app.connection_scope,
+            |this, _, event: &scope_picker::PickerEvent, cx| match event {
+                scope_picker::PickerEvent::LoadRequested => this.load_namespaces(cx),
+            },
+        ));
         if std::env::var_os("JYKRE_DEMO").is_some() {
             for (name, detail, color) in [
                 (tr!("PostgreSQL · Local"), "localhost:5432", MINT),
@@ -403,6 +427,8 @@ impl AppView {
                     metadata: Vec::new(),
                     collapsed: HashSet::new(),
                     refreshing: None,
+                    scope: jykre::metadata_scope::MetadataScope::default(),
+                    progress: None,
                     status: Feedback::new(Tone::Info, tr!("Demo · simulated data")),
                     notice: None,
                 });

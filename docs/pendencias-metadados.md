@@ -1,0 +1,380 @@
+# Pendências do subsistema de metadados
+
+Itens da auditoria do subsistema de metadados que **ainda não foram
+implementados**, ou foram implementados só em parte, em `release/0.1.0`
+(3 de novembro de 2026). As referências de mercado aparecem com nomes
+genéricos: "IDEs de banco de dados", "gerenciadores de banco de dados" e
+"ferramentas de referência".
+
+Os números `MET-xxx` são os da auditoria original, para rastreio. Os
+achados já fechados aparecem só no resumo.
+
+## Resumo
+
+| Situação | Quantidade | IDs |
+| --- | ---: | --- |
+| Fechados | 2 | MET-001, MET-007 |
+| Parciais (ainda falta uma parte) | 7 | MET-002, MET-003, MET-004, MET-005, MET-006, MET-016, MET-018 |
+| Ainda abertos | 13 | MET-008 a MET-015, MET-017, MET-019 a MET-022 |
+| **Pendências neste arquivo** | **20** | os parciais e os abertos |
+
+**O que já foi entregue**
+
+- **MET-001.** Seleção obrigatória do que introspectar, em todos os drivers
+  ([ADR-0015](adr/0015-introspect-only-what-the-user-chooses.md)):
+  - descoberta de namespaces nível a nível (`Driver::discover_namespaces`);
+  - regras persistidas por conexão (`connection.<id>.metadata_scope`);
+  - leitura e publicação por namespace, com barra de progresso e tempo
+    restante;
+  - remoção do que deixou de ser escolhido (`MetadataRepository::retain`).
+- **MET-007.** O namespace padrão de cada conexão (`Driver::default_namespaces`)
+  vem marcado no diálogo, com o selo **Padrão**, enquanto nada foi escolhido.
+- **Parte de MET-005 e MET-006**
+  ([ADR-0016](adr/0016-keys-defaults-and-relation-kinds.md)):
+  - tipos exatos, defaults, comentários, posição na chave primária e
+    chaves estrangeiras;
+  - views materializadas e partições;
+  - no PostgreSQL, a leitura passou para `pg_catalog`.
+- **Diálogo de conexão** dividido nas seções Conexão, Metadados e Opções,
+  com rodapé fixo.
+
+**O que mais pesa agora**
+
+1. O editor ainda não usa os metadados (**MET-008**).
+2. O contexto de execução de cada aba continua invisível (**MET-009**).
+3. Nada acontece depois de um DDL (**MET-010**).
+4. Há custos de leitura do cache no caminho interativo (**MET-011**,
+   **MET-012**, **MET-013**).
+
+---
+
+## P1: Integração com o editor
+
+### MET-008: o editor não usa os metadados
+
+- **Situação atual:**
+  - `Workspace` configura só o realce léxico (`SqlHighlighter`), sem
+    autocomplete, hover ou ir para a definição.
+  - O componente de editor (`gpui-kit` 0.9) já oferece `CompletionProvider`,
+    `HoverProvider` e `DefinitionProvider`.
+- **Referência:** as IDEs de banco de dados sugerem tabelas, colunas, aliases
+  e CTEs conforme o contexto SQL, e mostram tipo e comentário no hover.
+- **O que falta:**
+  - Um índice de nomes por conexão, imutável e versionado, montado fora da
+    thread de UI a partir do cache.
+  - Um provider que use o tokenizer (`jykre::sql::tokens`) e o statement no
+    cursor para:
+    - sugerir relações depois de `FROM`/`JOIN`;
+    - sugerir colunas em `alias.`;
+    - resolver nomes qualificados.
+  - Usar sempre a conexão e o contexto da própria aba.
+  - Pedir em segundo plano as colunas de uma relação ainda sem colunas no
+    cache, sem bloquear a digitação.
+  - Hover com tipo, nulabilidade, default, chave e comentário (os dados já
+    existem desde a ADR-0016).
+  - Ir para a definição, levando ao nó do explorer.
+- **Dependências e riscos:**
+  - O provider usa tipos `lsp_types`, que hoje só existem como dependência
+    transitiva. Torná-los dependência direta exige aprovação.
+  - O alvo de uma FK pode estar fora da seleção e, portanto, fora do cache.
+- **Critérios de aceitação:**
+  - Uma aba da conexão A nunca sugere objetos da conexão B.
+  - Depois de `FROM orders o`, `o.` sugere as colunas de `orders`.
+  - Uma relação sem colunas no cache mostra "carregando" e é completada sem
+    travar o editor.
+
+### MET-009: contexto de execução por aba invisível e sem controle
+
+- **Situação atual:**
+  - `ExecutionOptions.context` vai sempre vazio.
+  - O cabeçalho da aba mostra o `database` da configuração, não o schema
+    corrente da sessão.
+  - O PostgreSQL não tem `search_path` configurável, e a sugestão de padrão
+    (MET-007) usa `public`, não o `search_path` real.
+  - Se `context.schema` for usado, o driver PostgreSQL executa
+    `SET search_path` a cada statement e descarta `$user` e `public`.
+- **Referência:** os gerenciadores de banco de dados têm um seletor de
+  catálogo e schema ativos por editor, que acompanha os `USE` executados.
+- **O que falta:**
+  - Um seletor de contexto no cabeçalho da aba: schema no PostgreSQL,
+    database no MySQL, catálogo e schema no Databricks.
+  - Aplicar o contexto na sessão uma vez, só quando ele muda.
+  - Refletir `USE`/`SET` bem-sucedidos.
+  - Repor o contexto quando a sessão for reaberta.
+- **Critérios de aceitação:**
+  - Depois de `USE sales`, o cabeçalho mostra `sales`.
+  - Trocar o schema no seletor muda onde um `SELECT` não qualificado roda.
+  - Um `SET search_path` do usuário não é sobrescrito a cada statement.
+
+### MET-010: nenhuma atualização depois de DDL
+
+- **Situação atual:** o workspace não chama nenhuma operação de metadados.
+  Depois de `CREATE TABLE`, a tabela só aparece com F5 no schema.
+- **Referência:** as IDEs de banco de dados sincronizam a estrutura depois
+  de um DDL executado no editor.
+- **O que falta:**
+  - Classificar o statement pelo tokenizer (`CREATE`, `ALTER`, `DROP`,
+    `RENAME`, `COMMENT`) e identificar o alvo.
+  - Depois do sucesso, enfileirar a releitura do schema afetado, ou do
+    contexto ativo quando o nome não for qualificado, com debounce.
+  - Respeitar a seleção: um schema fora dela não é lido.
+- **Critério de aceitação:** `CREATE TABLE x` bem-sucedido faz `x` aparecer
+  no explorer em até 2 s, sem ação manual.
+
+## P1: Desempenho do cache e do explorer
+
+### MET-011: cada leitura do cache abre um pool e roda `quick_check`
+
+- **Situação atual:**
+  - `MetadataRepository::open` abre um pool SQLite e executa
+    `PRAGMA quick_check` a cada expansão, busca e refresh. No startup, isso
+    acontece duas vezes por conexão.
+  - O benchmark `metadata_paging` mede só `children()` com o repositório já
+    aberto.
+- **O que falta:**
+  - Um repositório de vida longa por conexão.
+  - `quick_check` só no startup ou depois de um erro.
+  - Um benchmark de abertura com 500 mil objetos.
+- **Critério de aceitação:** expandir um nó a partir do cache fica em até
+  50 ms p95 com 500 mil objetos, contando a abertura.
+
+### MET-012: expandir relê todas as páginas, e o merge é quadrático na UI
+
+- **Situação atual:**
+  - `load_cached_children` relê todas as páginas já abertas, com
+    `LIMIT/OFFSET`.
+  - `apply_cache` compara cada objeto novo com todos os carregados, O(N·M),
+    na thread de UI.
+- **O que falta:**
+  - Ler só a página pedida.
+  - Paginação por cursor.
+  - Merge com `HashSet<ObjectPath>` ou fora da thread de UI.
+- **Critério de aceitação:** expandir o 50º nó não relê as 49 páginas
+  anteriores (verificado por log).
+
+### MET-013: o render do explorer recalcula a árvore a cada frame
+
+Amplia a N038 da auditoria comportamental.
+
+- **Situação atual:**
+  - `explorer::visible` roda no render, em O(N × |collapsed|).
+  - O texto de atualidade de cada nó é montado a cada frame.
+  - IDs de elemento são feitos com `format!`, e o ID que junta nomes com `/`
+    pode colidir (`a/b` + `c` contra `a` + `b/c`).
+  - A árvore não é virtualizada.
+  - Views materializadas aparecem antes das tabelas, porque a ordem segue o
+    texto do tipo.
+- **O que falta:**
+  - Uma lista achatada e virtualizada, recalculada só quando a árvore muda.
+  - Guardar o conjunto de nós expandidos em vez dos recolhidos.
+  - Textos montados sob demanda e IDs estáveis.
+  - Uma ordem de tipos definida (tabelas, views, views materializadas).
+- **Critério de aceitação:** frame do explorer em até 16 ms com 5 mil nós
+  expandidos (frame probe).
+
+### MET-014: busca sem índice, só ASCII e frágil
+
+- **Situação atual:**
+  - `instr(lower(name))` percorre a tabela inteira, e o `lower` do SQLite só
+    converte ASCII.
+  - Os ancestrais são buscados em N+1.
+  - As conexões são consultadas em sequência, e uma falha derruba a busca
+    de todas.
+  - A palette filtra tabelas **depois** do `LIMIT 200`.
+- **O que falta:**
+  - Uma coluna de nome normalizado, com índice (FTS5 trigram, se a medição
+    exigir).
+  - Filtrar por tipo no SQL.
+  - Erros por conexão, sem afetar as outras.
+  - Consultas em paralelo.
+- **Critérios de aceitação:**
+  - Buscar `ação` encontra `AÇÃO`.
+  - Um cache quebrado não impede a busca nas outras conexões.
+  - Buscar `id` mostra a tabela `orders` mesmo que existam mais de 200
+    colunas `id`.
+
+## P2: Introspecção e refresh
+
+### MET-002 (parcial): Databricks em escala
+
+- **Já feito:** cada schema é lido e publicado sozinho, com limite de tempo
+  por leitura. Uma falha não derruba os outros.
+- **O que falta:**
+  - Paralelismo limitado (de 4 a 8 requisições ao mesmo tempo). Hoje os
+    namespaces são lidos em sequência.
+  - Listar só nomes com `table-summaries` ou `tables?omit_columns=true`, e
+    ler colunas sob demanda.
+  - Evitar o GET do catálogo e do schema que cada leitura de schema faz
+    antes de listar as tabelas.
+  - Deixar o catálogo `system` fora de **Tudo** até ele ser marcado
+    explicitamente.
+- **Critério de aceitação:** 20 catálogos × 50 schemas, num mock com
+  latência, terminam em menos de 60 s com paralelismo 4.
+
+### MET-003 (parcial): editar o perfil apaga o cache
+
+- **Já feito:** salvar com o cache vazio lê só a seleção, nunca a conexão
+  inteira.
+- **O que falta:**
+  - Hoje a identidade do cache é a configuração inteira. Trocar compute,
+    `defaultCatalog`, `defaultSchema` ou `sslMode` apaga o cache e força uma
+    releitura.
+  - Cada driver deve definir quais opções identificam o catálogo. Isso muda
+    o contrato e exige aprovação.
+- **Critério de aceitação:** trocar o warehouse de uma conexão Databricks
+  mantém o cache.
+
+### MET-004 (parcial): níveis de introspecção
+
+- **Já feito:**
+  - O PostgreSQL lê o `pg_catalog`, um schema por vez.
+  - O MySQL lê um database por vez.
+- **O que falta:**
+  - Níveis de leitura: só nomes de relações primeiro, colunas e chaves
+    depois, ou só ao expandir. Hoje cada namespace é lido completo.
+  - No MySQL, as colunas ainda vêm na mesma consulta das relações.
+  - Medir o tempo por schema em catálogos grandes (por exemplo, um fixture
+    sintético com 200 schemas).
+- **Critério de aceitação:** expandir um schema com 5 mil tabelas mostra os
+  nomes antes de as colunas chegarem.
+
+### MET-005 (parcial): cobertura de metadados
+
+- **Já feito:** tipos exatos, defaults, comentários, primary key, foreign
+  keys, views materializadas e partições.
+- **O que falta, lido sob demanda (inspeção) e não em todo refresh:**
+  - índices, unique e check constraints;
+  - funções e procedures com seus parâmetros;
+  - sequences e triggers;
+  - tipos customizados e enums do PostgreSQL;
+  - defaults de coluna no Databricks (não são lidos hoje);
+  - DDL e fonte de views e rotinas, só por ação explícita.
+- **Critério de aceitação:** uma ação **Inspecionar** numa tabela mostra
+  índices e constraints sem que o refresh normal os leia.
+
+### MET-006 (parcial): especificidades do PostgreSQL
+
+- **Já feito:**
+  - `pg_catalog` e views materializadas.
+  - Partições sob a tabela raiz.
+  - Schemas TOAST e temporários excluídos.
+- **O que falta:**
+  - Uma partição em schema diferente do da tabela raiz ainda aparece como
+    tabela comum.
+  - Listar os outros databases do servidor, como opção. Cada database exige
+    uma conexão própria.
+
+### MET-015: um refresh por conexão, e o segundo é ignorado sem aviso
+
+- **Situação atual:**
+  - O lock de escrita do cache fica preso durante toda a leitura remota.
+  - Um F5 em outro nó durante um refresh cai em `Some(_) => {}` e não tem
+    efeito visível.
+- **Referência:** as ferramentas de referência enfileiram os refreshes de
+  nós diferentes ou mostram que um já está em andamento.
+- **O que falta:**
+  - Uma fila por conexão no backend, que deduplica escopos iguais e absorve
+    os descendentes.
+  - Lock só na publicação.
+  - Mostrar "na fila".
+- **Critério de aceitação:** F5 em dois schemas seguidos atualiza os dois,
+  em ordem, com o segundo mostrado como "na fila".
+
+### MET-016 (parcial): estado e atualidade
+
+- **Já feito:** barra de progresso com o tempo restante ao ler a seleção.
+- **O que falta:**
+  - Um selo de idade por namespace escolhido (por exemplo, "há 3 dias"). Hoje
+    a idade só aparece no menu de contexto.
+  - Revalidação opcional ao abrir a conexão, só dos namespaces escolhidos e
+    só acima de um limite de idade configurável. Desligada por padrão.
+  - Sem polling.
+
+### MET-018 (parcial): sucesso anunciado sem a árvore atualizada
+
+Corresponde à N028 e N031 da auditoria comportamental.
+
+- **Já feito:** a leitura da seleção avisa quando os dados foram salvos mas
+  o explorer não conseguiu exibi-los.
+- **O que falta:**
+  - O refresh de um nó (`refresh_metadata`) ainda descarta o erro da
+    releitura (`if let Ok(snapshot)`).
+  - Salvar a conexão ainda cancela o refresh antes de saber se o
+    salvamento deu certo (N031).
+
+## P3: Ajustes e dívidas
+
+### MET-017: estados de refresh como texto
+
+- **Situação atual:**
+  - `RefreshStatus.state` é uma `String` comparada por texto na UI.
+  - Um refresh parcial não atualiza `last_success_at`, então aparece
+    "Última atualização bem-sucedida: nenhuma".
+- **O que falta:**
+  - Um enum no `jykre-storage`, sem mudar o texto gravado.
+  - Registrar a última publicação separada do último sucesso completo.
+
+### MET-019: permissões
+
+- **Situação atual:**
+  - PostgreSQL e MySQL omitem em silêncio o que o usuário não pode ver.
+  - O Databricks mantém as subárvores sem permissão, marcadas como
+    "parcial".
+- **O que falta:**
+  - Mostrar a data da última leitura boa numa subárvore protegida.
+  - Um nó "sem acesso".
+  - Avaliar `include_browse` no Unity Catalog (não verificado).
+
+### MET-020: caminhos de publicação sem uso
+
+- **Situação atual:** `backend::metadata`, `backend::merge_metadata` e
+  `MetadataRepository::all` só são usados em testes. São uma segunda forma
+  de publicar, em memória, que pode divergir da do SQLite.
+- **O que falta:** remover esses caminhos ou justificar por que ficam.
+
+### MET-021: reiniciar perde a expansão do explorer
+
+- **Situação atual:** só a raiz é carregada no startup. Os nós expandidos e
+  a seleção do explorer não são guardados.
+- **O que falta:** persistir os caminhos expandidos por conexão, junto com
+  o estado do workspace.
+
+### MET-022: o cache guarda o caminho três vezes
+
+- **Situação atual:** cada objeto grava `path_key` (JSON em hexadecimal),
+  `path_json` e `object_json`, que repete o caminho.
+- **O que falta:** medir o tamanho do arquivo com 500 mil objetos antes de
+  mudar. A mudança exige migração e ADR.
+
+### Diálogo de conexão
+
+- **Lista desatualizada:** se as configurações mudarem depois de a lista ser
+  carregada, o diálogo só avisa. Ele poderia recarregar sozinho, ou impedir
+  que uma seleção feita para outro servidor seja salva.
+- **Tempo total:** com **Tudo**, o tempo total é parecido com o de antes,
+  porque os namespaces são lidos em sequência (ver MET-002).
+
+---
+
+## Validações pendentes
+
+| Item | Situação |
+| --- | --- |
+| Verificação visual do diálogo de conexão (seções, rodapé fixo, foco, teclado, altura com o formulário do Databricks) | Não feita |
+| Verificação visual do explorer (ícones por tipo, tipo da coluna, tooltips, partições, selo **Padrão**, barra de progresso e tempo restante) | Não feita |
+| Databricks com CLI autenticado e workspace de teste: descoberta de catálogos e schemas, `table_constraints` na listagem de tabelas, views materializadas | Não feita (só mock HTTP) |
+| Tempo da nova consulta `pg_catalog` em um catálogo grande | Não medido |
+| Benchmark de abertura do cache com 500 mil objetos (MET-011) | Não existe |
+| ADR-0015 e ADR-0016 | *Proposed*; aguardam aceitação do mantenedor |
+
+## Ordem sugerida
+
+1. **MET-018, MET-015 e MET-020.** Correções pequenas de comportamento e
+   limpeza.
+2. **MET-011, MET-012 e MET-013.** Custos no caminho interativo. Medir antes
+   e depois.
+3. **MET-009 e MET-010.** Contexto por aba e atualização depois de DDL, que
+   preparam o editor.
+4. **MET-008.** Autocomplete, hover e ir para a definição.
+5. **MET-002, MET-003 e MET-004.** Escala da introspecção.
+6. **MET-005 e MET-014,** depois o restante de P3.

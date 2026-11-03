@@ -130,7 +130,8 @@ The full types live in `jykre-core`.
 | `DriverDescriptor`, `DriverStatus` | What a driver is and supports. Consumers check status and capabilities, not the kind. |
 | `QueryRequest`, `ExecutionOptions` | SQL as written plus row limit, timeout and session context. |
 | `ColumnInfo`, `Cell`, `Row`, `RowSink` | Streaming result model; NULL and exact decimals are preserved. |
-| `MetadataObject`, `ObjectPath` | Database, catalog, schema, table, view and column nodes addressed by structural paths. |
+| `MetadataObject`, `ObjectPath` | Database, catalog, schema, table, view, materialized view, column, foreign key and partition nodes addressed by structural paths, with types, defaults, comments and keys. |
+| `MetadataScope` (`jykre::metadata_scope`) | What the user chose to introspect: everything, whole namespaces (including what is created in them later) or last-level namespaces. Pending until chosen. |
 | `DriverError`, `ErrorCode`, `ServerDiagnostic` | Classified errors; messages never contain secrets, SQL or raw configuration. A database error keeps the server's own message, SQLSTATE, vendor code and position. |
 
 ## Main flows
@@ -174,13 +175,24 @@ sequenceDiagram
 
 ### Refresh metadata
 
-1. The explorer starts `backend::refresh_metadata` for a scope (the whole
-   connection or one node).
-2. The driver introspects that scope and streams batches into a pending
-   refresh in the connection's metadata file.
-3. On success the pending objects replace that scope in one transaction;
-   on failure or cancellation they are discarded and the last good read stays.
-   See [Persistence](persistence.md#atomic-metadata-refresh).
+A connection introspects only what the user chose in the connection dialog
+(`jykre::metadata_scope::MetadataScope`, [ADR-0015](adr/0015-introspect-only-what-the-user-chooses.md)).
+The dialog lists namespaces with `Driver::discover_namespaces`, one level at
+a time; until something is chosen, nothing is introspected.
+
+1. Refreshing the connection starts `backend::apply_selection` with the
+   choice (or only what a change added); refreshing a node starts
+   `backend::refresh_metadata` for that node.
+2. `apply_selection` lists the broader rules, then reads each last-level
+   namespace as its own scope and reports progress and the time left after
+   each one.
+3. For each scope, the driver streams batches into a pending refresh in the
+   connection's metadata file. On success the pending objects replace that
+   scope in one transaction; on failure or cancellation they are discarded
+   and the last good read stays. See
+   [Persistence](persistence.md#atomic-metadata-refresh).
+4. After a complete read, what the choice no longer covers leaves the cache
+   (`MetadataRepository::retain`).
 
 ## Concurrency
 

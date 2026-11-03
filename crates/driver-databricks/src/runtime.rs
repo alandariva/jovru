@@ -408,7 +408,51 @@ pub async fn introspect(
     .await
 }
 
+/// The root holds the Unity Catalog catalogs (`hive_metastore` is not
+/// supported) and a catalog holds its schemas. Only the listing endpoints
+/// are called: no table is read and no compute starts.
+pub async fn discover(
+    input: &ResolvedConnection,
+    parent: &ObjectPath,
+    cancel: CancellationToken,
+) -> DriverResult<Vec<MetadataObject>> {
+    bounded(&cancel, Duration::from_secs(60), async {
+        Client::new(input).await?.discover(parent).await
+    })
+    .await
+}
+
 impl Client {
+    async fn discover(&self, parent: &ObjectPath) -> DriverResult<Vec<MetadataObject>> {
+        let (items, kind) = match parent.0.as_slice() {
+            [] => (
+                self.pages("/api/2.1/unity-catalog/catalogs", "catalogs", vec![])
+                    .await?,
+                ObjectKind::Catalog,
+            ),
+            [catalog] => (
+                self.pages(
+                    "/api/2.1/unity-catalog/schemas",
+                    "schemas",
+                    vec![("catalog_name".into(), catalog.name.clone())],
+                )
+                .await?,
+                ObjectKind::Schema,
+            ),
+            _ => return Ok(Vec::new()),
+        };
+        let mut found = Vec::new();
+        for item in &items {
+            let name = name(item)?;
+            if kind == ObjectKind::Catalog && name == "hive_metastore" {
+                continue;
+            }
+            found.push(MetadataObject::new(kind, parent, name));
+        }
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(found)
+    }
+
     async fn metadata_items(
         &self,
         endpoint: &str,
@@ -522,19 +566,14 @@ impl Client {
                     {
                         continue;
                     }
-                    let mut rel = MetadataObject::new(
-                        if table["table_type"]
-                            .as_str()
-                            .is_some_and(|v| v.contains("VIEW"))
-                        {
-                            ObjectKind::View
-                        } else {
-                            ObjectKind::Table
-                        },
-                        &sch.path,
-                        name(&table)?,
-                    );
+                    let kind = match table["table_type"].as_str() {
+                        Some("MATERIALIZED_VIEW") => ObjectKind::MaterializedView,
+                        Some(kind) if kind.contains("VIEW") => ObjectKind::View,
+                        _ => ObjectKind::Table,
+                    };
+                    let mut rel = MetadataObject::new(kind, &sch.path, name(&table)?);
                     rel.comment = table["comment"].as_str().map(str::to_owned);
+                    let constraints = Constraints::read(&table["table_constraints"]);
                     let mut batch = vec![rel.clone()];
                     for column in table["columns"].as_array().into_iter().flatten() {
                         let mut object =
@@ -545,6 +584,17 @@ impl Client {
                             .as_u64()
                             .and_then(|v| u32::try_from(v + 1).ok());
                         object.comment = column["comment"].as_str().map(str::to_owned);
+                        object.primary_key = constraints
+                            .primary_key
+                            .iter()
+                            .position(|key| *key == object.name)
+                            .and_then(|at| u32::try_from(at + 1).ok());
+                        batch.push(object);
+                    }
+                    for (key, target) in constraints.foreign_keys {
+                        let mut object =
+                            MetadataObject::new(ObjectKind::ForeignKey, &rel.path, key);
+                        object.references = Some(target);
                         batch.push(object);
                     }
                     batch.retain(|object| object.path.is_within(scope));
@@ -555,6 +605,58 @@ impl Client {
             }
         }
         Ok(report)
+    }
+}
+
+/// The keys Unity Catalog reports for a table (`table_constraints`).
+#[derive(Default)]
+struct Constraints {
+    primary_key: Vec<String>,
+    foreign_keys: Vec<(String, ForeignKeyTarget)>,
+}
+
+impl Constraints {
+    fn read(constraints: &Value) -> Self {
+        let names = |value: &Value| -> Vec<String> {
+            value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect()
+        };
+        let mut read = Self::default();
+        for constraint in constraints.as_array().into_iter().flatten() {
+            if let Some(key) = constraint.get("primary_key_constraint") {
+                read.primary_key = names(&key["child_columns"]);
+            }
+            let Some(key) = constraint.get("foreign_key_constraint") else {
+                continue;
+            };
+            // Unity Catalog names cannot contain a period, so the full name
+            // of the parent table splits into catalog, schema and table.
+            let parent: Vec<_> = key["parent_table"]
+                .as_str()
+                .unwrap_or("")
+                .split('.')
+                .collect();
+            let (Some(name), [catalog, schema, table]) = (key["name"].as_str(), parent.as_slice())
+            else {
+                continue;
+            };
+            read.foreign_keys.push((
+                name.to_owned(),
+                ForeignKeyTarget {
+                    relation: ObjectPath::default()
+                        .child(ObjectKind::Catalog, *catalog)
+                        .child(ObjectKind::Schema, *schema)
+                        .child(ObjectKind::Table, *table),
+                    columns: names(&key["child_columns"]),
+                    referenced: names(&key["parent_columns"]),
+                },
+            ));
+        }
+        read
     }
 }
 
@@ -1454,6 +1556,109 @@ mod tests {
             self.0.extend(objects);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn discovery_lists_catalogs_and_schemas_without_reading_tables() {
+        let (client, task) = fixture(vec![
+            (
+                200,
+                json!({"catalogs":[{"name":"main"},{"name":"hive_metastore"}],"next_page_token":"p2"}),
+            ),
+            (200, json!({"catalogs":[{"name":"analytics"}]})),
+            (
+                200,
+                json!({"schemas":[{"name":"sales"},{"name":"default"}]}),
+            ),
+        ])
+        .await;
+        let root = ObjectPath::default();
+        let catalogs = client.discover(&root).await.unwrap();
+        assert_eq!(
+            catalogs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["analytics", "main"]
+        );
+        assert!(catalogs.iter().all(|c| c.kind == ObjectKind::Catalog));
+        let main = root.child(ObjectKind::Catalog, "main");
+        let schemas = client.discover(&main).await.unwrap();
+        assert_eq!(
+            schemas.iter().map(|s| s.path.clone()).collect::<Vec<_>>(),
+            [
+                main.child(ObjectKind::Schema, "default"),
+                main.child(ObjectKind::Schema, "sales")
+            ]
+        );
+        // Below the last namespace level there is nothing to list.
+        let below = client
+            .discover(&main.child(ObjectKind::Schema, "sales"))
+            .await
+            .unwrap();
+        assert!(below.is_empty());
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].contains("page_token=p2"));
+        assert!(requests[2].starts_with("GET /api/2.1/unity-catalog/schemas?"));
+        assert!(requests[2].contains("catalog_name=main"));
+        assert!(requests.iter().all(|r| !r.contains("/tables")));
+    }
+
+    #[tokio::test]
+    async fn relation_kinds_and_keys_come_from_the_table_listing() {
+        let (client, task) = fixture(vec![
+            (200, json!({"name":"cat"})),
+            (200, json!({"name":"sch"})),
+            (
+                200,
+                json!({"tables":[
+                    {"name":"orders","table_type":"MANAGED","columns":[
+                        {"name":"id","type_text":"BIGINT","position":0,"nullable":false},
+                        {"name":"customer_id","type_text":"BIGINT","position":1}
+                    ],"table_constraints":[
+                        {"primary_key_constraint":{"name":"orders_pk","child_columns":["id"]}},
+                        {"foreign_key_constraint":{"name":"orders_customer","child_columns":["customer_id"],"parent_table":"cat.crm.customers","parent_columns":["id"]}}
+                    ]},
+                    {"name":"daily","table_type":"MATERIALIZED_VIEW","columns":[]},
+                    {"name":"recent","table_type":"VIEW","columns":[]}
+                ]}),
+            ),
+        ])
+        .await;
+        let schema = ObjectPath::default()
+            .child(ObjectKind::Catalog, "cat")
+            .child(ObjectKind::Schema, "sch");
+        let mut metadata = Metadata::default();
+        client.introspect(&schema, &mut metadata).await.unwrap();
+        task.await.unwrap();
+        let find = |path: &ObjectPath| {
+            metadata
+                .0
+                .iter()
+                .find(|object| object.path == *path)
+                .unwrap()
+                .clone()
+        };
+        let orders = schema.child(ObjectKind::Table, "orders");
+        assert_eq!(
+            find(&orders.child(ObjectKind::Column, "id")).primary_key,
+            Some(1)
+        );
+        assert_eq!(
+            find(&orders.child(ObjectKind::Column, "customer_id")).primary_key,
+            None
+        );
+        assert_eq!(
+            find(&orders.child(ObjectKind::ForeignKey, "orders_customer")).references,
+            Some(ForeignKeyTarget {
+                relation: ObjectPath::default()
+                    .child(ObjectKind::Catalog, "cat")
+                    .child(ObjectKind::Schema, "crm")
+                    .child(ObjectKind::Table, "customers"),
+                columns: vec!["customer_id".into()],
+                referenced: vec!["id".into()],
+            })
+        );
+        find(&schema.child(ObjectKind::MaterializedView, "daily"));
+        find(&schema.child(ObjectKind::View, "recent"));
     }
 
     #[tokio::test]

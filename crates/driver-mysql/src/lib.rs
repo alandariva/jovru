@@ -52,6 +52,14 @@ impl Driver for MySqlDriver {
         MySqlConfig::parse(options).map(|_| ())
     }
 
+    /// The configured database, when there is one.
+    fn default_namespaces(&self, config: &ConnectionConfig) -> Vec<ObjectPath> {
+        config.options["database"]
+            .as_str()
+            .map(|database| vec![ObjectPath::default().child(ObjectKind::Database, database)])
+            .unwrap_or_default()
+    }
+
     async fn test(
         &self,
         connection: &ResolvedConnection,
@@ -78,6 +86,16 @@ impl Driver for MySqlDriver {
     ) -> DriverResult<IntrospectionReport> {
         self.prepare(connection, &cancel)?;
         runtime::introspect(connection, &ObjectPath::default(), sink, cancel).await
+    }
+    async fn discover_namespaces(
+        &self,
+        connection: &ResolvedConnection,
+        parent: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<Vec<MetadataObject>> {
+        self.prepare(connection, &cancel)?;
+        parent.validate_scope(&self.descriptor().capabilities.hierarchy)?;
+        runtime::discover(connection, parent, cancel).await
     }
     async fn introspect_scoped(
         &self,

@@ -3,6 +3,7 @@ use crate::tr;
 use crate::{
     backend::{self, MetadataSnapshot},
     drivers::*,
+    metadata_scope::MetadataScope,
     result::{DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT},
 };
 use jykre_secrets::SecretStore;
@@ -44,6 +45,8 @@ pub struct LoadedConnection {
     pub input: ResolvedConnection,
     /// Rows kept per statement, between 1 and [`MAX_ROW_LIMIT`].
     pub row_limit: u32,
+    /// What the user chose to introspect; pending when nothing was chosen.
+    pub scope: MetadataScope,
     pub cache: Option<MetadataSnapshot>,
     pub warning: Option<String>,
 }
@@ -232,10 +235,34 @@ async fn load_from(
                 DEFAULT_ROW_LIMIT
             }
         };
+        let scope = match stored_scope(dir, repository, &profile).await {
+            Ok((scope, derived)) => {
+                if derived {
+                    add_warning(
+                        &mut warning,
+                        tr!(
+                            "What to introspect was taken from the metadata already saved. Review it in the connection settings."
+                        ),
+                    );
+                }
+                scope
+            }
+            Err(error) => {
+                add_warning(
+                    &mut warning,
+                    tr!(
+                        "What to introspect could not be read; choose it again in the connection settings: {0}",
+                        error
+                    ),
+                );
+                MetadataScope::default()
+            }
+        };
         loaded.push(LoadedConnection {
             profile,
             input,
             row_limit,
+            scope,
             cache,
             warning,
         });
@@ -246,21 +273,30 @@ async fn load_from(
     })
 }
 
-/// Saves a profile, its row limit and, when asked to remember it, its
-/// password. The row limit must be between 1 and [`MAX_ROW_LIMIT`].
+/// What a saved connection keeps besides its profile and password.
+pub struct Preferences {
+    /// Rows kept per statement, between 1 and [`MAX_ROW_LIMIT`].
+    pub row_limit: u32,
+    /// What to introspect; pending (nothing chosen) is allowed, for example
+    /// when the server could not be reached to list its namespaces.
+    pub scope: MetadataScope,
+}
+
+/// Saves a profile, its preferences and, when asked to remember it, its
+/// password.
 pub async fn save(
     dir: &Path,
     profile: ConnectionProfile,
     credentials: Credentials,
-    row_limit: u32,
+    preferences: Preferences,
     secrets: &dyn SecretStore,
 ) -> DriverResult<LoadedConnection> {
     builtin_registry()?
         .get(profile.config.driver)?
         .validate_connection(&profile.config)?;
-    validate_row_limit(row_limit)?;
+    validate_row_limit(preferences.row_limit)?;
     let repository = ConfigRepository::open(dir).await?;
-    let result = save_to(dir, profile, credentials, row_limit, secrets, &repository).await;
+    let result = save_to(dir, profile, credentials, preferences, secrets, &repository).await;
     repository.close().await;
     result
 }
@@ -268,10 +304,11 @@ async fn save_to(
     dir: &Path,
     mut profile: ConnectionProfile,
     credentials: Credentials,
-    row_limit: u32,
+    preferences: Preferences,
     secrets: &dyn SecretStore,
     repository: &ConfigRepository,
 ) -> DriverResult<LoadedConnection> {
+    let Preferences { row_limit, scope } = preferences;
     // Another profile that cannot be read does not block this one.
     let previous = repository
         .list_each()
@@ -333,6 +370,9 @@ async fn save_to(
         }
     };
     repository.set_row_limit(profile.id, row_limit).await?;
+    repository
+        .set_metadata_scope(profile.id, &scope.to_value())
+        .await?;
     let had_entry = previous
         .as_ref()
         .is_some_and(|previous| previous.remember_password);
@@ -364,6 +404,7 @@ async fn save_to(
         profile,
         input,
         row_limit,
+        scope,
         cache,
         warning,
     })
@@ -417,6 +458,45 @@ async fn stored_row_limit(repository: &ConfigRepository, id: ConnectionId) -> Dr
         .await?
         .filter(|limit| *limit <= MAX_ROW_LIMIT)
         .unwrap_or(DEFAULT_ROW_LIMIT))
+}
+
+/// The saved choice of what to introspect, and whether it was just taken
+/// from a cache written before choosing existed: such a cache holds what the
+/// user had read, so its last-level namespaces become the choice, once. A
+/// connection with neither is pending.
+async fn stored_scope(
+    dir: &Path,
+    repository: &ConfigRepository,
+    profile: &ConnectionProfile,
+) -> DriverResult<(MetadataScope, bool)> {
+    if let Some(value) = repository.metadata_scope(profile.id).await? {
+        return MetadataScope::from_value(&value)
+            .map(|scope| (scope, false))
+            .ok_or_else(|| DriverError::validation(tr!("Invalid saved metadata choice.")));
+    }
+    let levels = builtin_registry()?
+        .get(profile.config.driver)?
+        .descriptor()
+        .capabilities
+        .namespace_levels();
+    let Some(last) = levels.last() else {
+        return Ok((MetadataScope::default(), false));
+    };
+    let cache = MetadataRepository::open(dir, profile.id, &profile.config).await?;
+    let paths = cache.paths(*last).await;
+    cache.close().await;
+    let scope = MetadataScope {
+        all: false,
+        include: paths?,
+    }
+    .normalized();
+    if scope.is_pending() {
+        return Ok((scope, false));
+    }
+    repository
+        .set_metadata_scope(profile.id, &scope.to_value())
+        .await?;
+    Ok((scope, true))
 }
 
 async fn prepare_cache(

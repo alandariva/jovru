@@ -9,7 +9,24 @@ pub enum ObjectKind {
     Schema,
     Table,
     View,
+    /// A view whose rows are stored and refreshed on demand.
+    #[serde(rename = "materialized_view")]
+    MaterializedView,
     Column,
+    /// A foreign key of a table, with what it references
+    /// ([`MetadataObject::references`]).
+    #[serde(rename = "foreign_key")]
+    ForeignKey,
+    /// A partition of a partitioned table, listed under the table it
+    /// belongs to rather than as a relation of its own.
+    Partition,
+}
+
+impl ObjectKind {
+    /// Tables, views and materialized views: what a query reads from.
+    pub fn is_relation(self) -> bool {
+        matches!(self, Self::Table | Self::View | Self::MaterializedView)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -30,6 +47,35 @@ impl ObjectPath {
         self.0.starts_with(&scope.0)
     }
 
+    /// The name of the relation on this path (table, view or materialized
+    /// view), if it reaches one.
+    pub fn relation(&self) -> Option<&str> {
+        self.0
+            .iter()
+            .find(|part| part.kind.is_relation())
+            .map(|part| part.name.as_str())
+    }
+
+    /// The path of the relation a query reads for this node: the
+    /// namespaces and the relation itself, without columns or keys. A
+    /// partition is read as a table of its own, in its root table's place.
+    /// `None` when the path does not reach a relation.
+    pub fn relation_path(&self) -> Option<Self> {
+        let at = self.0.iter().position(|part| part.kind.is_relation())?;
+        let mut segments = self.0[..=at].to_vec();
+        if let Some(partition) = self
+            .0
+            .iter()
+            .find(|part| part.kind == ObjectKind::Partition)
+        {
+            segments[at] = PathSegment {
+                kind: ObjectKind::Table,
+                name: partition.name.clone(),
+            };
+        }
+        Some(Self(segments))
+    }
+
     pub fn name_of(&self, kind: ObjectKind) -> Option<&str> {
         self.0
             .iter()
@@ -37,20 +83,21 @@ impl ObjectPath {
             .map(|part| part.name.as_str())
     }
 
-    /// Validate a contiguous prefix of the driver's hierarchy. Views occupy
-    /// the same level as tables; names remain opaque structural identifiers.
+    /// Validate a contiguous prefix of the driver's hierarchy. Views and
+    /// materialized views occupy the same level as tables; names remain
+    /// opaque structural identifiers.
     pub fn validate_scope(&self, hierarchy: &[ObjectKind]) -> crate::DriverResult<()> {
         let levels: Vec<_> = hierarchy
             .iter()
             .copied()
-            .filter(|kind| *kind != ObjectKind::View)
+            .filter(|kind| !matches!(kind, ObjectKind::View | ObjectKind::MaterializedView))
             .collect();
         if self.0.len() > levels.len()
             || self.0.iter().zip(levels).any(|(part, expected)| {
                 part.name.is_empty()
                     || part.name.chars().any(char::is_control)
                     || (part.kind != expected
-                        && !(part.kind == ObjectKind::View && expected == ObjectKind::Table))
+                        && !(part.kind.is_relation() && expected == ObjectKind::Table))
             })
         {
             return Err(crate::DriverError::validation("Invalid metadata scope"));
@@ -76,6 +123,19 @@ impl ObjectPath {
     }
 }
 
+/// What a foreign key points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignKeyTarget {
+    /// The referenced relation, as the driver addresses it.
+    pub relation: ObjectPath,
+    /// The key's columns, in key order.
+    pub columns: Vec<String>,
+    /// The referenced columns, in the same order.
+    pub referenced: Vec<String>,
+}
+
+/// The fields added after the first cache version are optional and left out
+/// when empty, so a cache written before them still reads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataObject {
     pub kind: ObjectKind,
@@ -83,9 +143,21 @@ pub struct MetadataObject {
     pub name: String,
     /// One-based column position, when available.
     pub ordinal: Option<u32>,
+    /// The type as the database writes it, with length, precision and
+    /// array or enum names (`character varying(80)`, `integer[]`).
     pub data_type: Option<String>,
     pub nullable: Option<bool>,
     pub comment: Option<String>,
+    /// A column's default, as the database reports it (an expression or a
+    /// literal, depending on the database).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+    /// One-based position of a column in its table's primary key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_key: Option<u32>,
+    /// What a foreign key references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<ForeignKeyTarget>,
 }
 
 impl MetadataObject {
@@ -99,6 +171,9 @@ impl MetadataObject {
             data_type: None,
             nullable: None,
             comment: None,
+            default_value: None,
+            primary_key: None,
+            references: None,
         }
     }
 }

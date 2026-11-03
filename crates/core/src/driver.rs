@@ -19,6 +19,24 @@ pub struct DriverCapabilities {
     pub identifier_quote: char,
 }
 
+impl DriverCapabilities {
+    /// The levels of the hierarchy that hold relations rather than being
+    /// relations: databases, catalogs and schemas. The user chooses what to
+    /// introspect among them; the last one is the unit a refresh reads.
+    pub fn namespace_levels(&self) -> Vec<ObjectKind> {
+        self.hierarchy
+            .iter()
+            .copied()
+            .take_while(|kind| {
+                matches!(
+                    kind,
+                    ObjectKind::Database | ObjectKind::Catalog | ObjectKind::Schema
+                )
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DriverStatus {
@@ -130,16 +148,28 @@ pub trait Driver: Debug + Send + Sync + 'static {
     }
 
     /// The qualified, quoted name of the relation at `path`, as generated SQL
-    /// writes it: every structural segment except columns, joined by dots.
-    /// Drivers whose sessions are bound to one level of the hierarchy (a
-    /// PostgreSQL database) leave that level out.
+    /// writes it: the namespaces and the relation
+    /// ([`ObjectPath::relation_path`]), joined by dots. Drivers whose
+    /// sessions are bound to one level of the hierarchy (a PostgreSQL
+    /// database) leave that level out.
     fn relation_name(&self, path: &ObjectPath) -> String {
-        path.0
+        path.relation_path()
+            .unwrap_or_else(|| path.clone())
+            .0
             .iter()
             .filter(|part| part.kind != ObjectKind::Column)
             .map(|part| self.quote_identifier(&part.name))
             .collect::<Vec<_>>()
             .join(".")
+    }
+
+    /// The namespaces a connection most likely works in (its configured
+    /// database, default schema or catalog), offered as the first choice of
+    /// what to introspect. Only suggested; nothing is read until the user
+    /// saves a choice. Paths that the server does not list are ignored.
+    fn default_namespaces(&self, config: &ConnectionConfig) -> Vec<ObjectPath> {
+        let _ = config;
+        Vec::new()
     }
 
     async fn test(
@@ -162,6 +192,25 @@ pub trait Driver: Debug + Send + Sync + 'static {
         sink: &mut dyn IntrospectionSink,
         cancel: CancellationToken,
     ) -> DriverResult<IntrospectionReport>;
+
+    /// Lists the namespaces directly below `parent` (the root, a database or
+    /// a catalog) without reading their relations or columns, so the user can
+    /// choose what to introspect. Only namespace levels
+    /// ([`DriverCapabilities::namespace_levels`]) are returned, ordered by
+    /// name; below the last namespace level the list is empty. Like
+    /// introspection, it does not require a SQL session or start compute.
+    async fn discover_namespaces(
+        &self,
+        connection: &ResolvedConnection,
+        parent: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<Vec<MetadataObject>> {
+        let _ = (connection, parent, cancel);
+        Err(DriverError::not_implemented(
+            &self.descriptor().display_name,
+            "namespace discovery",
+        ))
+    }
 
     /// Refresh a structural subtree. Empty scope means the complete connection.
     /// Only objects inside the scope are emitted. A successful empty result

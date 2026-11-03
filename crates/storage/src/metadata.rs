@@ -34,6 +34,12 @@ CREATE TABLE scope_status (
 );
 "#;
 
+/// A key is kept when it lies inside a kept subtree (`?1`), is a kept node
+/// (`?2`) or is an ancestor of either. Both are JSON arrays of keys; '/'
+/// separates segments and '0' is the character after it.
+const RETAIN_OBJECTS: &str = "DELETE FROM objects WHERE NOT EXISTS(SELECT 1 FROM json_each(?1) s WHERE objects.path_key=s.value OR (objects.path_key>=s.value||'/' AND objects.path_key<s.value||'0') OR (s.value>=objects.path_key||'/' AND s.value<objects.path_key||'0')) AND NOT EXISTS(SELECT 1 FROM json_each(?2) n WHERE objects.path_key=n.value OR (n.value>=objects.path_key||'/' AND n.value<objects.path_key||'0'))";
+const RETAIN_STATUSES: &str = "DELETE FROM scope_status WHERE scope_key<>'' AND NOT EXISTS(SELECT 1 FROM json_each(?1) s WHERE scope_status.scope_key=s.value OR (scope_status.scope_key>=s.value||'/' AND scope_status.scope_key<s.value||'0') OR (s.value>=scope_status.scope_key||'/' AND s.value<scope_status.scope_key||'0')) AND NOT EXISTS(SELECT 1 FROM json_each(?2) n WHERE scope_status.scope_key=n.value OR (n.value>=scope_status.scope_key||'/' AND n.value<scope_status.scope_key||'0'))";
+
 /// Hex-encoded structural segments make prefix ranges unambiguous and indexable.
 /// Neither dots, slashes, LIKE wildcards nor case folding can change node identity.
 fn key(path: &ObjectPath) -> DriverResult<String> {
@@ -51,6 +57,54 @@ fn key(path: &ObjectPath) -> DriverResult<String> {
         })
         .collect::<DriverResult<Vec<_>>>()
         .map(|parts| parts.join("/"))
+}
+
+/// Adds the namespace nodes on `path` (each prefix of length `1..=depth`)
+/// that the cache does not hold yet. A namespace is fully described by its
+/// path, so a refresh of a schema can publish under a database or catalog
+/// that no refresh of its own has read.
+async fn ensure_nodes(
+    tx: &mut sqlx::SqliteConnection,
+    path: &ObjectPath,
+    depth: usize,
+) -> DriverResult<()> {
+    for length in 1..=depth.min(path.0.len()) {
+        let node = ObjectPath(path.0[..length].to_vec());
+        let Some(last) = node.0.last() else {
+            continue;
+        };
+        let parent = node.parent().unwrap_or_default();
+        let object = MetadataObject::new(last.kind, &parent, last.name.clone());
+        let parent_key = if parent.0.is_empty() {
+            None
+        } else {
+            Some(key(&parent)?)
+        };
+        sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json) VALUES(?,?,?,?,?,NULL,?) ON CONFLICT(path_key) DO NOTHING")
+            .bind(key(&node)?)
+            .bind(parent_key)
+            .bind(serde_json::to_string(&node).map_err(json_error)?)
+            .bind(serde_json::to_string(&object.kind).map_err(json_error)?)
+            .bind(&object.name)
+            .bind(serde_json::to_string(&object).map_err(json_error)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+    }
+    Ok(())
+}
+
+/// Takes the writer lock, waiting up to `patience` for a refresh that is
+/// finishing (a cancelled one releases it once its task ends).
+async fn writer_lock_within(path: &Path, patience: std::time::Duration) -> DriverResult<File> {
+    let deadline = tokio::time::Instant::now() + patience;
+    loop {
+        match writer_lock(path) {
+            Ok(lock) => return Ok(lock),
+            Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    }
 }
 
 fn canonical(value: serde_json::Value) -> serde_json::Value {
@@ -357,6 +411,70 @@ impl MetadataRepository {
             })
             .collect()
     }
+    /// The paths of every cached object of `kind`, in key order.
+    pub async fn paths(&self, kind: ObjectKind) -> DriverResult<Vec<ObjectPath>> {
+        let values: Vec<String> =
+            sqlx::query_scalar("SELECT path_json FROM objects WHERE kind=? ORDER BY path_key")
+                .bind(serde_json::to_string(&kind).map_err(json_error)?)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(sql_error)?;
+        values
+            .into_iter()
+            .map(|value| serde_json::from_str(&value).map_err(json_error))
+            .collect()
+    }
+
+    /// Keeps only what the user chose to introspect: the objects inside
+    /// `subtrees`, the namespaces in `nodes` and the ancestors of both, which
+    /// are added when missing. Everything else goes, with its refresh status,
+    /// in one transaction, and the cache version changes so readers page
+    /// again. An empty path in `subtrees` keeps everything. Returns the new
+    /// version.
+    pub async fn retain(&self, subtrees: &[ObjectPath], nodes: &[ObjectPath]) -> DriverResult<i64> {
+        let _lock = writer_lock_within(&self.lock_path, std::time::Duration::from_secs(5)).await?;
+        let mut tx = self.pool.begin().await.map_err(sql_error)?;
+        let (version, identity): (i64, String) =
+            sqlx::query_as("SELECT version,identity FROM metadata_info WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(sql_error)?;
+        if identity != self.identity {
+            return Err(error(
+                "The connection configuration changed. Reopen the cache.",
+            ));
+        }
+        if subtrees.iter().any(|path| path.0.is_empty()) {
+            return Ok(version);
+        }
+        for node in nodes {
+            ensure_nodes(&mut tx, node, node.0.len()).await?;
+        }
+        let keys = |paths: &[ObjectPath]| -> DriverResult<String> {
+            serde_json::to_string(&paths.iter().map(key).collect::<DriverResult<Vec<_>>>()?)
+                .map_err(json_error)
+        };
+        let (subtrees, nodes) = (keys(subtrees)?, keys(nodes)?);
+        sqlx::query(RETAIN_OBJECTS)
+            .bind(&subtrees)
+            .bind(&nodes)
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        sqlx::query(RETAIN_STATUSES)
+            .bind(&subtrees)
+            .bind(&nodes)
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        sqlx::query("UPDATE metadata_info SET version=version+1 WHERE singleton=1")
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        tx.commit().await.map_err(sql_error)?;
+        Ok(version + 1)
+    }
+
     pub async fn begin(&self, scope: &ObjectPath) -> DriverResult<PendingRefresh> {
         let lock = writer_lock(&self.lock_path)?;
         let mut tx = self.pool.begin().await.map_err(sql_error)?;
@@ -457,8 +575,14 @@ impl PendingRefresh {
         }
         sqlx::query("DELETE FROM objects WHERE (?='' OR path_key=? OR (path_key>=? AND path_key<?)) AND NOT EXISTS(SELECT 1 FROM protected_scopes p WHERE p.run_id=? AND (p.path_key='' OR objects.path_key=p.path_key OR (objects.path_key>=p.path_key||'/' AND objects.path_key<p.path_key||'0')))")
             .bind(&scope_key).bind(&scope_key).bind(lower).bind(upper).bind(self.id).execute(&mut *tx).await.map_err(sql_error)?;
-        sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json) SELECT path_key,parent_key,path_json,kind,name,ordinal,object_json FROM staging_objects WHERE run_id=? ON CONFLICT(path_key) DO UPDATE SET parent_key=excluded.parent_key,path_json=excluded.path_json,kind=excluded.kind,name=excluded.name,ordinal=excluded.ordinal,object_json=excluded.object_json")
-            .bind(self.id).execute(&mut *tx).await.map_err(sql_error)?;
+        let published = sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json) SELECT path_key,parent_key,path_json,kind,name,ordinal,object_json FROM staging_objects WHERE run_id=? ON CONFLICT(path_key) DO UPDATE SET parent_key=excluded.parent_key,path_json=excluded.path_json,kind=excluded.kind,name=excluded.name,ordinal=excluded.ordinal,object_json=excluded.object_json")
+            .bind(self.id).execute(&mut *tx).await.map_err(sql_error)?.rows_affected();
+        // The scope's own ancestors are outside it, so the driver does not
+        // emit them; a scope that exists on the server still needs them.
+        if published > 0 {
+            let depth = self.scope.0.len().saturating_sub(1);
+            ensure_nodes(&mut tx, &self.scope, depth).await?;
+        }
         let state = if report.warnings.is_empty() {
             "success"
         } else {

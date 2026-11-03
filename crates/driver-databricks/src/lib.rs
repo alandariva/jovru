@@ -61,6 +61,21 @@ impl Driver for DatabricksDriver {
         DatabricksConfig::parse(options).map(|_| ())
     }
 
+    /// The profile's default catalog and schema, when both are set.
+    fn default_namespaces(&self, config: &ConnectionConfig) -> Vec<ObjectPath> {
+        match (
+            config.options["defaultCatalog"].as_str(),
+            config.options["defaultSchema"].as_str(),
+        ) {
+            (Some(catalog), Some(schema)) => vec![
+                ObjectPath::default()
+                    .child(ObjectKind::Catalog, catalog)
+                    .child(ObjectKind::Schema, schema),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     async fn test(
         &self,
         connection: &ResolvedConnection,
@@ -87,6 +102,16 @@ impl Driver for DatabricksDriver {
     ) -> DriverResult<IntrospectionReport> {
         self.prepare(connection, false, &cancel)?;
         runtime::introspect(connection, &ObjectPath::default(), sink, cancel).await
+    }
+    async fn discover_namespaces(
+        &self,
+        connection: &ResolvedConnection,
+        parent: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<Vec<MetadataObject>> {
+        self.prepare(connection, false, &cancel)?;
+        parent.validate_scope(&self.descriptor().capabilities.hierarchy)?;
+        runtime::discover(connection, parent, cancel).await
     }
     async fn introspect_scoped(
         &self,

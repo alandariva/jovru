@@ -42,6 +42,22 @@ selection survives failures; choosing a new profile clears the compute selection
 New connection forms show a prompt until profiles are loaded. Initial selection
 honours the CLI's declared default instead of assuming the name `DEFAULT`.
 
+The connection dialog keeps its title, the driver and a footer with the
+status, **Test connection** and **Save connection** in view, and switches
+three sections between them: **Connection** (name, server, credentials, TLS
+or the Databricks profile and compute), **Metadata** (what to introspect;
+its tab shows how much is chosen, amber when nothing is) and **Options**
+(row limit). Only the section scrolls, and the dialog keeps its height when
+switching. A field that fails validation on save opens its section.
+
+In **Metadata**, **Load list** reads the
+namespaces of the server typed in the form, a tree with three-state boxes
+(chosen, partly chosen, not chosen) opens one level at a time, a filter
+narrows it, and **Everything, including what is created later** chooses all.
+A namespace a saved choice names but the server no longer has shows
+**Not found**. Saving without a choice is allowed; nothing is read until the
+user chooses.
+
 Each state has one consistent representation.
 
 | State | Where | Representation |
@@ -52,7 +68,10 @@ Each state has one consistent representation.
 | Run cancelling | Footer | Spinner and "Cancelling…" until the driver stops; the previous result stays and a new run may start |
 | Run cancelled / failed | Footer (and the results area for errors) | Cancel or error icon with a short text |
 | Metadata refreshing | The node being refreshed | Its `↻` spins; clicking it cancels |
+| Reading the chosen metadata | Below the connection in the explorer | A bar with "Reading n of total: name", the percentage and the time left (estimated after the first namespace); the connection's `↻` spins and cancels |
+| Nothing chosen to introspect | The connection in the explorer | "Nothing is introspected yet." and **Choose what to introspect**, which opens the connection settings |
 | Metadata state per scope | Explorer node and its tooltip | Last success time, failure message, permission warnings |
+| What a node is | Explorer node | Icon by kind (table, view, materialized view, column, key column, foreign key, partition), the column's type or what a key references after the name, and a tooltip with nullability, primary key position, default and comment |
 | Demo versus server data | Footer badge | `MOCK` or `SQL` |
 
 Rules:

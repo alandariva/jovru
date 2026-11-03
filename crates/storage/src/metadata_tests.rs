@@ -271,3 +271,131 @@ async fn obsolete_readers_and_refresh_handles_cannot_revert_cache_identity() {
     reopened.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_scoped_refresh_into_an_empty_cache_publishes_its_namespace_ancestors() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = ObjectPath::default().child(ObjectKind::Database, "db.a/%_");
+    let schema = db.child(ObjectKind::Schema, "sales");
+    let table = MetadataObject::new(ObjectKind::Table, &schema, "orders");
+    let mut run = repository.begin(&schema).await.unwrap();
+    run.batch(vec![
+        MetadataObject::new(ObjectKind::Schema, &db, "sales"),
+        table.clone(),
+    ])
+    .await
+    .unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let root = repository
+        .children(&ObjectPath::default(), 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].path, db);
+    assert_eq!(repository.children(&schema, 0, 10).await.unwrap(), [table]);
+    // A scope the server no longer has publishes nothing, not even ancestors.
+    let other = ObjectPath::default()
+        .child(ObjectKind::Database, "gone")
+        .child(ObjectKind::Schema, "x");
+    let mut run = repository.begin(&other).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .children(&ObjectPath::default(), 0, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    repository.close().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn retain_keeps_the_selection_its_ancestors_and_named_nodes_only() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db.a/%_");
+    let kept = MetadataObject::new(ObjectKind::Schema, &db.path, "kept");
+    // A name that is a prefix of the kept one must not survive with it.
+    let dropped = MetadataObject::new(ObjectKind::Schema, &db.path, "kept.more");
+    let kept_table = MetadataObject::new(ObjectKind::Table, &kept.path, "orders");
+    let dropped_table = MetadataObject::new(ObjectKind::Table, &dropped.path, "orders");
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(vec![
+        db.clone(),
+        kept.clone(),
+        dropped.clone(),
+        kept_table.clone(),
+        dropped_table,
+    ])
+    .await
+    .unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    for scope in [&kept.path, &dropped.path] {
+        let mut run = repository.begin(scope).await.unwrap();
+        run.fail(&DriverError::cancelled()).await.unwrap();
+    }
+    let before = repository.version().await.unwrap();
+    // Keeping the root keeps everything.
+    assert_eq!(
+        repository
+            .retain(&[ObjectPath::default()], &[])
+            .await
+            .unwrap(),
+        before
+    );
+    assert_eq!(repository.all().await.unwrap().len(), 5);
+    let catalog = ObjectPath::default().child(ObjectKind::Database, "empty");
+    let version = repository
+        .retain(
+            std::slice::from_ref(&kept.path),
+            std::slice::from_ref(&catalog),
+        )
+        .await
+        .unwrap();
+    assert_eq!(version, before + 1);
+    assert_eq!(repository.version().await.unwrap(), version);
+    let paths: Vec<_> = repository
+        .all()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|object| object.path)
+        .collect();
+    assert_eq!(paths.len(), 4);
+    for path in [&db.path, &kept.path, &kept_table.path, &catalog] {
+        assert!(paths.contains(path), "{path:?} was removed");
+    }
+    let scopes: Vec<_> = repository
+        .statuses()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|status| status.scope)
+        .collect();
+    assert!(scopes.contains(&kept.path));
+    assert!(!scopes.contains(&dropped.path));
+    assert_eq!(
+        repository.paths(ObjectKind::Schema).await.unwrap(),
+        std::slice::from_ref(&kept.path)
+    );
+    // Nothing selected leaves an empty cache.
+    repository.retain(&[], &[]).await.unwrap();
+    assert!(repository.all().await.unwrap().is_empty());
+    repository.close().await;
+    let _ = std::fs::remove_dir_all(dir);
+}

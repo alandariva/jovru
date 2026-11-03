@@ -181,6 +181,24 @@ impl ConfigRepository {
             .await
     }
 
+    /// What the user chose to introspect for a connection, stored as the
+    /// setting `connection.<id>.metadata_scope`. The application owns its
+    /// shape; `None` means nothing was chosen yet.
+    pub async fn metadata_scope(
+        &self,
+        id: ConnectionId,
+    ) -> DriverResult<Option<serde_json::Value>> {
+        self.setting(&metadata_scope_key(id)).await
+    }
+
+    pub async fn set_metadata_scope(
+        &self,
+        id: ConnectionId,
+        scope: &serde_json::Value,
+    ) -> DriverResult<()> {
+        self.set_setting(&metadata_scope_key(id), scope).await
+    }
+
     pub async fn setting(&self, key: &str) -> DriverResult<Option<serde_json::Value>> {
         let value: Option<String> =
             sqlx::query_scalar("SELECT value_json FROM settings WHERE key=?")
@@ -201,4 +219,8 @@ impl ConfigRepository {
 
 fn row_limit_key(id: ConnectionId) -> String {
     format!("connection.{id}.row_limit")
+}
+
+fn metadata_scope_key(id: ConnectionId) -> String {
+    format!("connection.{id}.metadata_scope")
 }

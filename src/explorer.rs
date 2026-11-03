@@ -1,6 +1,7 @@
 //! The explorer tree without a window: which nodes are visible and where
 //! the arrow keys go, as in other desktop trees.
 use crate::drivers::{MetadataObject, ObjectKind, ObjectPath};
+use crate::tr;
 use std::collections::HashSet;
 
 /// The nodes the tree shows, in order. With a search, a node shows when its
@@ -32,9 +33,96 @@ pub fn visible<'a>(
         .collect()
 }
 
-/// A node that has children to show or hide (everything but a column).
+/// A node that has children to show or hide: namespaces and relations,
+/// not columns, keys or partitions.
 pub fn expandable(object: &MetadataObject) -> bool {
-    object.kind != ObjectKind::Column
+    !matches!(
+        object.kind,
+        ObjectKind::Column | ObjectKind::ForeignKey | ObjectKind::Partition
+    )
+}
+
+/// A node that opens a preview query: a relation, or a partition, which
+/// is read as a table of its own.
+pub fn opens(object: &MetadataObject) -> bool {
+    object.kind.is_relation() || object.kind == ObjectKind::Partition
+}
+
+/// What a refresh of this node reads: keys and partitions are read with
+/// their table.
+pub fn refresh_scope(path: &ObjectPath) -> ObjectPath {
+    match path.0.last().map(|part| part.kind) {
+        Some(ObjectKind::ForeignKey | ObjectKind::Partition) => path.parent().unwrap_or_default(),
+        _ => path.clone(),
+    }
+}
+
+/// The short text after a node's name: a column's type, a relation's kind
+/// when it is not a table, what a foreign key references.
+pub fn detail(object: &MetadataObject) -> Option<String> {
+    match object.kind {
+        ObjectKind::Column => object.data_type.clone(),
+        ObjectKind::View => Some(tr!("view").into()),
+        ObjectKind::MaterializedView => Some(tr!("materialized view").into()),
+        ObjectKind::Partition => Some(tr!("partition").into()),
+        ObjectKind::ForeignKey => object.references.as_ref().map(|target| {
+            format!(
+                "→ {}",
+                target
+                    .relation
+                    .0
+                    .last()
+                    .map(|part| part.name.as_str())
+                    .unwrap_or_default()
+            )
+        }),
+        _ => None,
+    }
+}
+
+/// Everything known about a node beyond its name, one fact per line, for
+/// its tooltip. Empty when there is nothing to add.
+pub fn description(object: &MetadataObject) -> String {
+    let mut lines = Vec::new();
+    match object.kind {
+        ObjectKind::Column => {
+            let mut first = object.data_type.clone().unwrap_or_default();
+            if let Some(nullable) = object.nullable {
+                first.push_str(if nullable { " NULL" } else { " NOT NULL" });
+            }
+            lines.push(first.trim().to_owned());
+            if let Some(position) = object.primary_key {
+                lines.push(tr!("Primary key, position {0}", position));
+            }
+            if let Some(default) = &object.default_value {
+                lines.push(tr!("Default: {0}", default));
+            }
+        }
+        ObjectKind::ForeignKey => {
+            if let Some(target) = &object.references {
+                let relation = target
+                    .relation
+                    .0
+                    .iter()
+                    .filter(|part| part.kind != ObjectKind::Database)
+                    .map(|part| part.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                lines.push(tr!(
+                    "({0}) references {1} ({2})",
+                    target.columns.join(", "),
+                    relation,
+                    target.referenced.join(", ")
+                ));
+            }
+        }
+        _ => {}
+    }
+    if let Some(comment) = &object.comment {
+        lines.push(comment.clone());
+    }
+    lines.retain(|line| !line.is_empty());
+    lines.join("\n")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +247,62 @@ mod tests {
             names(visible(&source, &orders, "total")),
             ["sales", "orders", "total"]
         );
+    }
+
+    #[test]
+    fn keys_and_partitions_are_leaves_that_describe_themselves() {
+        use crate::drivers::ForeignKeyTarget;
+        let table = ObjectPath::default()
+            .child(ObjectKind::Database, "db")
+            .child(ObjectKind::Schema, "sales")
+            .child(ObjectKind::Table, "orders");
+        let mut column = MetadataObject::new(ObjectKind::Column, &table, "id");
+        column.data_type = Some("integer".into());
+        column.nullable = Some(false);
+        column.primary_key = Some(1);
+        column.default_value = Some("nextval('orders_id_seq'::regclass)".into());
+        column.comment = Some("Order number".into());
+        assert_eq!(detail(&column).as_deref(), Some("integer"));
+        assert_eq!(
+            description(&column),
+            "integer NOT NULL\nPrimary key, position 1\nDefault: nextval('orders_id_seq'::regclass)\nOrder number"
+        );
+        let mut key = MetadataObject::new(ObjectKind::ForeignKey, &table, "orders_customer");
+        let customers = ObjectPath::default()
+            .child(ObjectKind::Database, "db")
+            .child(ObjectKind::Schema, "crm")
+            .child(ObjectKind::Table, "customers");
+        key.references = Some(ForeignKeyTarget {
+            relation: customers,
+            columns: vec!["customer_id".into()],
+            referenced: vec!["id".into()],
+        });
+        assert_eq!(detail(&key).as_deref(), Some("→ customers"));
+        assert_eq!(
+            description(&key),
+            "(customer_id) references crm.customers (id)"
+        );
+        let partition = MetadataObject::new(ObjectKind::Partition, &table, "orders_2026");
+        for leaf in [&column, &key, &partition] {
+            assert!(!expandable(leaf));
+            assert_eq!(
+                refresh_scope(&leaf.path),
+                if leaf.kind == ObjectKind::Column {
+                    leaf.path.clone()
+                } else {
+                    table.clone()
+                }
+            );
+        }
+        assert!(opens(&partition) && !opens(&key) && !opens(&column));
+        let summary = MetadataObject::new(
+            ObjectKind::MaterializedView,
+            &table.parent().unwrap(),
+            "summary",
+        );
+        assert!(expandable(&summary) && opens(&summary));
+        assert_eq!(detail(&summary).as_deref(), Some("materialized view"));
+        assert!(description(&summary).is_empty());
     }
 
     #[test]

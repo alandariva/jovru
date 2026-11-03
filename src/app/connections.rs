@@ -1,6 +1,7 @@
 use super::*;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use jykre::metadata_scope::{MetadataScope, RefreshPhase, RefreshProgress, format_eta};
 use jykre::result::{DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT};
 use jykre::{cell_format, tr};
 
@@ -25,8 +26,45 @@ impl AppView {
         self.connection_open = false;
         self.connection_databricks
             .update(cx, |form, _| form.cancel_discovery());
+        self.connection_scope
+            .update(cx, |picker, _| picker.cancel());
         self.invalidate_connection_test();
         cx.notify();
+    }
+
+    /// Shows the namespaces of `driver` to choose from, starting from
+    /// `selection`.
+    pub(super) fn reset_scope(
+        &mut self,
+        driver: DriverKind,
+        selection: MetadataScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let levels = builtin_registry()
+            .and_then(|registry| registry.get(driver))
+            .map(|driver| driver.descriptor().capabilities.namespace_levels())
+            .unwrap_or_default();
+        self.connection_scope
+            .update(cx, |picker, cx| picker.reset(levels, selection, window, cx));
+    }
+
+    /// Lists the namespaces of the connection typed in the form.
+    pub(super) fn load_namespaces(&mut self, cx: &mut Context<Self>) {
+        if self.connection_saving {
+            return;
+        }
+        match self.form_input(cx) {
+            Ok(input) => self
+                .connection_scope
+                .update(cx, |picker, cx| picker.load(input, cx)),
+            Err(error) => {
+                // The list needs a reachable server: show the field to fix.
+                self.connection_section = ConnectionSection::Connection;
+                self.connection_status = Some(Feedback::new(Tone::Error, error.to_string()));
+                cx.notify();
+            }
+        }
     }
 
     pub(super) fn open_connection(
@@ -44,6 +82,7 @@ impl AppView {
             .is_some_and(|profile| profile.remember_password);
         self.editing_connection = index;
         self.connection_open = true;
+        self.connection_section = ConnectionSection::Connection;
         let (name, config) = index.and_then(|index| self.connections[index].input.as_ref().map(|input| (self.connections[index].name.clone(), input.config.clone())))
             .unwrap_or_else(|| (String::new(), ConnectionConfig { driver: DriverKind::Postgres, options: serde_json::json!({"host":"localhost","port":5432,"database":"","user":"postgres","sslMode":"prefer"}) }));
         self.driver = match config.driver {
@@ -104,6 +143,10 @@ impl AppView {
         }) {
             self.connection_status = Some(Feedback::new(Tone::Error, error.to_string()));
         }
+        let selection = index
+            .map(|index| self.connections[index].scope.clone())
+            .unwrap_or_default();
+        self.reset_scope(config.driver, selection, window, cx);
         self.connection_name
             .update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
@@ -128,6 +171,12 @@ impl AppView {
                 "A connection with this name already exists."
             )));
         }
+        Ok((name, self.form_input(cx)?))
+    }
+
+    /// The configuration and credentials typed in the form, validated by
+    /// the driver.
+    fn form_input(&self, cx: &App) -> DriverResult<ResolvedConnection> {
         let config = self.form_config(cx)?;
         let driver = config.driver;
         builtin_registry()?
@@ -149,13 +198,10 @@ impl AppView {
                 password: Some(SecretString::from(password)),
             }
         };
-        Ok((
-            name,
-            ResolvedConnection {
-                config,
-                credentials,
-            },
-        ))
+        Ok(ResolvedConnection {
+            config,
+            credentials,
+        })
     }
 
     /// Whether an empty password field would keep the edited connection's
@@ -196,6 +242,15 @@ impl AppView {
             serde_json::json!({"host":self.connection_host.read(cx).value().trim(),"port":port,"database":if driver == DriverKind::MySql && database.is_empty() { None } else { Some(database) },"user":self.connection_user.read(cx).value().trim(),"sslMode":self.connection_ssl.read(cx).value().trim()})
         };
         Ok(ConnectionConfig { driver, options })
+    }
+
+    /// Whether the namespace list on screen came from other settings than
+    /// the ones in the form now.
+    fn scope_list_is_stale(&self, cx: &App) -> bool {
+        let Some(source) = self.connection_scope.read(cx).source() else {
+            return false;
+        };
+        self.form_config(cx).is_ok_and(|config| config != *source)
     }
 
     /// The row limit typed in the form, between 1 and the maximum.
@@ -414,6 +469,7 @@ impl AppView {
             profile,
             input,
             row_limit,
+            scope,
             cache,
             warning,
         } = loaded;
@@ -445,13 +501,17 @@ impl AppView {
             refresh_generation: 0,
             collapsed: HashSet::new(),
             refreshing: None,
+            scope,
+            progress: None,
             status: Feedback::new(Tone::Info, ""),
             notice: warning.clone(),
         };
         if let Some(cache) = cache {
             Self::apply_cache(&mut connection, cache);
         }
-        if connection.metadata.is_empty() {
+        if connection.scope.is_pending() {
+            connection.status = Feedback::new(Tone::Info, tr!("Nothing is introspected yet."));
+        } else if connection.metadata.is_empty() {
             connection.status = Feedback::new(
                 Tone::Info,
                 tr!("No saved metadata. Use refresh to fetch it from the server."),
@@ -471,10 +531,17 @@ impl AppView {
         }
         let form = self
             .form_connection(cx)
-            .and_then(|(name, input)| Ok((name, input, self.form_row_limit(cx)?)));
+            .map_err(|error| (ConnectionSection::Connection, error))
+            .and_then(|(name, input)| {
+                let limit = self
+                    .form_row_limit(cx)
+                    .map_err(|error| (ConnectionSection::Options, error))?;
+                Ok((name, input, limit))
+            });
         let (name, input, row_limit) = match form {
             Ok(value) => value,
-            Err(error) => {
+            Err((section, error)) => {
+                self.connection_section = section;
                 self.connection_status = Some(Feedback::new(Tone::Error, error.to_string()));
                 cx.notify();
                 return;
@@ -493,11 +560,16 @@ impl AppView {
         profile.name = name;
         profile.config = input.config.clone();
         profile.remember_password = self.driver != 2 && self.remember_password;
+        let scope = self.connection_scope.read(cx).selection();
+        let previous_scope = editing
+            .map(|index| self.connections[index].scope.clone())
+            .unwrap_or_default();
         if let Some(index) = editing {
             let connection = &mut self.connections[index];
             if let Some((_, cancel)) = connection.refreshing.take() {
                 cancel.cancel();
             }
+            connection.progress = None;
             connection.refresh_generation += 1;
         }
         if let Some(cancel) = self.connection_testing.take() {
@@ -507,6 +579,8 @@ impl AppView {
         self.connection_saving = true;
         self.connection_databricks
             .update(cx, |form, cx| form.set_disabled(true, cx));
+        self.connection_scope
+            .update(cx, |picker, cx| picker.set_disabled(true, cx));
         self.connection_status = Some(Feedback::new(Tone::Info, tr!("Saving connection…")));
         let dir = connection_store::data_dir();
         cx.spawn_in(window, async move |weak, cx| {
@@ -515,7 +589,7 @@ impl AppView {
                     &dir,
                     profile,
                     input.credentials,
-                    row_limit,
+                    connection_store::Preferences { row_limit, scope },
                     &SystemSecretStore,
                 )
                 .await
@@ -525,6 +599,8 @@ impl AppView {
                 this.connection_saving = false;
                 this.connection_databricks
                     .update(cx, |form, cx| form.set_disabled(false, cx));
+                this.connection_scope
+                    .update(cx, |picker, cx| picker.set_disabled(false, cx));
                 match result {
                     Err(error) => {
                         this.connection_status =
@@ -532,10 +608,20 @@ impl AppView {
                         cx.notify();
                     }
                     Ok(loaded) => {
-                        let should_refresh = loaded
+                        // An empty cache (new, or another server) reads the whole
+                        // choice; otherwise only what the change added is read,
+                        // and what it removed leaves the cache.
+                        let selection = loaded.scope.clone();
+                        let read = if loaded
                             .cache
                             .as_ref()
-                            .is_none_or(|cache| cache.objects.is_empty());
+                            .is_none_or(|cache| cache.objects.is_empty())
+                        {
+                            selection.clone()
+                        } else {
+                            selection.added_since(&previous_scope)
+                        };
+                        let apply = !read.is_pending() || selection != previous_scope;
                         let index = if let Some(index) = editing {
                             let connection = &mut this.connections[index];
                             let old_name = connection.name.clone();
@@ -551,6 +637,7 @@ impl AppView {
                             connection.profile = Some(loaded.profile);
                             connection.input = Some(loaded.input.clone());
                             connection.row_limit = loaded.row_limit;
+                            connection.scope = loaded.scope.clone();
                             connection.detail = connection_detail(&loaded.input.config);
                             if let Some(cache) = loaded.cache {
                                 Self::apply_cache(connection, cache);
@@ -595,8 +682,11 @@ impl AppView {
                         if !this.search.read(cx).value().is_empty() {
                             this.search_cache(false, cx);
                         }
-                        if should_refresh {
-                            this.refresh_metadata(index, ObjectPath::default(), cx);
+                        if apply {
+                            this.refresh_selection(index, read, cx);
+                        } else if selection.is_pending() {
+                            this.connections[index].status =
+                                Feedback::new(Tone::Info, tr!("Nothing is introspected yet."));
                         }
                         cx.notify();
                     }
@@ -726,8 +816,136 @@ impl AppView {
                 cx.notify();
             }
             Some(_) => {}
+            // The whole connection means what the user chose to introspect.
+            None if scope.0.is_empty() => {
+                if connection.scope.is_pending() {
+                    connection.status = Feedback::new(
+                        Tone::Info,
+                        tr!("Choose what to introspect in the connection settings."),
+                    );
+                    cx.notify();
+                } else {
+                    let read = connection.scope.clone();
+                    self.refresh_selection(index, read, cx);
+                }
+            }
             None => self.refresh_metadata(index, scope, cx),
         }
+    }
+
+    /// Reads `read` (the whole choice, or what a change added) and removes
+    /// what the choice no longer covers, showing how far it got and the
+    /// time left. Each namespace is published as soon as it is read.
+    fn refresh_selection(&mut self, index: usize, read: MetadataScope, cx: &mut Context<Self>) {
+        let connection = &mut self.connections[index];
+        if connection.refreshing.is_some() {
+            return;
+        }
+        let (Some(input), Some(profile)) = (connection.input.clone(), connection.profile.as_ref())
+        else {
+            return;
+        };
+        let id = profile.id;
+        let revision = profile.revision;
+        let selection = connection.scope.clone();
+        let removal_only = read.is_pending();
+        let cancel = CancellationToken::new();
+        connection.refresh_generation += 1;
+        let generation = connection.refresh_generation;
+        connection.refreshing = Some((ObjectPath::default(), cancel.clone()));
+        connection.progress = (!read.is_pending()).then(RefreshProgress::discovering);
+        connection.status = Feedback::new(Tone::Info, "");
+        let (progress, mut updates) = tokio::sync::mpsc::unbounded_channel::<RefreshProgress>();
+        cx.spawn(async move |weak, cx| {
+            while let Some(update) = updates.recv().await {
+                let alive = weak.update(cx, |this, cx| {
+                    let connection = &mut this.connections[index];
+                    if connection.refresh_generation == generation
+                        && connection.refreshing.is_some()
+                    {
+                        connection.progress = Some(update);
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let dir = connection_store::data_dir();
+        cx.spawn(async move |weak, cx| {
+            let result = backend::run(backend::apply_selection(
+                dir.clone(),
+                id,
+                input.clone(),
+                selection,
+                read,
+                cancel,
+                Some(progress),
+            ))
+            .await;
+            let pages = weak
+                .update(cx, |this, _| {
+                    this.connections[index]
+                        .metadata_pages
+                        .iter()
+                        .map(|(parent, count)| (parent.clone(), *count))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let snapshot = backend::run(async move {
+                backend::cached_metadata_pages(
+                    &dir,
+                    id,
+                    &input.config,
+                    false,
+                    if pages.is_empty() {
+                        vec![(ObjectPath::default(), 200)]
+                    } else {
+                        pages
+                    },
+                )
+                .await
+            })
+            .await;
+            let _ = weak.update(cx, |this, cx| {
+                let connection = &mut this.connections[index];
+                if connection.refresh_generation != generation
+                    || connection
+                        .profile
+                        .as_ref()
+                        .is_none_or(|profile| profile.id != id || profile.revision != revision)
+                {
+                    return;
+                }
+                connection.refreshing = None;
+                connection.progress = None;
+                let reloaded = match snapshot {
+                    Ok(snapshot) => {
+                        Self::apply_cache(connection, snapshot);
+                        None
+                    }
+                    Err(error) => Some(error),
+                };
+                connection.status = if connection.scope.is_pending() && result.is_ok() {
+                    Feedback::new(Tone::Info, tr!("Nothing is introspected yet."))
+                } else if removal_only && result.is_ok() && reloaded.is_none() {
+                    Feedback::new(
+                        Tone::Success,
+                        tr!("What is no longer chosen was removed from the cache."),
+                    )
+                } else {
+                    selection_status(result, reloaded)
+                };
+                if !this.search.read(cx).value().is_empty() {
+                    this.search_cache(false, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     /// The focus handle of an explorer node, created the first time it shows.
@@ -961,9 +1179,10 @@ impl AppView {
                     Ok(found) => {
                         for (index, driver, objects) in found {
                             if palette {
-                                for object in objects.into_iter().filter(|object| {
-                                    matches!(object.kind, ObjectKind::Table | ObjectKind::View)
-                                }) {
+                                for object in objects
+                                    .into_iter()
+                                    .filter(|object| object.kind.is_relation())
+                                {
                                     this.command_matches.push((
                                         index,
                                         object.name.clone(),
@@ -1065,7 +1284,7 @@ impl AppView {
                         icon_button(
                             ("refresh-connection", index),
                             I::RefreshCw,
-                            tr!("Refresh all metadata"),
+                            tr!("Refresh the chosen metadata"),
                         )
                         .when(busy, |s| s.opacity(0.5).cursor_default())
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -1098,7 +1317,7 @@ impl AppView {
                                 PopupMenuItem::new(if refreshing_all {
                                     tr!("Cancel refresh")
                                 } else {
-                                    tr!("Refresh all metadata")
+                                    tr!("Refresh the chosen metadata")
                                 })
                                 .icon(I::RefreshCw)
                                 .disabled(busy && !refreshing_all)
@@ -1157,6 +1376,26 @@ impl AppView {
                                 )
                             },
                         )
+                        .when_some(connection.progress.as_ref(), |s, progress| {
+                            s.child(progress_bar(index, progress))
+                        })
+                        .when(
+                            connection.scope.is_pending() && connection.refreshing.is_none(),
+                            |s| {
+                                s.child(
+                                    button(
+                                        ("choose-scope", index),
+                                        I::ListFilter,
+                                        tr!("Choose what to introspect"),
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.open_connection(Some(index), window, cx)
+                                        },
+                                    )),
+                                )
+                            },
+                        )
                         .child(
                             button(
                                 ("live-new-query", index),
@@ -1172,11 +1411,20 @@ impl AppView {
                 )
                 .children(objects.into_iter().enumerate().map(|(row_index, object)| {
                     let path = object.path.clone();
-                    let refresh_path = path.clone();
+                    // Keys and partitions refresh with their table.
+                    let refresh_path = jykre::explorer::refresh_scope(&path);
+                    let f5_path = refresh_path.clone();
                     let toggle_path = path.clone();
                     let key_path = path.clone();
                     let menu_path = path.clone();
-                    let relation = matches!(object.kind, ObjectKind::Table | ObjectKind::View);
+                    let relation = object.kind.is_relation();
+                    let opens = jykre::explorer::opens(object);
+                    let expandable = jykre::explorer::expandable(object);
+                    let detail = jykre::explorer::detail(object);
+                    let described =
+                        matches!(object.kind, ObjectKind::Column | ObjectKind::ForeignKey)
+                            || object.comment.is_some();
+                    let described_object = object.clone();
                     let collapsed = connection.collapsed.contains(&path);
                     let freshness = connection.node_freshness(&path);
                     let refreshing_this = refreshing.as_ref() == Some(&path);
@@ -1244,16 +1492,24 @@ impl AppView {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(rgb(HOVER)))
                                 .child(icon(
-                                    if relation {
-                                        I::Table2
-                                    } else if object.kind == ObjectKind::Column {
-                                        I::Columns3
-                                    } else if collapsed {
-                                        I::ChevronRight
-                                    } else {
-                                        I::ChevronDown
+                                    match object.kind {
+                                        ObjectKind::View => I::Eye,
+                                        ObjectKind::MaterializedView => I::TableProperties,
+                                        _ if relation => I::Table2,
+                                        ObjectKind::Column if object.primary_key.is_some() => {
+                                            I::KeyRound
+                                        }
+                                        ObjectKind::Column => I::Columns3,
+                                        ObjectKind::ForeignKey => I::Link,
+                                        ObjectKind::Partition => I::Layers,
+                                        _ if collapsed => I::ChevronRight,
+                                        _ => I::ChevronDown,
                                     },
-                                    MUTED,
+                                    if object.primary_key.is_some() {
+                                        AMBER
+                                    } else {
+                                        MUTED
+                                    },
                                 ))
                                 .child(
                                     div()
@@ -1261,13 +1517,33 @@ impl AppView {
                                         .text_size(px(14.))
                                         .child(object.name.clone()),
                                 )
+                                .when_some(detail, |s, detail| {
+                                    s.child(
+                                        div()
+                                            .flex_none()
+                                            .max_w(px(140.))
+                                            .truncate()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(FAINT))
+                                            .child(detail),
+                                    )
+                                })
+                                // Built only when shown, not for every node.
+                                .when(described, |s| {
+                                    s.tooltip(move |window, cx| {
+                                        Tooltip::new(jykre::explorer::description(
+                                            &described_object,
+                                        ))
+                                        .build(window, cx)
+                                    })
+                                })
                                 // F5 refreshes the focused node, or cancels its refresh;
                                 // the arrows move through the tree.
                                 .on_key_down(cx.listener(
                                     move |this, event: &KeyDownEvent, window, cx| {
                                         let keystroke = &event.keystroke;
                                         if keystroke.key == "f5" {
-                                            this.toggle_refresh(index, key_path.clone(), cx);
+                                            this.toggle_refresh(index, f5_path.clone(), cx);
                                         } else if let Some(key) =
                                             jykre::explorer::TreeKey::from_key(&keystroke.key)
                                                 .filter(|_| !keystroke.modifiers.modified())
@@ -1285,10 +1561,12 @@ impl AppView {
                                 .on_click(cx.listener(
                                     move |this, event: &ClickEvent, window, cx| {
                                         this.select_node(index, &path, window, cx);
-                                        if !relation {
+                                        if opens {
+                                            if event.is_keyboard() || event.click_count() >= 2 {
+                                                this.open_relation(index, &path, window, cx);
+                                            }
+                                        } else if expandable {
                                             this.toggle_node(index, &path, cx);
-                                        } else if event.is_keyboard() || event.click_count() >= 2 {
-                                            this.open_relation(index, &path, window, cx);
                                         }
                                     },
                                 )),
@@ -1324,9 +1602,9 @@ impl AppView {
                                     }
                                 };
                                 let open_path = menu_path.clone();
-                                let refresh_path = menu_path.clone();
+                                let refresh_path = jykre::explorer::refresh_scope(&menu_path);
                                 let copy_name = name.clone();
-                                menu.item(if relation {
+                                menu.item(if opens {
                                     PopupMenuItem::new(tr!("Open preview"))
                                         .icon(I::SquareTerminal)
                                         .on_click(run(Box::new(move |this, window, cx| {
@@ -1407,54 +1685,379 @@ impl AppView {
     }
 
     pub(super) fn connection_dialog(&self, cx: &mut Context<Self>) -> AnyElement {
-        let field = |title: &'static str, state: &Entity<InputState>| {
-            column().flex_1().gap_1().child(label(title)).child(
-                Input::new(state)
-                    .w_full()
-                    .disabled(self.connection_saving)
-                    .aria_label(title),
-            )
+        let section = self.connection_section;
+        let scope = self.connection_scope.read(cx).selection();
+        let scope_badge = if scope.all {
+            badge(tr!("All"), MINT)
+        } else if scope.is_pending() {
+            badge(tr!("None"), AMBER)
+        } else {
+            badge(scope.include.len().to_string(), MINT)
+        };
+        let body = match section {
+            ConnectionSection::Connection => self.connection_fields(cx),
+            ConnectionSection::Metadata => column()
+                .gap_3()
+                .when(self.scope_list_is_stale(cx), |s| {
+                    s.child(
+                        feedback_line(&Feedback::new(
+                            Tone::Warning,
+                            tr!("The connection settings changed after the list was loaded. Load it again to see this server's namespaces."),
+                        ))
+                        .id("scope-stale")
+                        .role(Role::Status),
+                    )
+                })
+                .child(self.connection_scope.clone()),
+            ConnectionSection::Options => column()
+                .gap_1()
+                .child(self.dialog_field(tr!("Row limit per statement"), &self.connection_row_limit))
+                .child(label(tr!(
+                    "Up to {0} rows. Reading also stops when a result reaches {1} MB.",
+                    cell_format::count(MAX_ROW_LIMIT as usize),
+                    DEFAULT_MEMORY_CEILING / (1024 * 1024)
+                ))),
         };
         self.overlay("connection-backdrop", cx)
-            .child(column().id("connection-form").role(Role::Dialog).aria_label(tr!("Configure connection")).w(px(560.)).max_h(px(750.)).overflow_y_scroll().mt(px(48.)).p_5().gap_3().rounded(px(12.)).border_1().border_color(rgb(BORDER)).bg(rgb(PANEL)).shadow_lg()
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(row().justify_between().child(div().text_size(px(20.)).child(if self.editing_connection.is_some() { tr!("Configure connection") } else { tr!("New connection") }))
-                    .child(icon_button("close-connection", I::X, tr!("Close")).when(self.connection_saving, |s| s.opacity(0.5).cursor_default()).on_click(cx.listener(|this, _, _, cx| this.close_connection_dialog(cx)))))
-                .child(row().children(["PostgreSQL", "MySQL", "Databricks"].into_iter().enumerate().map(|(index, name)| {
-                    button(("select-driver", index), I::Database, name).flex_1().when(self.driver == index, |s| s.bg(rgb(HOVER)).text_color(rgb(MINT)))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            // Re-selecting the current driver keeps the typed port and TLS mode.
-                            if this.connection_saving || this.driver == index { return; } this.driver = index; this.invalidate_connection_test(); this.connection_databricks.update(cx, |form,_| form.cancel_discovery());
-                            this.connection_port.update(cx, |input, cx| input.set_value(if index == 1 { "3306" } else { "5432" }, window, cx));
-                            this.connection_ssl.update(cx, |input, cx| input.set_value(if index == 1 { "preferred" } else { "prefer" }, window, cx));
-                            cx.notify();
-                        }))
-                })))
-                .child(field(tr!("Connection name"), &self.connection_name))
-                .when(self.driver != 2, |s| s
-                    .child(row().child(field(tr!("Host"), &self.connection_host)).child(field(tr!("Port"), &self.connection_port)))
-                    .child(row().child(field(tr!("Database"), &self.connection_database)).child(field(tr!("User"), &self.connection_user)))
-                    .child(field(tr!("Password"), &self.connection_password))
-                    .child(button("remember-password", if self.remember_password { I::Check } else { I::Square }, tr!("Remember password in the system vault"))
-                        .aria_label(if self.remember_password { tr!("Remember password in the vault: on") } else { tr!("Remember password in the vault: off") })
-                        .when(self.remember_password, |s| s.bg(rgb(HOVER)).text_color(rgb(MINT)))
-                        .on_click(cx.listener(|this, _, _, cx| { if !this.connection_saving { this.remember_password = !this.remember_password; cx.notify(); } })))
-                    .child(field(tr!("TLS mode"), &self.connection_ssl))
-                    .child(label(if self.driver == 0 { tr!("TLS: disable, prefer, require, verify-ca or verify-full") } else { tr!("TLS: disabled, preferred, required, verify-ca or verify-identity") })))
-                .when(self.driver == 2, |s| s.child(self.connection_databricks.clone()))
-                .child(field(tr!("Row limit per statement"), &self.connection_row_limit))
-                .child(label(tr!("Up to {0} rows. Reading also stops when a result reaches {1} MB.", cell_format::count(MAX_ROW_LIMIT as usize), DEFAULT_MEMORY_CEILING / (1024 * 1024))))
-                .when(self.driver != 2, |s| s.child(label(if self.editing_connection.is_none() { tr!("Without remember password, the password stays only in this session.") } else if self.form_keeps_password(cx) { tr!("An empty password keeps the one already available. Passwords are never written to SQLite.") } else { tr!("The driver, server or user changed, so the previous password is not used. Enter the password for this server.") })))
-                .when_some(self.connection_status.as_ref(), |s, status| s.child(feedback_line(status).id("connection-status").role(if status.tone == Tone::Error { Role::Alert } else { Role::Status }).aria_label(status.text.clone())))
-                .child(row().justify_between()
-                    .child(button("test-connection", I::PlugZap, if self.connection_testing.is_some() { tr!("Testing…") } else { tr!("Test connection") })
-                        .when(self.connection_testing.is_some() || self.connection_saving, |s| s.opacity(0.6).cursor_default())
-                        .on_click(cx.listener(|this, _, _, cx| this.test_connection(cx))))
-                    .child(primary_button("create-connection", if self.connection_saving { I::LoaderCircle } else { I::Plus }, if self.connection_saving { tr!("Saving…") } else { tr!("Save connection") })
-                        .when(self.connection_saving, |s| s.opacity(0.6).cursor_default())
-                        .on_click(cx.listener(|this, _, window, cx| this.save_connection(window, cx)))))
-                .focus_trap("connection-focus-trap", &self.connection_focus))
+            .child(
+                column()
+                    .id("connection-form")
+                    .role(Role::Dialog)
+                    .aria_label(tr!("Configure connection"))
+                    .w(px(580.))
+                    .h(px(640.))
+                    .max_h(relative(0.9))
+                    .mt(px(40.))
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .bg(rgb(PANEL))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        column()
+                            .flex_none()
+                            .px_5()
+                            .pt_5()
+                            .gap_3()
+                            .child(
+                                row()
+                                    .justify_between()
+                                    .child(div().text_size(px(20.)).child(
+                                        if self.editing_connection.is_some() {
+                                            tr!("Configure connection")
+                                        } else {
+                                            tr!("New connection")
+                                        },
+                                    ))
+                                    .child(
+                                        icon_button("close-connection", I::X, tr!("Close"))
+                                            .when(self.connection_saving, |s| {
+                                                s.opacity(0.5).cursor_default()
+                                            })
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.close_connection_dialog(cx)
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                row().children(
+                                    ["PostgreSQL", "MySQL", "Databricks"]
+                                        .into_iter()
+                                        .enumerate()
+                                        .map(|(index, name)| {
+                                            button(("select-driver", index), I::Database, name)
+                                                .flex_1()
+                                                .aria_selected(self.driver == index)
+                                                .when(self.driver == index, |s| {
+                                                    s.bg(rgb(HOVER)).text_color(rgb(MINT))
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.select_driver(index, window, cx)
+                                                    },
+                                                ))
+                                        }),
+                                ),
+                            )
+                            .child(
+                                row()
+                                    .id("connection-sections")
+                                    .role(Role::TabList)
+                                    .aria_label(tr!("Connection settings"))
+                                    .gap_0()
+                                    .border_b_1()
+                                    .border_color(rgb(BORDER))
+                                    .child(self.section_tab(
+                                        "section-connection",
+                                        tr!("Connection"),
+                                        ConnectionSection::Connection,
+                                        cx,
+                                    ))
+                                    .child(
+                                        self.section_tab(
+                                            "section-metadata",
+                                            tr!("Metadata"),
+                                            ConnectionSection::Metadata,
+                                            cx,
+                                        )
+                                        .child(scope_badge),
+                                    )
+                                    .child(self.section_tab(
+                                        "section-options",
+                                        tr!("Options"),
+                                        ConnectionSection::Options,
+                                        cx,
+                                    )),
+                            ),
+                    )
+                    // Only the section scrolls; the actions below stay in view.
+                    .child(
+                        div()
+                            .id("connection-section")
+                            .role(Role::TabPanel)
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_5()
+                            .py_4()
+                            .child(body),
+                    )
+                    .child(
+                        column()
+                            .flex_none()
+                            .px_5()
+                            .py_4()
+                            .gap_3()
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .when_some(self.connection_status.as_ref(), |s, status| {
+                                s.child(
+                                    feedback_line(status)
+                                        .id("connection-status")
+                                        .role(if status.tone == Tone::Error {
+                                            Role::Alert
+                                        } else {
+                                            Role::Status
+                                        })
+                                        .aria_label(status.text.clone()),
+                                )
+                            })
+                            .child(
+                                row()
+                                    .justify_between()
+                                    .child(
+                                        button(
+                                            "test-connection",
+                                            I::PlugZap,
+                                            if self.connection_testing.is_some() {
+                                                tr!("Testing…")
+                                            } else {
+                                                tr!("Test connection")
+                                            },
+                                        )
+                                        .when(
+                                            self.connection_testing.is_some()
+                                                || self.connection_saving,
+                                            |s| s.opacity(0.6).cursor_default(),
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.test_connection(cx)),
+                                        ),
+                                    )
+                                    .child(
+                                        primary_button(
+                                            "create-connection",
+                                            if self.connection_saving {
+                                                I::LoaderCircle
+                                            } else {
+                                                I::Plus
+                                            },
+                                            if self.connection_saving {
+                                                tr!("Saving…")
+                                            } else {
+                                                tr!("Save connection")
+                                            },
+                                        )
+                                        .when(self.connection_saving, |s| {
+                                            s.opacity(0.6).cursor_default()
+                                        })
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.save_connection(window, cx)
+                                            }),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .focus_trap("connection-focus-trap", &self.connection_focus),
+            )
             .into_any_element()
+    }
+
+    /// One tab of the connection dialog's sections.
+    fn section_tab(
+        &self,
+        id: &'static str,
+        title: &'static str,
+        target: ConnectionSection,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let section = self.connection_section;
+        let selected = section == target;
+        row()
+            .id(id)
+            .role(Role::Tab)
+            .aria_label(title)
+            .aria_selected(selected)
+            .focusable()
+            .tab_index(0)
+            .h(px(34.))
+            .px_3()
+            .gap_2()
+            .cursor_pointer()
+            .border_b_2()
+            .border_color(if selected {
+                rgb(MINT)
+            } else {
+                transparent_black().into()
+            })
+            .focus_visible(|s| s.bg(rgb(HOVER)))
+            .hover(|s| s.text_color(rgb(TEXT)))
+            .text_size(px(14.))
+            .text_color(rgb(if selected { TEXT } else { MUTED }))
+            .child(title)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.connection_section = target;
+                cx.notify();
+            }))
+    }
+
+    fn dialog_field(&self, title: &'static str, state: &Entity<InputState>) -> Div {
+        column().flex_1().gap_1().child(label(title)).child(
+            Input::new(state)
+                .w_full()
+                .disabled(self.connection_saving)
+                .aria_label(title),
+        )
+    }
+
+    /// Name, server and credentials: what is needed to reach the database.
+    fn connection_fields(&self, cx: &mut Context<Self>) -> Div {
+        let field = |title, state| self.dialog_field(title, state);
+        let password_hint = if self.editing_connection.is_none() {
+            tr!("Without remember password, the password stays only in this session.")
+        } else if self.form_keeps_password(cx) {
+            tr!(
+                "An empty password keeps the one already available. Passwords are never written to SQLite."
+            )
+        } else {
+            tr!(
+                "The driver, server or user changed, so the previous password is not used. Enter the password for this server."
+            )
+        };
+        column()
+            .gap_3()
+            .child(field(tr!("Connection name"), &self.connection_name))
+            .when(self.driver != 2, |s| {
+                s.child(
+                    row()
+                        .gap_3()
+                        .child(field(tr!("Host"), &self.connection_host))
+                        .child(
+                            field(tr!("Port"), &self.connection_port)
+                                .flex_none()
+                                .w(px(110.)),
+                        ),
+                )
+                .child(
+                    row()
+                        .gap_3()
+                        .child(field(tr!("Database"), &self.connection_database))
+                        .child(field(tr!("User"), &self.connection_user)),
+                )
+                .child(
+                    column()
+                        .gap_1()
+                        .child(field(tr!("Password"), &self.connection_password))
+                        .child(label(password_hint)),
+                )
+                .child(
+                    button(
+                        "remember-password",
+                        if self.remember_password {
+                            I::SquareCheck
+                        } else {
+                            I::Square
+                        },
+                        tr!("Remember password in the system vault"),
+                    )
+                    .role(Role::CheckBox)
+                    .aria_toggled(if self.remember_password {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    })
+                    .when(self.remember_password, |s| s.text_color(rgb(MINT)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.connection_saving {
+                            this.remember_password = !this.remember_password;
+                            cx.notify();
+                        }
+                    })),
+                )
+                .child(
+                    column()
+                        .gap_1()
+                        .child(field(tr!("TLS mode"), &self.connection_ssl))
+                        .child(label(if self.driver == 0 {
+                            tr!("TLS: disable, prefer, require, verify-ca or verify-full")
+                        } else {
+                            tr!("TLS: disabled, preferred, required, verify-ca or verify-identity")
+                        })),
+                )
+            })
+            .when(self.driver == 2, |s| {
+                s.child(self.connection_databricks.clone())
+            })
+    }
+
+    /// Switches the form to another driver. Re-selecting the current one
+    /// keeps the typed port and TLS mode.
+    fn select_driver(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connection_saving || self.driver == index {
+            return;
+        }
+        self.driver = index;
+        self.invalidate_connection_test();
+        self.connection_databricks
+            .update(cx, |form, _| form.cancel_discovery());
+        // Another driver has other namespaces; the edited connection's own
+        // choice comes back with its driver.
+        let kind = [
+            DriverKind::Postgres,
+            DriverKind::MySql,
+            DriverKind::Databricks,
+        ][index];
+        let selection = self
+            .editing_connection
+            .filter(|editing| {
+                self.connections[*editing]
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| input.config.driver == kind)
+            })
+            .map(|editing| self.connections[editing].scope.clone())
+            .unwrap_or_default();
+        self.reset_scope(kind, selection, window, cx);
+        self.connection_port.update(cx, |input, cx| {
+            input.set_value(if index == 1 { "3306" } else { "5432" }, window, cx)
+        });
+        self.connection_ssl.update(cx, |input, cx| {
+            input.set_value(if index == 1 { "preferred" } else { "prefer" }, window, cx)
+        });
+        cx.notify();
     }
 }
 
@@ -1503,6 +2106,146 @@ impl Connection {
             success.unwrap_or(tr!("none"))
         )
     }
+}
+
+/// The status a finished read of the chosen namespaces leaves.
+fn selection_status(
+    result: DriverResult<backend::SelectionOutcome>,
+    reloaded: Option<DriverError>,
+) -> Feedback {
+    let names = |paths: Vec<&ObjectPath>| {
+        paths
+            .into_iter()
+            .filter_map(|path| path.0.last().map(|part| part.name.clone()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match result {
+        Err(error) => Feedback::new(
+            Tone::Error,
+            tr!(
+                "Could not read the metadata: {0}. The previous cache is kept.",
+                error
+            ),
+        ),
+        Ok(outcome) if outcome.cancelled => Feedback::new(
+            Tone::Warning,
+            tr!(
+                "Reading cancelled. The {0} namespaces already read are kept.",
+                outcome.refreshed
+            ),
+        ),
+        Ok(outcome) if !outcome.failures.is_empty() => Feedback::new(
+            Tone::Warning,
+            tr!(
+                "{0} namespaces read. Could not read {1}: {2}",
+                outcome.refreshed,
+                names(outcome.failures.iter().map(|(path, _)| path).collect()),
+                outcome
+                    .failures
+                    .first()
+                    .map(|(_, error)| error.to_string())
+                    .unwrap_or_default()
+            ),
+        ),
+        Ok(outcome) if !outcome.missing.is_empty() => Feedback::new(
+            Tone::Warning,
+            tr!(
+                "{0} namespaces read. Not found on the server: {1}",
+                outcome.refreshed,
+                names(outcome.missing.iter().collect())
+            ),
+        ),
+        Ok(_) if reloaded.is_some() => Feedback::new(
+            Tone::Warning,
+            tr!(
+                "Metadata saved, but the explorer could not show it: {0}",
+                reloaded.map(|error| error.to_string()).unwrap_or_default()
+            ),
+        ),
+        Ok(outcome) => Feedback::new(
+            Tone::Success,
+            tr!(
+                "Metadata of {0} namespaces read and saved.",
+                outcome.refreshed
+            ),
+        ),
+    }
+}
+
+/// How far reading the chosen namespaces got, with the time left.
+fn progress_bar(index: usize, progress: &RefreshProgress) -> impl IntoElement {
+    let (text, eta): (String, String) = match progress.phase {
+        RefreshPhase::Discovering => (tr!("Listing namespaces…").into(), String::new()),
+        RefreshPhase::Reading => (
+            match &progress.current {
+                Some(path) => tr!(
+                    "Reading {0} of {1}: {2}",
+                    (progress.done + 1).min(progress.total),
+                    progress.total,
+                    path.0
+                        .last()
+                        .map(|part| part.name.as_str())
+                        .unwrap_or_default()
+                ),
+                None => tr!("Read {0} of {1}", progress.done, progress.total),
+            },
+            match progress.eta {
+                Some(left) if progress.done < progress.total => format_eta(left),
+                Some(_) => String::new(),
+                None => tr!("estimating time left…").into(),
+            },
+        ),
+    };
+    let percent = (progress.fraction() * 100.).round() as u32;
+    column()
+        .id(("selection-progress", index))
+        .role(Role::ProgressIndicator)
+        .aria_label(if eta.is_empty() {
+            text.clone()
+        } else {
+            format!("{text} · {eta}")
+        })
+        .gap_1()
+        .child(
+            row()
+                .justify_between()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child(text),
+                )
+                .when(progress.phase == RefreshPhase::Reading, |s| {
+                    s.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(12.))
+                            .text_color(rgb(FAINT))
+                            .child(format!("{percent}%")),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .h(px(4.))
+                .w_full()
+                .rounded_full()
+                .bg(rgb(SURFACE))
+                .child(
+                    div()
+                        .h_full()
+                        .rounded_full()
+                        .bg(rgb(MINT))
+                        .w(relative(progress.fraction())),
+                ),
+        )
+        .when(!eta.is_empty(), |s| {
+            s.child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(eta))
+        })
 }
 
 // Resource labels are presentation only. The driver executes using the ID.

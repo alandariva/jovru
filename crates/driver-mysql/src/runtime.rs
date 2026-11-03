@@ -645,48 +645,48 @@ pub async fn introspect(
     let mut connection = connect(input, &cancel).await?;
     bounded(&cancel, Some(Duration::from_secs(300)), async {
         let mut seen = HashSet::new();
+        let database = scope.name_of(ObjectKind::Database);
+        let relation = scope.relation();
+        let column = scope.name_of(ObjectKind::Column);
         let mut rows = sqlx::query(METADATA_SQL)
-            .bind(scope.name_of(ObjectKind::Database))
-            .bind(scope.name_of(ObjectKind::Database))
-            .bind(
-                scope
-                    .name_of(ObjectKind::Table)
-                    .or(scope.name_of(ObjectKind::View)),
-            )
-            .bind(
-                scope
-                    .name_of(ObjectKind::Table)
-                    .or(scope.name_of(ObjectKind::View)),
-            )
-            .bind(scope.name_of(ObjectKind::Column))
-            .bind(scope.name_of(ObjectKind::Column))
+            .bind(database)
+            .bind(database)
+            .bind(relation)
+            .bind(relation)
+            .bind(column)
+            .bind(column)
             .fetch(&mut connection);
         while let Some(row) = rows.try_next().await.map_err(map_error)? {
-            let database: String = row.try_get("db").map_err(map_error)?;
-            let schema: String = row.try_get("ns").map_err(map_error)?;
-            let table: Option<String> = row.try_get("rel").map_err(map_error)?;
-            let root = ObjectPath::default();
-            let db = MetadataObject::new(ObjectKind::Database, &root, database);
+            let db = MetadataObject::new(
+                ObjectKind::Database,
+                &ObjectPath::default(),
+                row.try_get::<String, _>("db").map_err(map_error)?,
+            );
             let mut batch = Vec::new();
             if seen.insert(db.path.clone()) {
                 batch.push(db.clone());
             }
-            let parent = {
-                let _ = schema;
-                db.path
-            };
-            if let Some(table) = table {
-                let relation_type: Option<String> = row.try_get("reltype").map_err(map_error)?;
-                let relation = MetadataObject::new(
-                    if relation_type.as_deref() == Some("VIEW") {
+            if let Some(table) = row.try_get::<Option<String>, _>("rel").map_err(map_error)? {
+                let view = row
+                    .try_get::<Option<String>, _>("reltype")
+                    .map_err(map_error)?
+                    .as_deref()
+                    == Some("VIEW");
+                let mut relation = MetadataObject::new(
+                    if view {
                         ObjectKind::View
                     } else {
                         ObjectKind::Table
                     },
-                    &parent,
+                    &db.path,
                     table,
                 );
                 if seen.insert(relation.path.clone()) {
+                    // MySQL reports "VIEW" as the comment of every view.
+                    relation.comment = row
+                        .try_get::<Option<String>, _>("relcomment")
+                        .map_err(map_error)?
+                        .filter(|comment| !(view && comment == "VIEW"));
                     batch.push(relation.clone());
                 }
                 if let Some(name) = row.try_get::<Option<String>, _>("col").map_err(map_error)? {
@@ -700,9 +700,84 @@ pub async fn introspect(
                         .try_get::<Option<i64>, _>("pos")
                         .map_err(map_error)?
                         .and_then(|v| u32::try_from(v).ok());
+                    column.default_value = row.try_get("dflt").map_err(map_error)?;
+                    column.comment = row.try_get("colcomment").map_err(map_error)?;
+                    column.primary_key = row
+                        .try_get::<Option<i64>, _>("pk")
+                        .map_err(map_error)?
+                        .and_then(|v| u32::try_from(v).ok());
                     batch.push(column);
                 }
             }
+            batch.retain(|object| object.path.is_within(scope));
+            if !batch.is_empty() {
+                sink.batch(batch).await?;
+            }
+        }
+        drop(rows);
+        if column.is_none() {
+            let mut keys = sqlx::query(FOREIGN_KEYS_SQL)
+                .bind(database)
+                .bind(database)
+                .bind(relation)
+                .bind(relation)
+                .fetch(&mut connection);
+            // One row per key column, in key order: consecutive rows of the
+            // same constraint make one key.
+            let mut current: Option<MetadataObject> = None;
+            let mut batch = Vec::new();
+            while let Some(row) = keys.try_next().await.map_err(map_error)? {
+                let table = ObjectPath::default()
+                    .child(
+                        ObjectKind::Database,
+                        row.try_get::<String, _>("db").map_err(map_error)?,
+                    )
+                    .child(
+                        ObjectKind::Table,
+                        row.try_get::<String, _>("rel").map_err(map_error)?,
+                    );
+                let path = table.child(
+                    ObjectKind::ForeignKey,
+                    row.try_get::<String, _>("name").map_err(map_error)?,
+                );
+                if current.as_ref().is_none_or(|key| key.path != path) {
+                    batch.extend(current.take());
+                    if !seen.contains(&table) {
+                        continue;
+                    }
+                    let mut key = MetadataObject::new(
+                        ObjectKind::ForeignKey,
+                        &table,
+                        path.0
+                            .last()
+                            .map(|part| part.name.clone())
+                            .unwrap_or_default(),
+                    );
+                    key.references = Some(ForeignKeyTarget {
+                        relation: ObjectPath::default()
+                            .child(
+                                ObjectKind::Database,
+                                row.try_get::<String, _>("refdb").map_err(map_error)?,
+                            )
+                            .child(
+                                ObjectKind::Table,
+                                row.try_get::<String, _>("refrel").map_err(map_error)?,
+                            ),
+                        columns: Vec::new(),
+                        referenced: Vec::new(),
+                    });
+                    current = Some(key);
+                }
+                if let Some(target) = current.as_mut().and_then(|key| key.references.as_mut()) {
+                    target
+                        .columns
+                        .push(row.try_get::<String, _>("col").map_err(map_error)?);
+                    target
+                        .referenced
+                        .push(row.try_get::<String, _>("refcol").map_err(map_error)?);
+                }
+            }
+            batch.extend(current);
             batch.retain(|object| object.path.is_within(scope));
             if !batch.is_empty() {
                 sink.batch(batch).await?;
@@ -712,4 +787,43 @@ pub async fn introspect(
     })
     .await
 }
-const METADATA_SQL: &str = r#"SELECT s.schema_name AS db,s.schema_name AS ns,t.table_name AS rel,t.table_type AS reltype,c.column_name AS col,c.column_type AS dtype,c.is_nullable AS isnull,CAST(c.ordinal_position AS SIGNED) AS pos FROM information_schema.schemata s LEFT JOIN information_schema.tables t ON t.table_schema=s.schema_name LEFT JOIN information_schema.columns c ON c.table_schema=t.table_schema AND c.table_name=t.table_name WHERE s.schema_name NOT IN ('mysql','information_schema','performance_schema','sys') AND (? IS NULL OR s.schema_name=?) AND (? IS NULL OR t.table_name=?) AND (? IS NULL OR c.column_name=?) ORDER BY s.schema_name,t.table_name,c.ordinal_position"#;
+/// The root holds the databases the user can see, without the system ones;
+/// a database holds no further namespace.
+pub async fn discover(
+    input: &ResolvedConnection,
+    parent: &ObjectPath,
+    cancel: CancellationToken,
+) -> DriverResult<Vec<MetadataObject>> {
+    if !parent.0.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut connection = connect(input, &cancel).await?;
+    bounded(&cancel, Some(Duration::from_secs(60)), async {
+        let names: Vec<String> = sqlx::query_scalar(DATABASES_SQL)
+            .fetch_all(&mut connection)
+            .await
+            .map_err(map_error)?;
+        Ok(names
+            .into_iter()
+            .map(|name| MetadataObject::new(ObjectKind::Database, parent, name))
+            .collect())
+    })
+    .await
+}
+const DATABASES_SQL: &str = r#"SELECT schema_name AS db FROM information_schema.schemata WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys') ORDER BY schema_name"#;
+/// Databases, relations and columns, with defaults, comments and each
+/// column's position in the primary key. Pairs of placeholders filter the
+/// database, the relation and the column; each pair may be NULL.
+const METADATA_SQL: &str = r#"SELECT s.schema_name AS db, t.table_name AS rel, t.table_type AS reltype, NULLIF(t.table_comment, '') AS relcomment, c.column_name AS col, c.column_type AS dtype, c.is_nullable AS isnull, CAST(c.ordinal_position AS SIGNED) AS pos, c.column_default AS dflt, NULLIF(c.column_comment, '') AS colcomment, CAST(k.ordinal_position AS SIGNED) AS pk
+FROM information_schema.schemata s
+LEFT JOIN information_schema.tables t ON t.table_schema = s.schema_name
+LEFT JOIN information_schema.columns c ON c.table_schema = t.table_schema AND c.table_name = t.table_name
+LEFT JOIN information_schema.key_column_usage k ON k.table_schema = c.table_schema AND k.table_name = c.table_name AND k.column_name = c.column_name AND k.constraint_name = 'PRIMARY'
+WHERE s.schema_name NOT IN ('mysql','information_schema','performance_schema','sys') AND (? IS NULL OR s.schema_name = ?) AND (? IS NULL OR t.table_name = ?) AND (? IS NULL OR c.column_name = ?)
+ORDER BY s.schema_name, t.table_name, c.ordinal_position"#;
+/// One row per column of each foreign key, in key order. Pairs of
+/// placeholders filter the database and the table; each pair may be NULL.
+const FOREIGN_KEYS_SQL: &str = r#"SELECT k.table_schema AS db, k.table_name AS rel, k.constraint_name AS name, k.referenced_table_schema AS refdb, k.referenced_table_name AS refrel, k.column_name AS col, k.referenced_column_name AS refcol
+FROM information_schema.key_column_usage k
+WHERE k.referenced_table_name IS NOT NULL AND k.table_schema NOT IN ('mysql','information_schema','performance_schema','sys') AND (? IS NULL OR k.table_schema = ?) AND (? IS NULL OR k.table_name = ?)
+ORDER BY k.table_schema, k.table_name, k.constraint_name, k.ordinal_position"#;

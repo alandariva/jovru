@@ -1,6 +1,7 @@
 //! Application operations, independent of the UI and its executor.
 use crate::drivers::*;
 use crate::logging;
+use crate::metadata_scope::{EtaEstimator, MetadataScope, RefreshPhase, RefreshProgress};
 use crate::result::{ResultBuilder, ResultData, ResultLimit};
 use crate::tr;
 use jykre_storage::{MetadataRepository, PendingRefresh, RefreshStatus};
@@ -114,6 +115,8 @@ pub async fn search_metadata(
 struct StagedMetadata<'a> {
     pending: &'a mut PendingRefresh,
     buffered: Vec<MetadataObject>,
+    /// Objects the driver delivered.
+    received: usize,
 }
 impl StagedMetadata<'_> {
     async fn flush(&mut self) -> DriverResult<()> {
@@ -126,6 +129,7 @@ impl StagedMetadata<'_> {
 #[async_trait]
 impl IntrospectionSink for StagedMetadata<'_> {
     async fn batch(&mut self, objects: Vec<MetadataObject>) -> DriverResult<()> {
+        self.received += objects.len();
         self.buffered.extend(objects);
         if self.buffered.len() >= 500 {
             self.flush().await?;
@@ -150,9 +154,14 @@ pub async fn refresh_metadata(
         depth = scope.0.len()
     );
     let started = Instant::now();
-    let result = refresh_metadata_in(dir, id, input, scope, cancel)
-        .instrument(span.clone())
-        .await;
+    let result = async {
+        let driver = builtin_registry()?.get(input.config.driver)?;
+        refresh_metadata_in(&*driver, &dir, id, &input, &scope, &cancel)
+            .await
+            .map(|(version, _)| version)
+    }
+    .instrument(span.clone())
+    .await;
     let _entered = span.enter();
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &result {
@@ -167,41 +176,290 @@ pub async fn refresh_metadata(
     result
 }
 
+/// Reads `scope` and publishes it. Returns the new cache version and how
+/// many objects the driver delivered (none when the scope no longer exists).
 async fn refresh_metadata_in(
-    dir: PathBuf,
+    driver: &dyn Driver,
+    dir: &Path,
     id: ConnectionId,
-    input: ResolvedConnection,
-    scope: ObjectPath,
-    cancel: CancellationToken,
-) -> DriverResult<i64> {
-    let driver = builtin_registry()?.get(input.config.driver)?;
+    input: &ResolvedConnection,
+    scope: &ObjectPath,
+    cancel: &CancellationToken,
+) -> DriverResult<(i64, usize)> {
     driver.validate_connection(&input.config)?;
-    let repository = MetadataRepository::open(&dir, id, &input.config).await?;
-    let mut staged = repository.begin(&scope).await?;
+    let repository = MetadataRepository::open(dir, id, &input.config).await?;
+    let mut staged = repository.begin(scope).await?;
     let mut sink = StagedMetadata {
         pending: &mut staged,
         buffered: Vec::new(),
+        received: 0,
     };
     let result = driver
-        .introspect_scoped(&input, &scope, &mut sink, cancel.clone())
+        .introspect_scoped(input, scope, &mut sink, cancel.clone())
         .await;
     let result = match result {
         Ok(report) => sink.flush().await.map(|_| report),
         Err(error) => Err(error),
     };
+    let received = sink.received;
     drop(sink);
     let published = match result {
-        Ok(report) => staged.activate(&report, &cancel).await,
+        Ok(report) => staged.activate(&report, cancel).await,
         Err(error) => Err(error),
     };
     if let Err(error) = published {
         staged.fail(&error).await?;
+        drop(staged);
         repository.close().await;
         return Err(error);
     }
     let version = published?;
+    drop(staged);
     repository.close().await;
-    Ok(version)
+    Ok((version, received))
+}
+
+/// What reading a choice of namespaces did. Each namespace is published on
+/// its own, so a failure or a cancellation keeps the ones already read.
+#[derive(Debug, Default)]
+pub struct SelectionOutcome {
+    /// Namespaces read and published.
+    pub refreshed: usize,
+    /// Namespaces (or lists of namespaces) that could not be read; their
+    /// previous cache stays.
+    pub failures: Vec<(ObjectPath, DriverError)>,
+    /// Chosen namespaces the server no longer has.
+    pub missing: Vec<ObjectPath>,
+    pub cancelled: bool,
+}
+
+/// The last-level namespaces a choice resolves to, listing broader rules on
+/// the way.
+#[derive(Default)]
+struct Plan {
+    /// Last-level namespaces to read, in order.
+    units: Vec<ObjectPath>,
+    /// Broader namespaces whose list was read in full.
+    listed: Vec<ObjectPath>,
+    /// Broader namespaces whose list failed: their cache is kept as it is.
+    unlisted: Vec<ObjectPath>,
+}
+
+impl Plan {
+    async fn resolve(
+        &mut self,
+        driver: &dyn Driver,
+        input: &ResolvedConnection,
+        levels: usize,
+        rule: &ObjectPath,
+        cancel: &CancellationToken,
+        failures: &mut Vec<(ObjectPath, DriverError)>,
+    ) -> DriverResult<()> {
+        let mut pending = vec![rule.clone()];
+        while let Some(path) = pending.pop() {
+            if cancel.is_cancelled() {
+                return Err(DriverError::cancelled());
+            }
+            if path.0.len() >= levels {
+                self.units.push(path);
+                continue;
+            }
+            match driver
+                .discover_namespaces(input, &path, cancel.clone())
+                .await
+            {
+                Ok(children) => {
+                    if !path.0.is_empty() {
+                        self.listed.push(path);
+                    }
+                    // Depth first, in name order.
+                    pending.extend(children.into_iter().rev().map(|child| child.path));
+                }
+                Err(error) if error.code == ErrorCode::Cancelled => return Err(error),
+                Err(error) => {
+                    self.unlisted.push(path.clone());
+                    failures.push((path, error));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Reads the `read` part of a connection's `selection` (all of it, or only
+/// what a change added) and then removes from the cache what the selection
+/// no longer covers. Rules above the last namespace level are listed first
+/// (`RefreshPhase::Discovering`); then each last-level namespace is read and
+/// published on its own, and `progress` receives the count and an estimate
+/// of the time left after each one. Cancelling stops between namespaces
+/// and keeps what was published; nothing is removed then.
+pub async fn apply_selection(
+    dir: PathBuf,
+    id: ConnectionId,
+    input: ResolvedConnection,
+    selection: MetadataScope,
+    read: MetadataScope,
+    cancel: CancellationToken,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<RefreshProgress>>,
+) -> DriverResult<SelectionOutcome> {
+    let driver = builtin_registry()?.get(input.config.driver)?;
+    let target = SelectionTarget {
+        dir: &dir,
+        id,
+        input: &input,
+        selection: &selection,
+        read: &read,
+    };
+    apply_selection_with(&*driver, target, &cancel, progress).await
+}
+
+/// The connection and choice [`apply_selection`] works on.
+struct SelectionTarget<'a> {
+    dir: &'a Path,
+    id: ConnectionId,
+    input: &'a ResolvedConnection,
+    selection: &'a MetadataScope,
+    read: &'a MetadataScope,
+}
+
+async fn apply_selection_with(
+    driver: &dyn Driver,
+    target: SelectionTarget<'_>,
+    cancel: &CancellationToken,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<RefreshProgress>>,
+) -> DriverResult<SelectionOutcome> {
+    let SelectionTarget {
+        dir,
+        id,
+        input,
+        selection,
+        read,
+    } = target;
+    let span = tracing::info_span!(
+        "apply_selection",
+        connection_id = %id,
+        driver = ?input.config.driver,
+    );
+    let started = Instant::now();
+    let send = |update: RefreshProgress| {
+        if let Some(progress) = &progress {
+            let _ = progress.send(update);
+        }
+    };
+    let result = async {
+        driver.validate_connection(&input.config)?;
+        let levels = driver.descriptor().capabilities.namespace_levels().len();
+        let mut outcome = SelectionOutcome::default();
+        let rules = if read.all {
+            vec![ObjectPath::default()]
+        } else {
+            read.include.clone()
+        };
+        let mut plan = Plan::default();
+        if !rules.is_empty() {
+            send(RefreshProgress::discovering());
+        }
+        for rule in &rules {
+            if let Err(error) = plan
+                .resolve(driver, input, levels, rule, cancel, &mut outcome.failures)
+                .await
+            {
+                if error.code == ErrorCode::Cancelled {
+                    outcome.cancelled = true;
+                    return Ok(outcome);
+                }
+                return Err(error);
+            }
+        }
+        let total = plan.units.len();
+        let mut eta = EtaEstimator::default();
+        for (done, unit) in plan.units.iter().enumerate() {
+            if cancel.is_cancelled() {
+                outcome.cancelled = true;
+                return Ok(outcome);
+            }
+            send(RefreshProgress {
+                phase: RefreshPhase::Reading,
+                done,
+                total,
+                current: Some(unit.clone()),
+                eta: eta.remaining(total - done),
+            });
+            let unit_started = Instant::now();
+            match refresh_metadata_in(driver, dir, id, input, unit, cancel).await {
+                Ok((_, 0)) => outcome.missing.push(unit.clone()),
+                Ok(_) => outcome.refreshed += 1,
+                Err(error) if error.code == ErrorCode::Cancelled => {
+                    outcome.cancelled = true;
+                    return Ok(outcome);
+                }
+                Err(error) => outcome.failures.push((unit.clone(), error)),
+            }
+            eta.record(unit_started.elapsed());
+        }
+        if total > 0 {
+            send(RefreshProgress {
+                phase: RefreshPhase::Reading,
+                done: total,
+                total,
+                current: None,
+                eta: Some(Duration::ZERO),
+            });
+        }
+        // What the cache keeps: each rule as it is, except the broad rules
+        // listed in full here, which keep only the namespaces still on the
+        // server.
+        let (mut subtrees, mut nodes) = (Vec::new(), Vec::new());
+        let kept_rules = if selection.all {
+            vec![ObjectPath::default()]
+        } else {
+            selection.include.clone()
+        };
+        for rule in kept_rules {
+            let listed_in_full = (rule.0.is_empty() && read.all && plan.unlisted.is_empty())
+                || plan.listed.contains(&rule)
+                    && !plan.unlisted.iter().any(|path| path.is_within(&rule));
+            if listed_in_full {
+                subtrees.extend(
+                    plan.units
+                        .iter()
+                        .filter(|unit| unit.is_within(&rule))
+                        .cloned(),
+                );
+                nodes.extend(
+                    plan.listed
+                        .iter()
+                        .filter(|path| path.is_within(&rule))
+                        .cloned(),
+                );
+            } else {
+                subtrees.push(rule);
+            }
+        }
+        let repository = MetadataRepository::open(dir, id, &input.config).await?;
+        let retained = repository.retain(&subtrees, &nodes).await;
+        repository.close().await;
+        retained?;
+        Ok(outcome)
+    }
+    .instrument(span.clone())
+    .await;
+    let _entered = span.enter();
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    match &result {
+        Ok(outcome) => tracing::info!(
+            elapsed_ms,
+            refreshed = outcome.refreshed,
+            failed = outcome.failures.len(),
+            missing = outcome.missing.len(),
+            cancelled = outcome.cancelled,
+            "metadata selection applied"
+        ),
+        Err(error) => {
+            tracing::warn!(elapsed_ms, error_code = ?error.code, "metadata selection failed")
+        }
+    }
+    result
 }
 
 /// The only Tokio runtime, created on first use.
@@ -1252,5 +1510,285 @@ mod tests {
         .unwrap();
         assert_eq!(done.page.unwrap_err().code, ErrorCode::Validation);
         assert!(done.session.is_some());
+    }
+
+    /// A two-level server (catalogs, then schemas) kept in memory: each
+    /// schema holds one table. It records what it was asked to read.
+    #[derive(Debug, Default)]
+    struct CatalogDriver {
+        server: std::sync::Mutex<Vec<(&'static str, Vec<&'static str>)>>,
+        read: std::sync::Mutex<Vec<ObjectPath>>,
+        failing: Option<&'static str>,
+        cancel_after: Option<(usize, CancellationToken)>,
+    }
+
+    impl CatalogDriver {
+        fn new(server: Vec<(&'static str, Vec<&'static str>)>) -> Self {
+            Self {
+                server: std::sync::Mutex::new(server),
+                ..Self::default()
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Driver for CatalogDriver {
+        fn descriptor(&self) -> DriverDescriptor {
+            DatabricksDriver.descriptor()
+        }
+        fn validate_config(&self, _: &serde_json::Value) -> DriverResult<()> {
+            Ok(())
+        }
+        async fn test(
+            &self,
+            _: &ResolvedConnection,
+            _: CancellationToken,
+        ) -> DriverResult<ServerInfo> {
+            Ok(ServerInfo { version: None })
+        }
+        async fn open_session(
+            &self,
+            _: &ResolvedConnection,
+            _: CancellationToken,
+        ) -> DriverResult<Box<dyn Session>> {
+            Err(DriverError::validation("no SQL here"))
+        }
+        async fn introspect(
+            &self,
+            _: &ResolvedConnection,
+            _: &mut dyn IntrospectionSink,
+            _: CancellationToken,
+        ) -> DriverResult<IntrospectionReport> {
+            Err(DriverError::validation(
+                "a selection never reads everything at once",
+            ))
+        }
+        async fn discover_namespaces(
+            &self,
+            _: &ResolvedConnection,
+            parent: &ObjectPath,
+            _: CancellationToken,
+        ) -> DriverResult<Vec<MetadataObject>> {
+            let server = self.server.lock().unwrap();
+            Ok(match parent.0.as_slice() {
+                [] => server
+                    .iter()
+                    .map(|(name, _)| MetadataObject::new(ObjectKind::Catalog, parent, *name))
+                    .collect(),
+                [catalog] => server
+                    .iter()
+                    .find(|(name, _)| *name == catalog.name)
+                    .ok_or_else(|| DriverError::new(ErrorCode::NotFound, "no catalog"))?
+                    .1
+                    .iter()
+                    .map(|name| MetadataObject::new(ObjectKind::Schema, parent, *name))
+                    .collect(),
+                _ => Vec::new(),
+            })
+        }
+        async fn introspect_scoped(
+            &self,
+            _: &ResolvedConnection,
+            scope: &ObjectPath,
+            sink: &mut dyn IntrospectionSink,
+            _: CancellationToken,
+        ) -> DriverResult<IntrospectionReport> {
+            let count = {
+                let mut read = self.read.lock().unwrap();
+                read.push(scope.clone());
+                read.len()
+            };
+            if let Some((after, cancel)) = &self.cancel_after
+                && count > *after
+            {
+                cancel.cancel();
+                return Err(DriverError::cancelled());
+            }
+            let [catalog, schema] = scope.0.as_slice() else {
+                return Err(DriverError::validation("schemas only"));
+            };
+            if self.failing == Some(schema.name.as_str()) {
+                return Err(DriverError::new(ErrorCode::Connection, "connection lost"));
+            }
+            let exists = self.server.lock().unwrap().iter().any(|(name, schemas)| {
+                *name == catalog.name && schemas.contains(&schema.name.as_str())
+            });
+            if exists {
+                let parent = scope.parent().unwrap();
+                sink.batch(vec![
+                    MetadataObject::new(ObjectKind::Schema, &parent, schema.name.clone()),
+                    MetadataObject::new(ObjectKind::Table, scope, "t"),
+                ])
+                .await?;
+            }
+            Ok(IntrospectionReport::default())
+        }
+    }
+
+    fn catalog_input() -> ResolvedConnection {
+        ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Databricks,
+                options: serde_json::json!({"profile":"FIXTURE"}),
+            },
+            credentials: Credentials::default(),
+        }
+    }
+
+    fn schema(catalog: &str, schema: &str) -> ObjectPath {
+        ObjectPath::default()
+            .child(ObjectKind::Catalog, catalog)
+            .child(ObjectKind::Schema, schema)
+    }
+
+    async fn apply(
+        driver: &CatalogDriver,
+        dir: &Path,
+        id: ConnectionId,
+        selection: &MetadataScope,
+        read: &MetadataScope,
+        cancel: &CancellationToken,
+    ) -> (SelectionOutcome, Vec<RefreshProgress>) {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let input = catalog_input();
+        let target = SelectionTarget {
+            dir,
+            id,
+            input: &input,
+            selection,
+            read,
+        };
+        let outcome = apply_selection_with(driver, target, cancel, Some(sender))
+            .await
+            .unwrap();
+        let mut updates = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            updates.push(update);
+        }
+        (outcome, updates)
+    }
+
+    async fn cached(dir: &Path, id: ConnectionId) -> Vec<ObjectPath> {
+        let repository = MetadataRepository::open(dir, id, &catalog_input().config)
+            .await
+            .unwrap();
+        let mut paths: Vec<_> = repository
+            .all()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|object| object.path)
+            .collect();
+        repository.close().await;
+        paths.sort_by(|a, b| {
+            a.0.iter()
+                .map(|part| &part.name)
+                .cmp(b.0.iter().map(|part| &part.name))
+        });
+        paths
+    }
+
+    #[tokio::test]
+    async fn a_selection_reads_only_its_namespaces_with_progress_and_drops_the_rest() {
+        let dir = std::env::temp_dir().join(format!("jykre-selection-{}", ConnectionId::new()));
+        let id = ConnectionId::new();
+        let driver = CatalogDriver::new(vec![("main", vec!["a", "b"]), ("other", vec!["x", "y"])]);
+        let main = ObjectPath::default().child(ObjectKind::Catalog, "main");
+        let selection = MetadataScope {
+            all: false,
+            include: vec![main.clone(), schema("other", "x"), schema("other", "gone")],
+        };
+        let cancel = CancellationToken::new();
+        let (outcome, updates) = apply(&driver, &dir, id, &selection, &selection, &cancel).await;
+        assert_eq!(outcome.refreshed, 3);
+        assert_eq!(outcome.missing, [schema("other", "gone")]);
+        assert!(outcome.failures.is_empty() && !outcome.cancelled);
+        // Only the chosen schemas were read; other.y never was.
+        assert_eq!(
+            *driver.read.lock().unwrap(),
+            [
+                schema("main", "a"),
+                schema("main", "b"),
+                schema("other", "x"),
+                schema("other", "gone")
+            ]
+        );
+        assert_eq!(updates[0], RefreshProgress::discovering());
+        let reading: Vec<_> = updates[1..]
+            .iter()
+            .map(|update| (update.done, update.total))
+            .collect();
+        assert_eq!(reading, [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4)]);
+        assert!(updates[1].eta.is_none());
+        assert!(updates[2].eta.is_some());
+        let other = ObjectPath::default().child(ObjectKind::Catalog, "other");
+        assert_eq!(
+            cached(&dir, id).await,
+            [
+                main.clone(),
+                schema("main", "a"),
+                schema("main", "a").child(ObjectKind::Table, "t"),
+                schema("main", "b"),
+                schema("main", "b").child(ObjectKind::Table, "t"),
+                other.clone(),
+                schema("other", "x"),
+                schema("other", "x").child(ObjectKind::Table, "t"),
+            ]
+        );
+        // The server drops main.b; a whole catalog follows the server.
+        driver.server.lock().unwrap()[0]
+            .1
+            .retain(|name| *name != "b");
+        driver.read.lock().unwrap().clear();
+        let (outcome, _) = apply(&driver, &dir, id, &selection, &selection, &cancel).await;
+        assert_eq!(outcome.refreshed, 2);
+        assert!(!cached(&dir, id).await.contains(&schema("main", "b")));
+        // Unchoosing other.x reads nothing and removes it from the cache.
+        let narrower = MetadataScope {
+            all: false,
+            include: vec![main.clone()],
+        };
+        driver.read.lock().unwrap().clear();
+        let added = narrower.added_since(&selection);
+        let (outcome, updates) = apply(&driver, &dir, id, &narrower, &added, &cancel).await;
+        assert_eq!(outcome.refreshed, 0);
+        assert!(updates.is_empty());
+        assert!(driver.read.lock().unwrap().is_empty());
+        let paths = cached(&dir, id).await;
+        assert!(paths.iter().all(|path| path.is_within(&main)), "{paths:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_namespace_keeps_its_cache_and_cancelling_removes_nothing() {
+        let dir = std::env::temp_dir().join(format!("jykre-selection-{}", ConnectionId::new()));
+        let id = ConnectionId::new();
+        let everything = MetadataScope::everything();
+        let cancel = CancellationToken::new();
+        let driver = CatalogDriver::new(vec![("main", vec!["a", "b", "c"])]);
+        apply(&driver, &dir, id, &everything, &everything, &cancel).await;
+        assert_eq!(cached(&dir, id).await.len(), 7);
+        let failing = CatalogDriver {
+            failing: Some("b"),
+            ..CatalogDriver::new(vec![("main", vec!["a", "b", "c"])])
+        };
+        let (outcome, _) = apply(&failing, &dir, id, &everything, &everything, &cancel).await;
+        assert_eq!(outcome.refreshed, 2);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].0, schema("main", "b"));
+        let kept = schema("main", "b").child(ObjectKind::Table, "t");
+        assert!(cached(&dir, id).await.contains(&kept));
+        // Cancelled after the first schema, with a schema the server lost:
+        // nothing is removed, because the read did not finish.
+        let cancel = CancellationToken::new();
+        let cancelling = CatalogDriver {
+            cancel_after: Some((1, cancel.clone())),
+            ..CatalogDriver::new(vec![("main", vec!["a", "b"])])
+        };
+        let (outcome, _) = apply(&cancelling, &dir, id, &everything, &everything, &cancel).await;
+        assert!(outcome.cancelled);
+        assert_eq!(outcome.refreshed, 1);
+        assert!(cached(&dir, id).await.contains(&schema("main", "c")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

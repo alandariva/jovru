@@ -38,6 +38,11 @@ Every file is opened by `open_pool`:
 | `settings` | `key` (primary key), `value_json` |
 
 Preferences live in `settings` as JSON values: `editor.font_size`, and
+`connection.<connection-id>.metadata_scope` for what to introspect
+(`{"all": bool, "include": [paths]}`; missing means nothing was chosen; a
+value that cannot be read is reported and treated as nothing chosen; a cache
+written before the choice existed becomes the choice of its last-level
+namespaces, once), and
 `connection.<connection-id>.row_limit` for each connection's row limit (a
 missing or out-of-range value reads as the default, 1,000).
 
@@ -82,6 +87,15 @@ configuration's identity.
    staged objects. The published objects are untouched.
 5. When a cache is opened, `recover_interrupted` marks runs left `running` by a
    crash as interrupted and removes them; the previous read stays.
+
+A scope's ancestors (its database or catalog) are outside the scope, so the
+driver does not emit them; `activate` adds the missing ones when the scope
+published anything. Reading a choice publishes each last-level namespace on
+its own. After a complete read, `retain(subtrees, nodes)` keeps only the
+objects inside the chosen subtrees, the named namespaces and their ancestors,
+removes everything else with its scope status in one transaction and bumps
+the version. It waits up to five seconds for a refresh that is finishing to
+release the writer lock.
 
 Readers that page through the cache compare the version before and after; if
 a refresh published in between, they stop and ask the user to expand the node

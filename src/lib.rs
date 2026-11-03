@@ -13,6 +13,7 @@ pub mod grid;
 pub mod grouped_tabs;
 pub mod i18n;
 pub mod logging;
+pub mod metadata_scope;
 pub mod palette;
 pub mod performance;
 pub mod probe;

@@ -9,6 +9,7 @@
 | Kept session no longer answers (idle disconnect) | The next run opens a new session and says so | Retrying a statement on the new session |
 | Timeout | The run is cancelled on the server when possible; the tab says it timed out | The query keeping running on the server without the user knowing |
 | Failed or cancelled metadata refresh | The scope shows the failure; the last good read stays in use | An empty tree or a half-published read |
+| One chosen namespace fails, or reading the choice is cancelled | The namespaces already read stay published; the others keep their last good read; the status names what failed. Nothing is removed from the cache after a cancellation | Losing the whole read for one namespace |
 | Expired Databricks session | A clear authentication error telling the user to run `databricks auth login` | Retry loops; asking for a password |
 | Panic inside a backend task | The operation fails with `Internal` | Closing the application |
 | Corrupted metadata cache | The cache is set aside and recreated; the user is told to refresh | The application failing to start |

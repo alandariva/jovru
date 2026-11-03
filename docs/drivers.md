@@ -24,11 +24,44 @@ GPUI. The application knows the adapters only to build the registry. `backend`
 runs operations on the Tokio runtime without blocking the UI. The simulated
 demo stays separate and is enabled with `JYKRE_DEMO=1`.
 
+`Driver::discover_namespaces` lists the namespaces directly below a parent
+without reading relations or columns, so the user can choose what to
+introspect ([ADR-0015](adr/0015-introspect-only-what-the-user-chooses.md)).
+PostgreSQL lists the configured database at the root and its schemas below
+it (without `pg_catalog`, `information_schema`, TOAST and temporary schemas);
+MySQL lists the visible databases, without the system ones; Databricks lists
+Unity Catalog catalogs (without `hive_metastore`) and the schemas of a
+catalog, calling only the listing endpoints. Below the last namespace level
+the list is empty. `DriverCapabilities::namespace_levels` names those levels
+from the hierarchy; the application derives everything from it.
+
 `Driver::introspect_scoped` takes a structural `ObjectPath`. An empty scope
 reads the whole connection; database/catalog, schema, table/view and column
-read only the requested subset. PostgreSQL/MySQL parameterize the
-`information_schema` filters; Databricks uses the individual Unity Catalog
-endpoints when an object is selected. The application publishes the read after
+read only the requested subset. PostgreSQL reads `pg_catalog` and MySQL
+`information_schema`, with parameterized filters; Databricks uses the
+individual Unity Catalog endpoints when an object is selected.
+
+What each driver reads ([ADR-0016](adr/0016-keys-defaults-and-relation-kinds.md)):
+
+| | PostgreSQL | MySQL | Databricks |
+| --- | --- | --- | --- |
+| Relation kinds | Tables (ordinary, partitioned, foreign), views, materialized views | Tables, views | Tables, views, materialized views (`table_type`) |
+| Column type | `format_type` (`character varying(80)`, `integer[]`, enum names) | `column_type` (`varchar(80)`, `enum('a','b')`) | `type_text` |
+| Default | `pg_get_expr` (the expression) | `column_default` (the value as MySQL reports it) | Not read |
+| Comments | Relations and columns | Relations and columns (empty means none; a view's `VIEW` is not a comment) | Relations and columns |
+| Primary key | Position of each column | Position of each column | `table_constraints` [NV with a real workspace] |
+| Foreign keys | A node per key, with its columns and the referenced table | Same | `table_constraints` [NV with a real workspace] |
+| Partitions | Listed under their root table (same schema), without columns; a partition in another schema is a table | Not listed | Not applicable |
+
+PostgreSQL shows a relation under the same rule as `information_schema`: the
+user owns it or has a privilege on it. Keys and partitions are only listed
+under a relation the user can see.
+
+`Driver::default_namespaces` suggests the first choice of what to
+introspect: `public` of the configured PostgreSQL database, the configured
+MySQL database, or the Databricks profile's default catalog and schema when
+both are set. The dialog checks them, marked **Default**, when the list
+shows them and nothing was chosen yet; nothing is read until the user saves. The application publishes the read after
 success, replacing only that scope and keeping subtrees that have permission
 warnings.
 
@@ -195,6 +228,9 @@ out of scope. A stopped classic cluster reports an actionable error.
   `USE [SCHEMA | DATABASE]` statements, without promising transactions or
   other SQL state between statements. Classic clusters keep their actual SQL
   execution context, including successful context changes, between runs.
+- `Driver::discover_namespaces` validates the configuration and the parent,
+  honours cancellation and has a 60-second limit. It needs no SQL session and
+  never starts compute. The default implementation reports `NotImplemented`.
 - `Driver::introspect` takes an async `IntrospectionSink` and delivers batches.
   A sink failure stops the operation. Since batches may arrive before a
   failure, the consumer must publish a snapshot only after successful
@@ -203,11 +239,18 @@ out of scope. A stopped classic cluster reports an actionable error.
   configuration before starting I/O and honour prior cancellation, timeouts and
   limits.
 
-`MetadataObject` represents a database, catalog, schema, table, view or column,
-with a 1-based column position and optional type, nullability and comment. Its
+`MetadataObject` represents a database, catalog, schema, table, view,
+materialized view, column, foreign key or partition, with a 1-based column
+position and optional type, nullability, comment, default, position in the
+primary key and, for a foreign key, what it references (`ForeignKeyTarget`).
+The fields added after the first cache version are optional and left out
+when empty, so older caches still read. `ObjectPath::relation_path` gives the
+relation a node is read from (a partition is read as a table). Its
 `ObjectPath` holds kind/name segments; names with dots, slashes or Unicode
-characters are neither split nor normalized. Table and view are alternatives in
-the descriptor hierarchy, not consecutive levels. Turning paths into SQL needs
+characters are neither split nor normalized. Table, view and materialized view are
+alternatives in the descriptor hierarchy, not consecutive levels; keys and
+partitions sit beside columns, outside the hierarchy, and refresh with their
+table. Turning paths into SQL needs
 the driver's quoting; a path is not a SQL statement.
 
 SQL generated by the application (previews, session commands) asks the driver
@@ -282,8 +325,8 @@ never reused. MySQL first reads and drops the rest of a result interrupted by
 a limit, and kills the statement only when that takes too long, because the
 statement may already be done. A lost connection closes the session.
 PostgreSQL inspects the configured database; MySQL inspects the visible
-databases, excluding internal schemas. `information_schema` visibility is
-respected.
+databases, excluding internal schemas. Both read only the namespaces the user
+chose, and respect what the user is allowed to see.
 
 Databricks reads `DATABRICKS_CONFIG_FILE` or `.databrickscfg` in the home
 directory. Authenticate first with `databricks auth login --profile DEV`. The

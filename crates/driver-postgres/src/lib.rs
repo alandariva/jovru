@@ -56,12 +56,29 @@ impl Driver for PostgresDriver {
     /// A session is bound to one database and PostgreSQL rejects
     /// cross-database names, so the database is left out.
     fn relation_name(&self, path: &ObjectPath) -> String {
-        path.0
+        path.relation_path()
+            .unwrap_or_else(|| path.clone())
+            .0
             .iter()
             .filter(|part| !matches!(part.kind, ObjectKind::Database | ObjectKind::Column))
             .map(|part| self.quote_identifier(&part.name))
             .collect::<Vec<_>>()
             .join(".")
+    }
+
+    /// `public` of the configured database: where unqualified names go
+    /// by default.
+    fn default_namespaces(&self, config: &ConnectionConfig) -> Vec<ObjectPath> {
+        config.options["database"]
+            .as_str()
+            .map(|database| {
+                vec![
+                    ObjectPath::default()
+                        .child(ObjectKind::Database, database)
+                        .child(ObjectKind::Schema, "public"),
+                ]
+            })
+            .unwrap_or_default()
     }
 
     async fn test(
@@ -90,6 +107,16 @@ impl Driver for PostgresDriver {
     ) -> DriverResult<IntrospectionReport> {
         self.prepare(connection, &cancel)?;
         runtime::introspect(connection, &ObjectPath::default(), sink, cancel).await
+    }
+    async fn discover_namespaces(
+        &self,
+        connection: &ResolvedConnection,
+        parent: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<Vec<MetadataObject>> {
+        self.prepare(connection, &cancel)?;
+        parent.validate_scope(&self.descriptor().capabilities.hierarchy)?;
+        runtime::discover(connection, parent, cancel).await
     }
     async fn introspect_scoped(
         &self,

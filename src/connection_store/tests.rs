@@ -2,6 +2,13 @@ use super::*;
 use jykre_secrets::SecretStore;
 use std::{collections::HashMap, sync::Mutex};
 
+fn preferences(row_limit: u32) -> Preferences {
+    Preferences {
+        row_limit,
+        scope: MetadataScope::default(),
+    }
+}
+
 #[derive(Default)]
 struct MemoryVault {
     passwords: Mutex<HashMap<ConnectionId, SecretString>>,
@@ -56,23 +63,41 @@ async fn profiles_round_trip_and_reject_embedded_credentials() {
     let (dir, mut profile) = fixture();
     let vault = MemoryVault::default();
     assert!(load(&dir, &vault).await.unwrap().connections.is_empty());
-    let saved = save(&dir, profile.clone(), Credentials::default(), 1_000, &vault)
-        .await
-        .unwrap();
+    let saved = save(
+        &dir,
+        profile.clone(),
+        Credentials::default(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     profile = saved.profile;
     profile.name = "Renamed fixture".into();
-    let saved = save(&dir, profile.clone(), Credentials::default(), 1_000, &vault)
-        .await
-        .unwrap();
+    let saved = save(
+        &dir,
+        profile.clone(),
+        Credentials::default(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     let loaded = load(&dir, &vault).await.unwrap().connections;
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].profile, saved.profile);
     profile = saved.profile;
     profile.config.options["password"] = serde_json::json!("synthetic-secret");
     assert!(
-        save(&dir, profile, Credentials::default(), 1_000, &vault)
-            .await
-            .is_err()
+        save(
+            &dir,
+            profile,
+            Credentials::default(),
+            preferences(1_000),
+            &vault
+        )
+        .await
+        .is_err()
     );
     assert!(
         !String::from_utf8_lossy(&std::fs::read(dir.join("config.db")).unwrap())
@@ -131,9 +156,15 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     let credentials = Credentials {
         password: Some(SecretString::from("synthetic-vault-password".to_owned())),
     };
-    let saved = save(&dir, profile.clone(), credentials.clone(), 1_000, &vault)
-        .await
-        .unwrap();
+    let saved = save(
+        &dir,
+        profile.clone(),
+        credentials.clone(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     assert!(vault.passwords.lock().unwrap().is_empty());
     assert!(
         load(&dir, &vault).await.unwrap().connections[0]
@@ -144,9 +175,15 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     );
     profile = saved.profile;
     profile.remember_password = true;
-    let saved = save(&dir, profile, credentials.clone(), 1_000, &vault)
-        .await
-        .unwrap();
+    let saved = save(
+        &dir,
+        profile,
+        credentials.clone(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     assert!(
         load(&dir, &vault).await.unwrap().connections[0]
             .input
@@ -156,9 +193,15 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
     );
     let mut profile = saved.profile;
     profile.remember_password = false;
-    save(&dir, profile, credentials.clone(), 1_000, &vault)
-        .await
-        .unwrap();
+    save(
+        &dir,
+        profile,
+        credentials.clone(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     assert!(vault.passwords.lock().unwrap().is_empty());
     let unavailable = MemoryVault {
         unavailable: true,
@@ -171,7 +214,7 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
         .remove(0)
         .profile;
     profile.remember_password = true;
-    let saved = save(&dir, profile, credentials, 1_000, &unavailable)
+    let saved = save(&dir, profile, credentials, preferences(1_000), &unavailable)
         .await
         .unwrap();
     assert!(saved.input.credentials.password.is_some());
@@ -225,16 +268,22 @@ async fn row_limits_are_saved_per_connection_and_validated() {
                 &dir,
                 profile.clone(),
                 Credentials::default(),
-                invalid,
+                preferences(invalid),
                 &vault
             )
             .await
             .is_err()
         );
     }
-    let saved = save(&dir, profile, Credentials::default(), 25_000, &vault)
-        .await
-        .unwrap();
+    let saved = save(
+        &dir,
+        profile,
+        Credentials::default(),
+        preferences(25_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     assert_eq!(saved.row_limit, 25_000);
     assert_eq!(
         load(&dir, &vault).await.unwrap().connections[0].row_limit,
@@ -304,16 +353,22 @@ async fn a_remembered_password_is_not_carried_to_another_driver() {
     let credentials = Credentials {
         password: Some(SecretString::from("synthetic-postgres-password".to_owned())),
     };
-    let saved = save(&dir, profile, credentials, 1_000, &vault)
+    let saved = save(&dir, profile, credentials, preferences(1_000), &vault)
         .await
         .unwrap();
     assert_eq!(vault.passwords.lock().unwrap().len(), 1);
     // The same server keeps it when the field is left empty.
     let mut profile = saved.profile;
     profile.config.options["database"] = serde_json::json!("other");
-    let saved = save(&dir, profile, Credentials::default(), 1_000, &vault)
-        .await
-        .unwrap();
+    let saved = save(
+        &dir,
+        profile,
+        Credentials::default(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     assert_eq!(vault.passwords.lock().unwrap().len(), 1);
     // Another driver does not: the vault entry goes.
     let mut profile = saved.profile;
@@ -321,9 +376,15 @@ async fn a_remembered_password_is_not_carried_to_another_driver() {
         driver: DriverKind::MySql,
         options: serde_json::json!({"host":"localhost","user":"fixture","sslMode":"disabled"}),
     };
-    save(&dir, profile, Credentials::default(), 1_000, &vault)
-        .await
-        .unwrap();
+    save(
+        &dir,
+        profile,
+        Credentials::default(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     assert!(vault.passwords.lock().unwrap().is_empty());
     assert!(
         load(&dir, &vault).await.unwrap().connections[0]
@@ -343,7 +404,7 @@ async fn a_missing_vault_entry_is_reported_and_warnings_add_up() {
     let credentials = Credentials {
         password: Some(SecretString::from("synthetic-password".to_owned())),
     };
-    let saved = save(&dir, profile, credentials, 1_000, &vault)
+    let saved = save(&dir, profile, credentials, preferences(1_000), &vault)
         .await
         .unwrap();
     assert!(saved.profile.remember_password);
@@ -367,9 +428,15 @@ async fn a_missing_vault_entry_is_reported_and_warnings_add_up() {
     );
     // Saving with nothing to store turns the preference off instead of
     // claiming a password the vault does not have.
-    let saved = save(&dir, loaded.profile, Credentials::default(), 1_000, &vault)
-        .await
-        .unwrap();
+    let saved = save(
+        &dir,
+        loaded.profile,
+        Credentials::default(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
     assert!(!saved.profile.remember_password);
     assert!(saved.warning.is_some());
     assert!(
@@ -415,11 +482,80 @@ async fn an_invalid_profile_is_left_out_without_hiding_the_others() {
             &dir,
             profile,
             Credentials::default(),
-            500,
+            preferences(500),
             &MemoryVault::default()
         )
         .await
         .is_ok()
     );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once() {
+    let (dir, profile) = fixture();
+    let vault = MemoryVault::default();
+    let sales = ObjectPath::default()
+        .child(ObjectKind::Database, "fixture")
+        .child(ObjectKind::Schema, "sales");
+    let saved = save(
+        &dir,
+        profile.clone(),
+        Credentials::default(),
+        Preferences {
+            row_limit: 1_000,
+            scope: MetadataScope {
+                all: false,
+                include: vec![sales.clone()],
+            },
+        },
+        &vault,
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.scope.include, std::slice::from_ref(&sales));
+    let loaded = load(&dir, &vault).await.unwrap().connections.remove(0);
+    assert_eq!(loaded.scope.include, [sales]);
+    assert!(loaded.warning.is_none());
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    // A cache written before choosing existed, with no saved choice.
+    let (dir, profile) = fixture();
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    repository.save(&profile).await.unwrap();
+    repository.close().await;
+    let empty = load(&dir, &vault).await.unwrap().connections.remove(0);
+    assert!(empty.scope.is_pending());
+    let cache = MetadataRepository::open(&dir, profile.id, &profile.config)
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "fixture");
+    let schemas =
+        ["public", "sales"].map(|name| MetadataObject::new(ObjectKind::Schema, &db.path, name));
+    let mut run = cache.begin(&ObjectPath::default()).await.unwrap();
+    run.batch([vec![db], schemas.to_vec()].concat())
+        .await
+        .unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    cache.close().await;
+    let derived = load(&dir, &vault).await.unwrap().connections.remove(0);
+    assert_eq!(
+        derived.scope.include,
+        schemas
+            .iter()
+            .map(|schema| schema.path.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        derived
+            .warning
+            .is_some_and(|warning| warning.contains("Review it"))
+    );
+    let again = load(&dir, &vault).await.unwrap().connections.remove(0);
+    assert_eq!(again.scope, derived.scope);
+    assert!(again.warning.is_none());
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -384,3 +384,90 @@ async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
     .await
     .expect("live scenario exceeded its time budget");
 }
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_discovery_lists_databases_without_system_ones() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = MySqlDriver;
+        let input = input();
+        let cancel = CancellationToken::new();
+        let databases = driver
+            .discover_namespaces(&input, &ObjectPath::default(), cancel.clone())
+            .await
+            .unwrap();
+        assert!(databases.iter().any(|database| database.name == "jykre"));
+        assert!(databases.iter().all(|database| {
+            database.kind == ObjectKind::Database
+                && !["mysql", "information_schema", "performance_schema", "sys"]
+                    .contains(&database.name.as_str())
+        }));
+        let jykre = databases
+            .iter()
+            .find(|database| database.name == "jykre")
+            .unwrap();
+        assert!(
+            driver
+                .discover_namespaces(&input, &jykre.path, cancel)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    })
+    .await
+    .expect("live discovery took too long");
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_metadata_has_exact_types_keys_defaults_and_comments() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = MySqlDriver;
+        let input = input();
+        let cancel = CancellationToken::new();
+        let database = ObjectPath::default().child(ObjectKind::Database, "jykre");
+        assert_eq!(
+            driver.default_namespaces(&input.config),
+            std::slice::from_ref(&database)
+        );
+        let mut metadata = Metadata::default();
+        driver
+            .introspect_scoped(&input, &database, &mut metadata, cancel)
+            .await
+            .unwrap();
+        let find = |path: &ObjectPath| {
+            let found = metadata.0.iter().find(|object| object.path == *path);
+            assert!(found.is_some(), "missing {path:?}");
+            found.cloned().unwrap()
+        };
+        let fixture = database.child(ObjectKind::Table, "gate_fixture");
+        let id = find(&fixture.child(ObjectKind::Column, "id"));
+        assert_eq!(id.primary_key, Some(1));
+        assert_eq!(
+            find(&fixture.child(ObjectKind::Column, "label"))
+                .data_type
+                .as_deref(),
+            Some("varchar(80)")
+        );
+        assert_eq!(find(&fixture).comment, None);
+        assert_eq!(
+            find(&database.child(ObjectKind::View, "gate_fixture_view")).comment,
+            None
+        );
+        let child = database.child(ObjectKind::Table, "gate_child");
+        assert_eq!(find(&child).comment.as_deref(), Some("Synthetic child"));
+        let created = find(&child.child(ObjectKind::Column, "created"));
+        assert_eq!(created.default_value.as_deref(), Some("none"));
+        assert_eq!(created.comment.as_deref(), Some("Synthetic default"));
+        let key = find(&child.child(ObjectKind::ForeignKey, "gate_child_fixture"));
+        assert_eq!(
+            key.references,
+            Some(ForeignKeyTarget {
+                relation: fixture.clone(),
+                columns: vec!["fixture_id".into()],
+                referenced: vec!["id".into()],
+            })
+        );
+    })
+    .await
+    .expect("live metadata took too long");
+}
