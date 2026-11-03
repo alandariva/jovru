@@ -274,7 +274,7 @@ mod tests {
             columns,
             [Some("NULL"), None, Some("nullable"), Some("other")]
                 .into_iter()
-                .map(|cell| std::iter::once(cell)),
+                .map(std::iter::once),
         );
         let rows = |filter: &str| GridView::new(&result, key(0, filter, true)).rows;
         // The text 'NULL' and 'nullable' match; the real NULL does not.
