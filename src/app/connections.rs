@@ -940,6 +940,9 @@ impl AppView {
                 {
                     return;
                 }
+                // The highlighted match stays on the same object when the new
+                // results still hold it.
+                let chosen = this.command_matches.get(this.command_selected).cloned();
                 if palette {
                     this.command_searching = false;
                     this.command_matches.clear();
@@ -970,6 +973,11 @@ impl AppView {
                         this.app_notice =
                             Some(Feedback::new(Tone::Error, tr!("Search failed: {0}", error)))
                     }
+                }
+                if palette {
+                    this.command_selected =
+                        jykre::palette::keep(chosen.as_ref(), &this.command_matches);
+                    this.command_scroll.scroll_to_item(this.command_selected);
                 }
                 cx.notify();
             });

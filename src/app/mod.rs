@@ -11,6 +11,7 @@ mod workspace;
 
 use demo::{ORDER_COLUMNS, SALES_SQL, TABLES, table_sql};
 use gpui_kit::assets::IconName as I;
+use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::{
     ActiveTheme, Sizable, Theme, ThemeMode, TitleBar, WindowExt as _,
     input::{Input, InputEvent, InputState},
@@ -155,6 +156,11 @@ struct AppView {
     search_revision: usize,
     command_revision: usize,
     command_matches: Vec<(usize, String, String)>,
+    /// The match Enter opens; the arrow keys move it.
+    command_selected: usize,
+    command_scroll: ScrollHandle,
+    /// Keeps Tab inside the palette while it is open.
+    command_focus: FocusHandle,
     connection_testing: Option<CancellationToken>,
     connection_revision: usize,
     editing_connection: Option<usize>,
@@ -237,7 +243,10 @@ impl AppView {
                 }
                 if let InputEvent::PressEnter { .. } = event {
                     let _ = input;
-                    if let Some((index, name, sql)) = this.table_matches(cx).into_iter().next() {
+                    // Enter opens the highlighted match, not always the first.
+                    if let Some((index, name, sql)) =
+                        this.command_matches.get(this.command_selected).cloned()
+                    {
                         this.add_query(this.connections[index].group, &name, &sql, window, cx);
                         this.command_open = false;
                     }
@@ -305,6 +314,9 @@ impl AppView {
             search_revision: 0,
             command_revision: 0,
             command_matches: Vec::new(),
+            command_selected: 0,
+            command_scroll: ScrollHandle::new(),
+            command_focus: cx.focus_handle(),
             connection_testing: None,
             connection_revision: 0,
             editing_connection: None,
@@ -1273,8 +1285,11 @@ impl AppView {
                     .child(
                         column()
                             .id("command-results")
+                            .role(Role::ListBox)
+                            .aria_label(tr!("Tables and views · connections"))
                             .max_h(px(320.))
                             .overflow_y_scroll()
+                            .track_scroll(&self.command_scroll)
                             .px_2()
                             .pb_3()
                             .when(matches.is_empty(), |s| {
@@ -1288,12 +1303,15 @@ impl AppView {
                             })
                             .children(matches.into_iter().enumerate().map(
                                 |(index, (connection_index, name, sql))| {
+                                    let selected = index == self.command_selected;
                                     row()
                                         .id(("command-table", index))
-                                        .role(Role::Button)
+                                        .role(Role::ListBoxOption)
                                         .aria_label(tr!("Open table {0}", name))
+                                        .aria_selected(selected)
                                         .focusable()
                                         .tab_index(0)
+                                        .when(selected, |s| s.bg(rgb(SURFACE)))
                                         .focus_visible(|s| s.bg(rgb(HOVER)))
                                         .h(px(43.))
                                         .px_3()
@@ -1329,9 +1347,11 @@ impl AppView {
                             .bg(rgb(BG))
                             .border_t_1()
                             .border_color(rgb(BORDER))
-                            .child(label(tr!("Click an object to open the query.")))
+                            .child(label(tr!("↑ ↓ choose · Enter opens · or click an object")))
                             .child(row().child(shortcut("Esc")).child(label(tr!("close")))),
-                    ),
+                    )
+                    // Tab cycles through the palette while it is open.
+                    .focus_trap("command-focus-trap", &self.command_focus),
             )
             .into_any_element()
     }
@@ -1399,6 +1419,22 @@ impl Render for AppView {
                     } else {
                         this.close_connection_dialog(cx);
                     }
+                } else if this.command_open
+                    && matches!(event.keystroke.key.as_str(), "up" | "down")
+                    && !event.keystroke.modifiers.modified()
+                {
+                    // The arrows move the highlighted match; the text field
+                    // keeps every other key.
+                    let delta = if event.keystroke.key == "up" { -1 } else { 1 };
+                    this.command_selected = jykre::palette::step(
+                        this.command_selected,
+                        this.command_matches.len(),
+                        delta,
+                    );
+                    this.command_scroll.scroll_to_item(this.command_selected);
+                    cx.notify();
+                    window.prevent_default();
+                    cx.stop_propagation();
                 } else if this.connection_open {
                     // Workspace shortcuts would act behind the modal form.
                 } else if event.keystroke.modifiers.control
@@ -1407,6 +1443,7 @@ impl Render for AppView {
                 {
                     this.command_open = !this.command_open;
                     if this.command_open {
+                        this.command_selected = 0;
                         this.command.update(cx, |input, cx| input.focus(window, cx));
                         this.search_cache(true, cx);
                     }

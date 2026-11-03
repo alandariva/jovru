@@ -78,6 +78,7 @@ Rules:
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Search tables in the local cache | `Ctrl Shift P` |
+| Search: choose a match, open it | `↑`, `↓`, `Enter` |
 | New query on the active connection | `Ctrl N` |
 | Close the query tab (asks when it runs or has unsaved SQL) | `Ctrl W`, `Ctrl F4` |
 | Show or hide the explorer | `Ctrl B` |

@@ -263,6 +263,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Índice selecionado, setas, Enter no item, focus trap.
 - **Evidência no projeto:** `src/app/mod.rs` (`command_subscription`)
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. A palette tem um item destacado (`command_selected`, `aria_selected`, papel `ListBoxOption`) que ↑/↓ movem com volta nas pontas (`jykre::palette::step`) e que a lista rola para mostrar; Enter abre o destacado. Novos resultados mantêm o mesmo objeto destacado quando ele continua na lista (`palette::keep`). Um focus trap mantém o Tab dentro da palette.
 
 ## N028 — Refresh anuncia sucesso mantendo a árvore antiga
 

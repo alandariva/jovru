@@ -25,7 +25,6 @@
   "Cell copied.": "Célula copiada.",
   "Chart": "Gráfico",
   "Chart available only in the Revenue by category demo.": "Gráfico disponível apenas na demonstração Receita por categoria.",
-  "Click an object to open the query.": "Clique em um objeto para abrir a consulta.",
   "Close": "Fechar",
   "Close notice": "Fechar aviso",
   "Close {0}": "Fechar {0}",
@@ -364,5 +363,6 @@
   "Stopping…": "Parando…",
   "The previous run is still stopping. Run again when it ends.": "A execução anterior ainda está parando. Execute de novo quando ela terminar.",
   "Waiting for the statements before it · stop the run": "Aguardando as instruções anteriores · parar a execução",
-  "Table": "Tabela"
+  "Table": "Tabela",
+  "↑ ↓ choose · Enter opens · or click an object": "↑ ↓ escolhe · Enter abre · ou clique em um objeto"
 }
