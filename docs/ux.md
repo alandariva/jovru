@@ -66,7 +66,8 @@ Rules:
 
 | Action | Shortcut |
 | --- | --- |
-| Run the editor's statements | `Ctrl Enter` |
+| Run the selection, or the statement at the cursor | `Ctrl Enter` |
+| Run every statement in the tab | `Ctrl Shift Enter` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | New query on the active connection | `Ctrl N` |
 | Show or hide the explorer | `Ctrl B` |
@@ -133,4 +134,4 @@ interactive elements expose a role, a label and their state. Details are in
 | Error title, suggested action and **Copy details** | Errors show the message only |
 | Syntax error position marked in the editor | Not implemented |
 | Confirmation before closing a tab with a running query | Closing cancels the run without asking |
-| Shortcuts as actions in one keymap | Only `Ctrl Enter` is an action ([UI guidelines](ui-guidelines.md#known-deviations)) |
+| Shortcuts as actions in one keymap | Only `Ctrl Enter` and `Ctrl Shift Enter` are actions ([UI guidelines](ui-guidelines.md#known-deviations)) |

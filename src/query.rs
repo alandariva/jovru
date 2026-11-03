@@ -7,7 +7,23 @@
 //! discarded instead of overwriting a newer one.
 use crate::drivers::{DriverError, ErrorCode};
 use crate::{sql, tr};
+use std::ops::Range;
 use std::time::Instant;
+
+/// Which statements a run executes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// Every statement in the editor, in order (Ctrl+Shift+Enter).
+    All,
+    /// The statement at this index (its run button).
+    Statement(usize),
+    /// The statement the cursor at this byte offset picks
+    /// ([`sql::statement_at`]; Ctrl+Enter without a selection).
+    Cursor(usize),
+    /// Exactly the selected text, split into statements; a fragment that is
+    /// not a whole statement runs as written (Ctrl+Enter with a selection).
+    Selection(Range<usize>),
+}
 
 /// What the gutter shows next to one statement.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -143,20 +159,41 @@ impl QueryRun {
         }
     }
 
-    /// Starts a run of every statement in `sql`, or only the one at `only`.
-    /// Returns `None` when there is nothing to run or a run is still
-    /// `Running`. A run that is only `Cancelling` is superseded.
-    pub fn start(&mut self, sql: &str, only: Option<usize>) -> Option<Plan> {
+    /// Starts a run of the statements of `sql` that `scope` picks. Returns
+    /// `None` when there is nothing to run or a run is still `Running`. A run
+    /// that is only `Cancelling` is superseded.
+    pub fn start(&mut self, sql: &str, scope: Scope) -> Option<Plan> {
         if self.is_running() {
             return None;
         }
         let ranges = sql::statements(sql);
-        let statements: Vec<_> = ranges
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| only.is_none_or(|only| *index == only))
-            .filter_map(|(index, range)| Some((index, sql.get(range.clone())?.to_owned())))
-            .collect();
+        let whole = |index: usize| -> Option<(usize, String)> {
+            Some((index, sql.get(ranges.get(index)?.clone())?.to_owned()))
+        };
+        let statements: Vec<_> = match scope {
+            Scope::All => (0..ranges.len()).filter_map(whole).collect(),
+            Scope::Statement(index) => whole(index).into_iter().collect(),
+            Scope::Cursor(cursor) => sql::statement_at(sql, cursor)
+                .and_then(whole)
+                .into_iter()
+                .collect(),
+            Scope::Selection(selection) => {
+                let text = sql.get(selection.clone()).unwrap_or_default();
+                sql::statements(text)
+                    .into_iter()
+                    .map(|range| {
+                        // The gutter shows the outcome on the editor statement
+                        // the selected one starts in.
+                        let start = selection.start + range.start;
+                        let index = ranges
+                            .iter()
+                            .position(|statement| statement.end > start)
+                            .unwrap_or(ranges.len().saturating_sub(1));
+                        (index, text[range].to_owned())
+                    })
+                    .collect()
+            }
+        };
         if statements.is_empty() {
             return None;
         }
@@ -389,7 +426,7 @@ mod tests {
 
     fn started(sql: &str) -> (QueryRun, Plan) {
         let mut run = QueryRun::new(sql);
-        let plan = run.start(sql, None).expect("statements to run");
+        let plan = run.start(sql, Scope::All).expect("statements to run");
         assert!(run.begin_all(plan.id));
         (run, plan)
     }
@@ -405,19 +442,65 @@ mod tests {
     #[test]
     fn nothing_to_run_starts_nothing() {
         let mut run = QueryRun::new("-- only a comment");
-        assert_eq!(run.start("-- only a comment", None), None);
+        assert_eq!(run.start("-- only a comment", Scope::All), None);
         assert_eq!(run.state(), &RunState::Idle);
-        assert_eq!(run.start(TWO, Some(5)), None);
+        assert_eq!(run.start(TWO, Scope::Statement(5)), None);
+    }
+
+    #[test]
+    fn the_cursor_and_a_selection_pick_what_runs() {
+        let sql = "SELECT * FROM users; SELECT 1;\n\nSELECT * FROM teste";
+        let planned = |scope: Scope| {
+            let mut run = QueryRun::new(sql);
+            run.start(sql, scope).map(|plan| plan.statements)
+        };
+        let cursor = |marker: &str| Scope::Cursor(sql.find(marker).unwrap() + marker.len());
+        assert_eq!(
+            planned(cursor("users")),
+            Some(vec![(0, "SELECT * FROM users;".to_owned())])
+        );
+        assert_eq!(
+            planned(cursor("SELECT 1;")),
+            Some(vec![(1, "SELECT 1;".to_owned())])
+        );
+        assert_eq!(
+            planned(Scope::Cursor(sql.find("\n\n").unwrap() + 1)),
+            Some(vec![(2, "SELECT * FROM teste".to_owned())])
+        );
+        let select = |text: &str| {
+            let start = sql.find(text).unwrap();
+            Scope::Selection(start..start + text.len())
+        };
+        assert_eq!(
+            planned(select("SELECT 1")),
+            Some(vec![(1, "SELECT 1".to_owned())])
+        );
+        assert_eq!(
+            planned(select("users; SELECT 1;")),
+            Some(vec![(0, "users;".to_owned()), (1, "SELECT 1;".to_owned())])
+        );
+        // A fragment runs as selected, even when it is not valid SQL.
+        assert_eq!(
+            planned(select("* FROM tes")),
+            Some(vec![(2, "* FROM tes".to_owned())])
+        );
+        // Running everything ignores the cursor and any selection.
+        assert_eq!(planned(Scope::All).map(|plan| plan.len()), Some(3));
+        // Blank or comment-only selections and empty editors run nothing.
+        assert_eq!(planned(select("\n\n")), None);
+        assert_eq!(planned(Scope::Selection(1_000..1_010)), None);
+        let mut empty = QueryRun::new("-- nothing");
+        assert_eq!(empty.start("-- nothing", Scope::Cursor(0)), None);
     }
 
     #[test]
     fn a_run_plans_all_statements_or_only_one() {
         let mut run = QueryRun::new(TWO);
-        let plan = run.start(TWO, Some(1)).expect("one statement");
+        let plan = run.start(TWO, Scope::Statement(1)).expect("one statement");
         assert_eq!(plan.statements, [(1, "SELECT 2;".to_owned())]);
         assert!(matches!(run.state(), RunState::Running { .. }));
         // A running run is not restarted.
-        assert_eq!(run.start(TWO, None), None);
+        assert_eq!(run.start(TWO, Scope::All), None);
         assert!(run.begin_all(plan.id));
         assert_eq!(run.statuses(), [Ready, Running]);
     }
@@ -505,7 +588,7 @@ mod tests {
     fn a_new_run_supersedes_one_that_is_stopping() {
         let (mut run, old) = started(TWO);
         run.cancel();
-        let new = run.start(TWO, Some(0)).expect("a new run");
+        let new = run.start(TWO, Scope::Statement(0)).expect("a new run");
         assert_ne!(old.id, new.id);
         assert!(run.begin_all(new.id));
         // The stale outcome changes nothing.
@@ -540,7 +623,7 @@ mod tests {
     #[test]
     fn statements_recorded_one_by_one_end_as_done_or_failed() {
         let mut run = QueryRun::new(TWO);
-        let plan = run.start(TWO, None).expect("statements");
+        let plan = run.start(TWO, Scope::All).expect("statements");
         assert!(run.begin_statement(plan.id, 0));
         assert_eq!(run.statuses(), [Running, Ready]);
         assert!(run.finish_statement(plan.id, 0, None));
@@ -551,13 +634,13 @@ mod tests {
         // A failed run takes no further steps.
         assert!(!run.begin_statement(plan.id, 1));
 
-        let plan = run.start(TWO, None).expect("statements");
+        let plan = run.start(TWO, Scope::All).expect("statements");
         assert!(run.begin_statement(plan.id, 0));
         run.cancel();
         // The next step finds the run stopping and ends it.
         assert!(!run.finish_statement(plan.id, 0, None));
         assert_eq!(run.state(), &RunState::Cancelled);
-        let plan = run.start(TWO, Some(0)).expect("statement");
+        let plan = run.start(TWO, Scope::Statement(0)).expect("statement");
         run.complete(plan.id);
         assert_eq!(run.state(), &RunState::Done);
     }

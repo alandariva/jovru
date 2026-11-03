@@ -63,9 +63,11 @@ Demo connections and results are labelled as such and never reach a server.
 - The metadata cache is stored locally, read page by page and browsable offline
   after a restart. Search also queries the local cache.
 - Click a table or view to open a SQL preview with escaped identifiers.
-  `Ctrl Shift P` searches real tables, `Ctrl N` opens a query on the active
-  connection and `Ctrl Enter` runs it. Each run uses a dedicated session shared
-  by the editor's statements and closes it at the end. Limits: a row limit per
+  `Ctrl Shift P` searches real tables and `Ctrl N` opens a query on the active
+  connection. `Ctrl Enter` runs the selection, or the statement at the cursor
+  when nothing is selected; `Ctrl Shift Enter` runs every statement in the tab.
+  Each tab keeps its own session between runs, so `USE`, `SET`, temporary
+  tables and transactions carry over; a failed statement keeps it. Limits: a row limit per
   statement set in each connection (1,000 by default, up to 100,000), 256 MB
   per result and a 300 s timeout. The run button can cancel.
 - Tabs keep their SQL. Moving a tab to another group changes its connection and
@@ -137,7 +139,7 @@ deleted only after the import is verified.
 ## Drivers
 
 The GPUI-independent backend implements PostgreSQL and MySQL with SQLx, SQL
-execution in dedicated sessions and metadata via `information_schema`.
+execution in sessions kept per tab and metadata via `information_schema`.
 Databricks uses CLI profiles, the Statement Execution API and Unity Catalog REST.
 `jykre::drivers::builtin_registry()` registers the three adapters.
 

@@ -173,7 +173,7 @@
   "Run": "Executar",
   "Run SQL": "Executar SQL",
   "Run a query before copying the results.": "Execute uma consulta antes de copiar os resultados.",
-  "Run or stop queries · Ctrl+Enter": "Executar ou parar consultas · Ctrl+Enter",
+  "Run the statement at the cursor or the selection · Ctrl+Enter\nRun all statements · Ctrl+Shift+Enter": "Executar a instrução do cursor ou a seleção · Ctrl+Enter\nExecutar todas as instruções · Ctrl+Shift+Enter",
   "Run query": "Executar consulta",
   "Run query again": "Executar consulta novamente",
   "Run the query to see the results.": "Execute a consulta para ver os resultados.",
@@ -245,7 +245,7 @@
   "The result reached the memory limit of {0} MB before the row limit. Refine the SQL to get other rows.": "O resultado atingiu o limite de memória de {0} MB antes do limite de linhas. Refine o SQL para obter outras linhas.",
   "The tab's connection changed. Review the SQL before running it.": "A conexão da aba mudou. Revise o SQL antes de executá-lo.",
   "Theme": "Tema",
-  "There is no SQL statement to run.": "Não há instrução SQL para executar.",
+  "There is no SQL statement to execute.": "Não há instrução SQL para executar.",
   "To investigate data quality, start by checking null values in product_id, orders without a category, and duplicate IDs. Also compare the orders count before and after the JOINs.": "Para investigar a qualidade dos dados, comece verificando valores nulos em product_id, pedidos sem categoria e IDs duplicados. Também compare a contagem de pedidos antes e depois dos JOINs.",
   "Up to {0} rows. Reading also stops when a result reaches {1} MB.": "Até {0} linhas. A leitura também para quando um resultado chega a {1} MB.",
   "Update saved query": "Atualizar consulta salva",
@@ -282,5 +282,7 @@
   "{0} · row limit reached": "{0} · limite de linhas atingido",
   "{0} · {1} rows affected": "{0} · {1} linhas afetadas",
   "↑ ↓ navigate · Enter select · Esc close": "↑ ↓ navegar · Enter selecionar · Esc fechar",
-  "␠ {0} spaces": "␠ {0} espaços"
+  "␠ {0} spaces": "␠ {0} espaços",
+  "The previous session no longer answered, so this run used a new one. Session settings such as the current schema started over.": "A sessão anterior não respondia mais, então esta execução usou uma nova. As configurações da sessão, como o schema atual, recomeçaram.",
+  "The session was closed. The next run opens a new one, and session settings such as the current schema start over.": "A sessão foi encerrada. A próxima execução abre uma nova, e as configurações da sessão, como o schema atual, recomeçam."
 }

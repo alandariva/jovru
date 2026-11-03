@@ -36,3 +36,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0011](0011-workspace-lints.md) | Workspace-wide lints for panics, output and async locks | Accepted (implemented) |
 | [0012](0012-result-grid-as-a-cached-entity.md) | Result grid as its own cached entity | Accepted (implemented) |
 | [0013](0013-thin-ancestors-of-frequently-notified-views.md) | Thin ancestors for frequently notified views | Proposed |
+| [0014](0014-a-session-per-tab.md) | A session per tab, kept between runs and after errors | Proposed |

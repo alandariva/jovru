@@ -28,7 +28,15 @@ use std::collections::HashSet;
 use ui::*;
 use workspace::{Workspace, WorkspaceEvent};
 
-actions!(jykre, [ExecuteActiveQuery]);
+actions!(
+    jykre,
+    [
+        /// Ctrl+Enter: the selection, or the statement at the cursor.
+        ExecuteCurrentQuery,
+        /// Ctrl+Shift+Enter: every statement in the tab.
+        ExecuteAllQueries
+    ]
+);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Section {
@@ -434,6 +442,27 @@ impl AppView {
             "SELECT * FROM orders LIMIT 100;"
         };
         self.add_query(group, &title, sql, window, cx);
+    }
+
+    /// Runs `action` on the active tab's workspace, unless a dialog or the
+    /// command palette is in front of it.
+    fn with_active_panel(
+        &mut self,
+        cx: &mut Context<Self>,
+        action: fn(&mut Workspace, &mut Context<Workspace>),
+    ) {
+        if self.connection_open || self.command_open {
+            return;
+        }
+        if let Some(panel) = self
+            .tabs
+            .read(cx)
+            .active_tab()
+            .and_then(|tab| self.panels.get(&tab))
+            .cloned()
+        {
+            panel.update(cx, action);
+        }
     }
 
     fn new_active_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1115,19 +1144,11 @@ impl Render for AppView {
             .text_color(rgb(TEXT))
             .font_family("Segoe UI")
             .text_size(px(14.))
-            .on_action(cx.listener(|this, _: &ExecuteActiveQuery, _, cx| {
-                if this.connection_open || this.command_open {
-                    return;
-                }
-                if let Some(panel) = this
-                    .tabs
-                    .read(cx)
-                    .active_tab()
-                    .and_then(|tab| this.panels.get(&tab))
-                    .cloned()
-                {
-                    panel.update(cx, |panel, cx| panel.execute(cx));
-                }
+            .on_action(cx.listener(|this, _: &ExecuteCurrentQuery, _, cx| {
+                this.with_active_panel(cx, Workspace::execute_current);
+            }))
+            .on_action(cx.listener(|this, _: &ExecuteAllQueries, _, cx| {
+                this.with_active_panel(cx, Workspace::execute_all);
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
@@ -1285,7 +1306,16 @@ pub fn run() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         probe::start(cx);
-        cx.bind_keys([KeyBinding::new("ctrl-enter", ExecuteActiveQuery, None)]);
+        // The editor binds Ctrl+Enter itself; a binding in its own, deeper
+        // context added later wins there, and the global ones apply anywhere
+        // else in the window.
+        let editor = format!("{} > Input", workspace::SQL_EDITOR_CONTEXT);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, None),
+            KeyBinding::new("ctrl-shift-enter", ExecuteAllQueries, None),
+            KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, Some(&editor)),
+            KeyBinding::new("ctrl-shift-enter", ExecuteAllQueries, Some(&editor)),
+        ]);
         Theme::change(ThemeMode::Dark, None, cx);
         Theme::update(cx, |theme| {
             theme.font_family = "Segoe UI".into();

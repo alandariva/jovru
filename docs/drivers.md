@@ -139,10 +139,17 @@ inside the application are out of scope for now.
   must stop delivering data. The sink is synchronous and must not do blocking
   I/O. `Cell` distinguishes NULL from text and keeps exact decimals as strings;
   temporal and binary types also have their own representations.
+- A session lives as long as its tab and runs many statements. A failed
+  statement does not end it: the driver restores the protocol (cancelling the
+  statement on the server when it may still run) or closes the session.
+  `Session::is_open` tells whether it can be reused; `Session::ping` checks a
+  kept session before a run, within 5 seconds.
 - `Session::close` consumes the session and can report close failures.
-  Relational sessions keep physical state; Databricks uses a logical context
-  sent with each request, without promising transactions or persistent SQL
-  state between statements.
+  Relational sessions keep physical state (`USE`, `SET`, temporary tables,
+  transactions). Databricks keeps a logical catalog/schema context sent with
+  each request, which follows successful `USE CATALOG`, `SET CATALOG` and
+  `USE [SCHEMA | DATABASE]` statements, without promising transactions or
+  other SQL state between statements.
 - `Driver::introspect` takes an async `IntrospectionSink` and delivers batches.
   A sink failure stops the operation. Since batches may arrive before a
   failure, the consumer must publish a snapshot only after successful
@@ -220,10 +227,15 @@ Each run accepts one SQL statement. Columns are delivered even for a SELECT
 without rows. Text protocol values are `Cell::Text`, keeping decimals without
 rounding; NULL is `Cell::Null` and MySQL binaries are `Cell::Binary`.
 
-Cancellation, timeout, error or interruption by a limit or the sink discard the
-relational session so an incomplete protocol is never reused. There is one
-attempt to cancel on the server, limited to 5 seconds. Open another session
-before the next query in these cases; open transactions are not kept.
+A database error keeps the relational session and its state, including an
+open transaction (which PostgreSQL then requires to be rolled back). After a
+cancellation, a timeout, an interruption by a limit or the sink, or a value
+that cannot be decoded, the driver makes one attempt to cancel the statement
+on the server and then reads up to the end of the response, each limited to 5
+seconds; if that fails the session is closed, so an incomplete protocol is
+never reused. MySQL first reads and drops the rest of a result interrupted by
+a limit, and kills the statement only when that takes too long, because the
+statement may already be done. A lost connection closes the session.
 PostgreSQL inspects the configured database; MySQL inspects the visible
 databases, excluding internal schemas. `information_schema` visibility is
 respected.

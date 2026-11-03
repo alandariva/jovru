@@ -4,8 +4,9 @@
 
 | Failure | Allowed effect | Forbidden effect |
 | --- | --- | --- |
-| SQL error in a tab | That tab shows the error in its results area and footer | Affecting another tab, another connection or the application |
-| Connection lost during a run | The run fails with a connection error; the session is discarded | Freezing the UI; reusing the broken session |
+| SQL error in a tab | That tab shows the error in its results area and footer; its session stays open with its state | Affecting another tab, another connection or the application; closing the session |
+| Connection lost during a run | The run fails with a connection error; the session is discarded and the tab says session settings start over | Freezing the UI; reusing the broken session |
+| Kept session no longer answers (idle disconnect) | The next run opens a new session and says so | Retrying a statement on the new session |
 | Timeout | The run is cancelled on the server when possible; the tab says it timed out | The query keeping running on the server without the user knowing |
 | Failed or cancelled metadata refresh | The scope shows the failure; the last good read stays in use | An empty tree or a half-published read |
 | Expired Databricks session | A clear authentication error telling the user to run `databricks auth login` | Retry loops; asking for a password |
@@ -15,10 +16,15 @@
 
 ## Mechanisms
 
-- **A session per run.** Each run opens its own session and closes it at the
-  end, so no idle session can go stale between runs. Cancellation, timeouts,
-  errors and interruption by a limit discard the session instead of reusing a
-  protocol in an unknown state.
+- **A session per tab** ([ADR-0014](adr/0014-a-session-per-tab.md)). A tab
+  opens a session on its first run and keeps it until the tab closes, its
+  connection changes or the session is lost, so state such as the current
+  schema, temporary tables and an open transaction carries over between runs.
+  A failed statement keeps the session. After a cancellation, a timeout or an
+  interruption by a limit the driver cancels the statement on the server and
+  brings the protocol back to a known state, within 5 seconds, or closes the
+  session; a session in an unknown state is never reused. A kept session is
+  pinged before each run and replaced, with a notice, when it does not answer.
 - **Panics are contained.** `backend::run` spawns each operation on Tokio; a
   panic surfaces as a `JoinError` and becomes `Internal` ("Database task
   failed"), not a crash.
@@ -41,6 +47,7 @@
 | Statement execution (all drivers) | `ExecutionOptions.timeout`, default 300 s; `None` disables it |
 | PostgreSQL/MySQL introspection | 300 s |
 | Server-side cancel attempt after cancellation or timeout | 5 s |
+| Bringing a session back to a known state after a failure, or pinging a kept session | 5 s |
 | Databricks: test or open | 90 s |
 | Databricks introspection | 300 s |
 | Databricks HTTP request | 30 s |

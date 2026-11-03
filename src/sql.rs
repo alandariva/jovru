@@ -100,6 +100,39 @@ pub fn statements(sql: &str) -> Vec<Range<usize>> {
     ranges
 }
 
+/// The statement Ctrl+Enter runs with the cursor at byte `cursor`, as an
+/// index into [`statements`]:
+///
+/// - inside a statement, or right after its `;`, that statement;
+/// - after a `;` on the same line (spaces or a comment in between), the
+///   statement that ended there;
+/// - on a line between two statements, the next one;
+/// - before the first or after the last statement, the nearest one.
+///
+/// `None` when there is nothing to run.
+pub fn statement_at(sql: &str, cursor: usize) -> Option<usize> {
+    let ranges = statements(sql);
+    let cursor = cursor.min(sql.len());
+    if let Some(index) = ranges
+        .iter()
+        .position(|range| range.start <= cursor && cursor <= range.end)
+    {
+        return Some(index);
+    }
+    let next = ranges.iter().position(|range| range.start > cursor);
+    let previous = match next {
+        Some(next) => next.checked_sub(1),
+        None => ranges.len().checked_sub(1),
+    };
+    match (previous, next) {
+        (Some(previous), Some(next)) => {
+            let gap = sql.get(ranges[previous].end..cursor).unwrap_or("\n");
+            Some(if gap.contains('\n') { next } else { previous })
+        }
+        (previous, next) => previous.or(next),
+    }
+}
+
 /// The zero-based line on which each of [`statements`] starts. One pass over
 /// the text, so a view can keep the result while the text is unchanged
 /// instead of counting lines on every frame.
@@ -344,8 +377,8 @@ pub fn format(sql: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        TokenKind, format, normalized_statements, preview_error, statement_lines, statements,
-        tokens,
+        TokenKind, format, normalized_statements, preview_error, statement_at, statement_lines,
+        statements, tokens,
     };
     use std::time::{Duration, Instant};
 
@@ -390,6 +423,47 @@ mod tests {
         assert_eq!(&sql[queries[0].clone()], "SELECT 'a;''b', \"x;y\";");
         assert_eq!(&sql[queries[1].clone()], "SELECT $$a;b$$;");
         assert!(statements("-- comment\n/* only */ ;").is_empty());
+    }
+
+    #[test]
+    fn the_cursor_picks_the_statement_to_run() {
+        let sql = "SELECT * FROM users; SELECT 1;\n\nSELECT * FROM teste";
+        let at = |marker: &str, offset: usize| {
+            let cursor = sql.find(marker).expect("marker in the script") + offset;
+            statement_at(sql, cursor).map(|index| &sql[statements(sql)[index].clone()])
+        };
+        assert_eq!(at("users", 2), Some("SELECT * FROM users;"));
+        assert_eq!(at("SELECT 1;", "SELECT 1;".len()), Some("SELECT 1;"));
+        assert_eq!(at("\n\n", 1), Some("SELECT * FROM teste"));
+        assert_eq!(at("teste", 3), Some("SELECT * FROM teste"));
+        assert_eq!(at("teste", 5), Some("SELECT * FROM teste"));
+        // Right after a `;` that touches the next statement, the one that ended.
+        assert_eq!(at("users;", 6), Some("SELECT * FROM users;"));
+        assert_eq!(at(" SELECT 1", 1), Some("SELECT 1;"));
+    }
+
+    #[test]
+    fn the_cursor_between_or_around_statements() {
+        // Spaces or a comment after the `;` keep the statement of that line.
+        let sql = "SELECT 1;   -- done\nSELECT 2;";
+        assert_eq!(statement_at(sql, sql.find("--").unwrap()), Some(0));
+        assert_eq!(statement_at(sql, sql.find('\n').unwrap()), Some(0));
+        assert_eq!(statement_at(sql, sql.find('\n').unwrap() + 1), Some(1));
+        // A comment line above a statement belongs to the next one.
+        let sql = "SELECT 1;\n-- next\nSELECT 2;";
+        assert_eq!(statement_at(sql, sql.find("next").unwrap()), Some(1));
+        // Before or after the only statement, that statement.
+        let sql = "\n\n  SELECT 1;\n\n";
+        assert_eq!(statement_at(sql, 0), Some(0));
+        assert_eq!(statement_at(sql, sql.len()), Some(0));
+        assert_eq!(statement_at(sql, sql.len() + 10), Some(0));
+        // Semicolons in literals and comments do not split.
+        let sql = "SELECT 'a;b'; /* ; */ SELECT $$;$$";
+        assert_eq!(statement_at(sql, sql.find("$$").unwrap()), Some(1));
+        assert_eq!(statement_at(sql, 9), Some(0));
+        for empty in ["", "   ", "-- only a comment\n", "/* ; */ ;"] {
+            assert_eq!(statement_at(empty, 0), None, "{empty:?}");
+        }
     }
 
     #[test]

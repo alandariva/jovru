@@ -41,6 +41,38 @@ fn input() -> ResolvedConnection {
         },
     }
 }
+/// Session state that must survive a failed, cancelled or interrupted
+/// statement.
+async fn keep_state(session: &mut Box<dyn Session>) {
+    session
+        .execute(
+            &QueryRequest {
+                sql: "SET @jykre_kept := 'jykre-kept'".into(),
+                options: ExecutionOptions::default(),
+            },
+            &mut Sink::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+}
+/// The session still runs statements and kept the state [`keep_state`] set.
+async fn assert_kept(session: &mut Box<dyn Session>) {
+    assert!(session.is_open());
+    let mut sink = Sink::default();
+    session
+        .execute(
+            &QueryRequest {
+                sql: "SELECT CAST(@jykre_kept AS CHAR)".into(),
+                options: ExecutionOptions::default(),
+            },
+            &mut sink,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sink.rows, vec![vec![Cell::Text("jykre-kept".into())]]);
+}
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_connection_queries_metadata_and_timeout() {
@@ -57,6 +89,7 @@ async fn live_connection_queries_metadata_and_timeout() {
             .is_some()
     );
     let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
+    keep_state(&mut session).await;
     let mut sink = Sink::default();
     session.execute(&QueryRequest{sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
     assert_eq!(sink.columns, 3);
@@ -109,6 +142,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     driver.introspect_scoped(&input, &table.path.parent().unwrap().child(ObjectKind::Table, "absent_fixture"), &mut missing, cancel.clone()).await.unwrap();
     assert!(missing.0.is_empty());
     let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
+    keep_state(&mut session).await;
     let err = session
         .execute(
             &QueryRequest {
@@ -124,21 +158,7 @@ async fn live_connection_queries_metadata_and_timeout() {
         .await
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::Timeout);
-    assert_eq!(
-        session
-            .execute(
-                &QueryRequest {
-                    sql: "SELECT 1".into(),
-                    options: ExecutionOptions::default()
-                },
-                &mut Sink::default(),
-                CancellationToken::new()
-            )
-            .await
-            .unwrap_err()
-            .code,
-        ErrorCode::Connection
-    );
+    assert_kept(&mut session).await;
     let mut bad = input.clone();
     bad.config.options["sslMode"] = json!("required");
     bad.credentials.password = Some(SecretString::from("wrong-password".to_owned()));
@@ -154,6 +174,7 @@ async fn live_connection_queries_metadata_and_timeout() {
         .open_session(&input, CancellationToken::new())
         .await
         .unwrap();
+    keep_state(&mut session).await;
     let token = CancellationToken::new();
     let trigger = token.clone();
     tokio::spawn(async move {
@@ -172,25 +193,12 @@ async fn live_connection_queries_metadata_and_timeout() {
         .await
         .unwrap_err();
     assert_eq!(cancelled.code, ErrorCode::Cancelled);
-    assert_eq!(
-        session
-            .execute(
-                &QueryRequest {
-                    sql: "SELECT 1".into(),
-                    options: ExecutionOptions::default()
-                },
-                &mut Sink::default(),
-                CancellationToken::new()
-            )
-            .await
-            .unwrap_err()
-            .code,
-        ErrorCode::Connection
-    );
+    assert_kept(&mut session).await;
     let mut session = driver
         .open_session(&input, CancellationToken::new())
         .await
         .unwrap();
+    keep_state(&mut session).await;
     let query = QueryRequest {
         sql: "SELECT 1 UNION ALL SELECT 2".into(),
         options: ExecutionOptions {
@@ -204,21 +212,74 @@ async fn live_connection_queries_metadata_and_timeout() {
         .await
         .unwrap();
     assert_eq!(limited.rows.len(), 1);
-    assert_eq!(
-        session
-            .execute(&query, &mut Sink::default(), CancellationToken::new())
-            .await
-            .unwrap_err()
-            .code,
-        ErrorCode::Connection
-    );
+    assert_kept(&mut session).await;
+
+    let mut session = driver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    keep_state(&mut session).await;
+    let failed = session
+        .execute(
+            &QueryRequest {
+                sql: "SELECT * FROM jykre_missing_table".into(),
+                options: ExecutionOptions::default(),
+            },
+            &mut Sink::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code, ErrorCode::Database);
+    assert_kept(&mut session).await;
+    // A long result cut by the row limit, then one cancelled while its rows
+    // stream: the rest is drained or stopped, and the session is kept.
+    let big = QueryRequest {
+        sql: "SELECT a.n * 1000 + b.n, REPEAT('x', 200) FROM (WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 499) SELECT n FROM s) a CROSS JOIN (WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 399) SELECT n FROM s) b".into(),
+        options: ExecutionOptions {
+            max_rows: 10,
+            ..ExecutionOptions::default()
+        },
+    };
+    let mut limited = Sink::default();
+    session
+        .execute(&big, &mut limited, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(limited.rows.len(), 10);
+    assert_kept(&mut session).await;
+    struct CancelAfter(CancellationToken, usize);
+    impl RowSink for CancelAfter {
+        fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+            SinkControl::Continue
+        }
+        fn row(&mut self, _: Row) -> SinkControl {
+            self.1 += 1;
+            if self.1 == 5 {
+                self.0.cancel();
+            }
+            SinkControl::Continue
+        }
+    }
+    let token = CancellationToken::new();
+    let unlimited = QueryRequest {
+        options: ExecutionOptions::default(),
+        ..big
+    };
+    let cancelled = session
+        .execute(&unlimited, &mut CancelAfter(token.clone(), 0), token)
+        .await;
+    // The cancellation may land after the last row was read.
+    assert!(cancelled.is_ok() || cancelled.unwrap_err().code == ErrorCode::Cancelled);
+    assert_kept(&mut session).await;
+    session.close().await.unwrap();
 
     }).await.expect("live scenario exceeded its time budget");
 }
 
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
-async fn receiver_stop_discards_session_and_fresh_session_works() {
+async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
     tokio::time::timeout(Duration::from_secs(20), async {
         struct Stop {
             columns: usize,
@@ -252,6 +313,7 @@ async fn receiver_stop_discards_session_and_fresh_session_works() {
                 .open_session(&input(), CancellationToken::new())
                 .await
                 .unwrap();
+            keep_state(&mut session).await;
             let mut sink = Stop {
                 columns: 0,
                 rows: 0,
@@ -263,14 +325,7 @@ async fn receiver_stop_discards_session_and_fresh_session_works() {
                 .unwrap();
             assert_eq!(sink.columns, 1);
             assert_eq!(sink.rows, usize::from(!at_columns));
-            assert_eq!(
-                session
-                    .execute(&query, &mut Sink::default(), CancellationToken::new())
-                    .await
-                    .unwrap_err()
-                    .code,
-                ErrorCode::Connection
-            );
+            assert_kept(&mut session).await;
             let mut fresh = driver
                 .open_session(&input(), CancellationToken::new())
                 .await

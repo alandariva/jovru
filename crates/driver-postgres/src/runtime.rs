@@ -23,6 +23,22 @@ fn map_error(error: sqlx::Error) -> DriverError {
         "Database operation failed; check connectivity, permissions and SQL",
     )
 }
+/// How long a session may take to cancel a statement on the server, and then
+/// to get back to a known protocol state, before it is closed.
+const RECOVERY: Duration = Duration::from_secs(5);
+/// Reads what is left of the previous response up to the server's
+/// ReadyForQuery. SQLx reports an ErrorResponse found on the way (such as the
+/// one a cancelled statement ends with) as the ping's error and keeps reading
+/// on the next call, so database errors are skipped until the connection is
+/// ready; any other error means the protocol cannot be trusted.
+async fn resynchronize(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+    loop {
+        match connection.ping().await {
+            Err(sqlx::Error::Database(_)) => continue,
+            outcome => return outcome,
+        }
+    }
+}
 async fn bounded<T>(
     cancel: &CancellationToken,
     timeout: Option<Duration>,
@@ -202,22 +218,68 @@ impl Session for DatabaseSession {
             })
         };
         let outcome = bounded(&cancel, request.options.timeout, operation).await;
-        if outcome.is_err() || interrupted {
-            let cancel_server = async {
-                let mut control = connect(&self.input, &CancellationToken::new()).await?;
-                sqlx::query("SELECT pg_cancel_backend($1)")
-                    .bind(self.backend as i32)
-                    .execute(&mut control)
-                    .await
-                    .map_err(map_error)?;
-                Ok::<_, DriverError>(())
-            };
-            let _ = tokio::time::timeout(Duration::from_secs(5), cancel_server).await;
-            let _ = owned.close_hard().await;
-        } else {
-            self.connection = Some(owned);
+        match &outcome {
+            Ok(_) if !interrupted => self.connection = Some(owned),
+            Err(error) if error.code == ErrorCode::Connection => {
+                let _ = owned.close_hard().await;
+            }
+            _ => {
+                // The server may still be producing this statement's rows:
+                // cancel it there, then read up to the next ReadyForQuery so
+                // the session is in a known state and can be kept. A cancel
+                // request that reaches an idle backend is ignored.
+                let running = interrupted
+                    || outcome.as_ref().is_err_and(|error| {
+                        matches!(
+                            error.code,
+                            ErrorCode::Cancelled | ErrorCode::Timeout | ErrorCode::Protocol
+                        )
+                    });
+                if running {
+                    let cancel_server = async {
+                        let mut control = connect(&self.input, &CancellationToken::new()).await?;
+                        sqlx::query("SELECT pg_cancel_backend($1)")
+                            .bind(self.backend as i32)
+                            .execute(&mut control)
+                            .await
+                            .map_err(map_error)?;
+                        Ok::<_, DriverError>(())
+                    };
+                    let _ = tokio::time::timeout(RECOVERY, cancel_server).await;
+                }
+                match tokio::time::timeout(RECOVERY, resynchronize(&mut owned)).await {
+                    Ok(Ok(())) => self.connection = Some(owned),
+                    _ => {
+                        let _ = owned.close_hard().await;
+                    }
+                }
+            }
         }
         outcome
+    }
+    fn is_open(&self) -> bool {
+        self.connection.is_some()
+    }
+    async fn ping(&mut self) -> DriverResult<()> {
+        let mut connection = self.connection.take().ok_or_else(|| {
+            DriverError::new(
+                ErrorCode::Connection,
+                "Session closed; reconnect before executing",
+            )
+        })?;
+        match tokio::time::timeout(RECOVERY, resynchronize(&mut connection)).await {
+            Ok(Ok(())) => {
+                self.connection = Some(connection);
+                Ok(())
+            }
+            outcome => {
+                let _ = connection.close_hard().await;
+                Err(match outcome {
+                    Ok(Err(error)) => map_error(error),
+                    _ => DriverError::new(ErrorCode::Timeout, "Database operation timed out"),
+                })
+            }
+        }
     }
     async fn close(mut self: Box<Self>) -> DriverResult<()> {
         if let Some(connection) = self.connection.take() {

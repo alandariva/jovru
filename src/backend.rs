@@ -300,8 +300,27 @@ pub struct QueryBatch {
     pub error: Option<DriverError>,
 }
 
-/// All statements in a run share one dedicated session. Always close it, also
-/// after failure; cancelled sessions are never reused by subsequent runs.
+/// What a run leaves behind.
+pub struct SessionRun {
+    /// The statements' results, or why the run could not start.
+    pub batch: DriverResult<QueryBatch>,
+    /// The session for the tab's next run, or `None` when it was closed.
+    pub session: Option<Box<dyn Session>>,
+    /// The tab's session had been lost and this run opened a new one, so
+    /// session state (current schema, temporary tables, a transaction)
+    /// started over.
+    pub reopened: bool,
+    /// The session was lost during this run; the next run opens a new one.
+    pub ended: bool,
+}
+
+/// Runs `requests` in order on the tab's `session`, opening one when there is
+/// none, and hands the session back so state set by one run (`USE`, `SET`,
+/// temporary tables, a transaction) applies to the next. A failed statement
+/// keeps the session; only a session the driver could not bring back to a
+/// known state is closed. A kept session is checked with [`Session::ping`]
+/// before it is reused, and replaced when it no longer answers. A statement
+/// is never retried.
 ///
 /// Each result is converted to [`ResultData`] row by row as the driver reads
 /// it, so driver cells are dropped here, on the runtime, and reading stops at
@@ -312,34 +331,42 @@ pub struct QueryBatch {
 /// error code; SQL text only at `trace`.
 pub async fn query(
     input: ResolvedConnection,
+    session: Option<Box<dyn Session>>,
     requests: Vec<QueryRequest>,
     memory_ceiling: usize,
     cancel: CancellationToken,
-) -> DriverResult<QueryBatch> {
-    let driver = builtin_registry()?.get(input.config.driver)?;
-    query_with(driver, input, requests, memory_ceiling, cancel).await
+) -> DriverResult<SessionRun> {
+    let driver = match builtin_registry().and_then(|registry| registry.get(input.config.driver)) {
+        Ok(driver) => driver,
+        Err(error) => {
+            close_session(session).await;
+            return Err(error);
+        }
+    };
+    query_with(driver, input, session, requests, memory_ceiling, cancel).await
 }
 
 /// [`query`] with a given driver.
 pub async fn query_with(
     driver: Arc<dyn Driver>,
     input: ResolvedConnection,
+    session: Option<Box<dyn Session>>,
     requests: Vec<QueryRequest>,
     memory_ceiling: usize,
     cancel: CancellationToken,
-) -> DriverResult<QueryBatch> {
+) -> DriverResult<SessionRun> {
     let span = tracing::info_span!(
         "query",
         driver = ?input.config.driver,
         statements = requests.len()
     );
     let started = Instant::now();
-    let result = run_statements(driver, input, requests, memory_ceiling, cancel)
+    let run = run_statements(driver, input, session, requests, memory_ceiling, cancel)
         .instrument(span.clone())
         .await;
     let _entered = span.enter();
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    match &result {
+    match &run.batch {
         Ok(batch) => {
             let rows: usize = batch.completed.iter().map(|r| r.data.row_count()).sum();
             let error_code = batch.error.as_ref().map(|error| error.code);
@@ -348,25 +375,57 @@ pub async fn query_with(
                 completed = batch.completed.len(),
                 rows,
                 error_code = ?error_code,
+                reopened = run.reopened,
+                ended = run.ended,
                 "run finished"
             );
         }
         Err(error) => tracing::info!(elapsed_ms, error_code = ?error.code, "run failed"),
     }
-    result
+    Ok(run)
 }
 
 async fn run_statements(
     driver: Arc<dyn Driver>,
     input: ResolvedConnection,
+    session: Option<Box<dyn Session>>,
     requests: Vec<QueryRequest>,
     memory_ceiling: usize,
     cancel: CancellationToken,
-) -> DriverResult<QueryBatch> {
-    for request in &requests {
-        request.validate()?;
+) -> SessionRun {
+    let mut run = SessionRun {
+        batch: Err(DriverError::cancelled()),
+        session: None,
+        reopened: false,
+        ended: false,
+    };
+    if let Some(error) = requests.iter().find_map(|request| request.validate().err()) {
+        run.batch = Err(error);
+        run.session = session;
+        return run;
     }
-    let mut session = driver.open_session(&input, cancel.clone()).await?;
+    let kept = match session {
+        Some(mut session) => match session.ping().await {
+            Ok(()) if session.is_open() => Some(session),
+            _ => {
+                tracing::debug!("kept session no longer answers; opening another");
+                close_session(Some(session)).await;
+                run.reopened = true;
+                None
+            }
+        },
+        None => None,
+    };
+    let mut session = match kept {
+        Some(session) => session,
+        None => match driver.open_session(&input, cancel.clone()).await {
+            Ok(session) => session,
+            Err(error) => {
+                run.batch = Err(error);
+                return run;
+            }
+        },
+    };
     let mut results = Vec::new();
     let mut failure = None;
     for (index, mut request) in requests.into_iter().enumerate() {
@@ -410,14 +469,37 @@ async fn run_statements(
             }
         }
     }
-    let closed = session.close().await;
-    if failure.is_none() {
-        failure = closed.err();
+    if session.is_open() {
+        run.session = Some(session);
+    } else {
+        run.ended = true;
+        close_session(Some(session)).await;
     }
-    Ok(QueryBatch {
+    run.batch = Ok(QueryBatch {
         completed: results,
         error: failure,
-    })
+    });
+    run
+}
+
+/// Closes a tab's session within a short deadline; a close failure only
+/// means the server drops the connection on its own.
+pub async fn close_session(session: Option<Box<dyn Session>>) {
+    if let Some(session) = session
+        && tokio::time::timeout(Duration::from_secs(5), session.close())
+            .await
+            .is_err()
+    {
+        tracing::debug!("session close timed out");
+    }
+}
+
+/// [`close_session`] on the database runtime, for a tab that closes or
+/// changes connection while the UI moves on.
+pub fn close_in_background(session: Box<dyn Session>) {
+    if let Ok(runtime) = runtime() {
+        drop(runtime.spawn(close_session(Some(session))));
+    }
 }
 
 /// Drops `value` on the database runtime's blocking pool, so freeing a large
@@ -656,11 +738,14 @@ mod tests {
         let batch = query_with(
             Arc::new(EchoDriver { rows: 1 }),
             input,
+            None,
             requests,
             crate::result::DEFAULT_MEMORY_CEILING,
             CancellationToken::new(),
         )
         .await
+        .unwrap()
+        .batch
         .unwrap();
         assert_eq!(batch.completed.len(), 2);
         captured.text()
@@ -704,11 +789,14 @@ mod tests {
         let mut batch = query_with(
             Arc::new(EchoDriver { rows: available }),
             input,
+            None,
             vec![request],
             crate::result::DEFAULT_MEMORY_CEILING,
             CancellationToken::new(),
         )
         .await
+        .unwrap()
+        .batch
         .unwrap();
         let result = batch.completed.remove(0);
         (result.data.row_count(), result.limit)
@@ -720,5 +808,197 @@ mod tests {
         assert_eq!(rows_and_limit(3, 3).await, (3, None));
         assert_eq!(rows_and_limit(4, 3).await, (3, Some(ResultLimit::Rows(3))));
         assert_eq!(rows_and_limit(50, 3).await, (3, Some(ResultLimit::Rows(3))));
+    }
+
+    /// A driver whose sessions remember `SET` statements, so a test can tell
+    /// whether a later run reused the session.
+    #[derive(Debug, Default)]
+    struct StateDriver {
+        opened: std::sync::atomic::AtomicUsize,
+        /// Sessions stop answering pings, as after an idle disconnect.
+        dead: std::sync::atomic::AtomicBool,
+    }
+
+    #[derive(Debug)]
+    struct StateSession {
+        id: usize,
+        settings: Vec<String>,
+        open: bool,
+        dead: bool,
+    }
+
+    #[async_trait]
+    impl Session for StateSession {
+        async fn execute(
+            &mut self,
+            request: &QueryRequest,
+            sink: &mut dyn RowSink,
+            _: CancellationToken,
+        ) -> DriverResult<DriverOutcome> {
+            match request.sql.as_str() {
+                "FAIL" => return Err(DriverError::new(ErrorCode::Database, "synthetic")),
+                "LOSE" => {
+                    self.open = false;
+                    return Err(DriverError::new(ErrorCode::Connection, "synthetic"));
+                }
+                sql if sql.starts_with("SET ") => self.settings.push(sql[4..].to_owned()),
+                _ => {}
+            }
+            sink.columns(vec![ColumnInfo {
+                name: "state".into(),
+                data_type: "text".into(),
+                nullable: Some(false),
+            }]);
+            sink.row(vec![Cell::Text(format!(
+                "{}:{}",
+                self.id,
+                self.settings.join(",")
+            ))]);
+            Ok(DriverOutcome::default())
+        }
+
+        fn is_open(&self) -> bool {
+            self.open
+        }
+
+        async fn ping(&mut self) -> DriverResult<()> {
+            if self.dead {
+                self.open = false;
+                return Err(DriverError::new(ErrorCode::Connection, "synthetic"));
+            }
+            Ok(())
+        }
+
+        async fn close(self: Box<Self>) -> DriverResult<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Driver for StateDriver {
+        fn descriptor(&self) -> DriverDescriptor {
+            PostgresDriver.descriptor()
+        }
+        fn validate_config(&self, _: &serde_json::Value) -> DriverResult<()> {
+            Ok(())
+        }
+        async fn test(
+            &self,
+            _: &ResolvedConnection,
+            _: CancellationToken,
+        ) -> DriverResult<ServerInfo> {
+            Ok(ServerInfo { version: None })
+        }
+        async fn open_session(
+            &self,
+            _: &ResolvedConnection,
+            _: CancellationToken,
+        ) -> DriverResult<Box<dyn Session>> {
+            use std::sync::atomic::Ordering;
+            Ok(Box::new(StateSession {
+                id: self.opened.fetch_add(1, Ordering::SeqCst) + 1,
+                settings: Vec::new(),
+                open: true,
+                dead: self.dead.load(Ordering::SeqCst),
+            }))
+        }
+        async fn introspect(
+            &self,
+            _: &ResolvedConnection,
+            _: &mut dyn IntrospectionSink,
+            _: CancellationToken,
+        ) -> DriverResult<IntrospectionReport> {
+            Ok(IntrospectionReport::default())
+        }
+    }
+
+    /// Runs `statements` on `session` and returns the run with each completed
+    /// statement's single cell.
+    async fn run_on(
+        driver: &Arc<StateDriver>,
+        session: Option<Box<dyn Session>>,
+        statements: &[&str],
+    ) -> (SessionRun, Vec<String>) {
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({}),
+            },
+            credentials: Credentials::default(),
+        };
+        let requests = statements
+            .iter()
+            .map(|sql| QueryRequest {
+                sql: (*sql).into(),
+                options: ExecutionOptions::default(),
+            })
+            .collect();
+        let mut run = query_with(
+            driver.clone(),
+            input,
+            session,
+            requests,
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let cells = match &mut run.batch {
+            Ok(batch) => batch
+                .completed
+                .iter()
+                .map(|result| result.data.value(0, 0).unwrap_or_default().to_owned())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        (run, cells)
+    }
+
+    #[tokio::test]
+    async fn a_tab_session_keeps_its_state_between_runs_and_after_errors() {
+        let driver = Arc::new(StateDriver::default());
+        let (run, cells) = run_on(&driver, None, &["SET schema=sales", "SELECT"]).await;
+        assert_eq!(cells, ["1:schema=sales", "1:schema=sales"]);
+        assert!(!run.reopened && !run.ended);
+        // A failed statement stops the run but keeps the session.
+        let (run, cells) = run_on(&driver, run.session, &["SET role=x", "FAIL", "SELECT"]).await;
+        assert_eq!(cells, ["1:schema=sales,role=x"]);
+        assert_eq!(
+            run.batch.as_ref().unwrap().error.as_ref().unwrap().code,
+            ErrorCode::Database
+        );
+        let (run, cells) = run_on(&driver, run.session, &["SELECT"]).await;
+        assert_eq!(cells, ["1:schema=sales,role=x"]);
+        assert_eq!(driver.opened.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // A lost connection ends the session; the next run starts over.
+        let (run, _) = run_on(&driver, run.session, &["LOSE"]).await;
+        assert!(run.ended && run.session.is_none());
+        let (run, cells) = run_on(&driver, run.session, &["SELECT"]).await;
+        assert_eq!(cells, ["2:"]);
+        assert!(!run.reopened);
+        assert!(run.session.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_session_that_stopped_answering_is_replaced_without_retrying() {
+        let driver = Arc::new(StateDriver::default());
+        driver.dead.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (run, _) = run_on(&driver, None, &["SET schema=sales"]).await;
+        driver
+            .dead
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let (run, cells) = run_on(&driver, run.session, &["SELECT"]).await;
+        assert!(run.reopened, "the dead session was replaced");
+        assert_eq!(cells, ["2:"], "state starts over in the new session");
+        // An invalid request runs nothing and hands the session back.
+        let invalid = QueryRequest {
+            sql: String::new(),
+            options: ExecutionOptions::default(),
+        };
+        assert!(invalid.validate().is_err());
+        let (run, cells) = run_on(&driver, run.session, &[""]).await;
+        assert!(run.batch.is_err() && cells.is_empty());
+        let (_, cells) = run_on(&driver, run.session, &["SELECT"]).await;
+        assert_eq!(cells, ["2:"]);
     }
 }

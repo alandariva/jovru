@@ -85,8 +85,9 @@ for that run's project. Ports are fixed, so concurrent full runs can conflict.
 
 The tests cover connection, invalid authentication, exact values and NULL,
 empty results, metadata, timeout, cancellation, row limits and stops requested
-by the receiver. Interrupted sessions must reject reuse; a new session must run
-normally. TLS with certificates and effective server-side interruption need
+by the receiver. A session must keep its state after a database error, a
+timeout, a cancellation and an interruption by a limit or the receiver; a new
+session must run normally. TLS with certificates and effective server-side interruption need
 additional scenarios before the guarantees are extended.
 
 ## Local databases for manual testing

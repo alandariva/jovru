@@ -141,20 +141,27 @@ sequenceDiagram
     participant R as backend::run (Tokio)
     participant D as Driver session
     W->>W: QueryRun::start splits statements and marks them Running
-    W->>R: backend::query(connection, requests, cancel)
-    R->>D: open_session, execute each statement
+    W->>R: backend::query(connection, tab session, requests, cancel)
+    R->>D: ping the kept session (or open one), execute each statement
     D-->>R: columns and rows through RowSink (bounded by the row limit)
     R->>R: convert rows to display data, drop driver cells
     R-->>W: completed results and the first error
-    W->>W: QueryRun::finish discards a superseded or cancelled run; publish result and statuses
+    R-->>W: the session, unless it was lost
+    W->>W: keep the session; QueryRun::finish discards a superseded or cancelled run; publish result and statuses
 ```
 
-- Each run opens a dedicated session shared by the editor's statements and
-  closes it at the end.
+- `Ctrl Enter` runs the selection, split into statements, or the statement at
+  the cursor (`sql::statement_at`); `Ctrl Shift Enter` and the gutter buttons
+  run all statements or one (`query::Scope`).
+- Each tab keeps one session between runs ([ADR-0014](adr/0014-a-session-per-tab.md)).
+  The workspace hands it to the run and takes it back with the result; a
+  session that comes back from a superseded run, or after the connection
+  changed, is closed.
 - Statements run in order and stop at the first failure; earlier statements
   are not rolled back automatically, and the UI says so.
 - Cancelling fires the run's `CancellationToken`; the driver interrupts the
-  server-side work when it can and discards the session.
+  server-side work and keeps the session when it can bring it back to a known
+  state, or closes it.
 
 ### Refresh metadata
 

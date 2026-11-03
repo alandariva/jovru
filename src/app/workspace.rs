@@ -12,10 +12,13 @@ use jykre::tr;
 use jykre::{
     backend, cell_format,
     drivers::*,
-    query::{Outcome, QueryRun, RunState, StatementStatus},
+    query::{Outcome, QueryRun, RunId, RunState, Scope, StatementStatus},
     result::{DEFAULT_MEMORY_CEILING, DEFAULT_ROW_LIMIT, ResultData, ResultLimit},
 };
 use std::rc::Rc;
+
+/// Key context of the SQL editor, for the run shortcuts.
+pub const SQL_EDITOR_CONTEXT: &str = "SqlEditor";
 
 #[derive(Clone, Copy, PartialEq)]
 enum ResultView {
@@ -32,6 +35,14 @@ struct Message {
 
 pub struct Workspace {
     input: Option<ResolvedConnection>,
+    /// The tab's session, kept between runs so `USE`, `SET`, temporary
+    /// tables and transactions carry over. Out with the run while one is
+    /// running; `None` until the first run or after it was lost.
+    session: Option<Box<dyn Session>>,
+    /// The run whose session the tab keeps when it comes back. A session
+    /// returned by any other run (superseded, or begun on another connection)
+    /// is closed.
+    session_run: Option<RunId>,
     cancellation: CancellationToken,
     elapsed_ms: u128,
     rows_affected: Option<u64>,
@@ -151,6 +162,8 @@ impl Workspace {
         });
         Self {
             input: None,
+            session: None,
+            session_run: None,
             cancellation: CancellationToken::new(),
             elapsed_ms: 0,
             rows_affected: None,
@@ -225,11 +238,30 @@ impl Workspace {
         }
     }
 
-    pub fn execute(&mut self, cx: &mut Context<Self>) {
+    /// Ctrl+Enter: the selected text when there is a selection, otherwise the
+    /// statement at the cursor. Stops the run while one is running.
+    pub fn execute_current(&mut self, cx: &mut Context<Self>) {
+        let editor = self.editor.read(cx);
+        let selection = editor.selected_range();
+        let scope = if selection.is_empty() {
+            Scope::Cursor(editor.cursor())
+        } else {
+            Scope::Selection(selection)
+        };
+        self.toggle_run(scope, cx);
+    }
+
+    /// Ctrl+Shift+Enter: every statement in the tab, in order, whatever the
+    /// cursor or selection. Stops the run while one is running.
+    pub fn execute_all(&mut self, cx: &mut Context<Self>) {
+        self.toggle_run(Scope::All, cx);
+    }
+
+    fn toggle_run(&mut self, scope: Scope, cx: &mut Context<Self>) {
         if self.run.is_running() {
             self.stop_execution(cx);
         } else {
-            self.execute_queries(None, cx);
+            self.execute_queries(scope, cx);
         }
     }
 
@@ -247,13 +279,13 @@ impl Workspace {
         self.has_result && !matches!(self.run.state(), RunState::Failed { .. })
     }
 
-    fn execute_queries(&mut self, only: Option<usize>, cx: &mut Context<Self>) {
+    fn execute_queries(&mut self, scope: Scope, cx: &mut Context<Self>) {
         let sql = self.editor.read(cx).text().to_string();
-        let Some(plan) = self.run.start(&sql, only) else {
+        let Some(plan) = self.run.start(&sql, scope) else {
             if !self.run.is_running() {
                 self.notice = Some(Feedback::new(
                     Tone::Info,
-                    tr!("There is no SQL statement to run."),
+                    tr!("There is no SQL statement to execute."),
                 ));
                 cx.notify();
             }
@@ -273,6 +305,9 @@ impl Workspace {
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
             self.run.begin_all(id);
+            // A superseded run still holds its session; this one opens another.
+            let session = self.session.take();
+            self.session_run = Some(id);
             let options = ExecutionOptions {
                 max_rows: self.row_limit,
                 ..ExecutionOptions::default()
@@ -289,13 +324,34 @@ impl Workspace {
                 // by row, and the driver cells are dropped there.
                 let result = backend::run(backend::query(
                     input,
+                    session,
                     requests,
                     DEFAULT_MEMORY_CEILING,
                     cancel,
                 ))
                 .await;
+                let mut pending = Some(result);
                 let _ = weak.update(cx, |this, cx| {
                     let _timer = jykre::logging::UiTimer::start("publish result");
+                    let Some(result) = pending.take() else {
+                        return;
+                    };
+                    let result = match result {
+                        Ok(run) => {
+                            if this.session_run == Some(id) {
+                                this.session_notice(run.reopened, run.ended);
+                                if let Some(previous) =
+                                    std::mem::replace(&mut this.session, run.session)
+                                {
+                                    backend::close_in_background(previous);
+                                }
+                            } else if let Some(stale) = run.session {
+                                backend::close_in_background(stale);
+                            }
+                            run.batch
+                        }
+                        Err(error) => Err(error),
+                    };
                     match result {
                         Ok(batch) => {
                             let completed = batch.completed.len();
@@ -327,6 +383,12 @@ impl Workspace {
                     }
                     cx.notify();
                 });
+                // The tab closed while the run was out: its session goes too.
+                if let Some(Ok(run)) = pending
+                    && let Some(session) = run.session
+                {
+                    backend::close_in_background(session);
+                }
             })
             .detach();
             return;
@@ -471,9 +533,12 @@ impl Workspace {
                             },
                         )
                         .tooltip(|window, cx| {
-                            Tooltip::new(tr!("Run or stop queries · Ctrl+Enter")).build(window, cx)
+                            Tooltip::new(tr!(
+                                "Run the statement at the cursor or the selection · Ctrl+Enter\nRun all statements · Ctrl+Shift+Enter"
+                            ))
+                            .build(window, cx)
                         })
-                        .on_click(cx.listener(|this, _, _, cx| this.execute(cx))),
+                        .on_click(cx.listener(|this, _, _, cx| this.execute_current(cx))),
                     )
                     .child(divider())
                     .child(button("explain", I::ScanLine, tr!("Explain")).on_click(
@@ -678,16 +743,23 @@ impl Workspace {
                     .relative()
                     .pl(px(24.))
                     .child(
-                        div().flex_1().min_w_0().h_full().child(
-                            Editor::new(&self.editor)
-                                .appearance(false)
-                                .bordered(false)
-                                .font_family("Cascadia Code")
-                                .text_size(cx.theme().mono_font_size)
-                                .w_full()
-                                .h_full()
-                                .aria_label(tr!("SQL query editor")),
-                        ),
+                        // The run shortcuts take precedence over the editor's own
+                        // Ctrl+Enter binding inside this context.
+                        div()
+                            .key_context(SQL_EDITOR_CONTEXT)
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(
+                                Editor::new(&self.editor)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .font_family("Cascadia Code")
+                                    .text_size(cx.theme().mono_font_size)
+                                    .w_full()
+                                    .h_full()
+                                    .aria_label(tr!("SQL query editor")),
+                            ),
                     )
                     .child(
                         div()
@@ -826,7 +898,7 @@ impl Workspace {
                                     I::RefreshCw,
                                     tr!("Run query again"),
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| this.execute(cx))),
+                                .on_click(cx.listener(|this, _, _, cx| this.execute_current(cx))),
                             ),
                     ),
             )
@@ -882,7 +954,7 @@ impl Workspace {
                             .child(label(tr!("Run the query to see the results.")))
                             .child(
                                 button("empty-run", I::Play, tr!("Run query"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.execute(cx))),
+                                    .on_click(cx.listener(|this, _, _, cx| this.execute_current(cx))),
                             )
                             .into_any_element()
                     } else {
@@ -1237,10 +1309,36 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Stops the run and forgets it: its outcome no longer applies.
+    /// Stops the run and forgets it: its outcome no longer applies. The
+    /// tab's session is closed, and one still out with the run is closed
+    /// when it comes back.
     fn abandon_run(&mut self) {
         self.cancellation.cancel();
         self.run.reset();
+        self.session_run = None;
+        if let Some(session) = self.session.take() {
+            backend::close_in_background(session);
+        }
+    }
+
+    /// Tells the user when the session state they may rely on (current
+    /// schema, temporary tables, an open transaction) started over.
+    fn session_notice(&mut self, reopened: bool, ended: bool) {
+        if ended {
+            self.notice = Some(Feedback::new(
+                Tone::Warning,
+                tr!(
+                    "The session was closed. The next run opens a new one, and session settings such as the current schema start over."
+                ),
+            ));
+        } else if reopened {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!(
+                    "The previous session no longer answered, so this run used a new one. Session settings such as the current schema started over."
+                ),
+            ));
+        }
     }
 
     /// Binds the tab to another server. Any run is abandoned and the
@@ -1400,7 +1498,7 @@ fn run_button(
                 if this.run.status(index) == StatementStatus::Running {
                     this.stop_execution(cx);
                 } else {
-                    this.execute_queries(Some(index), cx);
+                    this.execute_queries(Scope::Statement(index), cx);
                 }
             });
         })
@@ -1447,5 +1545,8 @@ impl Render for Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         self.cancellation.cancel();
+        if let Some(session) = self.session.take() {
+            backend::close_in_background(session);
+        }
     }
 }

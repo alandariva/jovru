@@ -30,6 +30,22 @@ fn map_error(error: sqlx::Error) -> DriverError {
         "Database operation failed; check connectivity, permissions and SQL",
     )
 }
+/// How long a session may take to cancel a statement on the server, or to
+/// read what is left of a result, before it is closed.
+const RECOVERY: Duration = Duration::from_secs(5);
+/// Reads what is left of the previous response, until the server answers a
+/// ping. SQLx reports an error packet found on the way (such as the one a
+/// killed statement ends with) as the ping's error and keeps its state
+/// consistent, so database errors are skipped; any other error means the
+/// protocol cannot be trusted.
+async fn resynchronize(connection: &mut MySqlConnection) -> Result<(), sqlx::Error> {
+    loop {
+        match connection.ping().await {
+            Err(sqlx::Error::Database(_)) => continue,
+            outcome => return outcome,
+        }
+    }
+}
 async fn bounded<T>(
     cancel: &CancellationToken,
     timeout: Option<Duration>,
@@ -110,6 +126,27 @@ struct DatabaseSession {
     input: ResolvedConnection,
     backend: i64,
     connection: Option<MySqlConnection>,
+}
+impl DatabaseSession {
+    /// Stops this session's statement from another connection, at most once
+    /// and within [`RECOVERY`]. Killing an idle connection's query is a no-op.
+    async fn kill_query(&self) {
+        let cancel_server = async {
+            let mut control = connect(&self.input, &CancellationToken::new()).await?;
+            let sql = format!("KILL QUERY {}", self.backend);
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+                .execute(&mut control)
+                .await
+                .map_err(map_error)?;
+            Ok::<_, DriverError>(())
+        };
+        let _ = tokio::time::timeout(RECOVERY, cancel_server).await;
+    }
+    async fn discard(&self, connection: MySqlConnection) {
+        // SQLx's hard close still shuts down TLS. A server may keep that
+        // handshake open; dropping the timed-out future closes the socket.
+        let _ = tokio::time::timeout(Duration::from_secs(1), connection.close_hard()).await;
+    }
 }
 #[async_trait]
 impl Session for DatabaseSession {
@@ -219,24 +256,58 @@ impl Session for DatabaseSession {
             })
         };
         let outcome = bounded(&cancel, request.options.timeout, operation).await;
-        if outcome.is_err() || interrupted {
-            let cancel_server = async {
-                let mut control = connect(&self.input, &CancellationToken::new()).await?;
-                let sql = format!("KILL QUERY {}", self.backend);
-                sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
-                    .execute(&mut control)
-                    .await
-                    .map_err(map_error)?;
-                Ok::<_, DriverError>(())
-            };
-            let _ = tokio::time::timeout(Duration::from_secs(5), cancel_server).await;
-            // SQLx's hard close still shuts down TLS. A server may keep that
-            // handshake open; dropping the timed-out future closes the socket.
-            let _ = tokio::time::timeout(Duration::from_secs(1), owned.close_hard()).await;
-        } else {
-            self.connection = Some(owned);
+        match &outcome {
+            Ok(_) if !interrupted => self.connection = Some(owned),
+            Err(error) if error.code == ErrorCode::Connection => self.discard(owned).await,
+            // Rows beyond the limit are still arriving: read and drop them
+            // rather than killing a statement that may already be done, and
+            // kill only a result too long to drain in time, closing the
+            // session.
+            Ok(_) => match tokio::time::timeout(RECOVERY, resynchronize(&mut owned)).await {
+                Ok(Ok(())) => self.connection = Some(owned),
+                _ => {
+                    self.kill_query().await;
+                    self.discard(owned).await;
+                }
+            },
+            Err(error) => {
+                if matches!(
+                    error.code,
+                    ErrorCode::Cancelled | ErrorCode::Timeout | ErrorCode::Protocol
+                ) {
+                    self.kill_query().await;
+                }
+                match tokio::time::timeout(RECOVERY, resynchronize(&mut owned)).await {
+                    Ok(Ok(())) => self.connection = Some(owned),
+                    _ => self.discard(owned).await,
+                }
+            }
         }
         outcome
+    }
+    fn is_open(&self) -> bool {
+        self.connection.is_some()
+    }
+    async fn ping(&mut self) -> DriverResult<()> {
+        let mut connection = self.connection.take().ok_or_else(|| {
+            DriverError::new(
+                ErrorCode::Connection,
+                "Session closed; reconnect before executing",
+            )
+        })?;
+        match tokio::time::timeout(RECOVERY, resynchronize(&mut connection)).await {
+            Ok(Ok(())) => {
+                self.connection = Some(connection);
+                Ok(())
+            }
+            outcome => {
+                self.discard(connection).await;
+                Err(match outcome {
+                    Ok(Err(error)) => map_error(error),
+                    _ => DriverError::new(ErrorCode::Timeout, "Database operation timed out"),
+                })
+            }
+        }
     }
     async fn close(mut self: Box<Self>) -> DriverResult<()> {
         if let Some(connection) = self.connection.take() {

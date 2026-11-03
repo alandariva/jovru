@@ -1,6 +1,7 @@
 # ADR-0002: SQLx for PostgreSQL and MySQL, with rustls and the text protocol
 
-- **Status:** Accepted (recorded 2026-11-02 for a decision already in effect)
+- **Status:** Accepted (recorded 2026-11-02 for a decision already in effect);
+  the session lifetime is superseded by [ADR-0014](0014-a-session-per-tab.md)
 - **Date:** 2026-11-02
 
 ## Context

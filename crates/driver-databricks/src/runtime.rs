@@ -266,7 +266,7 @@ pub async fn open(
         let _ = tokio::time::timeout(Duration::from_secs(60), cli(&client.config))
             .await
             .map_err(|_| error(ErrorCode::Timeout, "CLI timed out"))??;
-        Ok(Box::new(DatabricksSession { client }) as Box<dyn Session>)
+        Ok(Box::new(DatabricksSession::new(client)) as Box<dyn Session>)
     })
     .await
 }
@@ -439,9 +439,139 @@ impl Client {
     }
 }
 
+/// Statement Execution keeps no state between requests, so the session keeps
+/// the current catalog and schema itself, starting from the profile's
+/// defaults, and follows the `USE` statements that succeed.
 #[derive(Debug)]
 struct DatabricksSession {
     client: Client,
+    catalog: Option<String>,
+    schema: Option<String>,
+}
+impl DatabricksSession {
+    fn new(client: Client) -> Self {
+        Self {
+            catalog: client.config.default_catalog.clone(),
+            schema: client.config.default_schema.clone(),
+            client,
+        }
+    }
+    fn apply(&mut self, change: UseStatement) {
+        match change {
+            UseStatement::Catalog(catalog) => {
+                self.catalog = Some(catalog);
+                // Setting the catalog also resets the current schema.
+                self.schema = Some("default".to_owned());
+            }
+            UseStatement::Schema { catalog, schema } => {
+                if catalog.is_some() {
+                    self.catalog = catalog;
+                }
+                self.schema = Some(schema);
+            }
+        }
+    }
+}
+
+/// A statement that changes the current catalog or schema.
+#[derive(Debug, PartialEq, Eq)]
+enum UseStatement {
+    Catalog(String),
+    Schema {
+        catalog: Option<String>,
+        schema: String,
+    },
+}
+
+/// Recognises `USE CATALOG c`, `USE [SCHEMA | DATABASE] [c.]s` and the
+/// `SET CATALOG` alias. Names may be quoted with backticks; anything else
+/// is not a context change.
+fn use_statement(sql: &str) -> Option<UseStatement> {
+    let sql = sql.trim().trim_end_matches(';').trim_end();
+    let (keyword, rest) = split_word(sql)?;
+    let catalog_alias = keyword.eq_ignore_ascii_case("set");
+    if !keyword.eq_ignore_ascii_case("use") && !catalog_alias {
+        return None;
+    }
+    let (kind, after_kind) = split_word(rest).unwrap_or(("", rest));
+    let (catalog, names) = if kind.eq_ignore_ascii_case("catalog") {
+        (true, after_kind)
+    } else if catalog_alias {
+        return None;
+    } else if kind.eq_ignore_ascii_case("schema") || kind.eq_ignore_ascii_case("database") {
+        (false, after_kind)
+    } else {
+        (false, rest)
+    };
+    let mut parts = qualified_name(names)?;
+    if catalog {
+        return (parts.len() == 1).then(|| UseStatement::Catalog(parts.remove(0)));
+    }
+    match parts.len() {
+        1 => Some(UseStatement::Schema {
+            catalog: None,
+            schema: parts.remove(0),
+        }),
+        2 => {
+            let schema = parts.remove(1);
+            Some(UseStatement::Schema {
+                catalog: Some(parts.remove(0)),
+                schema,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The first bare word of `text` and what follows it.
+fn split_word(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_start();
+    let end = text
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(text.len());
+    (end > 0).then(|| (&text[..end], &text[end..]))
+}
+
+/// `a`, `` `a.b` `` or `a.b`, with nothing after it.
+fn qualified_name(text: &str) -> Option<Vec<String>> {
+    let mut parts = Vec::new();
+    let mut rest = text.trim();
+    loop {
+        if let Some(quoted) = rest.strip_prefix('`') {
+            let mut name = String::new();
+            let mut chars = quoted.char_indices();
+            let mut end = None;
+            while let Some((index, c)) = chars.next() {
+                if c == '`' {
+                    if quoted[index + 1..].starts_with('`') {
+                        name.push('`');
+                        chars.next();
+                    } else {
+                        end = Some(index + 1);
+                        break;
+                    }
+                } else {
+                    name.push(c);
+                }
+            }
+            parts.push(name);
+            rest = &quoted[end?..];
+        } else {
+            let end = rest
+                .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            if end == 0 {
+                return None;
+            }
+            parts.push(rest[..end].to_owned());
+            rest = &rest[end..];
+        }
+        match rest.strip_prefix('.') {
+            Some(next) => rest = next,
+            None => break,
+        }
+    }
+    rest.trim().is_empty().then_some(parts)
 }
 #[async_trait]
 impl Session for DatabricksSession {
@@ -456,19 +586,21 @@ impl Session for DatabricksSession {
             return Err(DriverError::cancelled());
         }
         let mut body = json!({"warehouse_id":self.client.config.warehouse_id,"statement":request.sql,"wait_timeout":"0s","format":"JSON_ARRAY","disposition":"INLINE","row_limit":request.options.max_rows});
-        if let Some(catalog) = request.options.context.catalog.as_ref().or(self
-            .client
-            .config
-            .default_catalog
-            .as_ref())
+        if let Some(catalog) = request
+            .options
+            .context
+            .catalog
+            .as_ref()
+            .or(self.catalog.as_ref())
         {
             body["catalog"] = json!(catalog);
         }
-        if let Some(schema) = request.options.context.schema.as_ref().or(self
-            .client
-            .config
-            .default_schema
-            .as_ref())
+        if let Some(schema) = request
+            .options
+            .context
+            .schema
+            .as_ref()
+            .or(self.schema.as_ref())
         {
             body["schema"] = json!(schema);
         }
@@ -504,9 +636,16 @@ impl Session for DatabricksSession {
                     }
                 }
             }
-            let columns = response["manifest"]["schema"]["columns"]
+            // Statements without a result (USE, DDL) may leave the column
+            // list out of the manifest.
+            let manifest = &response["manifest"]["schema"];
+            if !manifest.is_object() {
+                return Err(protocol());
+            }
+            let columns = manifest["columns"]
                 .as_array()
-                .ok_or_else(protocol)?
+                .map(Vec::as_slice)
+                .unwrap_or_default()
                 .iter()
                 .map(|c| {
                     Ok(ColumnInfo {
@@ -571,6 +710,11 @@ impl Session for DatabricksSession {
                 tokio::select! {biased;_=cancel.cancelled()=>Err(DriverError::cancelled()),result=work=>result}
             }
         };
+        if outcome.is_ok()
+            && let Some(change) = use_statement(&request.sql)
+        {
+            self.apply(change);
+        }
         if outcome.is_err() {
             let cancel_path = format!("{path}/cancel");
             let cleanup = self
@@ -663,7 +807,7 @@ mod tests {
                 unreachable!("pending statement has no rows")
             }
         }
-        let mut session = DatabricksSession { client };
+        let mut session = DatabricksSession::new(client);
         let result = session
             .execute(
                 &QueryRequest {
@@ -698,7 +842,7 @@ mod tests {
             }
         }
         let mut rows = Rows::default();
-        let mut session = DatabricksSession { client };
+        let mut session = DatabricksSession::new(client);
         session
             .execute(
                 &QueryRequest {
@@ -723,6 +867,98 @@ mod tests {
             v.to_ascii_lowercase()
                 .contains("authorization: bearer test-token")
         }));
+    }
+
+    #[test]
+    fn use_statements_change_catalog_or_schema() {
+        let schema = |catalog: Option<&str>, schema: &str| UseStatement::Schema {
+            catalog: catalog.map(str::to_owned),
+            schema: schema.to_owned(),
+        };
+        assert_eq!(
+            use_statement("USE CATALOG main;"),
+            Some(UseStatement::Catalog("main".into()))
+        );
+        assert_eq!(
+            use_statement("set catalog `my cat`"),
+            Some(UseStatement::Catalog("my cat".into()))
+        );
+        assert_eq!(use_statement("use sales"), Some(schema(None, "sales")));
+        assert_eq!(
+            use_statement("USE SCHEMA main.`a``b` ;"),
+            Some(schema(Some("main"), "a`b"))
+        );
+        assert_eq!(
+            use_statement("Use Database finance"),
+            Some(schema(None, "finance"))
+        );
+        for other in [
+            "SELECT 1",
+            "USE",
+            "USE CATALOG a.b",
+            "USE a.b.c",
+            "USE sales; SELECT 1",
+            "SET spark.sql.ansi.enabled = true",
+            "USE `unterminated",
+            "users",
+        ] {
+            assert_eq!(use_statement(other), None, "{other}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_successful_use_carries_its_context_to_later_statements() {
+        let done = json!({"statement_id":"abc","status":{"state":"SUCCEEDED"},"manifest":{"schema":{"column_count":0}}});
+        let failed = json!({"statement_id":"abd","status":{"state":"FAILED"}});
+        let (client, task) = fixture(vec![
+            (200, done.clone()),
+            (200, done.clone()),
+            (200, failed),
+            (200, json!({})),
+            (200, done.clone()),
+            (200, done),
+        ])
+        .await;
+        struct Ignore;
+        impl RowSink for Ignore {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                SinkControl::Continue
+            }
+            fn row(&mut self, _: Row) -> SinkControl {
+                SinkControl::Continue
+            }
+        }
+        let mut session = DatabricksSession::new(client);
+        for sql in [
+            "USE CATALOG main",
+            "USE SCHEMA sales",
+            "USE SCHEMA missing",
+            "SELECT 1",
+            "USE other.finance",
+        ] {
+            let request = QueryRequest {
+                sql: sql.into(),
+                options: ExecutionOptions::default(),
+            };
+            let result = session
+                .execute(&request, &mut Ignore, CancellationToken::new())
+                .await;
+            assert_eq!(result.is_err(), sql.contains("missing"), "{sql}");
+        }
+        assert_eq!(session.catalog.as_deref(), Some("other"));
+        assert_eq!(session.schema.as_deref(), Some("finance"));
+        let requests = task.await.unwrap();
+        let body = |index: usize| -> Value {
+            let request: &String = &requests[index];
+            serde_json::from_str(&request[request.find("\r\n\r\n").unwrap() + 4..]).unwrap()
+        };
+        // USE SCHEMA runs with the catalog chosen before it; the failed USE
+        // and its cancel request leave the context as it was.
+        assert_eq!(body(1)["catalog"], "main");
+        assert_eq!(body(1)["schema"], "default");
+        assert_eq!(body(4)["catalog"], "main");
+        assert_eq!(body(4)["schema"], "sales");
+        assert!(requests[3].starts_with("POST /api/2.0/sql/statements/abd/cancel "));
     }
 
     #[derive(Default)]

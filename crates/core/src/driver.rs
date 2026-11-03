@@ -35,8 +35,15 @@ pub struct DriverDescriptor {
     pub capabilities: DriverCapabilities,
 }
 
-/// A dedicated SQL session. Stateful semantics vary by driver: Databricks
-/// Statement Execution will forward catalog/schema on each request.
+/// A SQL session that a tab keeps between runs. Relational drivers keep one
+/// physical connection, so session state (current schema, temporary tables,
+/// an open transaction) carries over between statements; Databricks keeps a
+/// logical catalog/schema context and sends it with each request.
+///
+/// A failed statement does not end the session: the driver restores the
+/// protocol to a known state (cancelling server-side work when needed) and
+/// keeps the session, or closes it when that is not possible. The caller
+/// asks [`Session::is_open`] before reusing it.
 #[async_trait]
 pub trait Session: Debug + Send {
     /// Implementations validate the request, honor cancellation, timeout and
@@ -47,6 +54,21 @@ pub trait Session: Debug + Send {
         sink: &mut dyn RowSink,
         cancel: CancellationToken,
     ) -> DriverResult<DriverOutcome>;
+
+    /// Whether the session can run another statement. `false` once the
+    /// connection was lost or could not be brought back to a known state;
+    /// the caller then opens a new session, whose state starts over.
+    fn is_open(&self) -> bool {
+        true
+    }
+
+    /// Checks, before a kept session is reused, that the server still
+    /// answers, within a short deadline. A failure closes the session
+    /// ([`Session::is_open`] turns `false`). Sessions without a connection of
+    /// their own have nothing to check.
+    async fn ping(&mut self) -> DriverResult<()> {
+        Ok(())
+    }
 
     async fn close(self: Box<Self>) -> DriverResult<()>;
 }
