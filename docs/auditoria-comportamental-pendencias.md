@@ -200,6 +200,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Preservar por índice de dados; ocultar só se os extremos sumirem.
 - **Evidência no projeto:** `src/app/result_grid.rs` (`set_filter`); `src/grid.rs`; `docs/results.md`
 - **Confiança:** Confirmado no Jykre; Provável na comparação
+- **Situação:** Corrigido. `set_filter` mantém a seleção (por linha de dados) e só recalcula a contagem; com um extremo oculto ela não aparece nem conta, e volta quando o filtro o mostra de novo.
 
 ## N023 — Filtro trata NULL como o texto “NULL”
 

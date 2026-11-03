@@ -94,8 +94,10 @@ impl ResultGrid {
         let filter = filter.to_lowercase();
         if self.filter != filter {
             self.filter = filter;
-            self.select(None, cx);
-            cx.notify();
+            // The selection addresses data rows: it stays while its ends are
+            // visible and reappears when they are again; only the count
+            // reported to the footer changes.
+            self.select(self.selection, cx);
         }
     }
 

@@ -78,8 +78,9 @@ alignment only; the value itself is never converted.
   and reports the selected count and copy notices to the workspace through
   `ResultGridEvent`. Selection and copy rules live in `jykre::grid`.
 - Selections are stored as data-row indices, so filtering or sorting the view
-  does not change what is selected; a selection whose ends are hidden is not
-  shown.
+  does not change what is selected; typing in the filter keeps the selection,
+  a selection whose ends are hidden is not shown (and counts as no cells), and
+  it shows again when they are.
 
 ## Limits
 

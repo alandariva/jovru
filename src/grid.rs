@@ -246,6 +246,25 @@ mod tests {
         // A filter that hides an end of the block hides the selection.
         assert_eq!(selection_block(selection, &[5, 4, 3]), None);
     }
+    #[test]
+    fn a_selection_survives_filters_that_keep_its_ends() {
+        let result = event_log(12);
+        // Rows 3 and 7 are "error"; the block covers data rows 3..=7.
+        let selection = Some(CellSelection {
+            anchor: (3, 1),
+            focus: (7, 1),
+        });
+        let all = GridView::new(&result, key(0, "", true));
+        assert_eq!(selected_cells(selection, &all.rows), 5);
+        let errors = GridView::new(&result, key(0, "error", true));
+        assert_eq!(errors.rows, [3, 7, 11]);
+        assert_eq!(selected_cells(selection, &errors.rows), 2);
+        // Hiding an end hides the block, which comes back with the rows.
+        let info = GridView::new(&result, key(0, "info", true));
+        assert_eq!(selected_cells(selection, &info.rows), 0);
+        assert_eq!(selected_cells(selection, &all.rows), 5);
+    }
+
     /// Shaped like the `sales.event_log` seed, without a database.
     fn event_log_rows(rows: usize) -> Vec<Vec<String>> {
         (0..rows)
