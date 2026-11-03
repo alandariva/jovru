@@ -379,10 +379,7 @@ impl AppView {
             refresh_generation: 0,
             collapsed: HashSet::new(),
             refreshing: None,
-            status: Feedback::new(
-                Tone::Info,
-                tr!("Local cache available without connecting to the server."),
-            ),
+            status: Feedback::new(Tone::Info, ""),
             notice: warning.clone(),
         };
         if let Some(cache) = cache {
@@ -1016,8 +1013,6 @@ impl AppView {
                         .px_3()
                         .gap_1()
                         .pb_2()
-                        .child(label(connection.detail.clone()))
-                        .child(label(connection.last_full_refresh()))
                         .when_some(connection.notice.clone(), |s, notice| {
                             s.child(
                                 div()
@@ -1026,16 +1021,18 @@ impl AppView {
                                     .child(notice),
                             )
                         })
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(if connection.status.tone == Tone::Info {
-                                    MUTED
-                                } else {
-                                    connection.status.tone.color()
-                                }))
-                                .child(connection.status.text.clone()),
-                        )
+                        .when(!connection.status.text.is_empty(), |s| {
+                            s.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(if connection.status.tone == Tone::Info {
+                                        MUTED
+                                    } else {
+                                        connection.status.tone.color()
+                                    }))
+                                    .child(connection.status.text.clone()),
+                            )
+                        })
                         .child(
                             button(
                                 ("live-new-query", index),
@@ -1336,19 +1333,6 @@ impl Drop for AppView {
 }
 
 impl Connection {
-    fn last_full_refresh(&self) -> String {
-        self.metadata_statuses
-            .iter()
-            .find(|status| status.scope.0.is_empty())
-            .and_then(|status| status.last_success_at.as_ref())
-            .map(|stamp| {
-                tr!(
-                    "Full connection: {0}",
-                    stamp.replace('T', " ").replace('Z', " UTC")
-                )
-            })
-            .unwrap_or_else(|| tr!("No full connection refresh saved.").into())
-    }
     fn node_freshness(&self, path: &ObjectPath) -> String {
         let applicable: Vec<_> = self
             .metadata_statuses

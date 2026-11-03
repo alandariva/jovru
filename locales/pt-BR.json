@@ -84,7 +84,6 @@
   "Filter results…": "Filtrar resultados…",
   "Financial summary": "Resumo financeiro",
   "Format": "Formatar",
-  "Full connection: {0}": "Conexão completa: {0}",
   "Functions": "Funções",
   "Give your results a view": "Dê uma visualização aos seus resultados",
   "Grouped tabs": "Abas agrupadas",
@@ -107,7 +106,6 @@
   "Load more objects": "Carregar mais objetos",
   "Loading connections…": "Carregando conexões…",
   "Local cache": "Cache local",
-  "Local cache available without connecting to the server.": "Cache local disponível sem conectar ao servidor.",
   "Local data · optional vault": "Dados locais · cofre opcional",
   "Message to the AI assistant": "Mensagem para o assistente de IA",
   "Messages": "Mensagens",
@@ -120,7 +118,6 @@
   "No changes to a real database.": "Sem alterações em um banco de dados real.",
   "No connections yet. Add one to explore its metadata and run SQL.": "Nenhuma conexão ainda. Adicione uma para explorar os metadados e executar SQL.",
   "No connections yet. Add one to search its tables.": "Nenhuma conexão ainda. Adicione uma para buscar suas tabelas.",
-  "No full connection refresh saved.": "Nenhuma atualização completa de conexão salva.",
   "No objects found. Refresh the connection metadata.": "Nenhum objeto encontrado. Atualize os metadados da conexão.",
   "No open tabs": "Nenhuma aba aberta",
   "No refresh recorded": "Nenhuma atualização registrada",
@@ -262,7 +259,6 @@
   "Without remember password, the password stays only in this session.": "Sem lembrar senha, a senha permanece apenas nesta sessão.",
   "Workspace": "Espaço de trabalho",
   "You": "Você",
-  "Your exploration environment": "Seu ambiente de exploração",
   "Your library": "Sua biblioteca",
   "analytics · 12 tables": "analytics · 12 tabelas",
   "close": "fechar",
@@ -286,6 +282,5 @@
   "{0} · row limit reached": "{0} · limite de linhas atingido",
   "{0} · {1} rows affected": "{0} · {1} linhas afetadas",
   "↑ ↓ navigate · Enter select · Esc close": "↑ ↓ navegar · Enter selecionar · Esc fechar",
-  "↻ refreshes the whole connection. Right-click a node (or press F5) to refresh only it.": "↻ atualiza a conexão inteira. Clique com o botão direito em um nó (ou pressione F5) para atualizar só ele.",
   "␠ {0} spaces": "␠ {0} espaços"
 }

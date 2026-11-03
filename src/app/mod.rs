@@ -690,28 +690,6 @@ impl AppView {
                             |(index, connection)| self.connection_tree(index, connection, cx),
                         )),
                 )
-                .child(
-                    column()
-                        .flex_none()
-                        .p_3()
-                        .gap_2()
-                        .border_t_1()
-                        .border_color(rgb(BORDER))
-                        .child(
-                            row()
-                                .child(icon(I::ShieldCheck, FAINT))
-                                .child(label(tr!("Your exploration environment"))),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .line_height(relative(1.5))
-                                .text_color(rgb(FAINT))
-                                .child(
-                                    tr!("↻ refreshes the whole connection. Right-click a node (or press F5) to refresh only it."),
-                                ),
-                        ),
-                )
             })
             .when(self.section != Section::Explorer, |s| {
                 s.child(self.sidebar_content(cx))
@@ -961,7 +939,6 @@ impl AppView {
                     })),
             )
             .child(div().flex_1())
-            .child(badge("Workspace SQL", FAINT))
             .child(divider())
             .child(
                 button("new-query", I::Plus, tr!("New query"))
