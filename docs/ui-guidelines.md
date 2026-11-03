@@ -102,8 +102,13 @@ See [Performance](performance.md) for budgets and how to measure.
 - Every essential flow works without a mouse.
 - Interactive elements have an ID, a `role` and an accessible label
   (`aria_label`); stateful ones expose their state (`aria_selected`).
-- Focus is always visible (`focus_visible` styles); a focusable area tracks a
-  `FocusHandle` and restores focus sensibly after dialogs close.
+- Focus is always visible (`focus_visible` styles) and contrasts with the
+  control's own fill (the primary button gets a light border, not a mint one
+  on mint); a focusable area tracks a `FocusHandle` and restores focus
+  sensibly after dialogs close.
+- A focusable control acts through `on_click`: GPUI turns Enter and Space on
+  the focused element into the same click event, so a button never needs its
+  own key handler and never reacts to the mouse only.
 - Status regions use `Role::Status` (or `Role::Alert` for errors) so changes
   are announced.
 

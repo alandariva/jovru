@@ -1087,7 +1087,7 @@ impl AppView {
             .child(row().justify_between().child(label(tr!("SQL size"))).child(badge(format!("{} px", f32::from(cx.theme().mono_font_size)), MINT)))
             .child(row().gap_1().children([12., 14., 16., 18., 20.].into_iter().enumerate().map(|(index, size)| {
                 div().id(("sql-font-size", index)).role(Role::Button).aria_label(tr!("SQL font at {0} pixels", size))
-                    .focusable().tab_index(0).w(px(37.)).h(px(32.)).flex().items_center().justify_center()
+                    .focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))).w(px(37.)).h(px(32.)).flex().items_center().justify_center()
                     .rounded(px(4.)).border_1().border_color(rgb(BORDER)).cursor_pointer()
                     .when(f32::from(cx.theme().mono_font_size) == size, |s| s.bg(rgb(0x263b37)).border_color(rgb(MINT)))
                     .focus_visible(|s| s.border_color(rgb(MINT)))

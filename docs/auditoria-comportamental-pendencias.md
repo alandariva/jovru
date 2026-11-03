@@ -174,6 +174,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Componente de botão que sintetiza Enter/Espaço; árvore com setas.
 - **Evidência no projeto:** `src/app/ui.rs`; `src/app/connections.rs` (nós); `docs/ui-guidelines.md`
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. Conferido no app (Xvfb): o GPUI usado (`gpui-pre` 0.3.11) já converte Enter/Espaço no elemento focado em `ClickEvent::Keyboard`, e Format/Run/Close respondem pelo teclado. O defeito real era o foco invisível: o Run (botão primário) tinha borda de foco menta sobre fundo menta e os botões de tamanho de fonte não tinham estilo de foco. Ambos ganharam foco visível, e `docs/ui-guidelines.md` registra a regra (`on_click` + `focusable`). Setas na árvore ficaram com a N026.
 
 ## N021 — Todas as instruções aparecem como Running antes de começarem
 

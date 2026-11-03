@@ -163,6 +163,9 @@ pub fn shortcut(value: &'static str) -> Div {
         .child(value)
 }
 
+/// A focusable control with `on_click`: GPUI turns Enter and Space on the
+/// focused element into the same click, so a mouse-only handler is never
+/// needed ([UI guidelines](../../docs/ui-guidelines.md#accessibility-and-keyboard)).
 fn base_button(
     id: impl Into<ElementId>,
     name: IconName,
@@ -200,6 +203,8 @@ pub fn primary_button(
     base_button(id, name, title, 0x172820)
         .bg(rgb(MINT))
         .hover(|s| s.bg(rgb(0xa2e6cc)))
+        // The mint focus border would vanish on the mint fill.
+        .focus_visible(|s| s.border_color(rgb(TEXT)).bg(rgb(0xa2e6cc)))
 }
 
 pub fn icon_button(id: impl Into<ElementId>, name: IconName, title: &'static str) -> Stateful<Div> {
