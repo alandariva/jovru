@@ -140,27 +140,38 @@ async fn load_from(
             .get(profile.config.driver)?
             .validate_connection(&profile.config)?;
         let mut warning = migration_warning.clone();
-        let credentials =
-            if profile.remember_password && profile.config.driver != DriverKind::Databricks {
-                match secrets.get(profile.id).await {
-                    Ok(value) => value,
-                    Err(error) => {
-                        tracing::warn!(
-                            connection_id = %profile.id,
-                            error_code = ?error.code,
-                            "password unavailable from the vault"
+        let credentials = if profile.remember_password
+            && profile.config.driver != DriverKind::Databricks
+        {
+            match secrets.get(profile.id).await {
+                Ok(value) => {
+                    if value.password.is_none() {
+                        add_warning(
+                            &mut warning,
+                            tr!(
+                                "Remember password is on, but the vault has no password for this connection. Enter it again to query the server."
+                            ),
                         );
-                        warning = Some(error.to_string());
-                        Credentials::default()
                     }
+                    value
                 }
-            } else {
-                Credentials::default()
-            };
+                Err(error) => {
+                    tracing::warn!(
+                        connection_id = %profile.id,
+                        error_code = ?error.code,
+                        "password unavailable from the vault"
+                    );
+                    add_warning(&mut warning, error.to_string());
+                    Credentials::default()
+                }
+            }
+        } else {
+            Credentials::default()
+        };
         let cache = match prepare_cache(dir, &profile, true).await {
             Ok(cache) => Some(cache),
             Err(error) => {
-                warning = Some(error.to_string());
+                add_warning(&mut warning, error.to_string());
                 None
             }
         };
@@ -200,7 +211,7 @@ pub async fn save(
 }
 async fn save_to(
     dir: &Path,
-    profile: ConnectionProfile,
+    mut profile: ConnectionProfile,
     credentials: Credentials,
     row_limit: u32,
     secrets: &dyn SecretStore,
@@ -211,49 +222,80 @@ async fn save_to(
         .await?
         .into_iter()
         .find(|value| value.id == profile.id);
-    let profile = repository.save(&profile).await?;
-    repository.set_row_limit(profile.id, row_limit).await?;
     let mut warning = None;
-    // A password remembered for another driver, server or user is not
-    // reused: without a new one the vault entry goes.
-    let identity_changed = previous
-        .as_ref()
-        .is_some_and(|previous| !keeps_password(&previous.config, &profile.config));
-    if identity_changed
-        && credentials.password.is_none()
-        && previous
-            .as_ref()
-            .is_some_and(|previous| previous.remember_password)
-        && profile.remember_password
-        && secrets.delete(profile.id).await.is_err()
-    {
-        warning = Some(tr!("The previous password could not be removed from the vault. Enter the password for this server.").into());
-    }
+    // The vault is written before the profile, so `remember_password` is
+    // saved only when the vault really holds the password.
+    let remembered_before = previous.as_ref().is_some_and(|previous| {
+        previous.remember_password && keeps_password(&previous.config, &profile.config)
+    });
+    let mut stored = false;
     if profile.config.driver != DriverKind::Databricks && profile.remember_password {
-        if let Some(password) = credentials.password.clone() {
-            if let Err(error) = secrets.set(profile.id, password).await {
-                warning = Some(tr!(
-                    "Connection saved. Could not store the password in the vault: {0}",
-                    error
-                ));
+        match credentials.password.clone() {
+            Some(password) => match secrets.set(profile.id, password).await {
+                Ok(()) => stored = true,
+                Err(error) => {
+                    profile.remember_password = false;
+                    add_warning(
+                        &mut warning,
+                        tr!(
+                            "Connection saved. Could not store the password in the vault, so Remember password was turned off: {0}",
+                            error
+                        ),
+                    );
+                }
+            },
+            // Nothing new to store: the vault may still hold the password,
+            // only for the same server and user.
+            None if remembered_before
+                && secrets
+                    .get(profile.id)
+                    .await
+                    .is_ok_and(|stored| stored.password.is_some()) => {}
+            None => {
+                profile.remember_password = false;
+                add_warning(
+                    &mut warning,
+                    tr!(
+                        "Connection saved without an available password, so Remember password was turned off. Enter the password before querying the server."
+                    ),
+                );
             }
-        } else {
-            warning = Some(
-                tr!("Connection saved without an available password. Enter it before querying the server.")
-                    .into(),
-            );
         }
-    } else if previous
+    } else {
+        profile.remember_password = false;
+    }
+    let profile = match repository.save(&profile).await {
+        Ok(profile) => profile,
+        Err(error) => {
+            // A new connection that was not saved must not leave its
+            // password behind.
+            if stored && previous.is_none() {
+                let _ = secrets.delete(profile.id).await;
+            }
+            return Err(error);
+        }
+    };
+    repository.set_row_limit(profile.id, row_limit).await?;
+    let had_entry = previous
         .as_ref()
-        .is_some_and(|profile| profile.remember_password)
-        && secrets.delete(profile.id).await.is_err()
-    {
-        warning = Some(tr!("Remember password was turned off, but the previous password could not be removed from the vault. It will not be used when reopening.").into());
+        .is_some_and(|previous| previous.remember_password);
+    // Remember turned off (by the user or above): the old entry goes, so a
+    // password for another server or user is never read back.
+    if had_entry && !profile.remember_password && secrets.delete(profile.id).await.is_err() {
+        add_warning(
+            &mut warning,
+            tr!(
+                "Remember password was turned off, but the previous password could not be removed from the vault. It will not be used when reopening."
+            ),
+        );
     }
     let cache = match prepare_cache(dir, &profile, false).await {
         Ok(value) => Some(value),
         Err(error) => {
-            warning = Some(tr!("Connection saved. Cache unavailable: {0}", error));
+            add_warning(
+                &mut warning,
+                tr!("Connection saved. Cache unavailable: {0}", error),
+            );
             None
         }
     };
@@ -268,6 +310,16 @@ async fn save_to(
         cache,
         warning,
     })
+}
+
+/// Adds `text` to the warnings already collected, so a later one does not
+/// hide an earlier one.
+fn add_warning(warning: &mut Option<String>, text: impl Into<String>) {
+    let text = text.into();
+    *warning = Some(match warning.take() {
+        Some(previous) => format!("{previous} {text}"),
+        None => text,
+    });
 }
 
 /// Whether a password kept for `previous` may be sent to `next`: the same

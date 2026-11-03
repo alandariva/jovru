@@ -156,6 +156,13 @@ async fn remembering_is_opt_in_and_vault_failure_keeps_only_session_credentials(
         .unwrap();
     assert!(saved.input.credentials.password.is_some());
     assert!(saved.warning.is_some());
+    // The preference follows what the vault holds: nothing was stored.
+    assert!(!saved.profile.remember_password);
+    assert!(
+        !load(&dir, &vault).await.unwrap()[0]
+            .profile
+            .remember_password
+    );
     assert!(
         load(&dir, &unavailable).await.unwrap()[0]
             .input
@@ -300,4 +307,54 @@ async fn a_remembered_password_is_not_carried_to_another_driver() {
             .is_none()
     );
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_missing_vault_entry_is_reported_and_warnings_add_up() {
+    let (dir, mut profile) = fixture();
+    let vault = MemoryVault::default();
+    profile.remember_password = true;
+    let credentials = Credentials {
+        password: Some(SecretString::from("synthetic-password".to_owned())),
+    };
+    let saved = save(&dir, profile, credentials, 1_000, &vault)
+        .await
+        .unwrap();
+    assert!(saved.profile.remember_password);
+    assert_eq!(saved.warning, None);
+    assert_eq!(load(&dir, &vault).await.unwrap()[0].warning, None);
+    // The entry disappears outside the application (another tool, a reset
+    // keyring): the preference says remember, so reopening says so.
+    vault.passwords.lock().unwrap().clear();
+    let loaded = load(&dir, &vault).await.unwrap().remove(0);
+    assert!(loaded.input.credentials.password.is_none());
+    assert!(
+        loaded
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("vault has no password")),
+        "{:?}",
+        loaded.warning
+    );
+    // Saving with nothing to store turns the preference off instead of
+    // claiming a password the vault does not have.
+    let saved = save(&dir, loaded.profile, Credentials::default(), 1_000, &vault)
+        .await
+        .unwrap();
+    assert!(!saved.profile.remember_password);
+    assert!(saved.warning.is_some());
+    assert!(
+        !load(&dir, &vault).await.unwrap()[0]
+            .profile
+            .remember_password
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn warnings_are_collected_in_order() {
+    let mut warning = None;
+    add_warning(&mut warning, "First.");
+    add_warning(&mut warning, "Second.");
+    assert_eq!(warning.as_deref(), Some("First. Second."));
 }

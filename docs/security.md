@@ -23,8 +23,10 @@ document is the engineering standard.
 2. **No home-made encryption.** A file encrypted with a key inside the binary
    is plain text with extra steps.
 3. **Vault unavailable** (no Secret Service, a locked session): the password
-   is used only for the session, and the UI says why. There is never a fallback
-   to a file.
+   is used only for the session, and the UI says why. **Remember password**
+   is saved as off, so the preference never claims a password the vault does
+   not hold; a remembered connection whose entry is missing says so when it
+   opens. There is never a fallback to a file.
 4. In Rust, passwords exist only as `SecretString`; `expose_secret()` is called
    at the point of use. In the UI, a password exists only in the form field
    while the dialog is open. The application never shows a stored password

@@ -122,6 +122,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** `remember_password=false` se a gravação falhar, ou estado “solicitado, indisponível”; acumular avisos.
 - **Evidência no projeto:** `src/connection_store.rs` (`save_to`); `crates/secrets/src/lib.rs` (`get`)
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. `save_to` grava o cofre antes do perfil e salva `remember_password=false` quando a senha não foi guardada (cofre indisponível ou nenhuma senha disponível); um perfil novo que falha ao salvar não deixa senha no cofre. Na leitura, `remember_password` sem entrada no cofre gera aviso. Avisos se acumulam (`add_warning`) em vez de se sobrescreverem, e o explorer não repete o mesmo aviso como status.
 
 ## N014 — Um perfil ou preferência inválidos escondem todas as conexões
 

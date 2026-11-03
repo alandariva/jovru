@@ -1061,18 +1061,24 @@ impl AppView {
                                     .child(notice),
                             )
                         })
-                        .when(!connection.status.text.is_empty(), |s| {
-                            s.child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(if connection.status.tone == Tone::Info {
-                                        MUTED
-                                    } else {
-                                        connection.status.tone.color()
-                                    }))
-                                    .child(connection.status.text.clone()),
-                            )
-                        })
+                        // A warning kept as the notice is not repeated as the status.
+                        .when(
+                            !connection.status.text.is_empty()
+                                && connection.notice.as_deref()
+                                    != Some(connection.status.text.as_ref()),
+                            |s| {
+                                s.child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(if connection.status.tone == Tone::Info {
+                                            MUTED
+                                        } else {
+                                            connection.status.tone.color()
+                                        }))
+                                        .child(connection.status.text.clone()),
+                                )
+                            },
+                        )
                         .child(
                             button(
                                 ("live-new-query", index),

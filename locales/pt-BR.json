@@ -37,10 +37,8 @@
   "Connection": "Conexão",
   "Connection established successfully.": "Conexão estabelecida com sucesso.",
   "Connection name": "Nome da conexão",
-  "Connection saved without an available password. Enter it before querying the server.": "Conexão salva sem uma senha disponível. Insira-a antes de consultar o servidor.",
   "Connection saved.": "Conexão salva.",
   "Connection saved. Cache unavailable: {0}": "Conexão salva. Cache indisponível: {0}",
-  "Connection saved. Could not store the password in the vault: {0}": "Conexão salva. Não foi possível armazenar a senha no cofre: {0}",
   "Connections": "Conexões",
   "Context": "Contexto",
   "Context of this query": "Contexto desta consulta",
@@ -355,5 +353,7 @@
   "Closing the tab cancels the query and loses its SQL, which is not in the saved queries.": "Fechar a aba cancela a consulta e perde o SQL, que não está nas consultas salvas.",
   "The SQL is not in the saved queries, so closing the tab loses it.": "O SQL não está nas consultas salvas, então fechar a aba o perde.",
   "The driver, server or user changed, so the previous password is not used. Enter the password for this server.": "O driver, o servidor ou o usuário mudou, então a senha anterior não é usada. Digite a senha deste servidor.",
-  "The previous password could not be removed from the vault. Enter the password for this server.": "Não foi possível remover a senha anterior do cofre. Digite a senha deste servidor."
+  "Connection saved without an available password, so Remember password was turned off. Enter the password before querying the server.": "Conexão salva sem uma senha disponível, então Lembrar senha foi desativado. Digite a senha antes de consultar o servidor.",
+  "Connection saved. Could not store the password in the vault, so Remember password was turned off: {0}": "Conexão salva. Não foi possível guardar a senha no cofre, então Lembrar senha foi desativado: {0}",
+  "Remember password is on, but the vault has no password for this connection. Enter it again to query the server.": "Lembrar senha está ativado, mas o cofre não tem senha para esta conexão. Digite-a de novo para consultar o servidor."
 }
