@@ -221,6 +221,19 @@ out of scope. A stopped classic cluster reports an actionable error.
   statement on the server when it may still run) or closes the session.
   `Session::is_open` tells whether it can be reused; `Session::ping` checks a
   kept session before a run, within 5 seconds.
+- The context in `ExecutionOptions::context` (the tab's catalog and schema)
+  is applied only when it differs from the last context the session applied
+  or reported, so a `USE` or `SET search_path` the user ran is not undone by
+  the next statement. PostgreSQL puts the chosen schema first in
+  `search_path` (`"schema", "$user", public`) and refuses another database;
+  MySQL runs `USE`; Databricks sends the catalog and schema with each
+  statement (warehouses) or switches the cluster's SQL context.
+- `Session::context` reports where unqualified names resolve now:
+  `current_database()` and `current_schema()` in PostgreSQL, `DATABASE()` in
+  MySQL (as the schema), the followed catalog and schema in Databricks.
+  Asking discards a result still open for paging, so the application asks
+  after a run whose last result is complete, or after its last page. The
+  default implementation reports an empty context.
 - `Session::close` consumes the session and can report close failures.
   Relational sessions keep physical state (`USE`, `SET`, temporary tables,
   transactions). Databricks warehouses keep a logical catalog/schema context sent with

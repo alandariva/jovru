@@ -5,7 +5,9 @@
 
 pub mod backend;
 pub mod cell_format;
+pub mod completion;
 pub mod connection_store;
+pub mod ddl;
 pub mod drivers;
 pub mod error_report;
 pub mod explorer;

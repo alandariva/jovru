@@ -668,6 +668,10 @@ struct DatabricksSession {
     client: Client,
     catalog: Option<String>,
     schema: Option<String>,
+    /// The context last requested by a run, or reported by
+    /// [`Session::context`]: a request for it is not applied again, so a
+    /// `USE` that succeeded meanwhile stays in force.
+    requested: SessionContext,
     /// The rows of the last result not delivered yet, while it has more.
     pending: Option<Pending>,
 }
@@ -697,6 +701,7 @@ impl DatabricksSession {
         Self {
             catalog: client.config.default_catalog.clone(),
             schema: client.config.default_schema.clone(),
+            requested: SessionContext::default(),
             client,
             pending: None,
         }
@@ -912,22 +917,20 @@ impl Session for DatabricksSession {
             .saturating_mul(SERVER_PAGES)
             .min(100_000);
         let mut body = json!({"warehouse_id":self.client.config.warehouse_id,"statement":request.sql,"wait_timeout":FIRST_WAIT,"on_wait_timeout":"CONTINUE","format":"JSON_ARRAY","disposition":"INLINE","row_limit":row_limit});
-        if let Some(catalog) = request
-            .options
-            .context
-            .catalog
-            .as_ref()
-            .or(self.catalog.as_ref())
-        {
+        let context = &request.options.context;
+        if *context != self.requested {
+            if let Some(catalog) = &context.catalog {
+                self.catalog = Some(catalog.clone());
+            }
+            if let Some(schema) = &context.schema {
+                self.schema = Some(schema.clone());
+            }
+            self.requested = context.clone();
+        }
+        if let Some(catalog) = &self.catalog {
             body["catalog"] = json!(catalog);
         }
-        if let Some(schema) = request
-            .options
-            .context
-            .schema
-            .as_ref()
-            .or(self.schema.as_ref())
-        {
+        if let Some(schema) = &self.schema {
             body["schema"] = json!(schema);
         }
         let started = tokio::time::Instant::now();
@@ -1061,6 +1064,16 @@ impl Session for DatabricksSession {
             self.pending = Some(pending);
         }
         Ok(outcome)
+    }
+    /// The catalog and schema the session follows, from the profile's
+    /// defaults and the `USE` statements that succeeded; nothing is asked of
+    /// the server, and an open result stays open.
+    async fn context(&mut self, _: CancellationToken) -> DriverResult<SessionContext> {
+        self.requested = SessionContext {
+            catalog: self.catalog.clone(),
+            schema: self.schema.clone(),
+        };
+        Ok(self.requested.clone())
     }
     async fn ping(&mut self) -> DriverResult<()> {
         Ok(())

@@ -223,6 +223,106 @@ pub async fn cached_children(
     result
 }
 
+/// The last-level namespaces (schemas, or MySQL databases) the cache holds,
+/// in key order: what a tab's context selector offers.
+pub async fn cached_namespaces(
+    dir: &Path,
+    id: ConnectionId,
+    config: &ConnectionConfig,
+) -> DriverResult<Vec<ObjectPath>> {
+    let driver = builtin_registry()?.get(config.driver)?;
+    let Some(last) = driver
+        .descriptor()
+        .capabilities
+        .namespace_levels()
+        .last()
+        .copied()
+    else {
+        return Ok(Vec::new());
+    };
+    let result = match cache(dir, id, config).await {
+        Ok((repository, _)) => repository.paths(last).await,
+        Err(error) => Err(error),
+    };
+    if result.is_err() {
+        forget_cache(dir, id);
+    }
+    result
+}
+
+/// Builds the editor's index of the connection's cached relations, off the
+/// UI thread. Its version tells a tab whether the index it holds is current.
+pub async fn name_index(
+    dir: &Path,
+    id: ConnectionId,
+    config: &ConnectionConfig,
+) -> DriverResult<crate::completion::NameIndex> {
+    let started = Instant::now();
+    let descriptor = builtin_registry()?.get(config.driver)?.descriptor();
+    let result = match cache(dir, id, config).await {
+        Ok((repository, _)) => repository.relations().await,
+        Err(error) => Err(error),
+    };
+    let (version, relations) = match result {
+        Ok(read) => read,
+        Err(error) => {
+            forget_cache(dir, id);
+            return Err(error);
+        }
+    };
+    let count = relations.len();
+    // Grouping thousands of names is CPU work; it stays on the runtime.
+    let index = tokio::task::spawn_blocking(move || {
+        crate::completion::NameIndex::new(
+            version,
+            descriptor.capabilities.namespace_levels(),
+            descriptor.dialect,
+            relations
+                .into_iter()
+                .map(|(path, kind)| crate::completion::Relation { path, kind })
+                .collect(),
+        )
+    })
+    .await
+    .map_err(|_| DriverError::new(ErrorCode::Internal, tr!("Database task failed")))?;
+    tracing::debug!(
+        connection_id = %id,
+        relations = count,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "editor name index built"
+    );
+    Ok(index)
+}
+
+/// The columns and keys of one relation, read from the cache: what the
+/// editor suggests after `alias.` and shows on hover.
+pub async fn relation_columns(
+    dir: &Path,
+    id: ConnectionId,
+    config: &ConnectionConfig,
+    relation: ObjectPath,
+) -> DriverResult<Vec<MetadataObject>> {
+    let result = match cache(dir, id, config).await {
+        Ok((repository, _)) => {
+            repository
+                .pages(&[PageRequest {
+                    parent: relation,
+                    after: None,
+                    limit: 100_000,
+                }])
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok((_, mut pages)) => Ok(pages.pop().map(|page| page.objects).unwrap_or_default()),
+        Err(error) => {
+            forget_cache(dir, id);
+            Err(error)
+        }
+    }
+}
+
 pub async fn search_metadata(
     dir: &Path,
     id: ConnectionId,
@@ -641,6 +741,10 @@ pub struct SessionRun {
     pub reopened: bool,
     /// The session was lost during this run; the next run opens a new one.
     pub ended: bool,
+    /// Where unqualified names resolve after the run, as the session reports
+    /// it ([`Session::context`]). `None` when it could not be asked: the
+    /// last result is still open for paging, or the session ended.
+    pub context: Option<SessionContext>,
 }
 
 /// Runs `requests` in order on the tab's `session`, opening one when there is
@@ -753,6 +857,7 @@ async fn run_statements(
         session: None,
         reopened: false,
         ended: false,
+        context: None,
     };
     if let Some(error) = requests.iter().find_map(|request| request.validate().err()) {
         run.batch = Err(error);
@@ -826,6 +931,11 @@ async fn run_statements(
             }
         }
     }
+    // Asking would close a result still open for paging; its context is
+    // asked once it is read to the end.
+    if session.is_open() && !results.last().is_some_and(|result| result.has_more) {
+        run.context = session_context(&mut *session, &cancel).await;
+    }
     if session.is_open() {
         run.session = Some(session);
     } else {
@@ -856,8 +966,27 @@ fn page_limit(
 /// What reading another page leaves behind.
 pub struct PageRun {
     pub page: DriverResult<QueryResult>,
+    /// Where unqualified names resolve, asked once the result was read to
+    /// the end.
+    pub context: Option<SessionContext>,
     /// The session for the tab's next run, or `None` when it was closed.
     pub session: Option<Box<dyn Session>>,
+}
+
+/// Asks the session where unqualified names resolve. A failure only means
+/// the tab keeps showing the context it had; the session's own state is
+/// what tells the next run whether it is still usable.
+async fn session_context(
+    session: &mut dyn Session,
+    cancel: &CancellationToken,
+) -> Option<SessionContext> {
+    match session.context(cancel.clone()).await {
+        Ok(context) => Some(context),
+        Err(error) => {
+            tracing::debug!(error_code = ?error.code, "session context unavailable");
+            None
+        }
+    }
 }
 
 /// Reads the next page of the result the tab's session left open, with the
@@ -873,7 +1002,7 @@ pub async fn fetch(
     let start = Instant::now();
     let mut builder = ResultBuilder::page(columns, options.max_rows, memory_ceiling);
     let page = session
-        .fetch(&options, &mut builder, cancel)
+        .fetch(&options, &mut builder, cancel.clone())
         .await
         .map(|outcome| {
             let (data, limit) = page_limit(builder, &outcome, options.max_rows);
@@ -890,13 +1019,22 @@ pub async fn fetch(
                 limit,
             }
         });
+    let context = if session.is_open() && page.as_ref().is_ok_and(|page| !page.has_more) {
+        session_context(&mut *session, &cancel).await
+    } else {
+        None
+    };
     let session = if session.is_open() {
         Some(session)
     } else {
         close_session(Some(session)).await;
         None
     };
-    Ok(PageRun { page, session })
+    Ok(PageRun {
+        page,
+        context,
+        session,
+    })
 }
 
 /// Closes a tab's session within a short deadline; a close failure only
@@ -1343,6 +1481,16 @@ mod tests {
             self.open
         }
 
+        /// Reports the last `SET` as the schema; like a real connection,
+        /// asking discards a result still open.
+        async fn context(&mut self, _: CancellationToken) -> DriverResult<SessionContext> {
+            self.pending = 0;
+            Ok(SessionContext {
+                catalog: None,
+                schema: self.settings.last().cloned(),
+            })
+        }
+
         async fn ping(&mut self) -> DriverResult<()> {
             if self.dead {
                 self.open = false;
@@ -1445,6 +1593,13 @@ mod tests {
         let (run, cells) = run_on(&driver, None, &["SET schema=sales", "SELECT"]).await;
         assert_eq!(cells, ["1:schema=sales", "1:schema=sales"]);
         assert!(!run.reopened && !run.ended);
+        // The run hands back where the session says names resolve.
+        assert_eq!(
+            run.context
+                .as_ref()
+                .and_then(|context| context.schema.as_deref()),
+            Some("schema=sales")
+        );
         // A failed statement stops the run but keeps the session.
         let (run, cells) = run_on(&driver, run.session, &["SET role=x", "FAIL", "SELECT"]).await;
         assert_eq!(cells, ["1:schema=sales,role=x"]);
@@ -1518,6 +1673,8 @@ mod tests {
         let first = &run.batch.as_ref().unwrap().completed[0];
         assert!(first.has_more);
         assert_eq!(first.limit, Some(ResultLimit::Rows(2)));
+        // Asking for the context would close the open result.
+        assert!(run.context.is_none());
         let columns = first.data.columns().to_vec();
         let mut session = run.session.unwrap();
         let mut pages = vec![first.data.value(1, 0).unwrap().to_owned()];
@@ -1532,7 +1689,10 @@ mod tests {
             .await
             .unwrap();
             session = page.session.unwrap();
+            let context = page.context;
             let page = page.page.unwrap();
+            // Only the page that ends the result asks for the context.
+            assert_eq!(context.is_some(), !page.has_more);
             pages.push(
                 page.data
                     .value(page.data.row_count() - 1, 0)

@@ -39,3 +39,5 @@ something is the way it is, and so a decision is not undone by accident.
 | [0014](0014-a-session-per-tab.md) | A session per tab, kept between runs and after errors | Proposed |
 | [0015](0015-introspect-only-what-the-user-chooses.md) | Introspect only what the user chooses | Proposed |
 | [0016](0016-keys-defaults-and-relation-kinds.md) | Keys, defaults and relation kinds in the metadata model | Proposed |
+| [0017](0017-driver-metadata-contract-batch.md) | Cache identity, reading levels and on-demand inspection in the driver contract | Proposed |
+| [0018](0018-metadata-cache-migrations.md) | Numbered migrations for the metadata cache, starting with search names and publication times | Proposed |

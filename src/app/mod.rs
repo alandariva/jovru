@@ -8,6 +8,7 @@ mod probe;
 mod result_grid;
 mod scope_picker;
 mod sql;
+mod sql_providers;
 mod state;
 mod ui;
 mod workspace;
@@ -104,6 +105,12 @@ struct Connection {
     tree: Tree,
     /// When each chosen namespace was last read in full.
     ages: HashMap<ObjectPath, std::time::SystemTime>,
+    /// The last-level namespaces in the cache, which tabs offer as their
+    /// context.
+    namespaces: Vec<ObjectPath>,
+    /// The editor's index of the cached relations, built off the UI thread
+    /// after each read of the cache.
+    names: Option<std::sync::Arc<jykre::completion::NameIndex>>,
     /// The rows of the current explorer search.
     search_rows: Vec<TreeRow>,
     /// Bumped whenever `search_rows` changes.
@@ -159,6 +166,8 @@ struct AppView {
     /// What the entries were built from, so they are rebuilt only when a
     /// tree, an expansion or a search changes.
     explorer_signature: Vec<(bool, bool, u64)>,
+    /// A node go to definition asked to show, selected once its row is read.
+    pending_reveal: Option<(usize, ObjectPath)>,
     search: Entity<InputState>,
     command: Entity<InputState>,
     command_open: bool,
@@ -316,6 +325,7 @@ impl AppView {
             explorer_list: ListState::new(0, ListAlignment::Top, px(200.)),
             explorer_entries: Vec::new(),
             explorer_signature: Vec::new(),
+            pending_reveal: None,
             search,
             command,
             command_open: false,
@@ -430,6 +440,8 @@ impl AppView {
                     metadata_statuses: Vec::new(),
                     tree: Tree::default(),
                     ages: HashMap::new(),
+                    namespaces: Vec::new(),
+                    names: None,
                     search_rows: Vec::new(),
                     search_revision: 0,
                     expanded_revision: 0,
@@ -553,6 +565,23 @@ impl AppView {
                             this.request_move(tab, group, usize::MAX, window, cx);
                         }
                     }
+                    WorkspaceEvent::StructureChanged {
+                        connection,
+                        namespaces,
+                    } => {
+                        if let Some(index) =
+                            this.connections.iter().position(|c| c.name == *connection)
+                        {
+                            this.refresh_after_ddl(index, namespaces.clone(), cx);
+                        }
+                    }
+                    WorkspaceEvent::Reveal { connection, path } => {
+                        if let Some(index) =
+                            this.connections.iter().position(|c| c.name == *connection)
+                        {
+                            this.reveal_object(index, path.clone(), cx);
+                        }
+                    }
                 }
                 this.save_state_soon(cx);
                 cx.notify();
@@ -624,6 +653,10 @@ impl AppView {
             panel.update(cx, |panel, cx| {
                 panel.set_connection_choices(names.clone(), cx)
             });
+        }
+        // A new or moved tab offers its connection's namespaces too.
+        for index in 0..self.connections.len() {
+            self.push_context_choices(index, cx);
         }
     }
 

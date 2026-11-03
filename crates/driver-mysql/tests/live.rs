@@ -471,3 +471,64 @@ async fn live_metadata_has_exact_types_keys_defaults_and_comments() {
     .await
     .expect("live metadata took too long");
 }
+
+/// Runs `sql` with `context` and returns the first cell as text, or an empty
+/// text for a statement without rows.
+async fn text_in(session: &mut Box<dyn Session>, sql: &str, context: &SessionContext) -> String {
+    let mut sink = Sink::default();
+    session
+        .execute(
+            &QueryRequest {
+                sql: sql.into(),
+                options: ExecutionOptions {
+                    context: context.clone(),
+                    ..ExecutionOptions::default()
+                },
+            },
+            &mut sink,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    match sink.rows.first().and_then(|row| row.first()) {
+        Some(Cell::Text(text)) => text.clone(),
+        _ => String::new(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_the_tab_context_is_applied_once_and_reported() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = MySqlDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let chosen = SessionContext {
+            catalog: None,
+            schema: Some("jykre".into()),
+        };
+        assert_eq!(
+            text_in(&mut session, "SELECT DATABASE()", &chosen).await,
+            "jykre"
+        );
+        // The user's USE is not undone by the next statement of the same tab.
+        text_in(&mut session, "USE information_schema", &chosen).await;
+        assert_eq!(
+            text_in(&mut session, "SELECT DATABASE()", &chosen).await,
+            "information_schema"
+        );
+        let reported = session.context(CancellationToken::new()).await.unwrap();
+        assert_eq!(reported.schema.as_deref(), Some("information_schema"));
+        assert_eq!(reported.catalog, None);
+        // Choosing again applies the choice once.
+        assert_eq!(
+            text_in(&mut session, "SELECT DATABASE()", &chosen).await,
+            "jykre"
+        );
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}

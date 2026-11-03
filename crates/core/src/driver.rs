@@ -1,7 +1,7 @@
 use crate::{
     CancellationToken, ConnectionConfig, DriverError, DriverKind, DriverOutcome, DriverResult,
     ExecutionOptions, IntrospectionReport, MetadataObject, ObjectKind, ObjectPath, QueryRequest,
-    ResolvedConnection, RowSink, ServerInfo, SqlDialect,
+    ResolvedConnection, RowSink, ServerInfo, SessionContext, SqlDialect,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -92,6 +92,18 @@ pub trait Session: Debug + Send {
     /// the caller then opens a new session, whose state starts over.
     fn is_open(&self) -> bool {
         true
+    }
+
+    /// Where unqualified names resolve now, as the server reports it after
+    /// the statements run so far, including a `USE` or `SET` the user ran and
+    /// indirect changes (a procedure, a rolled back `SET`). The reported
+    /// context becomes the one the session considers applied, so a request
+    /// carrying it is not applied again. Asking discards a result still open
+    /// for paging: callers ask only when none is. The default knows nothing
+    /// and returns an empty context.
+    async fn context(&mut self, cancel: CancellationToken) -> DriverResult<SessionContext> {
+        let _ = cancel;
+        Ok(SessionContext::default())
     }
 
     /// Checks, before a kept session is reused, that the server still

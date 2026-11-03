@@ -154,6 +154,7 @@ pub async fn open(
         backend,
         database: PostgresConfig::parse(&input.config.options)?.database,
         open: open.clone(),
+        schema: None,
     };
     tokio::spawn(server.serve(connection, receiver));
     Ok(Box::new(DatabaseSession { commands, open }))
@@ -176,6 +177,9 @@ enum Command {
     },
     Ping {
         reply: oneshot::Sender<DriverResult<()>>,
+    },
+    Context {
+        reply: oneshot::Sender<DriverResult<SessionContext>>,
     },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
@@ -291,6 +295,17 @@ impl Session for DatabaseSession {
     async fn ping(&mut self) -> DriverResult<()> {
         self.ask(|reply| Command::Ping { reply }).await
     }
+    async fn context(&mut self, cancel: CancellationToken) -> DriverResult<SessionContext> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Context { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -325,10 +340,13 @@ struct Server {
     backend: i64,
     database: String,
     open: Arc<AtomicBool>,
+    /// The schema last put first in `search_path` by a request, or reported
+    /// by [`Session::context`]: a request for it is not applied again.
+    schema: Option<String>,
 }
 
 impl Server {
-    async fn serve(self, mut connection: PgConnection, mut commands: mpsc::Receiver<Command>) {
+    async fn serve(mut self, mut connection: PgConnection, mut commands: mpsc::Receiver<Command>) {
         let mut next = None;
         loop {
             let command = match next.take() {
@@ -374,6 +392,37 @@ impl Server {
                         }
                     }
                 }
+                Command::Context { reply } => {
+                    let context = tokio::time::timeout(
+                        RECOVERY,
+                        sqlx::query_as::<_, (String, Option<String>)>(
+                            "SELECT current_database(), current_schema()",
+                        )
+                        .fetch_one(&mut connection),
+                    )
+                    .await;
+                    match context {
+                        Ok(Ok((database, schema))) => {
+                            self.schema.clone_from(&schema);
+                            let _ = reply.send(Ok(SessionContext {
+                                catalog: Some(database),
+                                schema,
+                            }));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
+                            Flow::Broken
+                        }
+                    }
+                }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
                     let _ = reply.send(connection.close().await.map_err(map_error));
@@ -398,7 +447,7 @@ impl Server {
     /// Runs one statement and serves its pages until the result ends or
     /// another command arrives.
     async fn execute(
-        &self,
+        &mut self,
         connection: &mut PgConnection,
         request: QueryRequest,
         mut events: mpsc::Sender<Event>,
@@ -406,24 +455,45 @@ impl Server {
         commands: &mut mpsc::Receiver<Command>,
     ) -> Flow {
         let mut options = request.options.clone();
-        let columns = bounded(&cancel, options.timeout, async {
+        // The chosen schema goes first in search_path only when it changed,
+        // so a SET search_path the user ran meanwhile stays in force.
+        let apply = options
+            .context
+            .schema
+            .clone()
+            .filter(|schema| self.schema.as_ref() != Some(schema));
+        let database = self.database.clone();
+        let applied = bounded(&cancel, options.timeout, async {
             if options
                 .context
                 .catalog
                 .as_ref()
-                .is_some_and(|v| v != &self.database)
+                .is_some_and(|v| v != &database)
             {
                 return Err(DriverError::validation(
                     "PostgreSQL catalog cannot change within a session",
                 ));
             }
-            if let Some(schema) = &options.context.schema {
-                let sql = format!("SET search_path TO \"{}\"", schema.replace('"', "\"\""));
+            if let Some(schema) = &apply {
+                let sql = format!(
+                    "SET search_path TO \"{}\", \"$user\", public",
+                    schema.replace('"', "\"\"")
+                );
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
                     .execute(&mut *connection)
                     .await
                     .map_err(map_error)?;
             }
+            Ok(())
+        })
+        .await;
+        if let Err(error) = applied {
+            return self.fail(connection, error, &events).await;
+        }
+        if apply.is_some() {
+            self.schema = apply;
+        }
+        let columns = bounded(&cancel, options.timeout, async {
             let description = connection
                 .prepare(sqlx::AssertSqlSafe(request.sql.as_str()).into_sql_str())
                 .await

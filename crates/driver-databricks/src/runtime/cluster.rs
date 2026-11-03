@@ -172,6 +172,10 @@ struct ClusterSession {
     open: bool,
     catalog: Option<String>,
     schema: Option<String>,
+    /// The context last requested by a run, or reported by
+    /// [`Session::context`]: a request for it is not applied again, so a
+    /// `USE` that succeeded meanwhile stays in force.
+    requested: SessionContext,
     pending: Option<ClusterResult>,
 }
 
@@ -216,6 +220,7 @@ pub(super) async fn open(
         open: true,
         catalog: None,
         schema: None,
+        requested: SessionContext::default(),
         pending: None,
     };
     let deadline = Some(Instant::now() + Duration::from_secs(90));
@@ -561,14 +566,17 @@ impl Session for ClusterSession {
             ));
         }
         let deadline = execution_deadline(&request.options)?;
-        let context = &request.options.context;
-        self.set_context(
-            context.catalog.as_deref(),
-            context.schema.as_deref(),
-            &cancel,
-            deadline,
-        )
-        .await?;
+        let context = request.options.context.clone();
+        if context != self.requested {
+            self.set_context(
+                context.catalog.as_deref(),
+                context.schema.as_deref(),
+                &cancel,
+                deadline,
+            )
+            .await?;
+            self.requested = context;
+        }
         let value = self.run(&request.sql, &cancel, deadline).await?;
         if let Some(change) = use_statement(&request.sql) {
             self.apply(change);
@@ -606,6 +614,15 @@ impl Session for ClusterSession {
     }
     fn is_open(&self) -> bool {
         self.open
+    }
+    /// The catalog and schema the cluster context is in, as the session
+    /// follows it (its defaults and the `USE` statements that succeeded).
+    async fn context(&mut self, _: CancellationToken) -> DriverResult<SessionContext> {
+        self.requested = SessionContext {
+            catalog: self.catalog.clone(),
+            schema: self.schema.clone(),
+        };
+        Ok(self.requested.clone())
     }
     async fn ping(&mut self) -> DriverResult<()> {
         self.pending = None;

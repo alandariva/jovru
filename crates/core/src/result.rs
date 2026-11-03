@@ -1,6 +1,10 @@
 use crate::{DriverError, DriverResult};
 use std::time::Duration;
 
+/// Where unqualified names resolve in a session: the catalog (a Databricks
+/// catalog, the PostgreSQL database) and the schema (a PostgreSQL or
+/// Databricks schema, the MySQL database). `None` leaves that level as the
+/// session has it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionContext {
     pub catalog: Option<String>,
@@ -12,6 +16,10 @@ pub struct ExecutionOptions {
     pub max_rows: u32,
     /// None disables the timeout; Some must be greater than zero.
     pub timeout: Option<Duration>,
+    /// The context the tab chose. A session applies it only when it differs
+    /// from the last context it applied or reported
+    /// ([`crate::Session::context`]), so a `USE` or `SET` the user ran is not
+    /// undone by the next statement.
     pub context: SessionContext,
 }
 

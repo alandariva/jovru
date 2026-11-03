@@ -152,6 +152,7 @@ pub async fn open(
         input: input.clone(),
         backend,
         open: open.clone(),
+        database: None,
     };
     tokio::spawn(server.serve(connection, receiver));
     Ok(Box::new(DatabaseSession { commands, open }))
@@ -174,6 +175,9 @@ enum Command {
     },
     Ping {
         reply: oneshot::Sender<DriverResult<()>>,
+    },
+    Context {
+        reply: oneshot::Sender<DriverResult<SessionContext>>,
     },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
@@ -289,6 +293,17 @@ impl Session for DatabaseSession {
     async fn ping(&mut self) -> DriverResult<()> {
         self.ask(|reply| Command::Ping { reply }).await
     }
+    async fn context(&mut self, cancel: CancellationToken) -> DriverResult<SessionContext> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Context { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -322,10 +337,17 @@ struct Server {
     input: ResolvedConnection,
     backend: i64,
     open: Arc<AtomicBool>,
+    /// The database last chosen with `USE` by a request, or reported by
+    /// [`Session::context`]: a request for it is not applied again.
+    database: Option<String>,
 }
 
 impl Server {
-    async fn serve(self, mut connection: MySqlConnection, mut commands: mpsc::Receiver<Command>) {
+    async fn serve(
+        mut self,
+        mut connection: MySqlConnection,
+        mut commands: mpsc::Receiver<Command>,
+    ) {
         let mut next = None;
         loop {
             let command = match next.take() {
@@ -371,6 +393,40 @@ impl Server {
                         }
                     }
                 }
+                Command::Context { reply } => {
+                    // The text protocol, like the statements the user runs:
+                    // a prepared statement may answer with the database the
+                    // connection was described with.
+                    let context = tokio::time::timeout(
+                        RECOVERY,
+                        sqlx::raw_sql("SELECT DATABASE()").fetch_one(&mut connection),
+                    )
+                    .await
+                    .map(|row| {
+                        row.and_then(|row| sqlx::Row::try_get::<Option<String>, _>(&row, 0))
+                    });
+                    match context {
+                        Ok(Ok(database)) => {
+                            self.database.clone_from(&database);
+                            let _ = reply.send(Ok(SessionContext {
+                                catalog: None,
+                                schema: database,
+                            }));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
+                            Flow::Broken
+                        }
+                    }
+                }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
                     let _ = reply.send(connection.close().await.map_err(map_error));
@@ -399,7 +455,7 @@ impl Server {
     /// Runs one statement and serves its pages until the result ends or
     /// another command arrives.
     async fn execute(
-        &self,
+        &mut self,
         connection: &mut MySqlConnection,
         request: QueryRequest,
         mut events: mpsc::Sender<Event>,
@@ -407,19 +463,30 @@ impl Server {
         commands: &mut mpsc::Receiver<Command>,
     ) -> Flow {
         let mut options = request.options.clone();
-        let columns = bounded(&cancel, options.timeout, async {
-            if let Some(database) = options
-                .context
-                .schema
-                .as_ref()
-                .or(options.context.catalog.as_ref())
-            {
-                let sql = format!("USE `{}`", database.replace('`', "``"));
+        // The chosen database is applied only when it changed, so a USE the
+        // user ran meanwhile stays in force.
+        let apply = options
+            .context
+            .schema
+            .clone()
+            .or(options.context.catalog.clone())
+            .filter(|database| self.database.as_ref() != Some(database));
+        if let Some(database) = &apply {
+            let sql = format!("USE `{}`", database.replace('`', "``"));
+            let applied = bounded(&cancel, options.timeout, async {
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
                     .execute(&mut *connection)
                     .await
-                    .map_err(map_error)?;
+                    .map_err(map_error)
+                    .map(|_| ())
+            })
+            .await;
+            if let Err(error) = applied {
+                return self.fail(connection, error, &events).await;
             }
+            self.database = apply;
+        }
+        let columns = bounded(&cancel, options.timeout, async {
             let description = connection
                 .prepare(sqlx::AssertSqlSafe(request.sql.as_str()).into_sql_str())
                 .await
@@ -435,11 +502,24 @@ impl Server {
                 .collect::<Vec<_>>())
         })
         .await;
+        // Some statements (USE, and others MySQL cannot prepare: error 1295)
+        // run as text only; their columns, if any, come with their rows.
+        let mut describe = Describe::Prepared;
         let columns = match columns {
             Ok(columns) => columns,
+            Err(error)
+                if error
+                    .server
+                    .as_ref()
+                    .and_then(|server| server.vendor_code.as_deref())
+                    == Some("1295") =>
+            {
+                describe = Describe::FromRows;
+                Vec::new()
+            }
             Err(error) => return self.fail(connection, error, &events).await,
         };
-        let returns_rows = !columns.is_empty();
+        let mut returns_rows = !columns.is_empty();
         if returns_rows && events.send(Event::Columns(columns)).await.is_err() {
             return self.recover(connection, false).await;
         }
@@ -455,11 +535,15 @@ impl Server {
                     &mut stream,
                     &mut ahead,
                     &mut affected,
+                    &mut describe,
                     options.max_rows,
                     &events,
                 ),
             )
             .await;
+            if describe == Describe::Sent {
+                returns_rows = true;
+            }
             match page {
                 Ok(PageEnd::Finished) => {
                     drop(stream);
@@ -568,10 +652,22 @@ impl Server {
 
 /// Sends up to `max_rows` rows, starting with the one read ahead last time,
 /// and reads one row ahead to tell a full page from the end of the result.
+/// Where a statement's columns come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Describe {
+    /// Preparing the statement described them before it ran.
+    Prepared,
+    /// The statement could not be prepared; columns come with the first row.
+    FromRows,
+    /// They came with the first row and were sent.
+    Sent,
+}
+
 async fn read_page<S>(
     stream: &mut S,
     ahead: &mut Option<Row>,
     affected: &mut Option<u64>,
+    describe: &mut Describe,
     max_rows: u32,
     events: &mpsc::Sender<Event>,
 ) -> DriverResult<PageEnd>
@@ -594,6 +690,21 @@ where
         match item {
             sqlx::Either::Left(result) => *affected = Some(result.rows_affected()),
             sqlx::Either::Right(row) => {
+                if *describe == Describe::FromRows {
+                    let columns = row
+                        .columns()
+                        .iter()
+                        .map(|column| ColumnInfo {
+                            name: column.name().into(),
+                            data_type: column.type_info().name().into(),
+                            nullable: None,
+                        })
+                        .collect();
+                    if events.send(Event::Columns(columns)).await.is_err() {
+                        return Ok(PageEnd::Gone);
+                    }
+                    *describe = Describe::Sent;
+                }
                 let mut cells = Vec::with_capacity(row.len());
                 for index in 0..row.len() {
                     let value = row.try_get_raw(index).map_err(map_error)?;

@@ -491,6 +491,8 @@ impl AppView {
             expanded: true,
             tree: Tree::default(),
             ages: HashMap::new(),
+            namespaces: Vec::new(),
+            names: None,
             metadata_statuses: Vec::new(),
             search_rows: Vec::new(),
             search_revision: 0,
@@ -1113,9 +1115,141 @@ impl AppView {
         .detach();
     }
 
+    /// Refreshes, after a short pause that gathers a burst of statements,
+    /// the namespaces a DDL statement made stale, when they are inside what
+    /// the user chose to introspect. Each waits in the connection's queue.
+    pub(super) fn refresh_after_ddl(
+        &mut self,
+        index: usize,
+        namespaces: Vec<ObjectPath>,
+        cx: &mut Context<Self>,
+    ) {
+        let connection = &self.connections[index];
+        let chosen: Vec<_> = namespaces
+            .into_iter()
+            .filter(|path| connection.scope.covers(path))
+            .collect();
+        if chosen.is_empty() {
+            return;
+        }
+        let generation = connection.refresh_generation;
+        cx.spawn(async move |weak, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.connections[index].refresh_generation < generation {
+                    return;
+                }
+                for path in chosen {
+                    this.request_refresh(index, RefreshJob::Node(path), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Starts a refresh, or queues it behind the one running; unlike
+    /// [`AppView::toggle_refresh`], asking again never cancels.
+    fn request_refresh(&mut self, index: usize, job: RefreshJob, cx: &mut Context<Self>) {
+        let connection = &mut self.connections[index];
+        if connection.refreshing.is_none() {
+            self.start_refresh(index, job, cx);
+        } else {
+            connection.refresh_queue.push(job);
+        }
+    }
+
+    /// Reads the namespaces the cache holds and offers them to the
+    /// connection's tabs as their context.
+    fn load_context_choices(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(profile) = self.connections[index].profile.clone() else {
+            return;
+        };
+        let dir = connection_store::data_dir();
+        cx.spawn(async move |weak, cx| {
+            let names_dir = dir.clone();
+            let names_profile = profile.clone();
+            let result = backend::run(async move {
+                backend::cached_namespaces(&dir, profile.id, &profile.config).await
+            })
+            .await;
+            let current = weak
+                .update(cx, |this, cx| {
+                    match result {
+                        Ok(namespaces) => {
+                            this.connections[index].namespaces = namespaces;
+                            this.push_context_choices(index, cx);
+                        }
+                        Err(error) => {
+                            tracing::debug!(error_code = ?error.code, "namespaces unavailable")
+                        }
+                    }
+                    let connection = &this.connections[index];
+                    connection
+                        .names
+                        .as_ref()
+                        .is_some_and(|names| names.version == connection.tree.version())
+                })
+                .unwrap_or(true);
+            // The editor's names are rebuilt only for a new cache version.
+            if current {
+                return;
+            }
+            let names = backend::run(async move {
+                backend::name_index(&names_dir, names_profile.id, &names_profile.config).await
+            })
+            .await;
+            let _ = weak.update(cx, |this, cx| match names {
+                Ok(names) => {
+                    this.connections[index].names = Some(std::sync::Arc::new(names));
+                    this.push_context_choices(index, cx);
+                }
+                Err(error) => tracing::debug!(error_code = ?error.code, "editor names unavailable"),
+            });
+        })
+        .detach();
+    }
+
+    /// Shows `path` in the explorer (go to definition): expands its
+    /// ancestors, reads what they hold and selects the node once its row
+    /// shows.
+    pub(super) fn reveal_object(&mut self, index: usize, path: ObjectPath, cx: &mut Context<Self>) {
+        let connection = &mut self.connections[index];
+        connection.expanded = true;
+        connection.tree.reveal(&path);
+        self.pending_reveal = Some((index, path));
+        self.save_expanded_soon(index, cx);
+        self.load_missing(index, cx);
+        cx.notify();
+    }
+
+    /// Gives the connection's tabs the namespaces they may choose from.
+    pub(super) fn push_context_choices(&self, index: usize, cx: &mut Context<Self>) {
+        let connection = &self.connections[index];
+        let choices: Vec<_> = connection
+            .namespaces
+            .iter()
+            .map(jykre::ddl::namespace_context)
+            .collect();
+        for panel in self.panels.values() {
+            panel.update(cx, |panel, cx| {
+                if panel.connection_name() == connection.name {
+                    panel.set_context_choices(choices.clone(), cx);
+                    if let (Some(profile), Some(names)) = (&connection.profile, &connection.names) {
+                        panel.set_names(profile.id, names.clone());
+                    }
+                }
+            });
+        }
+    }
+
     /// Reads, in one go, the children of the nodes that are expanded but
     /// were not read: after a restart, or after the tree was read again.
     pub(super) fn load_missing(&mut self, index: usize, cx: &mut Context<Self>) {
+        // The tree was read again: the namespaces the tabs offer may differ.
+        self.load_context_choices(index, cx);
         let connection = &mut self.connections[index];
         let missing = connection.tree.missing();
         let Some(profile) = connection.profile.clone().filter(|_| !missing.is_empty()) else {
@@ -1593,6 +1727,17 @@ impl AppView {
         let (range, count) = jykre::explorer::changed_range(&old, &new);
         self.explorer_list.splice(range, count);
         self.explorer_entries = entries;
+        // A node go to definition asked for is selected once it shows.
+        if let Some((index, path)) = self.pending_reveal.clone()
+            && self
+                .connections
+                .get(index)
+                .is_some_and(|connection| connection.tree.shows(&path))
+        {
+            self.pending_reveal = None;
+            self.explorer_selected = Some((index, path.clone()));
+            self.reveal_explorer_node(index, &path);
+        }
     }
 
     /// The element of one explorer list entry.

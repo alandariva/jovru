@@ -555,3 +555,15 @@ fn objects_cached_before_keys_existed_still_read_and_new_kinds_keep_their_level(
     );
     assert!(driver.default_namespaces(&connection().config).is_empty());
 }
+
+#[tokio::test]
+async fn a_session_that_knows_no_context_reports_an_empty_one() {
+    let mut session: Box<dyn Session> = Box::new(TestSession {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        closed: Arc::new(AtomicBool::new(false)),
+    });
+    assert_eq!(
+        session.context(CancellationToken::new()).await.unwrap(),
+        SessionContext::default()
+    );
+}

@@ -2,7 +2,7 @@
 
 Itens da auditoria do subsistema de metadados que **ainda não foram
 implementados**, ou foram implementados só em parte, em `release/0.1.0`
-(3 de novembro de 2026, atualizado depois da fase 2). As referências de
+(3 de novembro de 2026, atualizado depois das fases 3 e 4). As referências de
 mercado aparecem com nomes genéricos: "IDEs de banco de dados",
 "gerenciadores de banco de dados" e "ferramentas de referência".
 
@@ -13,10 +13,10 @@ achados já fechados aparecem só no resumo.
 
 | Situação | Quantidade | IDs |
 | --- | ---: | --- |
-| Fechados | 9 | MET-001, MET-007, MET-011, MET-012, MET-013, MET-015, MET-018, MET-020, MET-021 |
-| Parciais (ainda falta uma parte) | 7 | MET-002, MET-003, MET-004, MET-005, MET-006, MET-016, MET-017 |
-| Ainda abertos | 6 | MET-008, MET-009, MET-010, MET-014, MET-019, MET-022 |
-| **Pendências neste arquivo** | **13** | os parciais e os abertos |
+| Fechados | 11 | MET-001, MET-007, MET-008, MET-010, MET-011, MET-012, MET-013, MET-015, MET-018, MET-020, MET-021 |
+| Parciais (ainda falta uma parte) | 8 | MET-002, MET-003, MET-004, MET-005, MET-006, MET-009, MET-016, MET-017 |
+| Ainda abertos | 3 | MET-014, MET-019, MET-022 |
+| **Pendências neste arquivo** | **11** | os parciais e os abertos |
 
 **O que já foi entregue**
 
@@ -79,87 +79,46 @@ achados já fechados aparecem só no resumo.
   cache de uma vez.
 - **Parte de MET-016.** Um selo de idade ("há 3 dias") ao lado de cada
   namespace escolhido.
+- **MET-008.** O editor usa os metadados da própria conexão da aba
+  (`jykre::completion`, providers do `gpui-component`):
+  - sugere relações, CTEs e namespaces depois de `FROM`/`JOIN`;
+  - sugere colunas depois de `alias.` e, sem qualificador, as das relações
+    do statement;
+  - colunas ainda não lidas aparecem como "Carregando colunas…" e são
+    lidas em segundo plano;
+  - o hover mostra tipo, nulabilidade, chave, default e comentário;
+  - `Ctrl`-clique leva ao nó do explorer.
+  - O índice de nomes é imutável, versionado pelo cache e montado fora da
+    thread de UI. `lsp-types` virou dependência direta (decisão D2).
+- **MET-010.** Um `CREATE`, `ALTER`, `DROP`, `RENAME` ou `COMMENT`
+  bem-sucedido enfileira, uns 300 ms depois, a releitura dos namespaces
+  escolhidos que ele tocou (`jykre::ddl`). Nomes não qualificados contam no
+  contexto de antes e no de depois da execução.
 
 **O que mais pesa agora**
 
-1. O editor ainda não usa os metadados (**MET-008**).
-2. O contexto de execução de cada aba continua invisível (**MET-009**).
-3. Nada acontece depois de um DDL (**MET-010**).
+1. Escala da introspecção (**MET-002**, **MET-003**, **MET-004**), com o
+   contrato da [ADR-0017](adr/0017-driver-metadata-contract-batch.md).
+2. Inspeção sob demanda (**MET-005**) e permissões (**MET-019**).
+3. Busca Unicode e indexada (**MET-014**), com a migração da
+   [ADR-0018](adr/0018-metadata-cache-migrations.md).
 
 ---
 
 ## P1: Integração com o editor
 
-### MET-008: o editor não usa os metadados
+### MET-009 (parcial): `search_path` configurável no PostgreSQL
 
-- **Situação atual:**
-  - `Workspace` configura só o realce léxico (`SqlHighlighter`), sem
-    autocomplete, hover ou ir para a definição.
-  - O componente de editor (`gpui-kit` 0.9) já oferece `CompletionProvider`,
-    `HoverProvider` e `DefinitionProvider`.
-- **Referência:** as IDEs de banco de dados sugerem tabelas, colunas, aliases
-  e CTEs conforme o contexto SQL, e mostram tipo e comentário no hover.
-- **O que falta:**
-  - Um índice de nomes por conexão, imutável e versionado, montado fora da
-    thread de UI a partir do cache.
-  - Um provider que use o tokenizer (`jykre::sql::tokens`) e o statement no
-    cursor para:
-    - sugerir relações depois de `FROM`/`JOIN`;
-    - sugerir colunas em `alias.`;
-    - resolver nomes qualificados.
-  - Usar sempre a conexão e o contexto da própria aba.
-  - Pedir em segundo plano as colunas de uma relação ainda sem colunas no
-    cache, sem bloquear a digitação.
-  - Hover com tipo, nulabilidade, default, chave e comentário (os dados já
-    existem desde a ADR-0016).
-  - Ir para a definição, levando ao nó do explorer.
-- **Dependências e riscos:**
-  - O provider usa tipos `lsp_types`, que hoje só existem como dependência
-    transitiva. Torná-los dependência direta exige aprovação.
-  - O alvo de uma FK pode estar fora da seleção e, portanto, fora do cache.
-- **Critérios de aceitação:**
-  - Uma aba da conexão A nunca sugere objetos da conexão B.
-  - Depois de `FROM orders o`, `o.` sugere as colunas de `orders`.
-  - Uma relação sem colunas no cache mostra "carregando" e é completada sem
-    travar o editor.
-
-### MET-009: contexto de execução por aba invisível e sem controle
-
-- **Situação atual:**
-  - `ExecutionOptions.context` vai sempre vazio.
-  - O cabeçalho da aba mostra o `database` da configuração, não o schema
-    corrente da sessão.
-  - O PostgreSQL não tem `search_path` configurável, e a sugestão de padrão
-    (MET-007) usa `public`, não o `search_path` real.
-  - Se `context.schema` for usado, o driver PostgreSQL executa
-    `SET search_path` a cada statement e descarta `$user` e `public`.
-- **Referência:** os gerenciadores de banco de dados têm um seletor de
-  catálogo e schema ativos por editor, que acompanha os `USE` executados.
-- **O que falta:**
-  - Um seletor de contexto no cabeçalho da aba: schema no PostgreSQL,
-    database no MySQL, catálogo e schema no Databricks.
-  - Aplicar o contexto na sessão uma vez, só quando ele muda.
-  - Refletir `USE`/`SET` bem-sucedidos.
-  - Repor o contexto quando a sessão for reaberta.
-- **Critérios de aceitação:**
-  - Depois de `USE sales`, o cabeçalho mostra `sales`.
-  - Trocar o schema no seletor muda onde um `SELECT` não qualificado roda.
-  - Um `SET search_path` do usuário não é sobrescrito a cada statement.
-
-### MET-010: nenhuma atualização depois de DDL
-
-- **Situação atual:** o workspace não chama nenhuma operação de metadados.
-  Depois de `CREATE TABLE`, a tabela só aparece com F5 no schema.
-- **Referência:** as IDEs de banco de dados sincronizam a estrutura depois
-  de um DDL executado no editor.
-- **O que falta:**
-  - Classificar o statement pelo tokenizer (`CREATE`, `ALTER`, `DROP`,
-    `RENAME`, `COMMENT`) e identificar o alvo.
-  - Depois do sucesso, enfileirar a releitura do schema afetado, ou do
-    contexto ativo quando o nome não for qualificado, com debounce.
-  - Respeitar a seleção: um schema fora dela não é lido.
-- **Critério de aceitação:** `CREATE TABLE x` bem-sucedido faz `x` aparecer
-  no explorer em até 2 s, sem ação manual.
+- **Já feito** (opção A da decisão D3, `Session::context`):
+  - seletor de contexto no cabeçalho da aba;
+  - contexto aplicado na sessão só quando muda;
+  - `USE`/`SET` refletidos pelo que a sessão informa depois de cada
+    execução;
+  - contexto reposto quando a sessão reabre e guardado com a aba.
+  - O `USE` do MySQL, que falhava no protocolo de prepared statements
+    (erro 1295), passou a rodar pelo protocolo de texto.
+- **O que falta:** um `search_path` configurável na conexão PostgreSQL, que
+  também sirva de padrão sugerido no diálogo (MET-007) em vez de `public`.
 
 ## P1: Desempenho do cache e do explorer
 
@@ -326,8 +285,8 @@ achados já fechados aparecem só no resumo.
 
 ## Ordem sugerida
 
-1. **MET-009 e MET-010.** Contexto por aba e atualização depois de DDL, que
-   preparam o editor.
-2. **MET-008.** Autocomplete, hover e ir para a definição.
-3. **MET-002, MET-003 e MET-004.** Escala da introspecção.
-4. **MET-005 e MET-014,** depois o restante de P3.
+1. **MET-002, MET-003 e MET-004.** Escala da introspecção, com a
+   [ADR-0017](adr/0017-driver-metadata-contract-batch.md).
+2. **MET-005, MET-006 e MET-019.** Inspeção, PostgreSQL e permissões.
+3. **MET-014 e MET-017,** com a migração da
+   [ADR-0018](adr/0018-metadata-cache-migrations.md), depois o restante.

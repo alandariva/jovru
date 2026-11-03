@@ -143,6 +143,22 @@ impl Tree {
         paths
     }
 
+    /// Expands every ancestor of `path`, so the node shows once their
+    /// children are read ([`Tree::missing`]).
+    pub fn reveal(&mut self, path: &ObjectPath) {
+        for length in 1..path.0.len() {
+            self.expanded.insert(ObjectPath(path.0[..length].to_vec()));
+        }
+        self.rebuild();
+    }
+
+    /// Whether `path` is one of the rows shown.
+    pub fn shows(&self, path: &ObjectPath) -> bool {
+        self.rows
+            .iter()
+            .any(|row| row.object().is_some_and(|object| object.path == *path))
+    }
+
     /// Expands `paths`, as a previous session left them.
     pub fn set_expanded(&mut self, paths: impl IntoIterator<Item = ObjectPath>) {
         self.expanded = paths.into_iter().collect();
@@ -408,6 +424,23 @@ pub fn detail(object: &MetadataObject) -> Option<String> {
     }
 }
 
+/// What a kind of object is called, for hovers and tooltips.
+pub fn kind_name(kind: ObjectKind) -> String {
+    match kind {
+        ObjectKind::Table => tr!("table"),
+        ObjectKind::View => tr!("view"),
+        ObjectKind::MaterializedView => tr!("materialized view"),
+        ObjectKind::Column => tr!("column"),
+        ObjectKind::Schema => tr!("schema"),
+        ObjectKind::Database => tr!("database"),
+        ObjectKind::Catalog => tr!("catalog"),
+        ObjectKind::ForeignKey => tr!("foreign key"),
+        ObjectKind::Partition => tr!("partition"),
+        _ => "",
+    }
+    .into()
+}
+
 /// Everything known about a node beyond its name, one fact per line, for
 /// its tooltip. Empty when there is nothing to add.
 pub fn description(object: &MetadataObject) -> String {
@@ -656,6 +689,24 @@ mod tests {
         assert!(tree.append(1, source[1].path.clone(), page(&[source[2].clone()])));
         assert!(tree.missing().is_empty());
         assert_eq!(names(tree.rows()), ["sales", "orders", "id", "catalog"]);
+        // Revealing a column expands its schema and table.
+        let mut revealed = Tree::default();
+        revealed.replace(
+            1,
+            vec![(
+                ObjectPath::default(),
+                page(&[source[0].clone(), source[5].clone()]),
+            )],
+        );
+        revealed.reveal(&source[3].path);
+        assert_eq!(
+            revealed.missing(),
+            [source[0].path.clone(), source[1].path.clone()]
+        );
+        assert!(!revealed.shows(&source[3].path));
+        assert!(revealed.append(1, source[0].path.clone(), page(&[source[1].clone()])));
+        assert!(revealed.append(1, source[1].path.clone(), page(&[source[3].clone()])));
+        assert!(revealed.shows(&source[3].path));
         // A node under a collapsed one is not read until it shows.
         let mut tree = Tree::default();
         tree.set_expanded([source[1].path.clone()]);

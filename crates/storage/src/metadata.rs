@@ -75,6 +75,10 @@ const KIND_ORDER: [ObjectKind; 9] = [
     ObjectKind::Partition,
 ];
 
+fn kind_text_of(kind: ObjectKind) -> DriverResult<String> {
+    serde_json::to_string(&kind).map_err(json_error)
+}
+
 /// Where a stored kind sorts among a node's children: its position in
 /// [`KIND_ORDER`], then its text for kinds not listed.
 fn kind_rank(kind: &str) -> (usize, &str) {
@@ -684,6 +688,49 @@ impl MetadataRepository {
             })
             .collect()
     }
+    /// Every cached relation (table, view or materialized view) with its
+    /// kind and the cache version they were read from, without decoding the
+    /// objects: what the editor's name index is built from.
+    pub async fn relations(&self) -> DriverResult<(i64, Vec<(ObjectPath, ObjectKind)>)> {
+        let kinds = serde_json::to_string(
+            &[
+                ObjectKind::Table,
+                ObjectKind::View,
+                ObjectKind::MaterializedView,
+            ]
+            .iter()
+            .map(|kind| kind_text_of(*kind))
+            .collect::<DriverResult<Vec<_>>>()?,
+        )
+        .map_err(json_error)?;
+        let mut tx = self.pool.begin().await.map_err(sql_error)?;
+        let version: i64 =
+            sqlx::query_scalar("SELECT version FROM metadata_info WHERE singleton=1")
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(sql_error)?;
+        let rows = sqlx::query("SELECT path_json,kind FROM objects WHERE kind IN (SELECT value FROM json_each(?)) ORDER BY path_key")
+            .bind(kinds)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        tx.rollback().await.map_err(sql_error)?;
+        let relations = rows
+            .into_iter()
+            .map(|row| {
+                let path: ObjectPath = serde_json::from_str(
+                    &row.try_get::<String, _>("path_json").map_err(sql_error)?,
+                )
+                .map_err(json_error)?;
+                let kind: ObjectKind =
+                    serde_json::from_str(&row.try_get::<String, _>("kind").map_err(sql_error)?)
+                        .map_err(json_error)?;
+                Ok((path, kind))
+            })
+            .collect::<DriverResult<_>>()?;
+        Ok((version, relations))
+    }
+
     /// The paths of every cached object of `kind`, in key order.
     pub async fn paths(&self, kind: ObjectKind) -> DriverResult<Vec<ObjectPath>> {
         let values: Vec<String> =

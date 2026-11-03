@@ -528,3 +528,93 @@ async fn live_metadata_has_exact_types_keys_comments_and_relation_kinds() {
     .await
     .expect("live metadata took too long");
 }
+
+/// Runs `sql` with `context` and returns the first cell as text.
+async fn text_in(session: &mut Box<dyn Session>, sql: &str, context: &SessionContext) -> String {
+    let mut sink = Sink::default();
+    session
+        .execute(
+            &QueryRequest {
+                sql: sql.into(),
+                options: ExecutionOptions {
+                    context: context.clone(),
+                    ..ExecutionOptions::default()
+                },
+            },
+            &mut sink,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    match sink.rows.first().and_then(|row| row.first()) {
+        Some(Cell::Text(text)) => text.clone(),
+        // A statement without rows, such as SET.
+        _ => String::new(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_the_tab_context_is_applied_once_and_reported() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let none = SessionContext::default();
+        text_in(
+            &mut session,
+            "CREATE SCHEMA IF NOT EXISTS gate_context",
+            &none,
+        )
+        .await;
+        let chosen = SessionContext {
+            catalog: Some("jykre".into()),
+            schema: Some("gate_context".into()),
+        };
+        assert_eq!(
+            text_in(&mut session, "SELECT current_schema()", &chosen).await,
+            "gate_context"
+        );
+        // The user's SET is not undone by the next statement of the same tab.
+        text_in(&mut session, "SET search_path TO public", &chosen).await;
+        assert_eq!(
+            text_in(&mut session, "SELECT current_schema()", &chosen).await,
+            "public"
+        );
+        let reported = session.context(CancellationToken::new()).await.unwrap();
+        assert_eq!(reported.catalog.as_deref(), Some("jykre"));
+        assert_eq!(reported.schema.as_deref(), Some("public"));
+        // Choosing again applies the new choice once.
+        assert_eq!(
+            text_in(&mut session, "SELECT current_schema()", &chosen).await,
+            "gate_context"
+        );
+        // Another database cannot be chosen within the session.
+        let other = SessionContext {
+            catalog: Some("other".into()),
+            schema: None,
+        };
+        assert!(
+            session
+                .execute(
+                    &QueryRequest {
+                        sql: "SELECT 1".into(),
+                        options: ExecutionOptions {
+                            context: other,
+                            ..ExecutionOptions::default()
+                        },
+                    },
+                    &mut Sink::default(),
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
+        text_in(&mut session, "DROP SCHEMA gate_context", &none).await;
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
