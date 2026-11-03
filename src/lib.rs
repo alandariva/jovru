@@ -14,6 +14,7 @@ pub mod grouped_tabs;
 pub mod i18n;
 pub mod logging;
 pub mod palette;
+pub mod performance;
 pub mod probe;
 pub mod query;
 pub mod result;

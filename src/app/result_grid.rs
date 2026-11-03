@@ -49,6 +49,31 @@ pub struct ResultGrid {
 impl EventEmitter<ResultGridEvent> for ResultGrid {}
 
 impl ResultGrid {
+    pub(super) fn benchmark_begin(&mut self, bottom: bool, cx: &mut Context<Self>) {
+        if bottom {
+            self.select_all(cx);
+        } else {
+            self.select(Some(CellSelection::cell(0, 0)), cx);
+        }
+    }
+
+    pub(super) fn benchmark_step(&mut self, phase: &str, tick: usize, cx: &mut Context<Self>) {
+        let direction = (tick / 3) % 4;
+        let (mut rows, mut cols) = [(1, 0), (0, 1), (-1, 0), (0, -1)][direction];
+        if phase == "selection_bottom" {
+            rows = -rows;
+            cols = -cols;
+        }
+        if phase == "scroll" {
+            let position = (tick * 5) % self.result.row_count().max(1);
+            self.scroll
+                .scroll_to_item(position, ScrollStrategy::Nearest);
+            cx.notify();
+        } else if phase != "idle" {
+            self.move_selection(rows, cols, true, cx);
+        }
+    }
+
     pub fn new(result: Rc<ResultData>, sales: bool, cx: &mut Context<Self>) -> Self {
         Self {
             result,

@@ -5,6 +5,10 @@
 mod app;
 
 fn main() {
+    if std::env::args_os().any(|arg| arg == "--test-performance") {
+        app::performance::run();
+        return;
+    }
     // Without a writable data folder the application still runs, without logs.
     let _logs = jykre::logging::init(&jykre::connection_store::data_dir()).ok();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "Jykre Studio started");

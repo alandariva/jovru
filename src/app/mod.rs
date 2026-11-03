@@ -3,6 +3,7 @@ mod connections;
 mod databricks_connection;
 mod demo;
 mod layout;
+pub mod performance;
 mod probe;
 mod result_grid;
 mod sql;

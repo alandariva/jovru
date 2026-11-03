@@ -75,6 +75,35 @@ A change that introduces one of these is rejected in review:
 
 ## How to measure
 
+### Automated synthetic grid run
+
+Run `cargo run --release --locked -- --test-performance` (or pass
+`--test-performance` to the packaged executable). This opens an isolated
+window containing the production result grid, without loading connections,
+workspace persistence, a vault or a database. It generates 1,000 and 100,000
+rows with five columns off the UI thread. After a two-second warmup, each
+size runs idle (75 ticks), rectangular selection (250 ticks), selection near
+the final row (250 ticks) and scrolling (125 ticks), with a nominal 40 ms
+timer per tick. Closing the window cancels the run at its next update.
+
+The finished window shows the report path. A uniquely named
+`jykre-performance-<timestamp>-<pid>.json` is saved to the working directory.
+It contains elapsed wall time per phase, CPU percent (100% = one logical
+CPU), endpoint resident memory in bytes, dimensions, step counts, build
+profile and platform. Linux uses process CPU ticks and VmRSS; Windows uses
+background PowerShell process snapshots (hidden window). Snapshot overhead
+can affect short intervals, particularly on Windows. Counter failures are
+explicit errors and null measurements, not zero. Other platforms currently
+report counters unavailable. Memory is sampled at phase boundaries, not a
+peak-memory measurement. Time is phase duration, not frame latency.
+
+This calls the same selection/navigation methods as keyboard handling, but
+does not inject OS input, measure input delivery, or exercise the editor,
+explorer and workspace ancestors. Its numbers are not directly interchangeable
+with the earlier whole-workspace external-input measurements. Keep window
+size, graphics adapter, build and machine identical when comparing runs.
+The existing frame probe below remains the tool for the frame budget.
+
 - **Frame probe.** Run the application with `JYKRE_PROBE=1` (a release build
   for budgets: `JYKRE_PROBE=1 cargo run --release`). `src/app/probe.rs`
   records an `Instant` at the start of the root view's `render` and reads it
