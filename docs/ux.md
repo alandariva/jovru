@@ -68,6 +68,7 @@ Each state has one consistent representation.
 | Run cancelling | Footer | Spinner and "Cancelling…" until the driver stops; the previous result stays and a new run may start |
 | Run cancelled / failed | Footer (and the results area for errors) | Cancel or error icon with a short text |
 | Metadata refreshing | The node being refreshed | Its `↻` spins; clicking it cancels |
+| Metadata refresh waiting | The node (or the connection) whose refresh was asked for while another runs | "queued" after its name; it starts when the running one ends, in order. Asking again (F5, the menu or the connection's `↻`) takes it out of the queue |
 | Reading the chosen metadata | Below the connection in the explorer | A bar with "Reading n of total: name", the percentage and the time left (estimated after the first namespace); the connection's `↻` spins and cancels |
 | Nothing chosen to introspect | The connection in the explorer | "Nothing is introspected yet." and **Choose what to introspect**, which opens the connection settings |
 | Metadata state per scope | Explorer node and its tooltip | Last success time, failure message, permission warnings |

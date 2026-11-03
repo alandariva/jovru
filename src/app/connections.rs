@@ -2,8 +2,10 @@ use super::*;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use jykre::metadata_scope::{MetadataScope, RefreshPhase, RefreshProgress, format_eta};
+use jykre::refresh_queue::{Queued, RefreshJob};
 use jykre::result::{DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT};
 use jykre::{cell_format, tr};
+use jykre_storage::RefreshState;
 
 /// A context-menu command run against the app view.
 type MenuAction = Box<dyn Fn(&mut AppView, &mut Window, &mut Context<AppView>)>;
@@ -501,6 +503,7 @@ impl AppView {
             refresh_generation: 0,
             collapsed: HashSet::new(),
             refreshing: None,
+            refresh_queue: RefreshQueue::default(),
             scope,
             progress: None,
             status: Feedback::new(Tone::Info, ""),
@@ -564,14 +567,9 @@ impl AppView {
         let previous_scope = editing
             .map(|index| self.connections[index].scope.clone())
             .unwrap_or_default();
-        if let Some(index) = editing {
-            let connection = &mut self.connections[index];
-            if let Some((_, cancel)) = connection.refreshing.take() {
-                cancel.cancel();
-            }
-            connection.progress = None;
-            connection.refresh_generation += 1;
-        }
+        // A refresh in progress keeps running while the profile is saved: a
+        // failed save leaves it untouched, and a successful one stops it
+        // below, since it reads for the previous configuration.
         if let Some(cancel) = self.connection_testing.take() {
             cancel.cancel();
         }
@@ -624,6 +622,7 @@ impl AppView {
                         let apply = !read.is_pending() || selection != previous_scope;
                         let index = if let Some(index) = editing {
                             let connection = &mut this.connections[index];
+                            connection.stop_refreshes();
                             let old_name = connection.name.clone();
                             for snapshot in
                                 this.saved_queries.iter_mut().chain(this.history.iter_mut())
@@ -712,11 +711,7 @@ impl AppView {
         connection.refresh_generation += 1;
         let generation = connection.refresh_generation;
         connection.refreshing = Some((scope.clone(), cancel.clone()));
-        let scope_name = scope
-            .0
-            .last()
-            .map(|part| part.name.clone())
-            .unwrap_or_else(|| tr!("full connection").into());
+        let scope_name = scope_name(&scope);
         connection.status = Feedback::new(Tone::Info, tr!("Refreshing {0}…", scope_name));
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
@@ -766,30 +761,18 @@ impl AppView {
                     return;
                 }
                 connection.refreshing = None;
-                if let Ok(snapshot) = snapshot {
-                    Self::apply_cache(connection, snapshot);
-                }
-                connection.status = match result {
-                    Ok(_) => Feedback::new(
-                        Tone::Success,
-                        tr!("Refresh of {0} completed and saved.", scope_name),
-                    ),
-                    Err(error) if error.code == ErrorCode::Cancelled => Feedback::new(
-                        Tone::Warning,
-                        tr!("Refresh cancelled. Previous cache preserved."),
-                    ),
-                    Err(error) => Feedback::new(
-                        Tone::Error,
-                        tr!(
-                            "Failed to refresh {0}: {1}. Previous cache preserved.",
-                            scope_name,
-                            error
-                        ),
-                    ),
+                let reloaded = match snapshot {
+                    Ok(snapshot) => {
+                        Self::apply_cache(connection, snapshot);
+                        None
+                    }
+                    Err(error) => Some(error),
                 };
+                connection.status = node_status(&scope_name, result, reloaded);
                 if !this.search.read(cx).value().is_empty() {
                     this.search_cache(false, cx);
                 }
+                this.start_next_refresh(index, cx);
                 cx.notify();
             });
         })
@@ -797,8 +780,10 @@ impl AppView {
         cx.notify();
     }
 
-    /// Starts refreshing `scope`, or cancels it when that scope is the one
-    /// already refreshing. Another scope in progress leaves things unchanged.
+    /// Refreshes `scope` (the empty path is the whole connection, meaning
+    /// what the user chose to introspect), or queues it behind the refresh
+    /// that runs. Asked again, it cancels the running refresh of that scope
+    /// or takes the waiting one out of the queue.
     pub(super) fn toggle_refresh(
         &mut self,
         index: usize,
@@ -806,30 +791,84 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let connection = &mut self.connections[index];
-        match &connection.refreshing {
-            Some((current, cancel)) if *current == scope => {
-                cancel.cancel();
+        if let Some((current, cancel)) = &connection.refreshing
+            && *current == scope
+        {
+            cancel.cancel();
+            connection.status = Feedback::new(
+                Tone::Info,
+                tr!("Cancelling refresh; previous cache preserved."),
+            );
+            cx.notify();
+            return;
+        }
+        let selection = scope.0.is_empty();
+        let removed = if selection {
+            connection.refresh_queue.remove_selection()
+        } else {
+            connection.refresh_queue.remove(&scope)
+        };
+        if removed {
+            connection.status = Feedback::new(
+                Tone::Info,
+                tr!("Refresh of {0} taken out of the queue.", scope_name(&scope)),
+            );
+            cx.notify();
+            return;
+        }
+        let job = if selection {
+            if connection.scope.is_pending() {
                 connection.status = Feedback::new(
                     Tone::Info,
-                    tr!("Cancelling refresh; previous cache preserved."),
+                    tr!("Choose what to introspect in the connection settings."),
                 );
                 cx.notify();
+                return;
             }
-            Some(_) => {}
-            // The whole connection means what the user chose to introspect.
-            None if scope.0.is_empty() => {
-                if connection.scope.is_pending() {
-                    connection.status = Feedback::new(
-                        Tone::Info,
-                        tr!("Choose what to introspect in the connection settings."),
-                    );
-                    cx.notify();
-                } else {
-                    let read = connection.scope.clone();
-                    self.refresh_selection(index, read, cx);
-                }
-            }
-            None => self.refresh_metadata(index, scope, cx),
+            RefreshJob::Selection(connection.scope.clone())
+        } else {
+            RefreshJob::Node(scope.clone())
+        };
+        if connection.refreshing.is_none() {
+            self.start_refresh(index, job, cx);
+            return;
+        }
+        connection.status = Feedback::new(
+            Tone::Info,
+            match connection.refresh_queue.push(job) {
+                Queued::Added => tr!(
+                    "Refresh of {0} is queued; it starts when the current one ends.",
+                    scope_name(&scope)
+                ),
+                Queued::Covered => tr!(
+                    "Refresh of {0} is already queued with a broader one.",
+                    scope_name(&scope)
+                ),
+            },
+        );
+        cx.notify();
+    }
+
+    fn start_refresh(&mut self, index: usize, job: RefreshJob, cx: &mut Context<Self>) {
+        match job {
+            RefreshJob::Node(scope) => self.refresh_metadata(index, scope, cx),
+            RefreshJob::Selection(read) => self.refresh_selection(index, read, cx),
+        }
+    }
+
+    /// Starts the first waiting refresh, once the running one ended. A
+    /// failure or warning of the one that ended stays as the status, so the
+    /// next one does not hide it; its spinner shows that it runs.
+    fn start_next_refresh(&mut self, index: usize, cx: &mut Context<Self>) {
+        let connection = &mut self.connections[index];
+        let Some(job) = connection.refresh_queue.pop() else {
+            return;
+        };
+        let kept = matches!(connection.status.tone, Tone::Warning | Tone::Error)
+            .then(|| connection.status.clone());
+        self.start_refresh(index, job, cx);
+        if let Some(kept) = kept {
+            self.connections[index].status = kept;
         }
     }
 
@@ -941,6 +980,7 @@ impl AppView {
                 if !this.search.read(cx).value().is_empty() {
                     this.search_cache(false, cx);
                 }
+                this.start_next_refresh(index, cx);
                 cx.notify();
             });
         })
@@ -1230,7 +1270,7 @@ impl AppView {
             .as_ref()
             .map(|(scope, _)| scope.clone());
         let refreshing_all = refreshing.as_ref().is_some_and(|scope| scope.0.is_empty());
-        let busy = refreshing.is_some();
+        let queued_all = connection.refresh_queue.waits_for_selection();
         column()
             .flex_none()
             .child(
@@ -1269,8 +1309,10 @@ impl AppView {
                             },
                         )),
                     )
+                    .when(queued_all, |s| s.child(queued_label()))
                     // While the whole connection refreshes the same button spins and
-                    // cancels; a node refresh keeps it disabled until it ends.
+                    // cancels; during a node refresh it queues the read, and a
+                    // queued read is taken out of the queue.
                     .child(if refreshing_all {
                         spinner_button(
                             ("refresh-connection", index),
@@ -1284,9 +1326,12 @@ impl AppView {
                         icon_button(
                             ("refresh-connection", index),
                             I::RefreshCw,
-                            tr!("Refresh the chosen metadata"),
+                            if queued_all {
+                                tr!("Take the queued refresh out of the queue")
+                            } else {
+                                tr!("Refresh the chosen metadata")
+                            },
                         )
-                        .when(busy, |s| s.opacity(0.5).cursor_default())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.toggle_refresh(index, ObjectPath::default(), cx)
                         }))
@@ -1316,11 +1361,12 @@ impl AppView {
                             .item(
                                 PopupMenuItem::new(if refreshing_all {
                                     tr!("Cancel refresh")
+                                } else if queued_all {
+                                    tr!("Take out of the queue")
                                 } else {
                                     tr!("Refresh the chosen metadata")
                                 })
                                 .icon(I::RefreshCw)
-                                .disabled(busy && !refreshing_all)
                                 .on_click(run(
                                     |this, index, _, cx| {
                                         this.toggle_refresh(index, ObjectPath::default(), cx)
@@ -1428,6 +1474,8 @@ impl AppView {
                     let collapsed = connection.collapsed.contains(&path);
                     let freshness = connection.node_freshness(&path);
                     let refreshing_this = refreshing.as_ref() == Some(&path);
+                    let queued_this = connection.refresh_queue.waits_for(&path);
+                    let refresh_queued = connection.refresh_queue.waits_for(&refresh_path);
                     let name = object.name.clone();
                     let selected = self
                         .explorer_selected
@@ -1572,7 +1620,9 @@ impl AppView {
                                 )),
                         )
                         // Refresh lives in the context menu; only a running refresh
-                        // shows here, as a spinner that cancels it.
+                        // shows here, as a spinner that cancels it, and a waiting
+                        // one as a label.
+                        .when(queued_this, |s| s.child(queued_label()))
                         .when(refreshing_this, |s| {
                             s.child(
                                 spinner_button(
@@ -1628,11 +1678,12 @@ impl AppView {
                                 .item(
                                     PopupMenuItem::new(if refreshing_this {
                                         tr!("Cancel refresh")
+                                    } else if refresh_queued {
+                                        tr!("Take out of the queue")
                                     } else {
                                         tr!("Refresh")
                                     })
                                     .icon(I::RefreshCw)
-                                    .disabled(busy && !refreshing_this)
                                     .on_click(run(Box::new(move |this, _, cx| {
                                         this.toggle_refresh(index, refresh_path.clone(), cx)
                                     }))),
@@ -2078,6 +2129,17 @@ impl Drop for AppView {
 }
 
 impl Connection {
+    /// Cancels the running refresh and forgets the waiting ones; a result
+    /// still on its way is discarded by the new generation.
+    fn stop_refreshes(&mut self) {
+        if let Some((_, cancel)) = self.refreshing.take() {
+            cancel.cancel();
+        }
+        self.refresh_queue.clear();
+        self.progress = None;
+        self.refresh_generation += 1;
+    }
+
     fn node_freshness(&self, path: &ObjectPath) -> String {
         let applicable: Vec<_> = self
             .metadata_statuses
@@ -2090,13 +2152,15 @@ impl Connection {
             .rev()
             .find_map(|status| status.last_success_at.as_deref());
         let state = latest
-            .map(|status| match status.state.as_str() {
-                "success" => tr!("Updated"),
-                "running" => tr!("Refreshing"),
-                "partial" | "warning" => tr!("Partial refresh; some parts are not accessible"),
-                "failed" => tr!("Last attempt failed"),
-                "cancelled" => tr!("Last attempt cancelled"),
-                "interrupted" => tr!("Last attempt interrupted"),
+            .map(|status| match status.state {
+                RefreshState::Success => tr!("Updated"),
+                RefreshState::Running => tr!("Refreshing"),
+                RefreshState::Partial | RefreshState::Warning => {
+                    tr!("Partial refresh; some parts are not accessible")
+                }
+                RefreshState::Failed => tr!("Last attempt failed"),
+                RefreshState::Cancelled => tr!("Last attempt cancelled"),
+                RefreshState::Interrupted => tr!("Last attempt interrupted"),
                 _ => tr!("Local cache"),
             })
             .unwrap_or(tr!("No refresh recorded"));
@@ -2105,6 +2169,63 @@ impl Connection {
             state,
             success.unwrap_or(tr!("none"))
         )
+    }
+}
+
+/// Marks a node, or the connection, whose refresh waits in the queue.
+fn queued_label() -> Div {
+    div()
+        .flex_none()
+        .px_1()
+        .text_size(px(12.))
+        .text_color(rgb(FAINT))
+        .child(tr!("queued"))
+}
+
+/// How statuses name a refreshed scope: the node's name, or the whole
+/// connection.
+fn scope_name(scope: &ObjectPath) -> String {
+    scope
+        .0
+        .last()
+        .map(|part| part.name.clone())
+        .unwrap_or_else(|| tr!("full connection").into())
+}
+
+/// The status a finished refresh of one node leaves. A refresh that was
+/// saved but could not be shown says so instead of announcing success.
+fn node_status(
+    scope_name: &str,
+    result: DriverResult<i64>,
+    reloaded: Option<DriverError>,
+) -> Feedback {
+    match result {
+        Ok(_) => match reloaded {
+            None => Feedback::new(
+                Tone::Success,
+                tr!("Refresh of {0} completed and saved.", scope_name),
+            ),
+            Some(error) => Feedback::new(
+                Tone::Warning,
+                tr!(
+                    "Refresh of {0} saved, but the explorer could not show it: {1}",
+                    scope_name,
+                    error
+                ),
+            ),
+        },
+        Err(error) if error.code == ErrorCode::Cancelled => Feedback::new(
+            Tone::Warning,
+            tr!("Refresh cancelled. Previous cache preserved."),
+        ),
+        Err(error) => Feedback::new(
+            Tone::Error,
+            tr!(
+                "Failed to refresh {0}: {1}. Previous cache preserved.",
+                scope_name,
+                error
+            ),
+        ),
     }
 }
 

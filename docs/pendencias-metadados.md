@@ -2,9 +2,9 @@
 
 Itens da auditoria do subsistema de metadados que **ainda não foram
 implementados**, ou foram implementados só em parte, em `release/0.1.0`
-(3 de novembro de 2026). As referências de mercado aparecem com nomes
-genéricos: "IDEs de banco de dados", "gerenciadores de banco de dados" e
-"ferramentas de referência".
+(3 de novembro de 2026, atualizado depois da fase 1). As referências de
+mercado aparecem com nomes genéricos: "IDEs de banco de dados",
+"gerenciadores de banco de dados" e "ferramentas de referência".
 
 Os números `MET-xxx` são os da auditoria original, para rastreio. Os
 achados já fechados aparecem só no resumo.
@@ -13,10 +13,10 @@ achados já fechados aparecem só no resumo.
 
 | Situação | Quantidade | IDs |
 | --- | ---: | --- |
-| Fechados | 2 | MET-001, MET-007 |
-| Parciais (ainda falta uma parte) | 7 | MET-002, MET-003, MET-004, MET-005, MET-006, MET-016, MET-018 |
-| Ainda abertos | 13 | MET-008 a MET-015, MET-017, MET-019 a MET-022 |
-| **Pendências neste arquivo** | **20** | os parciais e os abertos |
+| Fechados | 5 | MET-001, MET-007, MET-015, MET-018, MET-020 |
+| Parciais (ainda falta uma parte) | 7 | MET-002, MET-003, MET-004, MET-005, MET-006, MET-016, MET-017 |
+| Ainda abertos | 10 | MET-008 a MET-014, MET-019, MET-021, MET-022 |
+| **Pendências neste arquivo** | **17** | os parciais e os abertos |
 
 **O que já foi entregue**
 
@@ -37,6 +37,23 @@ achados já fechados aparecem só no resumo.
   - no PostgreSQL, a leitura passou para `pg_catalog`.
 - **Diálogo de conexão** dividido nas seções Conexão, Metadados e Opções,
   com rodapé fixo.
+- **MET-015.** Uma fila de refresh por conexão
+  (`jykre::refresh_queue::RefreshQueue`):
+  - um F5 durante outro refresh entra na fila e aparece como **na fila**;
+  - um nó já coberto por outro da fila é ignorado, e um nó mais amplo
+    substitui os de dentro;
+  - pedir de novo tira o pedido da fila;
+  - o lock de escrita do cache só é usado na publicação, e um lock de
+    execução separado mantém a recuperação de refreshes interrompidos.
+- **MET-018.** O refresh de um nó avisa quando salvou mas não conseguiu
+  exibir a árvore. Salvar a conexão só interrompe os refreshes depois de o
+  salvamento dar certo (N028 e N031 da auditoria comportamental).
+- **MET-020.** `backend::metadata` e `backend::merge_metadata` foram
+  removidos, e `MetadataRepository::all` passou a existir só nos testes. Os
+  testes do SQLite já cobriam o que os testes da versão em memória
+  verificavam.
+- **Parte de MET-017.** `RefreshStatus.state` é o enum
+  `jykre_storage::RefreshState`, sem mudar o texto gravado.
 
 **O que mais pesa agora**
 
@@ -201,7 +218,10 @@ Amplia a N038 da auditoria comportamental.
   por leitura. Uma falha não derruba os outros.
 - **O que falta:**
   - Paralelismo limitado (de 4 a 8 requisições ao mesmo tempo). Hoje os
-    namespaces são lidos em sequência.
+    namespaces são lidos em sequência. O índice `one_running_refresh` e o
+    lock de execução só permitem um refresh ativo por cache: ler em
+    paralelo e publicar em sequência evita mudar o schema, e remover o
+    índice exige migração.
   - Listar só nomes com `table-summaries` ou `tables?omit_columns=true`, e
     ler colunas sob demanda.
   - Evitar o GET do catálogo e do schema que cada leitura de schema faz
@@ -264,22 +284,6 @@ Amplia a N038 da auditoria comportamental.
   - Listar os outros databases do servidor, como opção. Cada database exige
     uma conexão própria.
 
-### MET-015: um refresh por conexão, e o segundo é ignorado sem aviso
-
-- **Situação atual:**
-  - O lock de escrita do cache fica preso durante toda a leitura remota.
-  - Um F5 em outro nó durante um refresh cai em `Some(_) => {}` e não tem
-    efeito visível.
-- **Referência:** as ferramentas de referência enfileiram os refreshes de
-  nós diferentes ou mostram que um já está em andamento.
-- **O que falta:**
-  - Uma fila por conexão no backend, que deduplica escopos iguais e absorve
-    os descendentes.
-  - Lock só na publicação.
-  - Mostrar "na fila".
-- **Critério de aceitação:** F5 em dois schemas seguidos atualiza os dois,
-  em ordem, com o segundo mostrado como "na fila".
-
 ### MET-016 (parcial): estado e atualidade
 
 - **Já feito:** barra de progresso com o tempo restante ao ler a seleção.
@@ -290,29 +294,17 @@ Amplia a N038 da auditoria comportamental.
     só acima de um limite de idade configurável. Desligada por padrão.
   - Sem polling.
 
-### MET-018 (parcial): sucesso anunciado sem a árvore atualizada
-
-Corresponde à N028 e N031 da auditoria comportamental.
-
-- **Já feito:** a leitura da seleção avisa quando os dados foram salvos mas
-  o explorer não conseguiu exibi-los.
-- **O que falta:**
-  - O refresh de um nó (`refresh_metadata`) ainda descarta o erro da
-    releitura (`if let Ok(snapshot)`).
-  - Salvar a conexão ainda cancela o refresh antes de saber se o
-    salvamento deu certo (N031).
-
 ## P3: Ajustes e dívidas
 
-### MET-017: estados de refresh como texto
+### MET-017 (parcial): última publicação de um refresh parcial
 
-- **Situação atual:**
-  - `RefreshStatus.state` é uma `String` comparada por texto na UI.
-  - Um refresh parcial não atualiza `last_success_at`, então aparece
-    "Última atualização bem-sucedida: nenhuma".
-- **O que falta:**
-  - Um enum no `jykre-storage`, sem mudar o texto gravado.
-  - Registrar a última publicação separada do último sucesso completo.
+- **Já feito:** o enum `RefreshState` no `jykre-storage`, sem mudar o texto
+  gravado.
+- **Situação atual:** um refresh parcial não atualiza `last_success_at`,
+  então aparece "Última atualização bem-sucedida: nenhuma".
+- **O que falta:** registrar a última publicação separada do último sucesso
+  completo. Isso pede uma coluna nova em `scope_status`, ou seja, o primeiro
+  passo de migração do cache, que exige ADR e aprovação.
 
 ### MET-019: permissões
 
@@ -324,13 +316,6 @@ Corresponde à N028 e N031 da auditoria comportamental.
   - Mostrar a data da última leitura boa numa subárvore protegida.
   - Um nó "sem acesso".
   - Avaliar `include_browse` no Unity Catalog (não verificado).
-
-### MET-020: caminhos de publicação sem uso
-
-- **Situação atual:** `backend::metadata`, `backend::merge_metadata` e
-  `MetadataRepository::all` só são usados em testes. São uma segunda forma
-  de publicar, em memória, que pode divergir da do SQLite.
-- **O que falta:** remover esses caminhos ou justificar por que ficam.
 
 ### MET-021: reiniciar perde a expansão do explorer
 
@@ -369,12 +354,10 @@ Corresponde à N028 e N031 da auditoria comportamental.
 
 ## Ordem sugerida
 
-1. **MET-018, MET-015 e MET-020.** Correções pequenas de comportamento e
-   limpeza.
-2. **MET-011, MET-012 e MET-013.** Custos no caminho interativo. Medir antes
+1. **MET-011, MET-012 e MET-013.** Custos no caminho interativo. Medir antes
    e depois.
-3. **MET-009 e MET-010.** Contexto por aba e atualização depois de DDL, que
+2. **MET-009 e MET-010.** Contexto por aba e atualização depois de DDL, que
    preparam o editor.
-4. **MET-008.** Autocomplete, hover e ir para a definição.
-5. **MET-002, MET-003 e MET-004.** Escala da introspecção.
-6. **MET-005 e MET-014,** depois o restante de P3.
+3. **MET-008.** Autocomplete, hover e ir para a definição.
+4. **MET-002, MET-003 e MET-004.** Escala da introspecção.
+5. **MET-005 e MET-014,** depois o restante de P3.

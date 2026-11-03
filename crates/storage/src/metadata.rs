@@ -94,8 +94,13 @@ async fn ensure_nodes(
     Ok(())
 }
 
-/// Takes the writer lock, waiting up to `patience` for a refresh that is
-/// finishing (a cancelled one releases it once its task ends).
+/// How long publishing, retaining or resetting the cache waits for another
+/// writer, and a new refresh for one that is finishing (a cancelled one
+/// releases its lock once its task ends).
+const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Takes the lock at `path`, waiting up to `patience` for its holder to
+/// release it.
 async fn writer_lock_within(path: &Path, patience: std::time::Duration) -> DriverResult<File> {
     let deadline = tokio::time::Instant::now() + patience;
     loop {
@@ -124,18 +129,82 @@ fn canonical(value: serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Two OS locks guard a cache file. The run lock is held for a whole
+/// refresh, so owning it proves that no live refresh owns a `running` run
+/// (one left by a crash can be recovered). The writer lock is held only
+/// while publishing, retaining or resetting the cache, so a refresh reading
+/// the server does not block those.
 #[derive(Clone)]
 pub struct MetadataRepository {
     pool: SqlitePool,
     identity: String,
     lock_path: PathBuf,
+    run_lock_path: PathBuf,
     pub recovered: bool,
+}
+
+/// How a scope's last refresh ended, stored as text in `scope_status.state`
+/// (the text is unchanged, so caches written before keep loading).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RefreshState {
+    /// A refresh of the scope is running.
+    Running,
+    /// The last refresh read and published the whole scope.
+    Success,
+    /// The last refresh published the scope, but parts it could not read
+    /// kept their previous read.
+    Partial,
+    /// A part inside a refreshed scope could not be read; its previous read
+    /// stays.
+    Warning,
+    /// The last refresh failed; the previous read stays.
+    Failed,
+    /// The last refresh was cancelled; the previous read stays.
+    Cancelled,
+    /// The application stopped during the last refresh; the previous read
+    /// stays.
+    Interrupted,
+    /// A state this version does not know, such as one written by a newer
+    /// version.
+    #[default]
+    Unknown,
+}
+
+impl RefreshState {
+    /// The text stored in `scope_status.state`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Success => "success",
+            Self::Partial => "partial",
+            Self::Warning => "warning",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Reads the stored text; anything unrecognised is `Unknown`.
+    pub fn parse(text: &str) -> Self {
+        match text {
+            "running" => Self::Running,
+            "success" => Self::Success,
+            "partial" => Self::Partial,
+            "warning" => Self::Warning,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "interrupted" => Self::Interrupted,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct RefreshStatus {
     pub scope: ObjectPath,
-    pub state: String,
+    pub state: RefreshState,
     pub last_attempt_at: Option<String>,
     pub last_success_at: Option<String>,
     pub version: i64,
@@ -147,7 +216,7 @@ pub struct PendingRefresh {
     id: i64,
     version: i64,
     scope: ObjectPath,
-    _lock: File,
+    _run: File,
 }
 
 fn writer_lock(path: &Path) -> DriverResult<File> {
@@ -268,8 +337,11 @@ impl MetadataRepository {
             ));
         }
         let lock_path = dir.join(format!("{id}.lock"));
+        let run_lock_path = dir.join(format!("{id}.run.lock"));
+        // A refresh still reading for the previous configuration does not
+        // hold this lock; its publication fails as stale instead.
         let _lock = if current != identity {
-            Some(writer_lock(&lock_path)?)
+            Some(writer_lock_within(&lock_path, LOCK_PATIENCE).await?)
         } else {
             None
         };
@@ -297,13 +369,14 @@ impl MetadataRepository {
             pool,
             identity,
             lock_path,
+            run_lock_path,
             recovered,
         })
     }
 
     /// Called once at application startup, never when opening a second reader.
     pub async fn recover_interrupted(&self) -> DriverResult<()> {
-        let Ok(_lock) = writer_lock(&self.lock_path) else {
+        let Ok(_run) = writer_lock(&self.run_lock_path) else {
             return Ok(());
         };
         let mut tx = self.pool.begin().await.map_err(sql_error)?;
@@ -323,7 +396,9 @@ impl MetadataRepository {
             .await
             .map_err(sql_error)
     }
-    pub async fn all(&self) -> DriverResult<Vec<MetadataObject>> {
+    /// Every cached object, for assertions; the application reads pages.
+    #[cfg(test)]
+    async fn all(&self) -> DriverResult<Vec<MetadataObject>> {
         let values: Vec<String> =
             sqlx::query_scalar("SELECT object_json FROM objects ORDER BY path_key")
                 .fetch_all(&self.pool)
@@ -402,7 +477,9 @@ impl MetadataRepository {
                         &row.try_get::<String, _>("scope_json").map_err(sql_error)?,
                     )
                     .map_err(json_error)?,
-                    state: row.try_get("state").map_err(sql_error)?,
+                    state: RefreshState::parse(
+                        &row.try_get::<String, _>("state").map_err(sql_error)?,
+                    ),
                     last_attempt_at: row.try_get("last_attempt_at").map_err(sql_error)?,
                     last_success_at: row.try_get("last_success_at").map_err(sql_error)?,
                     version: row.try_get("version").map_err(sql_error)?,
@@ -432,7 +509,7 @@ impl MetadataRepository {
     /// again. An empty path in `subtrees` keeps everything. Returns the new
     /// version.
     pub async fn retain(&self, subtrees: &[ObjectPath], nodes: &[ObjectPath]) -> DriverResult<i64> {
-        let _lock = writer_lock_within(&self.lock_path, std::time::Duration::from_secs(5)).await?;
+        let _lock = writer_lock_within(&self.lock_path, LOCK_PATIENCE).await?;
         let mut tx = self.pool.begin().await.map_err(sql_error)?;
         let (version, identity): (i64, String) =
             sqlx::query_as("SELECT version,identity FROM metadata_info WHERE singleton=1")
@@ -475,10 +552,20 @@ impl MetadataRepository {
         Ok(version + 1)
     }
 
+    /// Starts a refresh of `scope`, waiting a few seconds for one that is
+    /// finishing. Fails while another refresh of this cache runs.
     pub async fn begin(&self, scope: &ObjectPath) -> DriverResult<PendingRefresh> {
-        let lock = writer_lock(&self.lock_path)?;
+        self.begin_within(scope, LOCK_PATIENCE).await
+    }
+
+    async fn begin_within(
+        &self,
+        scope: &ObjectPath,
+        patience: std::time::Duration,
+    ) -> DriverResult<PendingRefresh> {
+        let run = writer_lock_within(&self.run_lock_path, patience).await?;
         let mut tx = self.pool.begin().await.map_err(sql_error)?;
-        // Owning the OS lock proves no live refresh can own an abandoned run.
+        // Owning the run lock proves no live refresh can own an abandoned run.
         sqlx::query("UPDATE scope_status SET state='interrupted',message='Refresh interrupted; previous cache preserved.' WHERE state='running'").execute(&mut *tx).await.map_err(sql_error)?;
         sqlx::query("DELETE FROM refresh_runs WHERE state='running'")
             .execute(&mut *tx)
@@ -496,17 +583,17 @@ impl MetadataRepository {
         }
         let scope_key = key(scope)?;
         let scope_json = serde_json::to_string(scope).map_err(json_error)?;
-        let run = sqlx::query("INSERT INTO refresh_runs(scope_key,scope_json,base_version,state) VALUES(?,?,?,'running')")
+        let run_id = sqlx::query("INSERT INTO refresh_runs(scope_key,scope_json,base_version,state) VALUES(?,?,?,'running')")
             .bind(&scope_key).bind(&scope_json).bind(version).execute(&mut *tx).await.map_err(|_| DriverError::validation("A metadata refresh is already in progress."))?.last_insert_rowid();
         sqlx::query("INSERT INTO scope_status(scope_key,scope_json,state,last_run,last_attempt_at,version) VALUES(?,?,'running',?,strftime('%Y-%m-%dT%H:%M:%fZ','now'),?) ON CONFLICT(scope_key) DO UPDATE SET state='running',last_run=excluded.last_run,last_attempt_at=excluded.last_attempt_at,message=NULL")
-            .bind(scope_key).bind(scope_json).bind(run).bind(version).execute(&mut *tx).await.map_err(sql_error)?;
+            .bind(scope_key).bind(scope_json).bind(run_id).bind(version).execute(&mut *tx).await.map_err(sql_error)?;
         tx.commit().await.map_err(sql_error)?;
         Ok(PendingRefresh {
             repository: self.clone(),
-            id: run,
+            id: run_id,
             version,
             scope: scope.clone(),
-            _lock: lock,
+            _run: run,
         })
     }
 }
@@ -549,6 +636,7 @@ impl PendingRefresh {
         let scope_key = key(&self.scope)?;
         let lower = format!("{scope_key}/");
         let upper = format!("{scope_key}0");
+        let _lock = writer_lock_within(&self.repository.lock_path, LOCK_PATIENCE).await?;
         let mut tx = self.repository.pool.begin().await.map_err(sql_error)?;
         let current: (i64, String) =
             sqlx::query_as("SELECT version,identity FROM metadata_info WHERE singleton=1")
@@ -584,10 +672,11 @@ impl PendingRefresh {
             ensure_nodes(&mut tx, &self.scope, depth).await?;
         }
         let state = if report.warnings.is_empty() {
-            "success"
+            RefreshState::Success
         } else {
-            "partial"
-        };
+            RefreshState::Partial
+        }
+        .as_str();
         sqlx::query("UPDATE scope_status SET state=?,last_success_at=CASE WHEN ?='success' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE last_success_at END,last_success_run=CASE WHEN ?='success' THEN last_run ELSE last_success_run END,version=?,message=? WHERE scope_key=? AND last_run=?")
             .bind(state).bind(state).bind(state).bind(self.version+1)
             .bind(if report.warnings.is_empty() { None } else { Some("Parts without permission were preserved.") }).bind(&scope_key).bind(self.id)
@@ -619,11 +708,14 @@ impl PendingRefresh {
         sqlx::query(
             "UPDATE scope_status SET state=?,message=? WHERE last_run=? AND state='running'",
         )
-        .bind(if failure.code == ErrorCode::Cancelled {
-            "cancelled"
-        } else {
-            "failed"
-        })
+        .bind(
+            if failure.code == ErrorCode::Cancelled {
+                RefreshState::Cancelled
+            } else {
+                RefreshState::Failed
+            }
+            .as_str(),
+        )
         .bind(&failure.message)
         .bind(self.id)
         .execute(&mut *tx)

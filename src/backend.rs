@@ -486,60 +486,6 @@ pub async fn run<T: Send + 'static>(
     })?
 }
 
-#[derive(Default)]
-struct MetadataCollector(Vec<MetadataObject>);
-#[async_trait]
-impl IntrospectionSink for MetadataCollector {
-    async fn batch(&mut self, objects: Vec<MetadataObject>) -> DriverResult<()> {
-        self.0.extend(objects);
-        Ok(())
-    }
-}
-
-pub async fn metadata(
-    input: ResolvedConnection,
-    scope: ObjectPath,
-    cancel: CancellationToken,
-) -> DriverResult<(Vec<MetadataObject>, IntrospectionReport)> {
-    let driver = builtin_registry()?.get(input.config.driver)?;
-    let mut sink = MetadataCollector::default();
-    let report = driver
-        .introspect_scoped(&input, &scope, &mut sink, cancel)
-        .await?;
-    Ok((sink.0, report))
-}
-
-/// Publish atomically after success. Warnings protect unreadable subtrees from
-/// deletion, while a successful empty subtree removes objects deleted remotely.
-pub fn merge_metadata(
-    current: &mut Vec<MetadataObject>,
-    scope: &ObjectPath,
-    incoming: Vec<MetadataObject>,
-    report: &IntrospectionReport,
-) {
-    current.retain(|object| {
-        !object.path.is_within(scope)
-            || report
-                .warnings
-                .iter()
-                .any(|warning| object.path.is_within(&warning.path))
-    });
-    for object in incoming
-        .into_iter()
-        .filter(|object| object.path.is_within(scope))
-    {
-        current.retain(|old| old.path != object.path);
-        current.push(object);
-    }
-    current.sort_by(|a, b| {
-        a.path
-            .0
-            .iter()
-            .map(|p| &p.name)
-            .cmp(b.path.0.iter().map(|p| &p.name))
-    });
-}
-
 /// One statement's result, built while the driver reads it.
 #[derive(Debug, Default)]
 pub struct QueryResult {
@@ -929,43 +875,6 @@ mod tests {
         assert_eq!(expanded.objects.len(), 251);
         assert!(!expanded.pages.iter().any(|(_, _, more)| *more));
         std::fs::remove_dir_all(dir).unwrap();
-    }
-    #[test]
-    fn scoped_replace_preserves_siblings_and_removes_deleted_columns() {
-        let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db.a");
-        let table = MetadataObject::new(ObjectKind::Table, &db.path, "a");
-        let other = MetadataObject::new(ObjectKind::Table, &db.path, "ab");
-        let col = MetadataObject::new(ObjectKind::Column, &table.path, "gone");
-        let mut current = vec![db.clone(), table.clone(), other.clone(), col];
-        merge_metadata(
-            &mut current,
-            &table.path,
-            vec![table.clone()],
-            &IntrospectionReport::default(),
-        );
-        assert_eq!(current.len(), 3);
-        assert!(current.contains(&other));
-        merge_metadata(
-            &mut current,
-            &table.path,
-            vec![],
-            &IntrospectionReport::default(),
-        );
-        assert_eq!(current.len(), 2);
-        assert!(current.contains(&db));
-    }
-    #[test]
-    fn permission_warning_preserves_previous_subtree() {
-        let table = MetadataObject::new(ObjectKind::Table, &ObjectPath::default(), "a");
-        let mut current = vec![table.clone()];
-        let report = IntrospectionReport {
-            warnings: vec![IntrospectionWarning {
-                path: table.path.clone(),
-                message: "denied".into(),
-            }],
-        };
-        merge_metadata(&mut current, &ObjectPath::default(), vec![], &report);
-        assert_eq!(current, vec![table]);
     }
     #[test]
     fn preview_quotes_structural_names() {
@@ -1672,13 +1581,24 @@ mod tests {
         let repository = MetadataRepository::open(dir, id, &catalog_input().config)
             .await
             .unwrap();
-        let mut paths: Vec<_> = repository
-            .all()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|object| object.path)
-            .collect();
+        // Walks the cache through the paged reads the explorer uses.
+        let mut paths = Vec::new();
+        let mut parents = vec![ObjectPath::default()];
+        while let Some(parent) = parents.pop() {
+            let mut offset = 0;
+            loop {
+                let page = repository.children(&parent, offset, 500).await.unwrap();
+                offset += page.len() as u32;
+                let end = page.len() < 500;
+                for object in page {
+                    parents.push(object.path.clone());
+                    paths.push(object.path);
+                }
+                if end {
+                    break;
+                }
+            }
+        }
         repository.close().await;
         paths.sort_by(|a, b| {
             a.0.iter()

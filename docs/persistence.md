@@ -78,15 +78,31 @@ configuration's identity.
 
 ## Atomic metadata refresh
 
-1. `begin(scope)` takes the writer lock and inserts a `running` run.
+Two OS lock files guard each cache. The **run lock** (`<id>.run.lock`) is
+held for a whole refresh, so owning it proves that no live refresh owns a
+`running` run. The **writer lock** (`<id>.lock`) is held only while
+publishing, retaining or resetting the cache, so a refresh that is still
+reading the server does not block those; each waits up to five seconds for
+the other holder.
+
+1. `begin(scope)` takes the run lock (waiting up to five seconds for a
+   refresh that is finishing) and inserts a `running` run.
 2. The driver streams batches; `batch` writes them to `staging_objects`.
-3. On success, `activate` replaces the objects of that scope with the staged
-   ones **in one transaction**, keeps protected subtrees, bumps the cache
-   version and records the scope status.
+3. On success, `activate` takes the writer lock and replaces the objects of
+   that scope with the staged ones **in one transaction**, keeps protected
+   subtrees, bumps the cache version and records the scope status. A read
+   that started before the configuration was reset, or before another
+   publication, is refused as stale.
 4. On failure or cancellation, `fail` records the error and discards the
    staged objects. The published objects are untouched.
-5. When a cache is opened, `recover_interrupted` marks runs left `running` by a
-   crash as interrupted and removes them; the previous read stays.
+5. When a cache is opened, `recover_interrupted` takes the run lock, marks
+   runs left `running` by a crash as interrupted and removes them; the
+   previous read stays.
+
+The scope status is read as `jykre_storage::RefreshState`; the stored text
+(`running`, `success`, `partial`, `warning`, `failed`, `cancelled`,
+`interrupted`) is unchanged, and a value this version does not know reads as
+`Unknown`.
 
 A scope's ancestors (its database or catalog) are outside the scope, so the
 driver does not emit them; `activate` adds the missing ones when the scope
@@ -94,8 +110,8 @@ published anything. Reading a choice publishes each last-level namespace on
 its own. After a complete read, `retain(subtrees, nodes)` keeps only the
 objects inside the chosen subtrees, the named namespaces and their ancestors,
 removes everything else with its scope status in one transaction and bumps
-the version. It waits up to five seconds for a refresh that is finishing to
-release the writer lock.
+the version. It waits up to five seconds for a publication that is finishing
+to release the writer lock.
 
 Readers that page through the cache compare the version before and after; if
 a refresh published in between, they stop and ask the user to expand the node

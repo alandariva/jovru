@@ -182,7 +182,12 @@ a time; until something is chosen, nothing is introspected.
 
 1. Refreshing the connection starts `backend::apply_selection` with the
    choice (or only what a change added); refreshing a node starts
-   `backend::refresh_metadata` for that node.
+   `backend::refresh_metadata` for that node. A connection runs one refresh
+   at a time: one asked for meanwhile waits in its queue
+   (`jykre::refresh_queue::RefreshQueue`), which skips a node already covered
+   by a waiting one and lets a broader node replace the waiting nodes inside
+   it. Saving the connection stops its refreshes only after the save
+   succeeded.
 2. `apply_selection` lists the broader rules, then reads each last-level
    namespace as its own scope and reports progress and the time left after
    each one.
@@ -222,7 +227,8 @@ holds one value per operation, for example:
   (`jykre::query::RunState`, owned by `QueryRun` together with the status of
   each statement).
 - Metadata scope: `Idle { last_success_at } | Refreshing | Failed { error, last_success_at }`
-  (stored as `RefreshStatus` in the metadata file).
+  (stored as `RefreshStatus` in the metadata file, its state read as
+  `jykre_storage::RefreshState`).
 
 The footer, the gutter and every other indicator derive from that single
 value, so they cannot disagree.

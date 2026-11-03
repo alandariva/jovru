@@ -3,7 +3,7 @@
 mod config;
 mod metadata;
 pub use config::{ConfigRepository, UnreadableProfile};
-pub use metadata::{MetadataRepository, PendingRefresh, RefreshStatus};
+pub use metadata::{MetadataRepository, PendingRefresh, RefreshState, RefreshStatus};
 
 use jykre_core::*;
 use sqlx::{ConnectOptions, SqlitePool, sqlite::*};

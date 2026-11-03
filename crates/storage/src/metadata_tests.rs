@@ -63,6 +63,15 @@ async fn partial_publication_is_atomic_does_not_rewrite_siblings_and_persists() 
             .find(|status| status.scope == table.path)
             .unwrap()
             .state,
+        RefreshState::Success
+    );
+    // The enum changes the type, not the text existing caches hold.
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM scope_status WHERE scope_key=?")
+            .bind(key(&table.path).unwrap())
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap(),
         "success"
     );
     repository.close().await;
@@ -87,6 +96,25 @@ async fn partial_publication_is_atomic_does_not_rewrite_siblings_and_persists() 
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn refresh_states_read_back_the_text_they_store() {
+    for state in [
+        RefreshState::Running,
+        RefreshState::Success,
+        RefreshState::Partial,
+        RefreshState::Warning,
+        RefreshState::Failed,
+        RefreshState::Cancelled,
+        RefreshState::Interrupted,
+    ] {
+        assert_eq!(RefreshState::parse(state.as_str()), state);
+    }
+    assert_eq!(
+        RefreshState::parse("written by a newer version"),
+        RefreshState::Unknown
+    );
+}
+
 #[tokio::test]
 async fn errors_cancellation_and_crash_never_publish_staged_data() {
     let dir = dir();
@@ -109,7 +137,12 @@ async fn errors_cancellation_and_crash_never_publish_staged_data() {
     assert_eq!(repository.version().await.unwrap(), 1);
     let mut run = repository.begin(&objects()[1].path).await.unwrap();
     run.batch(vec![objects()[1].clone()]).await.unwrap();
-    assert!(repository.begin(&ObjectPath::default()).await.is_err());
+    assert!(
+        repository
+            .begin_within(&ObjectPath::default(), std::time::Duration::ZERO)
+            .await
+            .is_err()
+    );
     // A second reader must not recover a refresh that still owns its OS lock.
     repository.recover_interrupted().await.unwrap();
     assert!(
@@ -118,7 +151,7 @@ async fn errors_cancellation_and_crash_never_publish_staged_data() {
             .await
             .unwrap()
             .iter()
-            .any(|status| status.state == "running")
+            .any(|status| status.state == RefreshState::Running)
     );
     drop(run);
     repository.close().await;
@@ -131,7 +164,7 @@ async fn errors_cancellation_and_crash_never_publish_staged_data() {
             .await
             .unwrap()
             .iter()
-            .any(|status| status.state == "interrupted")
+            .any(|status| status.state == RefreshState::Interrupted)
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM staging_objects")
@@ -141,6 +174,70 @@ async fn errors_cancellation_and_crash_never_publish_staged_data() {
         0
     );
     reopened.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_refresh_holds_the_writer_lock_only_to_publish() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let config = config();
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    seed(&repository).await;
+    let table = objects()[1].clone();
+    let mut run = repository.begin(&table.path).await.unwrap();
+    run.batch(vec![table.clone()]).await.unwrap();
+    // While the refresh reads, another writer gets the lock at once.
+    let held = writer_lock(&repository.lock_path).unwrap();
+    // Publishing waits for the writer to finish instead of failing.
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        drop(held);
+    });
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    release.await.unwrap();
+    drop(run);
+    assert!(!repository.all().await.unwrap().contains(&objects()[2]));
+    // A new refresh waits for one that is finishing.
+    let finishing = repository.begin(&table.path).await.unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        drop(finishing);
+    });
+    let next = repository.begin(&ObjectPath::default()).await;
+    release.await.unwrap();
+    assert!(next.is_ok());
+    drop(next);
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn saving_another_configuration_during_a_read_makes_the_read_stale() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let config = config();
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    seed(&repository).await;
+    let mut run = repository.begin(&objects()[1].path).await.unwrap();
+    let mut changed = config.clone();
+    changed.options["user"] = serde_json::json!("another-fixture-user");
+    // The read in progress does not keep the new configuration from being
+    // accepted, and what it read is never published.
+    let current = MetadataRepository::prepare(&dir, id, &changed)
+        .await
+        .unwrap();
+    assert!(
+        run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    drop(run);
+    assert!(current.all().await.unwrap().is_empty());
+    repository.close().await;
+    current.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -173,7 +270,9 @@ async fn permission_warnings_preserve_unreadable_subtrees_and_mark_them() {
             .await
             .unwrap()
             .iter()
-            .any(|status| status.state == "warning" && status.scope == objects()[1].path)
+            .any(
+                |status| status.state == RefreshState::Warning && status.scope == objects()[1].path
+            )
     );
     repository.close().await;
     std::fs::remove_dir_all(dir).unwrap();

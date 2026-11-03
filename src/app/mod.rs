@@ -24,6 +24,7 @@ use gpui_kit::component::{
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId, TabId};
+use jykre::refresh_queue::RefreshQueue;
 use jykre::{backend, connection_store, drivers::*, result::DEFAULT_ROW_LIMIT};
 use jykre_secrets::SystemSecretStore;
 use jykre_storage::{ConfigRepository, RefreshStatus};
@@ -115,6 +116,8 @@ struct Connection {
     collapsed: HashSet<ObjectPath>,
     /// Scope being refreshed and how to cancel it.
     refreshing: Option<(ObjectPath, CancellationToken)>,
+    /// Refreshes asked for while another runs, started in order.
+    refresh_queue: RefreshQueue,
     /// What the user chose to introspect; pending until they choose.
     scope: jykre::metadata_scope::MetadataScope,
     /// How far reading the chosen namespaces got, while it runs.
@@ -427,6 +430,7 @@ impl AppView {
                     metadata: Vec::new(),
                     collapsed: HashSet::new(),
                     refreshing: None,
+                    refresh_queue: RefreshQueue::default(),
                     scope: jykre::metadata_scope::MetadataScope::default(),
                     progress: None,
                     status: Feedback::new(Tone::Info, tr!("Demo · simulated data")),
