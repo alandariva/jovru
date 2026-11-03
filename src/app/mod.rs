@@ -166,6 +166,11 @@ struct AppView {
     /// Groups for restored tabs whose connection no longer exists, by the
     /// connection's name.
     orphan_groups: Vec<(String, TabGroupId)>,
+    /// The explorer node selected by a click or the arrow keys.
+    explorer_selected: Option<(usize, ObjectPath)>,
+    /// Focus of each explorer node shown so far, so the arrow keys can move
+    /// it. Rendering takes `&self`, hence the cell.
+    node_focus: std::cell::RefCell<HashMap<(usize, ObjectPath), FocusHandle>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -306,6 +311,8 @@ impl AppView {
             persist_state: false,
             state_revision: 0,
             orphan_groups: Vec::new(),
+            explorer_selected: None,
+            node_focus: std::cell::RefCell::new(HashMap::new()),
             _subscriptions: vec![
                 // The last edits are written before the application exits.
                 cx.on_app_quit(|this, cx| this.save_state_now(cx)),
@@ -982,9 +989,11 @@ impl AppView {
                                     .child(icon(if table == "orders" && self.orders_open { I::ChevronDown } else { I::ChevronRight }, FAINT))
                                     .child(icon(I::Table2, if table == "orders" { MINT } else { FAINT }))
                                     .child(div().text_size(px(14.)).text_color(rgb(if table == "orders" { MINT } else { MUTED })).child(table))
+                                    // As in the real explorer: a click selects (orders also
+                                    // shows its columns); a double click or Enter opens.
                                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                                        if table == "orders" && event.click_count() == 1 { this.orders_open = !this.orders_open; cx.notify(); }
-                                        else { this.open_table(table, window, cx); }
+                                        if event.is_keyboard() || event.click_count() >= 2 { this.open_table(table, window, cx); }
+                                        else if table == "orders" { this.orders_open = !this.orders_open; cx.notify(); }
                                     })))
                                 .when(table == "orders" && self.orders_open, |s| s.children(ORDER_COLUMNS.into_iter().map(|(name, kind, key)| {
                                     row().h(px(30.)).pl(px(99.)).pr_3().gap_2().child(icon(if key { I::KeyRound } else { I::Columns3 }, if key { 0xd8be85 } else { FAINT }))

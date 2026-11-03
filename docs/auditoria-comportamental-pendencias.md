@@ -250,6 +250,7 @@ A aplicação não foi executada nesta conferência; o estado abaixo foi lido no
 - **Comportamento recomendado:** Seleção no clique simples; abertura no duplo clique/Enter; setas de árvore.
 - **Evidência no projeto:** `src/app/connections.rs` (`open_relation`, `on_click`, `on_key_down`); `src/backend.rs` (`preview_sql`)
 - **Confiança:** Confirmado
+- **Situação:** Corrigido. Clique simples numa tabela/view só seleciona (destaque e `aria_selected`); duplo clique ou Enter abre a prévia. `jykre::explorer` (com testes) calcula os nós visíveis e as setas: ↑/↓, Home/End, → expande ou entra no primeiro filho, ← recolhe ou vai ao pai. Cada nó tem `FocusHandle` próprio e papel `TreeItem`. A árvore do demo segue a mesma regra. Também cobre a parte “árvore com setas” da N019.
 
 ## N027 — Enter na command palette sempre abre o primeiro resultado
 

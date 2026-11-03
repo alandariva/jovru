@@ -724,6 +724,61 @@ impl AppView {
         }
     }
 
+    /// The focus handle of an explorer node, created the first time it shows.
+    fn node_handle(&self, index: usize, path: &ObjectPath, cx: &App) -> FocusHandle {
+        self.node_focus
+            .borrow_mut()
+            .entry((index, path.clone()))
+            .or_insert_with(|| cx.focus_handle())
+            .clone()
+    }
+
+    /// Selects an explorer node and gives it the keyboard.
+    fn select_node(
+        &mut self,
+        index: usize,
+        path: &ObjectPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let handle = self.node_handle(index, path, cx);
+        self.explorer_selected = Some((index, path.clone()));
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    /// An arrow key on an explorer node: move, expand or collapse
+    /// ([`jykre::explorer::step`]).
+    fn tree_key(
+        &mut self,
+        index: usize,
+        path: &ObjectPath,
+        key: jykre::explorer::TreeKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use jykre::explorer::TreeMove;
+        let query = self.search.read(cx).value().to_lowercase();
+        let connection = &self.connections[index];
+        let source = if query.is_empty() {
+            &connection.metadata
+        } else {
+            &connection.search_results
+        };
+        let nodes = jykre::explorer::visible(source, &connection.collapsed, &query);
+        let Some(current) = nodes.iter().position(|node| node.path == *path) else {
+            return;
+        };
+        match jykre::explorer::step(&nodes, &connection.collapsed, current, key) {
+            TreeMove::Focus(at) => {
+                let target = nodes[at].path.clone();
+                self.select_node(index, &target, window, cx);
+            }
+            TreeMove::Expand | TreeMove::Collapse => self.toggle_node(index, path, cx),
+            TreeMove::Stay => {}
+        }
+    }
+
     fn toggle_node(&mut self, index: usize, path: &ObjectPath, cx: &mut Context<Self>) {
         if self.connections[index].cache_loading {
             return;
@@ -935,26 +990,7 @@ impl AppView {
         } else {
             &connection.search_results
         };
-        let objects: Vec<_> = source
-            .iter()
-            .filter(|object| {
-                if !query.is_empty() {
-                    return object
-                        .path
-                        .0
-                        .iter()
-                        .any(|part| part.name.to_lowercase().contains(&query))
-                        || source.iter().any(|child| {
-                            child.path.is_within(&object.path)
-                                && child.name.to_lowercase().contains(&query)
-                        });
-                }
-                !connection
-                    .collapsed
-                    .iter()
-                    .any(|path| path != &object.path && object.path.is_within(path))
-            })
-            .collect();
+        let objects = jykre::explorer::visible(source, &connection.collapsed, &query);
         let weak = cx.weak_entity();
         let refreshing = connection
             .refreshing
@@ -1125,6 +1161,11 @@ impl AppView {
                     let freshness = connection.node_freshness(&path);
                     let refreshing_this = refreshing.as_ref() == Some(&path);
                     let name = object.name.clone();
+                    let selected = self
+                        .explorer_selected
+                        .as_ref()
+                        .is_some_and(|(at, chosen)| *at == index && *chosen == path);
+                    let focus = self.node_handle(index, &path, cx);
                     let node_id = path
                         .0
                         .iter()
@@ -1160,18 +1201,20 @@ impl AppView {
                         .child(
                             div()
                                 .id(ElementId::Name(format!("node-{index}-{row_index}").into()))
-                                .role(Role::Button)
+                                .role(Role::TreeItem)
                                 .aria_label(format!(
                                     "{} {}",
                                     if relation {
-                                        tr!("Open table")
+                                        tr!("Table")
                                     } else {
                                         tr!("Expand")
                                     },
                                     object.name
                                 ))
-                                .focusable()
+                                .aria_selected(selected)
+                                .track_focus(&focus)
                                 .tab_index(0)
+                                .when(selected, |s| s.bg(rgb(SURFACE)))
                                 .focus_visible(|s| s.bg(rgb(HOVER)))
                                 .flex()
                                 .items_center()
@@ -1198,23 +1241,37 @@ impl AppView {
                                         .text_size(px(14.))
                                         .child(object.name.clone()),
                                 )
-                                // F5 refreshes the focused node, or cancels its refresh.
+                                // F5 refreshes the focused node, or cancels its refresh;
+                                // the arrows move through the tree.
                                 .on_key_down(cx.listener(
                                     move |this, event: &KeyDownEvent, window, cx| {
-                                        if event.keystroke.key == "f5" {
+                                        let keystroke = &event.keystroke;
+                                        if keystroke.key == "f5" {
                                             this.toggle_refresh(index, key_path.clone(), cx);
-                                            window.prevent_default();
-                                            cx.stop_propagation();
+                                        } else if let Some(key) =
+                                            jykre::explorer::TreeKey::from_key(&keystroke.key)
+                                                .filter(|_| !keystroke.modifiers.modified())
+                                        {
+                                            this.tree_key(index, &key_path, key, window, cx);
+                                        } else {
+                                            return;
                                         }
+                                        window.prevent_default();
+                                        cx.stop_propagation();
                                     },
                                 ))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if relation {
-                                        this.open_relation(index, &path, window, cx);
-                                    } else {
-                                        this.toggle_node(index, &path, cx);
-                                    }
-                                })),
+                                // A click selects; a double click or Enter opens a
+                                // table, so a stray click never opens a tab.
+                                .on_click(cx.listener(
+                                    move |this, event: &ClickEvent, window, cx| {
+                                        this.select_node(index, &path, window, cx);
+                                        if !relation {
+                                            this.toggle_node(index, &path, cx);
+                                        } else if event.is_keyboard() || event.click_count() >= 2 {
+                                            this.open_relation(index, &path, window, cx);
+                                        }
+                                    },
+                                )),
                         )
                         // Refresh lives in the context menu; only a running refresh
                         // shows here, as a spinner that cancels it.

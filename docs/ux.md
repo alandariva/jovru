@@ -85,6 +85,9 @@ Rules:
 | SQL font size: larger, smaller, reset | `Ctrl +`, `Ctrl -`, `Ctrl 0` |
 | Close the search or the connection dialog | `Esc` |
 | Refresh the focused explorer node | `F5` |
+| Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
+| Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
+| Explorer: open the table (a click only selects it; a double click opens) | `Enter` |
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
 | Grid: select all, clear | `Ctrl A`, `Esc` |
 | Grid: copy, copy with headers | `Ctrl C`, `Ctrl Shift C` |

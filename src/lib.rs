@@ -8,6 +8,7 @@ pub mod cell_format;
 pub mod connection_store;
 pub mod drivers;
 pub mod error_report;
+pub mod explorer;
 pub mod grid;
 pub mod grouped_tabs;
 pub mod i18n;
