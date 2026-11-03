@@ -88,6 +88,16 @@ searching and refreshing do not reopen the file. It is opened, and checked
 with `quick_check`, at start, after the profile's identity changed and after
 a failed read.
 
+A cache is keyed by the driver's identity of the catalog
+(`Driver::cache_identity`, [ADR-0017](adr/0017-driver-metadata-contract-batch.md)),
+not by the whole profile: changing compute, defaults or TLS keeps it. A
+cache an earlier version keyed by the whole profile is adopted under the
+narrower identity without being emptied (`MetadataRepository::adopt`).
+
+The search compares `search_name` with the query in Unicode lower case
+(`instr`), filters by kind in SQL before the limit and reads the ancestors
+of the matches in one query.
+
 Children are read a page at a time with a cursor (`PageCursor`), in a fixed
 order of kinds (namespaces, tables, views, materialized views, columns,
 foreign keys, partitions) and then by ordinal, name and key. Every query
@@ -138,9 +148,18 @@ again instead of mixing two reads.
 
 ## Migrations
 
-Each file's schema version is `PRAGMA user_version`. Today both files are at
-version 1, created in one transaction, and a file with a higher version is
-refused ("created by a newer version of the application").
+Each file's schema version is `PRAGMA user_version`. `config.db` is at
+version 1. The metadata files are at version 2
+([ADR-0018](adr/0018-metadata-cache-migrations.md)): a new file is created at
+version 1 and then migrated, and an older one gets only the steps it lacks.
+A file with a higher version is refused ("created by a newer version of the
+application").
+
+Metadata steps (`jykre-storage`, `metadata.rs`):
+
+| Step | Change |
+| --- | --- |
+| 2 | `objects.search_name` and `staging_objects.search_name`: the name in Unicode lower case, written with every object and filled for existing rows by the step; the index `objects_search` and the FTS5 trigram table `objects_fts`, kept in step with `objects` by triggers; `scope_status.last_published_at`: when a refresh last published the scope, complete or partial |
 
 The standard for schema changes:
 
@@ -180,5 +199,5 @@ The standard for schema changes:
 
 | Standard | Current code |
 | --- | --- |
-| Numbered forward-only migration steps | Only version 1 exists; there is no step mechanism yet. The first schema change must introduce it |
+| Numbered forward-only migration steps | `config.db` has no step yet; the metadata files have their mechanism and step 2 |
 | `config.db` backup before migrating, restore offered on failure | Not implemented; a broken `config.db` produces an error only |

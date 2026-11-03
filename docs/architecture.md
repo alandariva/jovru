@@ -188,9 +188,12 @@ a time; until something is chosen, nothing is introspected.
    by a waiting one and lets a broader node replace the waiting nodes inside
    it. Saving the connection stops its refreshes only after the save
    succeeded.
-2. `apply_selection` lists the broader rules, then reads each last-level
-   namespace as its own scope and reports progress and the time left after
-   each one.
+2. `apply_selection` lists the broader rules (**Everything** skips what the
+   driver leaves out, such as Databricks' `system` catalog), then reads each
+   last-level namespace as its own scope, up to four at a time, publishing
+   them one at a time, and reports progress and the time left after each one.
+   A namespace the cache does not hold yet is published with its names first
+   and in full right after.
 3. For each scope, the driver streams batches into a pending refresh in the
    connection's metadata file. On success the pending objects replace that
    scope in one transaction; on failure or cancellation they are discarded

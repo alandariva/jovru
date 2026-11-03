@@ -334,6 +334,38 @@ pub fn namespace_ages(statuses: &[RefreshStatus]) -> HashMap<ObjectPath, SystemT
         .collect()
 }
 
+/// The chosen namespaces last read longer ago than `max_age` (as of `now`),
+/// by their last complete read or, failing that, their last publication:
+/// what opening the connection reads again when the user asked for it.
+/// Namespaces never read are left to the regular read of the choice.
+pub fn due_for_revalidation(
+    statuses: &[RefreshStatus],
+    scope: &crate::metadata_scope::MetadataScope,
+    max_age: Duration,
+    now: SystemTime,
+) -> Vec<ObjectPath> {
+    statuses
+        .iter()
+        .filter(|status| {
+            status.scope.0.last().is_some_and(|part| {
+                matches!(
+                    part.kind,
+                    ObjectKind::Database | ObjectKind::Catalog | ObjectKind::Schema
+                )
+            }) && scope.covers(&status.scope)
+        })
+        .filter(|status| {
+            status
+                .last_success_at
+                .as_deref()
+                .or(status.last_published_at.as_deref())
+                .and_then(parse_utc)
+                .is_some_and(|at| now.duration_since(at).unwrap_or_default() > max_age)
+        })
+        .map(|status| status.scope.clone())
+        .collect()
+}
+
 /// Reads the cache's UTC timestamps (`2026-11-03T12:30:05.123Z`).
 pub fn parse_utc(text: &str) -> Option<SystemTime> {
     let (date, time) = text.strip_suffix('Z')?.split_once('T')?;
@@ -439,6 +471,33 @@ pub fn kind_name(kind: ObjectKind) -> String {
         _ => "",
     }
     .into()
+}
+
+/// What an inspected item is called in the inspection panel.
+pub fn inspected_kind_name(kind: crate::drivers::InspectedKind) -> String {
+    use crate::drivers::InspectedKind;
+    match kind {
+        InspectedKind::Index => tr!("Index"),
+        InspectedKind::PrimaryKey => tr!("Primary key"),
+        InspectedKind::Unique => tr!("Unique"),
+        InspectedKind::Check => tr!("Check"),
+        InspectedKind::ForeignKey => tr!("Foreign key"),
+        InspectedKind::Exclusion => tr!("Exclusion"),
+        InspectedKind::Trigger => tr!("Trigger"),
+        InspectedKind::Function => tr!("Function"),
+        InspectedKind::Procedure => tr!("Procedure"),
+        InspectedKind::Sequence => tr!("Sequence"),
+        InspectedKind::Type => tr!("Type"),
+        InspectedKind::Default => tr!("Default"),
+        _ => "",
+    }
+    .into()
+}
+
+/// Whether a node can be inspected: a relation, or a namespace of the last
+/// level (its routines, sequences and types).
+pub fn inspectable(object: &MetadataObject, last_level: Option<ObjectKind>) -> bool {
+    object.kind.is_relation() || Some(object.kind) == last_level
 }
 
 /// Everything known about a node beyond its name, one fact per line, for
@@ -845,6 +904,35 @@ mod tests {
         let ages = namespace_ages(&statuses);
         assert_eq!(ages.len(), 1);
         assert_eq!(ages.get(&schema.path), Some(&at));
+        // Revalidation picks chosen namespaces read too long ago.
+        let other = object(&[(ObjectKind::Database, "db"), (ObjectKind::Schema, "hr")]);
+        let mut statuses = statuses.to_vec();
+        statuses.push(RefreshStatus {
+            scope: other.path.clone(),
+            last_published_at: Some("2026-11-01T12:30:05.250Z".into()),
+            ..RefreshStatus::default()
+        });
+        let chosen = crate::metadata_scope::MetadataScope {
+            all: false,
+            include: vec![schema.path.clone(), other.path.clone()],
+        };
+        let now = at + Duration::from_secs(3_600);
+        assert_eq!(
+            due_for_revalidation(&statuses, &chosen, Duration::from_secs(24 * 3_600), now),
+            std::slice::from_ref(&other.path)
+        );
+        assert_eq!(
+            due_for_revalidation(&statuses, &chosen, Duration::from_secs(60), now),
+            [schema.path.clone(), other.path.clone()]
+        );
+        let narrower = crate::metadata_scope::MetadataScope {
+            all: false,
+            include: vec![schema.path.clone()],
+        };
+        assert_eq!(
+            due_for_revalidation(&statuses, &narrower, Duration::from_secs(60), now),
+            std::slice::from_ref(&schema.path)
+        );
         assert_eq!(format_age(Duration::from_secs(20)), "just now");
         assert_eq!(format_age(Duration::from_secs(5 * 60)), "5 min ago");
         assert_eq!(format_age(Duration::from_secs(3 * 3_600)), "3 h ago");

@@ -105,6 +105,9 @@ struct Connection {
     tree: Tree,
     /// When each chosen namespace was last read in full.
     ages: HashMap<ObjectPath, std::time::SystemTime>,
+    /// Nodes the last refresh could not read for lack of permission; their
+    /// last good read stays.
+    no_access: std::collections::HashSet<ObjectPath>,
     /// The last-level namespaces in the cache, which tabs offer as their
     /// context.
     namespaces: Vec<ObjectPath>,
@@ -126,6 +129,9 @@ struct Connection {
     input: Option<ResolvedConnection>,
     /// Rows kept per statement in this connection's tabs.
     row_limit: u32,
+    /// Hours after which opening the connection reads its chosen namespaces
+    /// again; 0 never does.
+    revalidate_hours: u32,
     /// Scope being refreshed and how to cancel it.
     refreshing: Option<(ObjectPath, CancellationToken)>,
     /// Refreshes asked for while another runs, started in order.
@@ -168,6 +174,11 @@ struct AppView {
     explorer_signature: Vec<(bool, bool, u64)>,
     /// A node go to definition asked to show, selected once its row is read.
     pending_reveal: Option<(usize, ObjectPath)>,
+    /// The inspection panel, while open.
+    inspection: Option<connections::InspectionPanel>,
+    /// Bumped by every inspection, so a late answer for an earlier one is
+    /// dropped.
+    inspection_revision: usize,
     search: Entity<InputState>,
     command: Entity<InputState>,
     command_open: bool,
@@ -183,6 +194,13 @@ struct AppView {
     connection_row_limit: Entity<InputState>,
     connection_password: Entity<InputState>,
     connection_ssl: Entity<InputState>,
+    /// PostgreSQL: the search_path sessions start with.
+    connection_search_path: Entity<InputState>,
+    /// PostgreSQL: offer the server's other databases to introspect.
+    all_databases: bool,
+    /// Hours after which opening the connection reads its chosen namespaces
+    /// again; empty or 0 never does.
+    connection_revalidate: Entity<InputState>,
     connection_databricks: Entity<databricks_connection::DatabricksForm>,
     connection_scope: Entity<scope_picker::ScopePicker>,
     connection_status: Option<Feedback>,
@@ -326,6 +344,8 @@ impl AppView {
             explorer_entries: Vec::new(),
             explorer_signature: Vec::new(),
             pending_reveal: None,
+            inspection: None,
+            inspection_revision: 0,
             search,
             command,
             command_open: false,
@@ -346,6 +366,12 @@ impl AppView {
                     .placeholder(tr!("Enter the password"))
             }),
             connection_ssl: cx.new(|cx| InputState::new(window, cx).default_value("prefer")),
+            connection_search_path: cx.new(|cx| {
+                InputState::new(window, cx).placeholder(tr!("Server default, e.g. sales, public"))
+            }),
+            all_databases: false,
+            connection_revalidate: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr!("Never"))),
             connection_databricks: cx
                 .new(|cx| databricks_connection::DatabricksForm::new(window, cx)),
             connection_scope: cx.new(|cx| scope_picker::ScopePicker::new(window, cx)),
@@ -440,6 +466,7 @@ impl AppView {
                     metadata_statuses: Vec::new(),
                     tree: Tree::default(),
                     ages: HashMap::new(),
+                    no_access: Default::default(),
                     namespaces: Vec::new(),
                     names: None,
                     search_rows: Vec::new(),
@@ -452,6 +479,7 @@ impl AppView {
                     expanded: app.connections.is_empty(),
                     input: None,
                     row_limit: DEFAULT_ROW_LIMIT,
+                    revalidate_hours: 0,
                     refreshing: None,
                     refresh_queue: RefreshQueue::default(),
                     scope: jykre::metadata_scope::MetadataScope::default(),
@@ -1463,6 +1491,9 @@ impl AppView {
                         this.command_open = false;
                         cx.notify();
                     }
+                    if this.inspection.take().is_some() {
+                        cx.notify();
+                    }
                 }),
             )
     }
@@ -1503,7 +1534,9 @@ impl Render for AppView {
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    if this.command_open {
+                    if this.inspection.take().is_some() {
+                        cx.notify();
+                    } else if this.command_open {
                         this.command_open = false;
                         cx.notify();
                     } else {
@@ -1662,6 +1695,9 @@ impl Render for AppView {
                     ),
             )
             .when(self.command_open, |s| s.child(self.command_palette(cx)))
+            .when(self.inspection.is_some(), |s| {
+                s.child(self.inspection_panel(cx))
+            })
             .when(self.connection_open, |s| {
                 s.child(self.connection_dialog(cx))
             })

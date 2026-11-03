@@ -56,7 +56,11 @@ namespaces of the server typed in the form, a tree with three-state boxes
 narrows it, and **Everything, including what is created later** chooses all.
 A namespace a saved choice names but the server no longer has shows
 **Not found**. Saving without a choice is allowed; nothing is read until the
-user chooses.
+user chooses. When the connection settings changed after the list was loaded,
+a new choice cannot be saved until the list is loaded again, so a choice made
+for another server is never saved. For PostgreSQL, **Connection** also takes
+the search path sessions start with and whether to offer the server's other
+databases to introspect.
 
 Each state has one consistent representation.
 
@@ -74,6 +78,10 @@ Each state has one consistent representation.
 | Metadata state per scope | Explorer node and its tooltip | Last success time, failure message, permission warnings |
 | Age of a chosen namespace | After the namespace's name in the explorer | How long ago it was last read in full ("3 days ago"), as of the moment it is drawn |
 | A tab's context | The editor header, after the connection | Where unqualified names resolve: the schema (PostgreSQL), database (MySQL) or catalog and schema (Databricks), as the session reports it after each run ("Session default" before the first). Choosing another from the namespaces in the cache applies it from the next run; it comes back with the tab after a restart and is applied again to a session that reopened |
+| No access | After a node's name in the explorer | "no access" when the last refresh could not read it for lack of permission; its last good read stays and its menu says when it was taken |
+| Inspection | **Inspect** in a relation's or a schema's menu | A panel with indexes, constraints and triggers (relations) or functions, procedures with their parameters, sequences and types (schemas), read from the server when asked; `Esc` closes it |
+| Definition | **Show definition** in a relation's menu | A new tab with the view's source or the table's DDL, read from the server |
+| Revalidation | Connection dialog, **Options** | Hours after which opening the application reads the chosen namespaces again, once; empty or 0 never does |
 | Editor suggestions | The SQL editor | After `FROM` or `JOIN`, the relations of the tab's context (or of the schema written before the dot), its CTEs and namespaces; after `alias.`, the columns of that relation; elsewhere, the columns of the statement's relations. Only the tab's own connection is suggested. Columns not read yet show "Loading columns…" and are read in the background; typing never waits. Hovering a column shows its type, nullability, key, default and comment; `Ctrl`-click on a relation or column shows it in the explorer |
 | Structure changed by SQL | The explorer | A `CREATE`, `ALTER`, `DROP`, `RENAME` or `COMMENT` that ran queues a refresh of the namespaces it touched, when they are chosen to be introspected, about 300 ms later |
 | Explorer expansion | The explorer | The nodes left expanded come back after a restart, read from the local cache; "Load more" after a node reads its next page only |

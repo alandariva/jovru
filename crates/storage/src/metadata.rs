@@ -35,6 +35,86 @@ CREATE TABLE scope_status (
 );
 "#;
 
+/// The metadata file's schema version: version 1 is [`SCHEMA`]; each later
+/// version is one step of [`STEPS`], applied in order. A released step is
+/// never edited ([ADR-0018](../../../docs/adr/0018-metadata-cache-migrations.md)).
+const VERSION: i64 = 2;
+
+/// Step 2: Unicode search names (filled by [`migrate`]) and the time of the
+/// last publication, complete or partial.
+const STEP_2: &str = "ALTER TABLE objects ADD COLUMN search_name TEXT; ALTER TABLE staging_objects ADD COLUMN search_name TEXT; ALTER TABLE scope_status ADD COLUMN last_published_at TEXT; UPDATE scope_status SET last_published_at=last_success_at; CREATE INDEX objects_search ON objects(search_name,kind,name,path_key); CREATE VIRTUAL TABLE objects_fts USING fts5(search_name, content='objects', content_rowid='rowid', tokenize='trigram');";
+
+/// The end of step 2, once the search names are filled: the trigram index
+/// of the names, kept in step with `objects` by triggers.
+const STEP_2_INDEX: &str = "INSERT INTO objects_fts(objects_fts) VALUES('rebuild'); CREATE TRIGGER objects_fts_insert AFTER INSERT ON objects BEGIN INSERT INTO objects_fts(rowid,search_name) VALUES(new.rowid,new.search_name); END; CREATE TRIGGER objects_fts_delete AFTER DELETE ON objects BEGIN INSERT INTO objects_fts(objects_fts,rowid,search_name) VALUES('delete',old.rowid,old.search_name); END; CREATE TRIGGER objects_fts_update AFTER UPDATE OF search_name ON objects BEGIN INSERT INTO objects_fts(objects_fts,rowid,search_name) VALUES('delete',old.rowid,old.search_name); INSERT INTO objects_fts(rowid,search_name) VALUES(new.rowid,new.search_name); END;";
+
+const STEPS: [&str; 1] = [STEP_2];
+
+/// How the search compares names: lower case by Unicode rules, so `ação`
+/// finds `AÇÃO`.
+pub(crate) fn search_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// Brings the file to [`VERSION`]: a new file gets version 1 and then every
+/// step; an older one only the steps it lacks, each in one transaction that
+/// ends by setting `user_version`. A file from a newer version is refused.
+async fn migrate(pool: &SqlitePool) -> DriverResult<()> {
+    let mut version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(pool)
+        .await
+        .map_err(sql_error)?;
+    if version > VERSION {
+        return Err(error(
+            "This file was created by a newer version of the application.",
+        ));
+    }
+    if version == 0 {
+        schema(pool, SCHEMA).await?;
+        version = 1;
+    }
+    while version < VERSION {
+        let step = usize::try_from(version - 1)
+            .ok()
+            .and_then(|index| STEPS.get(index))
+            .ok_or_else(|| error("Unknown metadata cache version."))?;
+        let mut tx = pool.begin().await.map_err(sql_error)?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(*step))
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        if version + 1 == 2 {
+            // SQLite folds ASCII only, so the names are folded here.
+            let names: Vec<(String, String)> = sqlx::query_as("SELECT path_key,name FROM objects")
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(sql_error)?;
+            for (path_key, name) in names {
+                sqlx::query("UPDATE objects SET search_name=? WHERE path_key=?")
+                    .bind(search_name(&name))
+                    .bind(path_key)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(sql_error)?;
+            }
+            sqlx::raw_sql(STEP_2_INDEX)
+                .execute(&mut *tx)
+                .await
+                .map_err(sql_error)?;
+        }
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "PRAGMA user_version={}",
+            version + 1
+        )))
+        .execute(&mut *tx)
+        .await
+        .map_err(sql_error)?;
+        tx.commit().await.map_err(sql_error)?;
+        version += 1;
+    }
+    Ok(())
+}
+
 /// A key is kept when it lies inside a kept subtree (`?1`), is a kept node
 /// (`?2`) or is an ancestor of either. Both are JSON arrays of keys; '/'
 /// separates segments and '0' is the character after it.
@@ -243,13 +323,14 @@ async fn ensure_nodes(
         } else {
             Some(key(&parent)?)
         };
-        sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json) VALUES(?,?,?,?,?,NULL,?) ON CONFLICT(path_key) DO NOTHING")
+        sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name) VALUES(?,?,?,?,?,NULL,?,?) ON CONFLICT(path_key) DO NOTHING")
             .bind(key(&node)?)
             .bind(parent_key)
             .bind(serde_json::to_string(&node).map_err(json_error)?)
             .bind(serde_json::to_string(&object.kind).map_err(json_error)?)
             .bind(&object.name)
             .bind(serde_json::to_string(&object).map_err(json_error)?)
+            .bind(search_name(&object.name))
             .execute(&mut *tx)
             .await
             .map_err(sql_error)?;
@@ -326,8 +407,8 @@ pub enum RefreshState {
     /// The last refresh published the scope, but parts it could not read
     /// kept their previous read.
     Partial,
-    /// A part inside a refreshed scope could not be read; its previous read
-    /// stays.
+    /// The scope, or a part inside a refreshed scope, could not be read for
+    /// lack of permission; its previous read stays.
     Warning,
     /// The last refresh failed; the previous read stays.
     Failed,
@@ -378,6 +459,8 @@ pub struct RefreshStatus {
     pub state: RefreshState,
     pub last_attempt_at: Option<String>,
     pub last_success_at: Option<String>,
+    /// When a refresh last published this scope, complete or partial.
+    pub last_published_at: Option<String>,
     pub version: i64,
     pub message: Option<String>,
 }
@@ -484,7 +567,7 @@ impl MetadataRepository {
                 open_pool(&path, false).await?
             }
         };
-        schema(&pool, SCHEMA).await?;
+        migrate(&pool).await?;
         let identity = identity(config)?;
         let mut tx = pool.begin().await.map_err(sql_error)?;
         sqlx::query("INSERT OR IGNORE INTO metadata_info(singleton,identity) VALUES(1,?)")
@@ -542,6 +625,39 @@ impl MetadataRepository {
         })
     }
 
+    /// Moves a cache from the identity `from` to `to` without emptying it,
+    /// when it still holds `from`: what a new way of computing the identity
+    /// needs, since the catalog the cache describes is the same. Does
+    /// nothing otherwise, and never creates a cache.
+    pub async fn adopt(
+        dir: &Path,
+        id: ConnectionId,
+        from: &ConnectionConfig,
+        to: &ConnectionConfig,
+    ) -> DriverResult<()> {
+        let path = dir.join("metadata").join(format!("{id}.db"));
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(());
+        }
+        let (from, to) = (identity(from)?, identity(to)?);
+        if from == to {
+            return Ok(());
+        }
+        let pool = open_pool(&path, false).await?;
+        let result = async {
+            migrate(&pool).await?;
+            sqlx::query("UPDATE metadata_info SET identity=? WHERE singleton=1 AND identity=?")
+                .bind(to)
+                .bind(from)
+                .execute(&pool)
+                .await
+                .map_err(sql_error)
+        }
+        .await;
+        pool.close().await;
+        result.map(|_| ())
+    }
+
     /// Whether this cache was opened for `config`'s identity, so a reader
     /// kept open can serve it. After the profile changes, the cache must be
     /// opened again.
@@ -584,32 +700,70 @@ impl MetadataRepository {
             .map(|value| serde_json::from_str(&value).map_err(json_error))
             .collect()
     }
-    pub async fn search(&self, query: &str, limit: u32) -> DriverResult<Vec<MetadataObject>> {
+    /// Up to `limit` (1 to 200) objects whose name contains `query`, compared
+    /// by Unicode lower case, with their ancestors so a tree can show them.
+    /// `kinds` keeps only those kinds before the limit applies, so tables are
+    /// found behind any number of columns with the same name.
+    pub async fn search(
+        &self,
+        query: &str,
+        kinds: Option<&[ObjectKind]>,
+        limit: u32,
+    ) -> DriverResult<Vec<MetadataObject>> {
         if !(1..=200).contains(&limit) {
             return Err(DriverError::validation("Invalid search limit."));
         }
-        let values: Vec<String> = sqlx::query_scalar("SELECT object_json FROM objects WHERE instr(lower(name),lower(?))>0 ORDER BY name,path_key LIMIT ?")
-            .bind(query).bind(limit).fetch_all(&self.pool).await.map_err(sql_error)?;
+        let kinds = kinds
+            .map(|kinds| {
+                serde_json::to_string(
+                    &kinds
+                        .iter()
+                        .map(|kind| kind_text_of(*kind))
+                        .collect::<DriverResult<Vec<_>>>()?,
+                )
+                .map_err(json_error)
+            })
+            .transpose()?;
+        let folded = search_name(query);
+        // Three characters or more: through the trigram index. Fewer, which a
+        // trigram cannot match: a scan of the name index, which holds only
+        // the short folded names.
+        let values: Vec<String> = if folded.chars().count() >= 3 {
+            let phrase = format!("\"{}\"", folded.replace('"', "\"\""));
+            sqlx::query_scalar("SELECT object_json FROM objects WHERE rowid IN (SELECT rowid FROM objects_fts WHERE objects_fts MATCH ?1) AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2))) ORDER BY name,path_key LIMIT ?3")
+                .bind(phrase).bind(kinds).bind(limit).fetch_all(&self.pool).await.map_err(sql_error)?
+        } else {
+            sqlx::query_scalar("SELECT object_json FROM objects WHERE path_key IN (SELECT path_key FROM objects INDEXED BY objects_search WHERE instr(search_name,?1)>0 AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2))) ORDER BY name,path_key LIMIT ?3) ORDER BY name,path_key")
+                .bind(folded).bind(kinds).bind(limit).fetch_all(&self.pool).await.map_err(sql_error)?
+        };
         let mut found = std::collections::HashMap::new();
         for value in values {
             let object: MetadataObject = serde_json::from_str(&value).map_err(json_error)?;
-            let mut parent = object.path.parent();
             found.insert(object.path.clone(), object);
+        }
+        // Every ancestor not found, read in one query.
+        let mut ancestors = std::collections::BTreeSet::new();
+        for path in found.keys() {
+            let mut parent = path.parent();
             while let Some(path) = parent.filter(|path| !path.0.is_empty()) {
                 parent = path.parent();
-                if found.contains_key(&path) {
-                    continue;
+                if !found.contains_key(&path) {
+                    ancestors.insert(key(&path)?);
                 }
-                if let Some(value) = sqlx::query_scalar::<_, String>(
-                    "SELECT object_json FROM objects WHERE path_key=?",
-                )
-                .bind(key(&path)?)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(sql_error)?
-                {
-                    found.insert(path, serde_json::from_str(&value).map_err(json_error)?);
-                }
+            }
+        }
+        if !ancestors.is_empty() {
+            let keys = serde_json::to_string(&ancestors).map_err(json_error)?;
+            let values: Vec<String> = sqlx::query_scalar(
+                "SELECT object_json FROM objects WHERE path_key IN (SELECT value FROM json_each(?))",
+            )
+            .bind(keys)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(sql_error)?;
+            for value in values {
+                let object: MetadataObject = serde_json::from_str(&value).map_err(json_error)?;
+                found.insert(object.path.clone(), object);
             }
         }
         let mut found: Vec<_> = found.into_values().collect();
@@ -669,7 +823,7 @@ impl MetadataRepository {
         Ok((version, pages))
     }
     pub async fn statuses(&self) -> DriverResult<Vec<RefreshStatus>> {
-        let rows = sqlx::query("SELECT scope_json,state,last_attempt_at,last_success_at,version,message FROM scope_status ORDER BY last_run,length(scope_key)").fetch_all(&self.pool).await.map_err(sql_error)?;
+        let rows = sqlx::query("SELECT scope_json,state,last_attempt_at,last_success_at,last_published_at,version,message FROM scope_status ORDER BY last_run,length(scope_key)").fetch_all(&self.pool).await.map_err(sql_error)?;
         rows.into_iter()
             .map(|row| {
                 Ok(RefreshStatus {
@@ -682,6 +836,7 @@ impl MetadataRepository {
                     ),
                     last_attempt_at: row.try_get("last_attempt_at").map_err(sql_error)?,
                     last_success_at: row.try_get("last_success_at").map_err(sql_error)?,
+                    last_published_at: row.try_get("last_published_at").map_err(sql_error)?,
                     version: row.try_get("version").map_err(sql_error)?,
                     message: row.try_get("message").map_err(sql_error)?,
                 })
@@ -860,9 +1015,9 @@ impl PendingRefresh {
                 .filter(|parent| !parent.0.is_empty())
                 .map(|parent| key(&parent))
                 .transpose()?;
-            sqlx::query("INSERT INTO staging_objects(run_id,path_key,parent_key,path_json,kind,name,ordinal,object_json) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,path_key) DO UPDATE SET parent_key=excluded.parent_key,ordinal=excluded.ordinal,object_json=excluded.object_json")
+            sqlx::query("INSERT INTO staging_objects(run_id,path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,path_key) DO UPDATE SET parent_key=excluded.parent_key,ordinal=excluded.ordinal,object_json=excluded.object_json,search_name=excluded.search_name")
                 .bind(self.id).bind(key(&object.path)?).bind(parent).bind(serde_json::to_string(&object.path).map_err(json_error)?)
-                .bind(serde_json::to_string(&object.kind).map_err(json_error)?).bind(&object.name).bind(object.ordinal).bind(serde_json::to_string(&object).map_err(json_error)?)
+                .bind(serde_json::to_string(&object.kind).map_err(json_error)?).bind(&object.name).bind(object.ordinal).bind(serde_json::to_string(&object).map_err(json_error)?).bind(search_name(&object.name))
                 .execute(&mut *tx).await.map_err(sql_error)?;
         }
         tx.commit().await.map_err(sql_error)
@@ -906,7 +1061,7 @@ impl PendingRefresh {
         }
         sqlx::query("DELETE FROM objects WHERE (?='' OR path_key=? OR (path_key>=? AND path_key<?)) AND NOT EXISTS(SELECT 1 FROM protected_scopes p WHERE p.run_id=? AND (p.path_key='' OR objects.path_key=p.path_key OR (objects.path_key>=p.path_key||'/' AND objects.path_key<p.path_key||'0')))")
             .bind(&scope_key).bind(&scope_key).bind(lower).bind(upper).bind(self.id).execute(&mut *tx).await.map_err(sql_error)?;
-        let published = sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json) SELECT path_key,parent_key,path_json,kind,name,ordinal,object_json FROM staging_objects WHERE run_id=? ON CONFLICT(path_key) DO UPDATE SET parent_key=excluded.parent_key,path_json=excluded.path_json,kind=excluded.kind,name=excluded.name,ordinal=excluded.ordinal,object_json=excluded.object_json")
+        let published = sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name) SELECT path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name FROM staging_objects WHERE run_id=? ON CONFLICT(path_key) DO UPDATE SET parent_key=excluded.parent_key,path_json=excluded.path_json,kind=excluded.kind,name=excluded.name,ordinal=excluded.ordinal,object_json=excluded.object_json,search_name=excluded.search_name")
             .bind(self.id).execute(&mut *tx).await.map_err(sql_error)?.rows_affected();
         // The scope's own ancestors are outside it, so the driver does not
         // emit them; a scope that exists on the server still needs them.
@@ -914,13 +1069,21 @@ impl PendingRefresh {
             let depth = self.scope.0.len().saturating_sub(1);
             ensure_nodes(&mut tx, &self.scope, depth).await?;
         }
-        let state = if report.warnings.is_empty() {
+        // A warning on the scope itself (or above it) means nothing of it could
+        // be read: no access, rather than a partial read.
+        let state = if report
+            .warnings
+            .iter()
+            .any(|warning| self.scope.is_within(&warning.path))
+        {
+            RefreshState::Warning
+        } else if report.warnings.is_empty() {
             RefreshState::Success
         } else {
             RefreshState::Partial
         }
         .as_str();
-        sqlx::query("UPDATE scope_status SET state=?,last_success_at=CASE WHEN ?='success' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE last_success_at END,last_success_run=CASE WHEN ?='success' THEN last_run ELSE last_success_run END,version=?,message=? WHERE scope_key=? AND last_run=?")
+        sqlx::query("UPDATE scope_status SET state=?,last_published_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),last_success_at=CASE WHEN ?='success' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE last_success_at END,last_success_run=CASE WHEN ?='success' THEN last_run ELSE last_success_run END,version=?,message=? WHERE scope_key=? AND last_run=?")
             .bind(state).bind(state).bind(state).bind(self.version+1)
             .bind(if report.warnings.is_empty() { None } else { Some("Parts without permission were preserved.") }).bind(&scope_key).bind(self.id)
             .execute(&mut *tx).await.map_err(sql_error)?;

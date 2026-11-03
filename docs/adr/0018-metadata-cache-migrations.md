@@ -39,10 +39,14 @@ the mechanism for it as well.
    - It also adds `last_published_at TEXT` to `scope_status`, set by every
      publication, partial or complete.
    - `last_success_at` keeps meaning a complete read.
-3. The search reads `instr(search_name, ?)` with the query lower-cased the
-   same way, filters by kind in SQL, and reads the ancestors of the matches
-   in one query. FTS5 (trigram) is the next step only if the benchmark
-   exceeds the 50 ms budget at 500,000 objects.
+3. The search compares `search_name` with the query lower-cased the same
+   way, filters by kind in SQL, and reads the ancestors of the matches in one
+   query. The benchmark measured a scan at 235 ms (and 112 ms over a covering
+   index `objects_search`) at 500,000 objects, above the 50 ms budget, so step
+   2 also creates an FTS5 table with the trigram tokenizer (`objects_fts`,
+   external content, kept in step by triggers): a query of three characters
+   or more matches through it in about 3.5 ms. A shorter one, which a trigram
+   cannot match, scans `objects_search` (about 114 ms at that size).
 4. The configuration file `config.db` keeps its own version and is not
    touched by this ADR.
 

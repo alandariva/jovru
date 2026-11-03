@@ -594,3 +594,195 @@ async fn retain_keeps_the_selection_its_ancestors_and_named_nodes_only() {
     repository.close().await;
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn a_version_1_cache_migrates_with_unicode_search_names() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let path = dir.join("metadata");
+    std::fs::create_dir_all(&path).unwrap();
+    // A file as version 1 left it: its schema and one object, no search name.
+    let pool = open_pool(&path.join(format!("{id}.db")), false)
+        .await
+        .unwrap();
+    sqlx::raw_sql(SCHEMA).execute(&pool).await.unwrap();
+    sqlx::raw_sql("PRAGMA user_version=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let table = MetadataObject::new(ObjectKind::Table, &ObjectPath::default(), "AÇÃO");
+    sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json) VALUES(?,NULL,?,?,?,NULL,?)")
+        .bind(key(&table.path).unwrap())
+        .bind(serde_json::to_string(&table.path).unwrap())
+        .bind(serde_json::to_string(&table.kind).unwrap())
+        .bind(&table.name)
+        .bind(serde_json::to_string(&table).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO scope_status(scope_key,scope_json,state,last_run,last_attempt_at,last_success_at,version) VALUES('','[]','success',1,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let repository = MetadataRepository::open(&dir, id, &config()).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap(),
+        2
+    );
+    // The object written before the step is found by its Unicode name.
+    assert_eq!(repository.search("ação", None, 10).await.unwrap(), [table]);
+    let status = &repository.statuses().await.unwrap()[0];
+    assert_eq!(
+        status.last_published_at.as_deref(),
+        Some("2026-01-01T00:00:00.000Z")
+    );
+    // Opening again runs no step twice.
+    repository.close().await;
+    let repository = MetadataRepository::open(&dir, id, &config()).await.unwrap();
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_search_folds_unicode_and_filters_kinds_before_the_limit() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db");
+    let mut objects = vec![db.clone()];
+    let accented = MetadataObject::new(ObjectKind::Table, &db.path, "AÇÃO");
+    objects.push(accented.clone());
+    // More columns called id than the limit, then the table called orders_id.
+    for index in 0..210 {
+        let table = MetadataObject::new(ObjectKind::Table, &db.path, format!("t{index:03}"));
+        objects.push(MetadataObject::new(ObjectKind::Column, &table.path, "id"));
+        objects.push(table);
+    }
+    let orders = MetadataObject::new(ObjectKind::Table, &db.path, "orders_id");
+    objects.push(orders.clone());
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(objects).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let found = repository.search("ação", None, 200).await.unwrap();
+    assert!(found.contains(&accented));
+    // The database comes along as the match's ancestor.
+    assert!(found.contains(&db));
+    let all = repository.search("id", None, 200).await.unwrap();
+    assert!(!all.contains(&orders));
+    let tables = repository
+        .search("id", Some(&[ObjectKind::Table]), 200)
+        .await
+        .unwrap();
+    assert!(tables.contains(&orders));
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_partial_refresh_records_when_it_published() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(objects()).await.unwrap();
+    let report = IntrospectionReport {
+        warnings: vec![IntrospectionWarning {
+            path: objects()[1].path.clone(),
+            message: "fixture denied".into(),
+        }],
+    };
+    run.activate(&report, &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let root = repository
+        .statuses()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|status| status.scope.0.is_empty())
+        .unwrap();
+    assert_eq!(root.state, RefreshState::Partial);
+    assert!(root.last_success_at.is_none());
+    assert!(root.last_published_at.is_some());
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_cache_moves_to_a_new_identity_without_losing_its_objects() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let full = config();
+    let repository = MetadataRepository::open(&dir, id, &full).await.unwrap();
+    seed(&repository).await;
+    repository.close().await;
+    let narrower = ConnectionConfig {
+        driver: full.driver,
+        options: serde_json::json!({"host":"localhost","user":"fixture"}),
+    };
+    MetadataRepository::adopt(&dir, id, &full, &narrower)
+        .await
+        .unwrap();
+    let repository = MetadataRepository::open(&dir, id, &narrower).await.unwrap();
+    assert_eq!(repository.all().await.unwrap().len(), objects().len());
+    repository.close().await;
+    // A cache of another identity is left alone.
+    let other = ConnectionConfig {
+        driver: full.driver,
+        options: serde_json::json!({"host":"elsewhere","user":"fixture"}),
+    };
+    MetadataRepository::adopt(&dir, id, &full, &other)
+        .await
+        .unwrap();
+    assert!(MetadataRepository::open(&dir, id, &other).await.is_err());
+    // No cache, nothing created.
+    let missing = ConnectionId::new();
+    MetadataRepository::adopt(&dir, missing, &full, &narrower)
+        .await
+        .unwrap();
+    assert!(!dir.join("metadata").join(format!("{missing}.db")).exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_scope_denied_as_a_whole_keeps_its_read_and_says_no_access() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    seed(&repository).await;
+    let schema = objects()[0].path.clone();
+    let run = repository.begin(&schema).await.unwrap();
+    let report = IntrospectionReport {
+        warnings: vec![IntrospectionWarning {
+            path: schema.clone(),
+            message: "fixture denied".into(),
+        }],
+    };
+    let mut run = run;
+    run.activate(&report, &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    assert!(repository.all().await.unwrap().contains(&objects()[3]));
+    let status = repository
+        .statuses()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|status| status.scope == schema)
+        .unwrap();
+    assert_eq!(status.state, RefreshState::Warning);
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}

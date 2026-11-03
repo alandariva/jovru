@@ -532,3 +532,97 @@ async fn live_the_tab_context_is_applied_once_and_reported() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_levels_inspection_definitions_and_permissions() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let driver = MySqlDriver;
+        let input = input();
+        let cancel = CancellationToken::new();
+        let db = ObjectPath::default().child(ObjectKind::Database, "jykre");
+        // The default database and TLS do not change which catalog a cache holds.
+        let mut tuned = input.config.clone();
+        tuned.options["database"] = json!("other");
+        tuned.options["sslMode"] = json!("preferred");
+        assert_eq!(
+            driver.cache_identity(&tuned),
+            driver.cache_identity(&input.config)
+        );
+        let mut names = Metadata::default();
+        driver
+            .introspect_level(
+                &input,
+                &db,
+                IntrospectionLevel::Names,
+                &mut names,
+                cancel.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(names.0.iter().any(|object| object.name == "gate_fixture"));
+        assert!(
+            !names
+                .0
+                .iter()
+                .any(|object| matches!(object.kind, ObjectKind::Column | ObjectKind::ForeignKey))
+        );
+        let fixture = db.child(ObjectKind::Table, "gate_fixture");
+        let inspection = driver
+            .inspect(&input, &fixture, cancel.clone())
+            .await
+            .unwrap();
+        let has = |kind, name: &str| {
+            inspection
+                .items
+                .iter()
+                .any(|item| item.kind == kind && item.name == name)
+        };
+        assert!(has(InspectedKind::Index, "gate_fixture_label"));
+        assert!(has(InspectedKind::Check, "gate_fixture_amount"));
+        assert!(has(InspectedKind::PrimaryKey, "PRIMARY"));
+        assert!(has(InspectedKind::Trigger, "gate_fixture_touch"));
+        let routines = driver.inspect(&input, &db, cancel.clone()).await.unwrap();
+        let touch = routines
+            .items
+            .iter()
+            .find(|item| item.name == "gate_touch")
+            .expect("the procedure");
+        assert_eq!(touch.kind, InspectedKind::Procedure);
+        assert_eq!(touch.detail, "(IN steps int, OUT total int)");
+        let table = driver
+            .definition(&input, &fixture, cancel.clone())
+            .await
+            .unwrap();
+        assert!(table.starts_with("CREATE TABLE `gate_fixture`"));
+        let view = driver
+            .definition(
+                &input,
+                &db.child(ObjectKind::View, "gate_fixture_view"),
+                cancel.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(view.contains("VIEW `gate_fixture_view`"));
+        // A database the login may not use is a warning. MySQL answers a
+        // login without global privileges the same way for a database that
+        // does not exist, so that one is a warning too.
+        let mut reader = input.clone();
+        reader.config.options["user"] = json!("gate_reader");
+        let private = ObjectPath::default().child(ObjectKind::Database, "gate_private");
+        let report = driver
+            .introspect_scoped(&reader, &private, &mut Metadata::default(), cancel.clone())
+            .await
+            .unwrap();
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].path, private);
+        let gone = ObjectPath::default().child(ObjectKind::Database, "gate_gone");
+        let report = driver
+            .introspect_scoped(&input, &gone, &mut Metadata::default(), cancel)
+            .await
+            .unwrap();
+        assert_eq!(report.warnings.len(), 1);
+    })
+    .await
+    .expect("live metadata extensions took too long");
+}
