@@ -1,446 +1,758 @@
-# Pendências da auditoria comportamental
+# Auditoria comportamental — Jykre Studio × ferramentas de referência
 
-Comparação com o comportamento consolidado em gerenciadores profissionais de banco de dados: o que a aplicação **já faz**, mas de modo pior, inconsistente ou imprevisível. Este arquivo lista **somente o que ainda falta** depois do `git pull` em `release/0.1.0` (`876fdde`, 3 de novembro de 2026).
+Data: 3 de novembro de 2026 · Branch `release/0.1.0` (`15446f2` + alterações locais não commitadas). Este arquivo substitui o backlog anterior da auditoria comportamental, que continua no histórico do Git.
 
-Números `Nxxx` são os da auditoria original, para rastreio. Achados fechados pelos commits recentes não se repetem abaixo.
+**Ferramentas de referência.** A comparação usa três gerenciadores de banco de dados amplamente adotados no mercado, chamados aqui de **Ferramenta A** (IDE comercial de banco de dados), **Ferramenta B** (cliente universal open source) e **Ferramenta C** (cliente nativo leve). Os comportamentos atribuídos a cada uma foram conferidos na documentação oficial delas.
 
-## Resumo
+**Como foi feita.** Leitura do código das views (`src/app/*`), do modelo (`query.rs`, `result_tabs.rs`, `sql.rs`, `grid.rs`, `workspace_state.rs`, `connection_store.rs`, `grouped_tabs/`) e dos documentos em `docs/`. **A aplicação não foi executada**: tudo que está como *Confirmado* foi confirmado no código.
 
-O pull em `release/0.1.0` trouxe três commits (`b6268bf`, `355bbe3`, `876fdde`). O núcleo do fluxo diário de execução mudou de fato:
+**Como ler a referência.** Cada item diz quais ferramentas documentam o comportamento de referência. “Não documentado” significa que a documentação consultada não cobre o caso; não significa que a ferramenta se comporte diferente. Quando as ferramentas divergem entre si, o item diz isso, e o achado só se sustenta se o Jykre for pior que todas as abordagens ou inconsistente consigo mesmo. Alguns itens não dependem de nenhuma ferramenta: são violações de princípios gerais (não executar algo diferente do pedido, não perder dados em silêncio, consistência interna). Nesses casos a referência aparece como **Princípio**.
 
-| Situação | Quantidade | IDs |
-| --- | ---: | --- |
-| Fechados | 9 | N001, N003, N004, N007, N008, N009, N016, N017, N020 |
-| Parciais (restam trechos) | 4 | N005, N006, N018, N035 |
-| Ainda abertos | 28 | N002, N010–N015, N019, N021–N034, N036–N041 |
-| **Pendências neste arquivo** | **32** | os parciais + os abertos |
+**Aprovação.** Cada pendência tem a propriedade **Aprovação**. Só as pendências **Aprovadas** estão ativas para desenvolvimento; as **Pendentes** aguardam a decisão do mantenedor e não devem ser implementadas. Quando a aprovação vem com uma decisão que muda a recomendação, o item tem uma linha **Decisão**, e ela prevalece sobre o *Comportamento recomendado*.
 
-**O que os commits fecharam**
-
-- **N001.** `Ctrl+Enter` executa a seleção ou a instrução no cursor; `Ctrl+Shift+Enter` abre outro result tab; `Ctrl+Alt+Enter` roda o script.
-- **N003 / N004 / N008 / N009.** Cada statement ganha um result tab; falha não esconde os anteriores; Messages lista cada um; DML mostra *rows affected*; `Ctrl+Enter` substitui o último tab em vez de apagar tudo.
-- **N007.** Arrastar aba ou trocar conexão na toolbar pergunta antes; o SQL permanece.
-- **N016.** O result tab guarda o SQL executado, separado do editor.
-- **N017.** Abas, SQL, conexão, timeout, consultas salvas e os últimos 200 itens de histórico ficam em `config.db` (`workspace.state`).
-- **N020.** Sessão por aba entre runs (ADR-0014): `USE`, `SET` e temporárias sobrevivem. Databricks acompanha `USE CATALOG` / `USE SCHEMA`.
-
-**O que ainda pesa no dia a dia**
-
-Os dois críticos originais que restam: erros do servidor continuam genéricos (**N002**) e o splitter ainda ignora o dialeto (**N010**). Em seguida: format que pode alterar literais (**N011**), credenciais e carga de conexões (**N012–N014**), novo run durante cancelamento (**N015**), teclado que não ativa botões (**N019**) e o lote marcado todo como Running (**N021**).
-
-Transação explícita, fechar aba com SQL não salvo, colisão de título na biblioteca e histórico sem falhas foram só parcialmente cobertos.
-
-A aplicação não foi executada nesta conferência; o estado abaixo foi lido no código em `876fdde`.
+**Relação com o backlog anterior.** A versão anterior deste arquivo (até `15446f2`) usava números `Nxxx` próprios. Esta auditoria renumera tudo a partir de N001. Itens daquele backlog que **continuam abertos no código atual** aparecem de novo, marcados com “Backlog: Nxxx” (o número antigo). Dois itens que o backlog ainda listava como abertos já estão corrigidos no código: N028 (o status do refresh agora avisa quando a árvore não recarregou, `node_status`) e N031 (salvar só cancela o refresh depois de gravar). Ambos ficaram fora desta lista.
 
 ---
 
-## N002 — Erros do servidor são descartados e substituídos por texto genérico
+## 1. Resumo executivo
 
-- **Prioridade:** Crítica
-- **Funcionalidade:** Diagnóstico / drivers / UI
-- **Comportamento atual:** `map_error` do PostgreSQL e do MySQL classifica o `ErrorCode` e grava `"Database operation failed; check connectivity, permissions and SQL"`. `QueryRun::finish` guarda `error.to_string()`. A área de resultados e o teste de conexão mostram só essa frase. Sem título por código, sem SQLSTATE, sem posição, sem Copy details. `docs/ux.md` e `docs/reliability.md` ainda registram o desvio.
-- **Comportamento de referência:** Gerenciadores profissionais mostram a mensagem do servidor, o código e, quando há, marcam a posição no editor.
-- **Diferença identificada:** A classificação existe internamente e morre na fronteira com o usuário.
-- **Por que o comportamento atual é inferior:** Sintaxe, constraint, objeto inexistente, senha e timeout ficam indistinguíveis.
-- **Comportamento recomendado:** Preservar metadados seguros do driver (`code`, mensagem do servidor, posição) e renderizar título + mensagem + ação + detalhes copiáveis.
-- **Evidência no projeto:** `crates/driver-postgres/src/runtime.rs` (`map_error`); `crates/driver-mysql/src/runtime.rs`; `src/query.rs` (`finish`); `src/app/workspace.rs` (`ResultState::Failed`); `src/app/connections.rs` (`test_connection`)
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. `DriverError` carrega `ServerDiagnostic` (SQLSTATE, código do fornecedor, posição) e a mensagem do servidor; PostgreSQL inclui detail/hint, MySQL usa o número do erro (1045, 1142…) e Databricks repassa `status.error`. `src/error_report.rs` dá título por código/classe SQLSTATE, ação sugerida e **Copy details**; o result tab mostra tudo, põe o cursor na posição (sem selecionar) e oferece “Go to the position”, que também foca o editor. O teste de conexão mostra título, mensagem e ação.
+**Aderência: média.** O núcleo de execução já segue o que as três ferramentas fazem: executar a instrução sob o cursor ou a seleção, um resultado por instrução, erro do servidor com detalhes. Em alguns pontos o Jykre é mais cuidadoso que as referências (seção 4).
 
-## N005 — Mensagem transacional e transação explícita invisível
+As divergências que pesam ficam nas bordas desse núcleo:
 
+1. **Gatilhos que alternam sentido.** O atalho de executar também cancela, e o botão de salvar consulta também apaga. Com isso, um segundo toque desfaz o primeiro.
+2. **Resultado desligado de onde veio.** “Run query again” roda o que está no cursor, não o SQL do resultado. `Ctrl+Enter` sobrescreve o último tab criado, inclusive o que o usuário quis manter; A e B têm um “fixar resultado” que impede isso.
+3. **Identidade por nome, não por ID.** Abas, histórico e consultas salvas apontam para a conexão pelo nome. Se o nome não existe mais, o histórico abre na *primeira* conexão, e a aba órfã roda o *demo*. A e C mantêm o histórico por conexão.
+4. **Fluxos de conexão sem diálogo.** Senha não lembrada nunca é pedida (A e B pedem ao conectar). Salvar o perfil derruba os runs abertos sem avisar.
+5. **Abrir tabela não mostra dados.** Nas três ferramentas, abrir uma tabela leva aos dados (ou ao editor do objeto) com paginação. No Jykre, cria uma aba com `SELECT … LIMIT 100` que não é executada.
+
+São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, sem nenhuma crítica. Dessas, 15 são reconfirmações do backlog anterior. **16 estão aprovadas** (N001–N016) e ativas para desenvolvimento; as outras 31 aguardam aprovação.
+
+---
+
+## 2. Divergências
+
+### N001 — O atalho de executar cancela a execução em andamento, num toque e sem confirmação
 - **Prioridade:** Alta
-- **Funcionalidade:** Transações / DML
-- **Comportamento atual:** A sessão da aba agora é mantida (N020 fechado). Só autocommit é suportado como fluxo. Após falha parcial a UI ainda afirma: “Previous statements were not rolled back automatically.” Um `BEGIN` explícito fica aberto na sessão, sem indicador, sem Commit/Rollback, e fechar a aba faz rollback sem perguntar. Dívida técnica em ADR-0014 e `docs/architecture.md`.
-- **Comportamento de referência:** Gerenciadores profissionais expõem o modo da transação (auto-commit ou manual) e o que fazer no erro do script (parar e reverter, parar e confirmar, ou ignorar).
-- **Diferença identificada:** No autocommit a frase ficou mais próxima da verdade; no `BEGIN` explícito ela pode estar errada, e o usuário não vê que há transação aberta.
-- **Por que o comportamento atual é inferior:** Fechar a aba (ou perder a sessão) pode reverter trabalho que a mensagem descreveu como já persistido — ou o contrário.
-- **Comportamento recomendado:** Distinguir autocommit de transação aberta; mostrar estado; confirmar ao fechar com transação aberta; não afirmar rollback que o runtime não observou.
-- **Evidência no projeto:** `src/query.rs` (`finish`); `docs/adr/0014-a-session-per-tab.md`; `docs/architecture.md` (Known deviations)
-- **Confiança:** Confirmado
-- **Nota:** Parcial — a sessão deixou de ser descartada a cada run; falta o fluxo transacional visível.
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Execução / cancelamento
+- **Comportamento atual:** Com um run ativo, `Ctrl+Enter`, `Ctrl+Shift+Enter` e `Ctrl+Alt+Enter` chamam `stop_execution`. O mesmo vale para o botão do gutter de uma instrução *Pending* e para um segundo clique em Run (que vira “Stop” no mesmo lugar). O cancelamento é imediato e sem confirmação.
+- **Comportamento de referência:** As ferramentas divergem quanto ao botão, mas nenhuma documenta cancelar pelo atalho de executar:
+  - **A:** cancelar é uma ação separada; um segundo pedido de cancelamento abre um aviso antes de encerrar o processo no servidor.
+  - **C:** o botão Run vira Cancel durante a execução, mas Cancel abre a lista de processos para escolher qual encerrar.
+  - **B:** não documentado.
+- **Diferença identificada:** O botão que alterna é aceitável (C faz igual). O problema é o *atalho* de executar passar a cancelar, num toque só.
+- **Por que o comportamento atual é inferior:** Repetir `Ctrl+Enter` (para “rodar de novo” ou porque o primeiro toque parece não ter respondido) cancela um `UPDATE`/`DELETE` longo no meio. O usuário quis executar e o efeito foi interromper.
+- **Comportamento recomendado:** Atalhos de execução nunca cancelam. Com run ativo, avisar “já em execução” (como o projeto já faz durante o Cancelling). Cancelar fica no botão e num atalho próprio.
+- **Decisão:** Acionar de novo um atalho de execução (`Ctrl+Enter`, `Ctrl+Shift+Enter`, `Ctrl+Alt+Enter`) durante um run abre uma confirmação “cancelar a execução?” com o foco já em **Sim**, para que Enter confirme. A confirmação de `Ctrl+Alt+Enter`, que executa todas as instruções, para a execução inteira.
+- **Evidência no projeto:** `src/app/workspace.rs` — `toggle_run`, `execute_current`, botão `execute` em `toolbar`, `run_button` (Pending → `stop_execution`).
+- **Confiança:** Confirmado no projeto; referência documentada em A e C.
 
-## N006 — Fechar aba descarta SQL sem confirmação e é inacessível pelo teclado
-
+### N002 — “Run query again” executa a instrução do cursor, não a do resultado
 - **Prioridade:** Alta
-- **Funcionalidade:** Abas
-- **Comportamento atual:** Fechar com query **em execução** agora pergunta (“Close and cancel”). Sem execução, o X remove a aba na hora: o SQL daquela aba some do `workspace.state` na próxima gravação. Não há dirty flag para SQL não salvo na biblioteca. O botão Close tem `tab_stop(false)` e não existe `Ctrl+W` / `Ctrl+F4`.
-- **Comportamento de referência:** Gerenciadores profissionais autossalvam o editor, recuperam consoles fechados e pedem confirmação para scripts alterados.
-- **Diferença identificada:** A guarda cobre só o cancelamento do job, não a perda do texto da aba nem o teclado.
-- **Por que o comportamento atual é inferior:** Clique acidental no X ainda perde SQL que não estava na biblioteca. Usuário de teclado não fecha a aba.
-- **Comportamento recomendado:** Confirmar SQL alterado e não salvo; atalho de fechar; X alcançável pelo teclado.
-- **Evidência no projeto:** `src/app/mod.rs` (`request_close`); `src/grouped_tabs/mod.rs` (botão Close, `tab_stop(false)`); `src/workspace_state.rs`
-- **Confiança:** Confirmado
-- **Nota:** Parcial — confirmação para query rodando foi implementada.
-- **Situação:** Corrigido. Fechar pergunta também quando o SQL não está na biblioteca e difere do que a aba abriu (`TabState::has_unsaved_sql`; o SQL de abertura persiste como `opened_sql`). `Ctrl+W` e `Ctrl+F4` são a action `CloseActiveTab`; o X da aba selecionada fica sempre visível e é o próximo Tab stop, e o foco volta para a aba que fica selecionada. `Ctrl+N` agora foca o editor da aba nova (antes o foco ficava num editor fora da tela e nenhum atalho respondia).
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Resultados
+- **Comportamento atual:** O botão ↻ “Run query again”, na barra do result tab, chama `execute_current`. Isso roda a seleção ou a instrução sob o cursor do editor *agora* e grava o resultado no último tab criado. O SQL guardado no próprio tab (`tab.sql`) não é usado.
+- **Comportamento de referência:** Princípio: reexecutar a partir de um resultado repete o que gerou aquele resultado. Nenhuma das três documenta um botão equivalente; a referência é a expectativa criada pelo próprio rótulo.
+- **Diferença identificada:** O rótulo promete repetir o resultado visível; a ação usa o estado do editor.
+- **Por que o comportamento atual é inferior:** Com o cursor em outra instrução, o “refresh” de um `SELECT` pode rodar um `DELETE`. E o resultado vai para outro tab, não para o que está na tela.
+- **Comportamento recomendado:** Reexecutar `tab.sql` do tab ativo e colocar o resultado nesse mesmo tab.
+- **Evidência no projeto:** `src/app/workspace.rs` — botão `refresh-results` → `execute_current`; `ResultTab::sql` (`src/result_tabs.rs`).
+- **Confiança:** Confirmado.
 
-## N010 — Separação de instruções ignora o dialeto
-
+### N003 — Abrir uma tabela não mostra os dados
 - **Prioridade:** Alta
-- **Funcionalidade:** SQL enviado
-- **Comportamento atual:** Todo `;` fora de aspas/dollar-quote termina statement. `/* */` inicial é descartado — inclusive `/*! ... */` do MySQL. Sem `DELIMITER`. O commit `876fdde` registrou isso como dívida técnica: `CREATE PROCEDURE`/`TRIGGER` MySQL e `BEGIN ATOMIC` PostgreSQL continuam fatiados.
-- **Comportamento de referência:** Gerenciadores profissionais separam instruções com parser por dialeto, delimiter nativo e, quando configurado, linha em branco.
-- **Diferença identificada:** O splitter é genérico num produto que já tem três dialetos. Com `Ctrl+Enter` no cursor isso afeta o que é escolhido como “a instrução”.
-- **Por que o comportamento atual é inferior:** Corpo de procedure MySQL e comentários executáveis podem nunca chegar íntegros ao servidor.
-- **Comportamento recomendado:** Splitter por dialeto, com rotinas, `DELIMITER` e comentários executáveis.
-- **Evidência no projeto:** `src/sql.rs` (`statements`); `docs/architecture.md` (Known deviations)
-- **Confiança:** Confirmado
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Explorer / navegação
+- **Comportamento atual:** Duplo clique, Enter, “Open preview” ou Enter na palette chamam `add_query` com `SELECT * FROM … LIMIT 100;`. Abre uma aba de consulta com o SQL e o estado vazio “Ready to explore — Run the query”. Nada é executado.
+- **Comportamento de referência:** Nas três ferramentas, abrir a tabela leva aos dados ou ao editor do objeto:
+  - **A:** duplo clique ou F4 abrem o editor de dados da tabela.
+  - **B:** abre o editor do objeto; a página inicial (Dados, Propriedades…) é configurável.
+  - **C:** clicar no nome da tabela abre os dados, paginados (300 linhas por página por padrão).
+- **Diferença identificada:** O gesto de “abrir” entrega um rascunho de SQL, não os dados.
+- **Por que o comportamento atual é inferior:** Toda inspeção de tabela custa um passo a mais (`Ctrl+Enter`). O nome “Open preview” promete uma prévia que não aparece.
+- **Comportamento recomendado:** Executar a prévia ao abrir, ou renomear a ação para “New query for table”.
+- **Decisão:** A ação passa a se chamar **New query for table** e continua só criando a aba com o SQL, sem executar. O rótulo muda em todos os pontos de entrada (menu de contexto, duplo clique ou Enter no explorer, palette).
+- **Evidência no projeto:** `src/app/connections.rs` — `open_relation`; `src/app/mod.rs` — `add_query`, palette (`PressEnter`); `src/backend.rs` — `preview_sql`.
+- **Confiança:** Confirmado no projeto; referência documentada nas três ferramentas.
 
-## N011 — Format pode alterar strings MySQL e sempre perde cursor/seleção
-
+### N004 — Senha não lembrada nunca é solicitada ao conectar
 - **Prioridade:** Alta
-- **Funcionalidade:** Formatação
-- **Comportamento atual:** `tokens()` (usado por `format`) não trata `\\` em strings; o splitter trata. `replace_all` da API GPUI reposiciona documento multiline em `0..0` e zera o scroll.
-- **Comportamento de referência:** Gerenciadores profissionais formatam por dialeto e preservam o cursor na região reformatada.
-- **Diferença identificada:** Dois tokenizers discordam; o format reescreve o buffer e joga o usuário ao início.
-- **Por que o comportamento atual é inferior:** `'a\\'b'` no MySQL pode mudar de sentido; mesmo SQL válido perde o ponto de edição.
-- **Comportamento recomendado:** Tokenizer por dialeto; restaurar caret, seleção e scroll.
-- **Evidência no projeto:** `src/sql.rs` (`tokens` vs `statements`); `src/app/workspace.rs` (botão Format)
-- **Confiança:** Confirmado no Jykre; Provável na preservação de caret das ferramentas de referência
-
-## N012 — Senha antiga é reenviada ao trocar de driver
-
-- **Prioridade:** Alta
+- **Aprovação:** Aprovada (3 de novembro de 2026)
 - **Funcionalidade:** Autenticação
-- **Comportamento atual:** Campo vazio reusa `editing_connection.input.credentials`, inclusive depois de mudar PostgreSQL → MySQL. Só Databricks zera.
-- **Comportamento de referência:** Senha vazia no edit costuma significar “manter a mesma identidade”, não portar credencial para outro motor.
-- **Diferença identificada:** A identidade de autenticação não é invalidada com o driver.
-- **Por que o comportamento atual é inferior:** Credencial de outro servidor pode ir em silêncio ao destino novo.
-- **Comportamento recomendado:** Preservar senha só se host/usuário/driver continuarem compatíveis; troca de driver exige senha explícita.
-- **Evidência no projeto:** `src/app/connections.rs` (`form_connection`)
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. `connection_store::keeps_password` só deixa a senha vazia manter a anterior quando driver, host, porta e usuário são os mesmos; senão a credencial não é enviada e, se estava lembrada, sai do cofre ao salvar. O diálogo avisa quando a senha anterior não será usada.
+- **Comportamento atual:** Sem “Remember password” e após reiniciar, a conexão carrega sem credencial. O primeiro run (ou refresh) falha com “Could not sign in”. O único caminho é abrir *Configure connection*, digitar a senha e salvar o perfil; o aviso do save chega a dizer “Enter the password before querying the server”.
+- **Comportamento de referência:**
+  - **A:** quando a senha não é guardada, ela é pedida a cada conexão (ou guardada até reiniciar, conforme a opção escolhida).
+  - **B:** quem não marca “salvar credenciais” recebe o pedido de credenciais ao conectar.
+  - **C:** não documentado (as credenciais ficam no keychain do sistema).
+- **Diferença identificada:** Não guardar a senha vira um erro, não um prompt.
+- **Por que o comportamento atual é inferior:** Quem segue a boa prática de não salvar a senha passa, toda sessão, por uma falha seguida de edição do perfil, e salvar o perfil dispara efeitos colaterais (N005).
+- **Comportamento recomendado:** Ao abrir uma sessão sem credencial, pedir a senha num diálogo próprio. A senha fica em memória até reiniciar, com a opção de lembrar.
+- **Evidência no projeto:** `src/connection_store.rs` — `save_to`; `src/app/connections.rs` — `form_input`; `src/error_report.rs` (ação de `Authentication`); não existe nenhum prompt de senha em `src/app`.
+- **Confiança:** Confirmado no projeto; referência documentada em A e B.
 
-## N013 — “Remember password” permanece ativo sem senha no vault
-
+### N005 — Salvar a conexão cancela runs e apaga resultados de todas as abas, sem aviso
 - **Prioridade:** Alta
-- **Funcionalidade:** Vault
-- **Comportamento atual:** O perfil é salvo com `remember_password=true` **antes** de `secrets.set`. Falha no vault vira warning. Na leitura, `NoEntry` vira `Credentials::default()` sem aviso. Um erro de cache posterior pode sobrescrever o warning.
-- **Comportamento de referência:** A preferência “lembrar senha” deve refletir o que realmente está armazenado.
-- **Diferença identificada:** Intenção persistida ≠ estado do vault.
-- **Por que o comportamento atual é inferior:** Na próxima abertura a UI mente, e o problema some visualmente.
-- **Comportamento recomendado:** `remember_password=false` se a gravação falhar, ou estado “solicitado, indisponível”; acumular avisos.
-- **Evidência no projeto:** `src/connection_store.rs` (`save_to`); `crates/secrets/src/lib.rs` (`get`)
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. `save_to` grava o cofre antes do perfil e salva `remember_password=false` quando a senha não foi guardada (cofre indisponível ou nenhuma senha disponível); um perfil novo que falha ao salvar não deixa senha no cofre. Na leitura, `remember_password` sem entrada no cofre gera aviso. Avisos se acumulam (`add_warning`) em vez de se sobrescreverem, e o explorer não repete o mesmo aviso como status.
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Conexões × abas
+- **Comportamento atual:** Quando qualquer opção do perfil muda (host, porta, banco padrão, sslMode…), `update_connection` chama `set_connection` em cada aba daquela conexão. O resultado: `abandon_run` (cancela o run, fecha a sessão e reverte uma transação aberta), `results.clear()` e o assistente fechado. Nenhuma confirmação antes e nenhuma notificação na aba depois.
+- **Comportamento de referência:** Princípio: uma edição de configuração não destrói trabalho em andamento sem perguntar. O próprio Jykre segue esse princípio ao mover uma aba de conexão (pergunta antes). As três ferramentas não documentam o efeito de editar um data source conectado.
+- **Diferença identificada:** Uma edição de configuração tem efeito destrutivo e imediato em trabalho em andamento.
+- **Por que o comportamento atual é inferior:** Corrigir um detalhe do perfil durante um `UPDATE` longo o cancela, e todos os resultados abertos somem.
+- **Comportamento recomendado:** Se houver run ou transação aberta nas abas afetadas, perguntar antes de salvar. Fora isso, manter resultados e sessão até o próximo run e avisar na aba que a configuração mudou.
+- **Evidência no projeto:** `src/app/connections.rs` — `save_connection` (laço `panel.update_connection`); `src/app/workspace.rs` — `update_connection`, `set_connection`, `abandon_run`.
+- **Confiança:** Confirmado no projeto; referência por princípio e por consistência interna.
 
-## N014 — Um perfil ou preferência inválidos escondem todas as conexões
-
+### N006 — Consulta salva ou do histórico abre em outra conexão quando a original não existe
 - **Prioridade:** Alta
-- **Funcionalidade:** Inicialização
-- **Comportamento atual:** `load_from` aborta a lista no primeiro `validate_connection` ou `row_limit` que falha. `load_connections` ainda junta conexões, `editor.font_size` e `workspace.state` no mesmo `Result` — agora uma fonte inválida também impede restaurar as abas.
-- **Comportamento de referência:** Falha de um data source não oculta os demais.
-- **Diferença identificada:** Isolamento de falha prometido em `docs/reliability.md` não vale para a carga inicial.
-- **Por que o comportamento atual é inferior:** Um JSON ruim ou uma fonte inválida deixa o explorer vazio e, com o novo snapshot, também pode impedir o restore do workspace.
-- **Comportamento recomendado:** Carregar preferências e workspace à parte; isolar falhas por perfil.
-- **Evidência no projeto:** `src/connection_store.rs` (`load_from`); `src/app/connections.rs` (`load_connections`)
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. `ConfigRepository::list_each` lê cada perfil por si; `connection_store::load` devolve `LoadedConnections` com as conexões válidas e um problema por perfil ilegível ou inválido (um JSON legado inválido também vira problema e é preservado sem importar). Limite de linhas ilegível usa o padrão com aviso, e salvar não falha por causa de outro perfil. `load_connections` lê conexões, fonte e workspace separadamente e relata cada problema.
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Biblioteca / histórico
+- **Comportamento atual:** O clique numa entrada procura a conexão pelo nome e, se não encontra, usa `.or(this.connections.first())`: abre a aba na primeira conexão da lista, sem aviso.
+- **Comportamento de referência:**
+  - **A:** o histórico pertence ao console da conexão.
+  - **C:** o histórico é mantido separadamente por conexão.
+  - **B:** não documentado.
+- **Diferença identificada:** Falta da conexão de origem vira troca de conexão.
+- **Por que o comportamento atual é inferior:** SQL escrito para um banco (às vezes um `DELETE`) fica pronto para rodar em outro. Isso acontece quando um perfil não carrega na inicialização ou foi renomeado fora da aplicação.
+- **Comportamento recomendado:** Abrir sem conexão (como já é feito para abas órfãs) ou pedir que o usuário escolha a conexão.
+- **Evidência no projeto:** `src/app/mod.rs` — `sidebar_content`, `on_click` das entradas (`.or(this.connections.first())`).
+- **Confiança:** Confirmado no projeto; referência documentada em A e C.
 
-## N015 — É possível iniciar outra execução enquanto a anterior ainda cancela
-
+### N007 — Uma aba sem conexão executa o SQL contra dados simulados
 - **Prioridade:** Alta
-- **Funcionalidade:** Cancelamento / concorrência
-- **Comportamento atual:** `start` rejeita só `Running`. Em `Cancelling`, suplanta o run (“A run that is only Cancelling is superseded”). O workspace abre **outra** sessão enquanto a antiga ainda para: “A superseded run still holds its session; this one opens another.”
-- **Comportamento de referência:** Gerenciadores profissionais cancelam o job do console e avisam se o cancelamento se prolonga; não costumam iniciar um segundo job no mesmo console enquanto o primeiro ainda para.
-- **Diferença identificada:** Cancelamento cooperativo + novo lote = duas sessões, uma invisível. Com sessão por aba isso ficou mais grave: a sessão antiga e a nova podem coexistir.
-- **Por que o comportamento atual é inferior:** A query antiga ainda pode alterar dados; o desfecho some da UI.
-- **Comportamento recomendado:** Bloquear Run até o cancelamento terminar, ou exibir os dois jobs.
-- **Evidência no projeto:** `src/query.rs` (`start`); `src/app/workspace.rs` (`execute_queries`)
-- **Confiança:** Confirmado no Jykre; Provável na comparação (as ferramentas de referência não documentam o caso explicitamente)
-- **Situação:** Corrigido. `QueryRun::start` recusa qualquer run ativo, inclusive `Cancelling`; nenhuma segunda sessão é aberta enquanto a anterior para. Run, atalhos e gutter avisam “The previous run is still stopping…”; o botão mostra “Stopping…” e o aviso some quando o desfecho chega.
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Execução / estado de conexão
+- **Comportamento atual:** Com `input == None`, `execute_queries` cai no ramo do demo: `sample_result` gera linhas fictícias, `preview_error` recusa o que não é leitura e o rodapé mostra “Demo data · MOCK”. Fora do modo `JYKRE_DEMO`, isso acontece em abas restauradas cuja conexão não existe mais (grupo órfão) ou movidas para “Without connection”. O cabeçalho mostra o banco inventado pela heurística do demo (`commerce`/`finance`/`analytics`).
+- **Comportamento de referência:** Princípio: sem conexão não há execução; a ferramenta pede uma conexão.
+- **Diferença identificada:** Código de demonstração atende um caminho real.
+- **Por que o comportamento atual é inferior:** O usuário vê linhas plausíveis que não vieram de banco nenhum, ou a mensagem “The demo accepts only read queries”, que não faz sentido fora do demo.
+- **Comportamento recomendado:** Fora do demo, Run numa aba sem conexão mostra “Choose a connection for this tab” e abre o seletor de conexão.
+- **Evidência no projeto:** `src/app/workspace.rs` — `execute_queries` (ramo após `if let Some(input)`), `Workspace::new` (`database`/`connection_color` por nome); `src/app/state.rs` — `group_for`; `src/app/demo/mod.rs` — `sample_result`.
+- **Confiança:** Confirmado.
 
-## N018 — Consultas salvas colidem por título
-
+### N008 — Transação explícita fica invisível e é revertida ao fechar a aba (Backlog: N005)
 - **Prioridade:** Alta
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Transações
+- **Comportamento atual:** Só autocommit é suportado. Um `BEGIN` continua aberto na sessão da aba, sem indicador e sem Commit/Rollback. Fechar a aba, trocar de conexão, salvar o perfil (N005) ou perder a sessão reverte a transação em silêncio. A mensagem de falha parcial afirma “Previous statements were not rolled back automatically”, o que é falso dentro de uma transação abortada no PostgreSQL.
+- **Comportamento de referência:**
+  - **B:** alterna entre auto-commit e commit manual, mostra se há alterações pendentes e tem botões Commit e Rollback, além da lista de transações pendentes.
+  - **A:** expõe o modo de transação e os comandos de Commit e Rollback (Provável; não conferido nesta auditoria).
+  - **C:** não documentado.
+- **Diferença identificada:** O estado transacional existe na sessão, mas não aparece na interface.
+- **Por que o comportamento atual é inferior:** Trabalho pode ser descartado sem o usuário saber, ou dado como persistido quando não foi.
+- **Comportamento recomendado:** Detectar uma transação aberta e mostrá-la. Confirmar antes de fechar, mover ou reconfigurar. Não afirmar nada sobre rollback que não tenha sido observado.
+- **Decisão:** Aprovada como recomendado. Além disso, a interface mostra o estado da transação com ícones (por exemplo: auto-commit, transação aberta, alterações pendentes), como fazem as ferramentas de referência.
+- **Evidência no projeto:** `src/query.rs` (mensagem “not rolled back”); `src/app/workspace.rs` — `abandon_run`, `Drop`; `docs/architecture.md` (Known deviations).
+- **Confiança:** Confirmado no projeto; referência documentada em B.
+
+### N009 — A separação de instruções ignora o dialeto (Backlog: N010)
+- **Prioridade:** Alta
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** SQL enviado
+- **Comportamento atual:** Todo `;` fora de aspas, comentário ou dollar-quote encerra uma instrução. Corpos `BEGIN … END` de procedure/trigger do MySQL e `BEGIN ATOMIC` do PostgreSQL são fatiados. Não há `DELIMITER`, e um `/*! … */` inicial é descartado como comentário.
+- **Comportamento de referência:** As ferramentas divergem:
+  - **B:** delimitador configurável e linha em branco como delimitador (sempre, nunca ou “inteligente”).
+  - **A:** separa por dialeto (Provável).
+  - **C:** documenta apenas a separação por ponto e vírgula, como o Jykre.
+- **Diferença identificada:** O Jykre está no nível de C e abaixo de A e B, num produto que já tem três dialetos.
+- **Por que o comportamento atual é inferior:** Rotinas nunca chegam inteiras ao servidor, e `Ctrl+Enter` escolhe um fragmento como “a instrução”.
+- **Comportamento recomendado:** Splitter fornecido pelo driver (dialeto), com rotinas, `DELIMITER` e comentários executáveis.
+- **Evidência no projeto:** `src/sql.rs` — `statements`; `docs/architecture.md` (Known deviations).
+- **Confiança:** Confirmado no projeto; referência documentada em B.
+
+### N010 — Format pode alterar strings do MySQL e joga o cursor para o início (Backlog: N011)
+- **Prioridade:** Alta
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Formatação
+- **Comportamento atual:** `tokens()` (usado por `format`) não trata `\` dentro de strings; `statements()` trata. Isso faz com que `'a\'b'` seja tokenizado de forma diferente nos dois caminhos. A aplicação usa `replace_all`, que reposiciona o caret e zera o scroll.
+- **Comportamento de referência:** Princípio: formatar nunca muda o significado de um literal e não tira o usuário do ponto de edição.
+- **Diferença identificada:** Dois tokenizers que discordam, e uma reescrita do buffer inteiro.
+- **Por que o comportamento atual é inferior:** Formatar pode mudar o significado de um literal e sempre tira o usuário do ponto em que estava.
+- **Comportamento recomendado:** Um tokenizer único por dialeto; restaurar caret, seleção e scroll depois de formatar.
+- **Decisão:** Aprovada como recomendado. Avaliar uma dependência dedicada à formatação de SQL em vez do formatador próprio, seguindo a política de [Stack and dependencies](stack-and-dependencies.md); a escolha da dependência é apresentada ao mantenedor antes de entrar.
+- **Evidência no projeto:** `src/sql.rs` — `tokens` vs `statements`; `src/app/workspace.rs` — botão `format`.
+- **Confiança:** Confirmado.
+
+### N011 — A prévia de tabela tem `LIMIT 100` fixo e ignora o limite de linhas da conexão
+- **Prioridade:** Média
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Explorer / paginação
+- **Comportamento atual:** `preview_sql` sempre gera `SELECT * FROM x LIMIT 100;`. O limite por conexão (1 a 100.000, padrão 1.000) e a paginação ficam sem efeito: a página 1 tem 100 linhas e não existe próxima.
+- **Comportamento de referência:**
+  - **A:** o editor de dados pagina a tabela com tamanho de página configurável e navegação entre páginas.
+  - **C:** pagina a tabela, 300 linhas por página por padrão, com limit/offset ajustáveis.
+  - **B:** não conferido.
+- **Diferença identificada:** Um limite embutido no SQL anula o mecanismo de páginas do próprio produto.
+- **Por que o comportamento atual é inferior:** Para ver a linha 101, o usuário precisa editar o SQL; a configuração “Row limit” parece não funcionar.
+- **Comportamento recomendado:** Gerar `SELECT * FROM x` e deixar o limite de linhas e a paginação controlarem o volume.
+- **Decisão:** A consulta gerada mantém um `LIMIT` por padrão, com o valor do limite de linhas da conexão em vez do 100 fixo.
+- **Evidência no projeto:** `src/backend.rs` — `preview_sql`; `docs/results.md` (Limits).
+- **Confiança:** Confirmado no projeto; referência documentada em A e C.
+
+### N012 — `Ctrl+Enter` sobrescreve justamente o result tab aberto com `Ctrl+Shift+Enter`
+- **Prioridade:** Média
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Result tabs
+- **Comportamento atual:** `ReplaceLast` reaproveita o tab de maior número (`last_created`), seja ele o visível ou não. Um tab aberto com `Ctrl+Shift+Enter` para preservar um resultado é o primeiro a ser substituído no próximo `Ctrl+Enter`. Com Result 1 na tela, o novo resultado vai para o Result 3.
+- **Comportamento de referência:**
+  - **A:** reaproveita o tab de resultado por padrão e permite fixar um tab para mantê-lo.
+  - **B:** abre o resultado em tab novo por atalho próprio; um tab fixado não pode ser sobrescrito por uma nova execução.
+  - **C:** não documentado.
+- **Diferença identificada:** O mecanismo de “manter” (abrir um tab novo) não protege o tab, e o alvo da substituição não é o que o usuário está vendo.
+- **Por que o comportamento atual é inferior:** O resultado que o usuário quis preservar some, e o que estava na tela continua desatualizado.
+- **Comportamento recomendado:** Substituir o tab ativo (ou o último não fixado) e oferecer um “fixar” explícito que nenhum `Ctrl+Enter` sobrescreva.
+- **Evidência no projeto:** `src/result_tabs.rs` — `begin`, `last_created` e o teste com `["c"], Placement::New` seguido de `["d","e"], ReplaceLast`.
+- **Confiança:** Confirmado no projeto; referência documentada em A e B.
+
+### N013 — Com o cursor fora de qualquer instrução, a instrução vizinha é executada
+- **Prioridade:** Média
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Editor / execução
+- **Comportamento atual:** `statement_at` escolhe a próxima instrução quando o cursor está numa linha entre duas, e a mais próxima antes da primeira ou depois da última. Executa sem perguntar.
+- **Comportamento de referência:**
+  - **A:** opção explícita para o cursor fora de instrução: não executar, executar o script inteiro ou executar tudo abaixo do cursor. Nenhuma delas é “a vizinha mais próxima”.
+  - **B:** linhas em branco podem delimitar instruções, com regra configurável.
+  - **C:** não documentado.
+- **Diferença identificada:** Uma heurística implícita no lugar de uma regra previsível e configurável.
+- **Por que o comportamento atual é inferior:** Um `Ctrl+Enter` numa linha em branco executa a instrução de baixo, que pode ser destrutiva.
+- **Comportamento recomendado:** Fora de instrução, não executar e avisar (ou destacar a candidata e pedir confirmação). A escolha pode ficar configurável.
+- **Decisão:** Com o cursor fora de qualquer instrução, não executar e avisar o usuário. Sem confirmação nem configuração.
+- **Evidência no projeto:** `src/sql.rs` — `statement_at`; `src/query.rs` — `Scope::Cursor`.
+- **Confiança:** Confirmado no projeto; referência documentada em A e B (o padrão de A não é documentado).
+
+### N014 — O filtro da grade busca só na página carregada, sem dizer isso
+- **Prioridade:** Média
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Grade
+- **Comportamento atual:** “Filter results…” filtra no cliente apenas as linhas da página atual (até o limite de linhas). Quando a linha procurada está em outra página, a grade diz “No results for this selection. The query or the current filter returned no rows.”
+- **Comportamento de referência:**
+  - **B:** filtros escritos como critérios SQL (o `WHERE` fica implícito), ou seja, aplicados à consulta.
+  - **A:** filtro aplicado à consulta (Provável).
+  - **C:** não conferido.
+- **Diferença identificada:** A busca parece global, mas é local à página.
+- **Por que o comportamento atual é inferior:** O “nada encontrado” é falso quando há mais páginas ou o limite foi atingido.
+- **Comportamento recomendado:** Indicar o escopo (“nesta página: 1.000 linhas”) e, havendo mais páginas, avisar que o filtro não as cobre.
+- **Evidência no projeto:** `src/app/result_grid.rs` — `set_filter`; `src/grid.rs` — `GridView::new`.
+- **Confiança:** Confirmado no projeto; referência Provável.
+
+### N015 — Trocar de result tab perde a seleção e herda o scroll do outro tab
+- **Prioridade:** Média
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Grade / result tabs
+- **Comportamento atual:** Um único `ResultGrid` atende todos os result tabs. `set_page` limpa a seleção a cada troca. O `UniformListScrollHandle` é o mesmo para todos, então o deslocamento do tab anterior passa para o próximo.
+- **Comportamento de referência:** Em B, cada result tab é uma instância própria do editor de dados. Nas outras duas ferramentas, não documentado.
+- **Diferença identificada:** O estado da grade pertence ao componente, não ao tab.
+- **Por que o comportamento atual é inferior:** Comparar Result 1 e Result 2 alternando entre eles destrói a seleção, e a posição de leitura salta.
+- **Comportamento recomendado:** Guardar seleção e scroll por `ResultId` e restaurar ao voltar.
+- **Evidência no projeto:** `src/app/result_grid.rs` — `set_page`, campo `scroll`; `src/app/workspace.rs` — `show_active`.
+- **Confiança:** Confirmado para a seleção; Provável para o scroll.
+
+### N016 — Messages não é um log: o desfecho de um DML some quando o tab é substituído
+- **Prioridade:** Média
+- **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Funcionalidade:** Saída / mensagens
+- **Comportamento atual:** Messages lista apenas os result tabs existentes (status e SQL), sem horário nem duração. Quando `Ctrl+Enter` substitui um tab, ou `Ctrl+Alt+Enter` substitui todos, o “5 rows affected” do `UPDATE` anterior desaparece. O histórico também não guarda linhas afetadas.
+- **Comportamento de referência:**
+  - **B:** registra cada execução com horário, duração, linhas afetadas e erros, independentemente dos tabs.
+  - **A:** mantém uma saída de execução no console (Provável).
+  - **C:** não documentado.
+- **Diferença identificada:** A informação de execução está presa ao ciclo de vida do tab.
+- **Por que o comportamento atual é inferior:** Some a prova do que foi alterado, justamente nas instruções que não retornam linhas.
+- **Comportamento recomendado:** Messages como log da sessão da aba (horário, instrução resumida, linhas, duração, erro), independente dos tabs.
+- **Evidência no projeto:** `src/app/workspace.rs` — `result_messages`; `src/result_tabs.rs` — `begin`.
+- **Confiança:** Confirmado no projeto; referência documentada em B.
+
+### N017 — O caminho acima do editor não mostra o contexto real da sessão
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Contexto de conexão
+- **Comportamento atual:** O cabeçalho do editor mostra “conexão / banco / SQL”. O banco vem do perfil (`options.database`/`defaultCatalog`, ou “—”). Até haver conexão, vem da heurística do demo pelo nome (`commerce`…). O terceiro segmento é o texto fixo “SQL”. Depois de `USE`, `SET search_path` ou `USE CATALOG`, nada muda, embora a sessão por aba preserve esse estado.
+- **Comportamento de referência:**
+  - **A e B:** seletor de banco/schema ativo no editor (em B, com atalho próprio).
+  - **C:** não documentado.
+  - Se o seletor acompanha um `USE` digitado: não documentado em nenhuma delas.
+- **Diferença identificada:** O indicador de contexto é estático e às vezes inventado.
+- **Por que o comportamento atual é inferior:** O usuário confia no rótulo para saber onde vai rodar um DML, e o rótulo pode estar errado.
+- **Comportamento recomendado:** Mostrar o banco/schema da sessão (consultado após cada run ou acompanhado pelo driver) ou retirar os segmentos que não são reais.
+- **Evidência no projeto:** `src/app/workspace.rs` — `editor_panel`, `Workspace::new` (`database`), `set_connection`.
+- **Confiança:** Confirmado no projeto; acompanhamento do `USE` pelas referências: Necessita validação.
+
+### N018 — Format reformata o script inteiro mesmo havendo seleção
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Formatação
+- **Comportamento atual:** O botão Format sempre usa `editor.text()` inteiro e ignora `selected_range`.
+- **Comportamento de referência:**
+  - **A:** oferece formatar só o trecho selecionado.
+  - **B:** a documentação instrui a selecionar o SQL e então formatar.
+  - **C:** não documentado.
+- **Diferença identificada:** Não existe escopo de formatação.
+- **Por que o comportamento atual é inferior:** Formatar uma consulta de um script longo bagunça todo o resto (agravado por N019 e N010).
+- **Comportamento recomendado:** Com seleção, formatar só a seleção.
+- **Evidência no projeto:** `src/app/workspace.rs` — botão `format`.
+- **Confiança:** Confirmado no projeto; referência documentada em A e B.
+
+### N019 — Format apaga linhas em branco e junta instruções DML na mesma linha
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Formatação
+- **Comportamento atual:** `format` reconstrói o texto a partir dos tokens e só quebra linha antes de `SELECT`, `FROM`, `WHERE` etc. A separação original some: `INSERT …;\n\nDELETE …;` vira `INSERT …; DELETE …` numa linha só. Comentários de fim de linha passam para a linha seguinte.
+- **Comportamento de referência:** Em A, o formatador tem uma opção que controla se as quebras de linha originais são mantidas. Nas outras duas, não documentado.
+- **Diferença identificada:** A formatação é destrutiva para o layout que separa as instruções.
+- **Por que o comportamento atual é inferior:** O script fica ilegível, e os botões do gutter (um por linha inicial de instrução) e a escolha de `Ctrl+Enter` mudam de posição.
+- **Comportamento recomendado:** Formatar cada instrução isoladamente e preservar linhas em branco e comentários entre elas.
+- **Evidência no projeto:** `src/sql.rs` — `format`.
+- **Confiança:** Confirmado no projeto; referência documentada em A.
+
+### N020 — Uma consulta salva reaberta fica desligada da biblioteca
+- **Prioridade:** Média
+- **Aprovação:** Pendente
 - **Funcionalidade:** Biblioteca
-- **Comportamento atual:** A lista **persiste** em `workspace.state` (a volatilidade original foi fechada). A identidade continua `(title, connection)`: `retain` apaga a homônima na mesma conexão. Duas “Active customers” na mesma conexão se sobrescrevem sem aviso.
-- **Comportamento de referência:** Scripts salvos têm identidade estável, independente do nome exibido.
-- **Diferença identificada:** Persistência existe; a chave de identidade não.
-- **Por que o comportamento atual é inferior:** Salvar com o mesmo título substitui a outra consulta em silêncio, agora de forma durável.
-- **Comportamento recomendado:** ID estável; nome separado da identidade.
-- **Evidência no projeto:** `src/app/mod.rs` (`WorkspaceEvent::Saved`, `retain`); `src/workspace_state.rs` (`QueryEntry`)
-- **Confiança:** Confirmado
-- **Nota:** Parcial — persistência implementada; colisão permanece.
+- **Comportamento atual:** Clicar numa consulta salva chama `add_query`, que cria uma aba com `saved_sql = None`. O ícone mostra “Save query” (não salva). Editar e fechar avisa “The SQL is not in the saved queries”.
+- **Comportamento de referência:** Princípio: a aba sabe de onde veio e mostra corretamente se está salva. Em A, scripts são arquivos, e editar altera o próprio script (Provável).
+- **Diferença identificada:** A aba não sabe de onde veio.
+- **Por que o comportamento atual é inferior:** O estado mostrado é falso, e o usuário não sabe se está editando a consulta salva ou uma cópia.
+- **Comportamento recomendado:** Abrir com `saved_sql` preenchido (vínculo pela identidade da consulta).
+- **Evidência no projeto:** `src/app/mod.rs` — `sidebar_content` → `add_query`; `src/app/workspace.rs` — `saved_sql`.
+- **Confiança:** Confirmado.
 
-## N019 — Controles focáveis não implementam Enter/Espaço
-
-- **Prioridade:** Alta
-- **Funcionalidade:** Teclado
-- **Comportamento atual:** `base_button` / `icon_button` / nós do explorer: `Role::Button`, `focusable`, `on_click`. Sem handler de Enter/Espaço. Só os três atalhos de run são actions GPUI.
-- **Comportamento de referência:** Botão de desktop ativa com Enter/Espaço; árvore navega com setas.
-- **Diferença identificada:** A affordance de foco mente.
-- **Por que o comportamento atual é inferior:** Tab chega no Run e a tecla não dispara. Explorer exige Tab por item.
-- **Comportamento recomendado:** Componente de botão que sintetiza Enter/Espaço; árvore com setas.
-- **Evidência no projeto:** `src/app/ui.rs`; `src/app/connections.rs` (nós); `docs/ui-guidelines.md`
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. Conferido no app (Xvfb): o GPUI usado (`gpui-pre` 0.3.11) já converte Enter/Espaço no elemento focado em `ClickEvent::Keyboard`, e Format/Run/Close respondem pelo teclado. O defeito real era o foco invisível: o Run (botão primário) tinha borda de foco menta sobre fundo menta e os botões de tamanho de fonte não tinham estilo de foco. Ambos ganharam foco visível, e `docs/ui-guidelines.md` registra a regra (`on_click` + `focusable`). Setas na árvore ficaram com a N026.
-
-## N021 — Todas as instruções aparecem como Running antes de começarem
-
+### N021 — O botão de salvar consulta remove a consulta quando clicado de novo
 - **Prioridade:** Média
-- **Funcionalidade:** Gutter
-- **Comportamento atual:** `execute_queries` ainda chama `begin_all`, que marca o lote. O backend executa sequencialmente. O demo usa `begin_statement` um a um.
-- **Comportamento de referência:** Pendente / executando / concluído por statement.
-- **Diferença identificada:** O gutter mente simultaneidade no caminho real.
-- **Por que o comportamento atual é inferior:** Não se vê qual statement longo está no servidor; qualquer Stop no gutter para o lote inteiro.
-- **Comportamento recomendado:** Callbacks por instrução: Pending → Running → Success/Error.
-- **Evidência no projeto:** `src/app/workspace.rs` (`begin_all`); `src/query.rs`; `src/backend.rs`
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. `backend::query` recebe um canal `Progress` e envia a posição de cada instrução quando a manda ao servidor. `QueryRun::queue_all` marca o lote como `Pending` (relógio no gutter) e `statement_started` move a instrução atual para Running e as anteriores para Success; parar cancela a atual e as que esperam. Stop no gutter ainda para o lote inteiro, que é uma única execução.
+- **Aprovação:** Pendente
+- **Funcionalidade:** Biblioteca
+- **Comportamento atual:** O ícone de marcador alterna: com o SQL igual ao salvo, o clique **remove** da biblioteca (“Query removed from saved queries”), sem confirmação e sem desfazer. A mensagem do primeiro save diz “Query saved in this session.”, embora a biblioteca já seja persistida em `workspace.state`.
+- **Comportamento de referência:** Princípio: salvar é idempotente e excluir é uma ação separada.
+- **Diferença identificada:** Salvar e excluir estão no mesmo controle.
+- **Por que o comportamento atual é inferior:** Clicar duas vezes em “salvar” apaga o trabalho; o texto da mensagem engana sobre a persistência.
+- **Comportamento recomendado:** O botão só salva ou atualiza; remover fica na própria lista, com confirmação ou desfazer. Corrigir a mensagem.
+- **Evidência no projeto:** `src/app/workspace.rs` — `save-query` em `toolbar`; `src/app/mod.rs` — `WorkspaceEvent::Saved`.
+- **Confiança:** Confirmado.
 
-## N022 — Filtrar a grade apaga a seleção
-
+### N022 — Consultas salvas colidem pelo título (Backlog: N018)
 - **Prioridade:** Média
-- **Funcionalidade:** Grade
-- **Comportamento atual:** `set_filter` chama `select(None)`. O modelo `CellSelection` foi feito para sobreviver a filtro/sort (`docs/results.md`).
-- **Comportamento de referência:** Grades profissionais mantêm a célula se ela continua visível.
-- **Diferença identificada:** O modelo permite preservar; a view descarta.
-- **Por que o comportamento atual é inferior:** Cada tecla no filtro derruba a seleção.
-- **Comportamento recomendado:** Preservar por índice de dados; ocultar só se os extremos sumirem.
-- **Evidência no projeto:** `src/app/result_grid.rs` (`set_filter`); `src/grid.rs`; `docs/results.md`
-- **Confiança:** Confirmado no Jykre; Provável na comparação
-- **Situação:** Corrigido. `set_filter` mantém a seleção (por linha de dados) e só recalcula a contagem; com um extremo oculto ela não aparece nem conta, e volta quando o filtro o mostra de novo.
+- **Aprovação:** Pendente
+- **Funcionalidade:** Biblioteca
+- **Comportamento atual:** A identidade é `(title, connection)`, e `retain` apaga a homônima. O título é o da aba (“Query 3”, nome da tabela), então duas abas `orders` da mesma conexão se sobrescrevem ao salvar.
+- **Comportamento de referência:** Princípio: identidade estável, independente do nome exibido.
+- **Diferença identificada:** O nome exibido funciona como chave.
+- **Por que o comportamento atual é inferior:** Perda silenciosa e durável de uma consulta salva.
+- **Comportamento recomendado:** ID estável; o nome é só rótulo.
+- **Evidência no projeto:** `src/app/mod.rs` — `WorkspaceEvent::Saved` (`retain`); `src/workspace_state.rs` — `QueryEntry`.
+- **Confiança:** Confirmado.
 
-## N023 — Filtro trata NULL como o texto “NULL”
-
+### N023 — O histórico mostra o título da aba, não o SQL, sem horário nem status
 - **Prioridade:** Média
-- **Funcionalidade:** Grade
-- **Comportamento atual:** `cell.unwrap_or("NULL").to_lowercase().contains(filter)` — nulos reais batem com a busca `null`.
-- **Comportamento de referência:** Gerenciadores profissionais distinguem filtro de nulo do texto.
-- **Diferença identificada:** A apresentação de NULL vaza para a semântica da busca.
-- **Por que o comportamento atual é inferior:** Mistura nulos com o literal `NULL`.
-- **Comportamento recomendado:** Não indexar nulos no texto do filtro, ou ter critério explícito “is null”.
-- **Evidência no projeto:** `src/grid.rs` (`GridView::new`)
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. O filtro compara apenas valores: um NULL real nunca casa (nem com “null”), e o texto `'NULL'` continua casando.
-
-## N024 — O botão Explain não executa EXPLAIN
-
-- **Prioridade:** Média
-- **Funcionalidade:** Explain
-- **Comportamento atual:** Chama `ask("Explain this query")`, que devolve texto fixo do exemplo de vendas. Sem badge MOCK (o assistente tem “IA”; o Chart admite “only in the demo”).
-- **Comportamento de referência:** Gerenciadores profissionais enviam `EXPLAIN` / `EXPLAIN ANALYZE` ao banco e mostram o plano real.
-- **Diferença identificada:** Ação real da toolbar, significado simulado.
-- **Por que o comportamento atual é inferior:** Em conexão real, o nome promete um plano que não existe.
-- **Comportamento recomendado:** Renomear enquanto for mock, ou executar o EXPLAIN do driver.
-- **Evidência no projeto:** `src/app/workspace.rs` (botão Explain, `ask`)
-- **Confiança:** Confirmado
-
-## N025 — “Insert into editor” substitui todo o SQL
-
-- **Prioridade:** Média
-- **Funcionalidade:** Assistente
-- **Comportamento atual:** O botão chama `replace_all` sem diff nem confirmação.
-- **Comportamento de referência:** Assistentes profissionais mostram diff, inserem no cursor ou pedem confirmação.
-- **Diferença identificada:** Rótulo de inserção, efeito de substituição.
-- **Por que o comportamento atual é inferior:** SQL não salvo some; o undo existe e não é anunciado nessa ação.
-- **Comportamento recomendado:** Inserir no cursor/seleção, ou “Replace editor” com confirmação.
-- **Evidência no projeto:** `src/app/workspace.rs` (`Insert into editor`)
-- **Confiança:** Confirmado no Jykre; Provável na comparação
-
-## N026 — Clique simples no explorer abre query; teclado não ativa o nó
-
-- **Prioridade:** Média
-- **Funcionalidade:** Explorer
-- **Comportamento atual:** Clique no nome da relação chama `open_relation` (`SELECT * FROM … LIMIT 100`). Enter/Espaço/setas não fazem o equivalente. F5 é o único atalho do nó.
-- **Comportamento de referência:** Gerenciadores profissionais selecionam no clique simples e abrem a tabela no duplo clique ou Enter.
-- **Diferença identificada:** Ativação agressiva no mouse, nula no teclado.
-- **Por que o comportamento atual é inferior:** Abas acidentais; árvore anunciada como botão que o teclado não dispara.
-- **Comportamento recomendado:** Seleção no clique simples; abertura no duplo clique/Enter; setas de árvore.
-- **Evidência no projeto:** `src/app/connections.rs` (`open_relation`, `on_click`, `on_key_down`); `src/backend.rs` (`preview_sql`)
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. Clique simples numa tabela/view só seleciona (destaque e `aria_selected`); duplo clique ou Enter abre a prévia. `jykre::explorer` (com testes) calcula os nós visíveis e as setas: ↑/↓, Home/End, → expande ou entra no primeiro filho, ← recolhe ou vai ao pai. Cada nó tem `FocusHandle` próprio e papel `TreeItem`. A árvore do demo segue a mesma regra. Também cobre a parte “árvore com setas” da N019.
-
-## N027 — Enter na command palette sempre abre o primeiro resultado
-
-- **Prioridade:** Média
-- **Funcionalidade:** Busca
-- **Comportamento atual:** `PressEnter` pega `.next()` da lista. Linhas só têm `on_click`. Sem setas, sem focus trap (o diálogo de conexão tem).
-- **Comportamento de referência:** Palettes profissionais navegam com setas e ativam o item selecionado.
-- **Diferença identificada:** Foco visual e ação de Enter divergem.
-- **Por que o comportamento atual é inferior:** Com vários matches, o teclado abre o errado.
-- **Comportamento recomendado:** Índice selecionado, setas, Enter no item, focus trap.
-- **Evidência no projeto:** `src/app/mod.rs` (`command_subscription`)
-- **Confiança:** Confirmado
-- **Situação:** Corrigido. A palette tem um item destacado (`command_selected`, `aria_selected`, papel `ListBoxOption`) que ↑/↓ movem com volta nas pontas (`jykre::palette::step`) e que a lista rola para mostrar; Enter abre o destacado. Novos resultados mantêm o mesmo objeto destacado quando ele continua na lista (`palette::keep`). Um focus trap mantém o Tab dentro da palette.
-
-## N028 — Refresh anuncia sucesso mantendo a árvore antiga
-
-- **Prioridade:** Média
-- **Funcionalidade:** Metadata
-- **Comportamento atual:** Após o refresh remoto, a recarga do snapshot é tentada; erro é ignorado (`if let Ok(snapshot)`). O status usa só o resultado do refresh (“completed and saved”).
-- **Comportamento de referência:** Sucesso visual implica árvore atualizada.
-- **Diferença identificada:** “Publicado no cache” ≠ “carregado na UI”.
-- **Por que o comportamento atual é inferior:** O usuário confia em nós velhos.
-- **Comportamento recomendado:** Distinguir parcial; retry de leitura.
-- **Evidência no projeto:** `src/app/connections.rs` (pós-refresh)
-- **Confiança:** Confirmado
-
-## N029 — Teste de conexão não cancela no próprio controle
-
-- **Prioridade:** Média
-- **Funcionalidade:** Diálogo de conexão
-- **Comportamento atual:** O botão vira “Testing…” inerte (`connection_testing.is_some()` retorna cedo). Sem elapsed. Cancelar só editando ou fechando. Databricks: até 90 s.
-- **Comportamento de referência:** Gerenciadores profissionais cancelam também a criação da conexão, não só a execução da query.
-- **Diferença identificada:** Run vira Cancel; Test não.
-- **Por que o comportamento atual é inferior:** Viola a regra local de cancelamento > 2 s e deixa o usuário preso.
-- **Comportamento recomendado:** O mesmo botão vira Cancel; mostrar tempo após 2 s.
-- **Evidência no projeto:** `src/app/connections.rs` (`test_connection`); `docs/reliability.md`
-- **Confiança:** Confirmado
-
-## N030 — Salvamento de conexão não é atômico
-
-- **Prioridade:** Média
-- **Funcionalidade:** Persistência
-- **Comportamento atual:** `repository.save` incrementa revisão; depois `set_row_limit`. Se o segundo falha, a UI mostra erro com o perfil já mudado; retry usa revisão antiga e tende a conflito.
-- **Comportamento de referência:** Perfil e preferências do data source gravam juntos.
-- **Diferença identificada:** Dois writes, um feedback.
-- **Por que o comportamento atual é inferior:** Falha enganosa e estado pela metade.
-- **Comportamento recomendado:** Uma transação; só então atualizar a UI.
-- **Evidência no projeto:** `src/connection_store.rs` (`save_to`)
-- **Confiança:** Confirmado
-
-## N031 — Salvar cancela o refresh antes de saber se o save funcionará
-
-- **Prioridade:** Média
-- **Funcionalidade:** Conexões × metadata
-- **Comportamento atual:** Ao iniciar o save de uma conexão existente, `refreshing.take().cancel()` e `refresh_generation += 1` ocorrem **antes** do persistir.
-- **Comportamento de referência:** Invalidar trabalho remoto só depois da configuração adotada.
-- **Diferença identificada:** Efeito colateral antecipado.
-- **Por que o comportamento atual é inferior:** Save que falha já matou uma introspecção válida.
-- **Comportamento recomendado:** Cancelar refresh só após commit bem-sucedido.
-- **Evidência no projeto:** `src/app/connections.rs` (início de `save_connection`)
-- **Confiança:** Confirmado
-
-## N032 — Status do gutter sobrevive a mudança de whitespace dentro de literal
-
-- **Prioridade:** Média
-- **Funcionalidade:** Gutter
-- **Comportamento atual:** `normalized_statements` faz `split_whitespace` no SQL inteiro. `SELECT 'a b'` e `SELECT 'a  b'` carregam o mesmo status.
-- **Comportamento de referência:** Indicador de execução invalida quando o texto executável muda.
-- **Diferença identificada:** Normalização de layout vaza para literais.
-- **Por que o comportamento atual é inferior:** Ícone de sucesso em SQL que nunca rodou.
-- **Comportamento recomendado:** Colapsar whitespace só entre tokens; preservar literais.
-- **Evidência no projeto:** `src/sql.rs` (`normalized_statements`); `src/query.rs` (`carry_statuses`)
-- **Confiança:** Confirmado
-
-## N033 — Cópias grandes bloqueiam a UI e não pedem confirmação
-
-- **Prioridade:** Média
-- **Funcionalidade:** Clipboard
-- **Comportamento atual:** Seleção e CSV da página materializam no thread da UI e vão direto ao clipboard. `docs/results.md` ainda registra o desvio (50 MiB / off UI thread).
-- **Comportamento de referência:** Exportação/job ou confirmação para volume grande.
-- **Diferença identificada:** Cópia é ação existente sem limite operacional.
-- **Por que o comportamento atual é inferior:** Pode congelar a janela.
-- **Comportamento recomendado:** Estimar tamanho, confirmar acima de 50 MiB, gerar fora da UI.
-- **Evidência no projeto:** `src/app/result_grid.rs` (`copy_selection`); `src/app/workspace.rs` (CSV); `docs/results.md`
-- **Confiança:** Confirmado
-
-## N034 — Busca mostra resultados da consulta anterior enquanto a nova corre
-
-- **Prioridade:** Média
-- **Funcionalidade:** Pesquisa
-- **Comportamento atual:** Matches antigos permanecem de propósito (“so the list does not blink”). “Searching…” só aparece quando a lista está **vazia**. Enter ainda abre o primeiro (N027).
-- **Comportamento de referência:** Busca global distingue pending do resultado atual.
-- **Diferença identificada:** Falta de geração visível na lista quando já há matches.
-- **Por que o comportamento atual é inferior:** A lista velha parece corresponder ao texto novo.
-- **Comportamento recomendado:** Estado pending visível mesmo com resultados antigos; cursor de seleção.
-- **Evidência no projeto:** `src/app/connections.rs` (`search_cache`); `src/app/mod.rs` (palette)
-- **Confiança:** Confirmado
-
-## N035 — Histórico ignora falhas
-
-- **Prioridade:** Média
+- **Aprovação:** Pendente
 - **Funcionalidade:** Histórico
-- **Comportamento atual:** A lista **persiste** (200 entradas em `workspace.state`). Só entra `WorkspaceEvent::Executed`, emitido no `complete` de statement com sucesso. Falha no primeiro statement não entra.
-- **Comportamento de referência:** Gerenciadores profissionais guardam o histórico dos statements rodados no console, inclusive tentativas que falharam.
-- **Diferença identificada:** Persistência existe; o recorte continua sendo só o que deu certo.
-- **Por que o comportamento atual é inferior:** Some justamente o SQL que se precisa reabrir para corrigir — agora de forma durável: a falha nunca chega ao arquivo.
-- **Comportamento recomendado:** Registrar tentativa com status, horário, conexão e duração.
-- **Evidência no projeto:** `src/app/workspace.rs` (emit `Executed` só após `complete`); `src/app/mod.rs` (`history`); `src/workspace_state.rs`
-- **Confiança:** Confirmado
-- **Nota:** Parcial — persistência e limite 200 implementados; falhas continuam de fora.
+- **Comportamento atual:** Cada entrada mostra o título da aba de origem e a conexão. Todas as instruções executadas na “Query 2” aparecem como linhas idênticas “Query 2”. Não há horário, duração, status nem busca.
+- **Comportamento de referência:** As três mostram a instrução executada:
+  - **A:** lista as instruções, com busca e exclusão, e insere a escolhida no editor.
+  - **B:** registra horário, duração, linhas e erro de cada execução.
+  - **C:** guarda as instruções enviadas, por conexão, e insere a escolhida numa nova aba de editor.
+- **Diferença identificada:** A lista identifica a aba, não a execução.
+- **Por que o comportamento atual é inferior:** Para encontrar uma consulta é preciso abrir entrada por entrada.
+- **Comportamento recomendado:** Mostrar o início do SQL, o horário e o status, com busca.
+- **Evidência no projeto:** `src/app/mod.rs` — `sidebar_content`; `src/workspace_state.rs` — `record`.
+- **Confiança:** Confirmado no projeto; referência documentada nas três ferramentas.
 
-## N036 — Execução longa não mostra tempo decorrido
+### N024 — O histórico ignora execuções que falharam (Backlog: N035)
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Histórico
+- **Comportamento atual:** Só `WorkspaceEvent::Executed`, emitido por instrução concluída, entra no histórico. A instrução que falhou nunca é registrada.
+- **Comportamento de referência:**
+  - **A:** guarda todas as instruções executadas no console.
+  - **B:** registra também os erros.
+  - **C:** não documenta se as falhas entram.
+- **Diferença identificada:** O histórico guarda apenas o que deu certo.
+- **Por que o comportamento atual é inferior:** Some justamente o SQL que se quer reabrir para corrigir.
+- **Comportamento recomendado:** Registrar toda tentativa, com o status.
+- **Evidência no projeto:** `src/app/workspace.rs` — `execute_queries` (emit dentro do laço de `completed`).
+- **Confiança:** Confirmado no projeto; referência documentada em A e B.
 
-- **Prioridade:** Baixa
+### N025 — A palette e os títulos de aba não mostram o schema
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Navegação
+- **Comportamento atual:** Cada resultado da palette mostra o nome do objeto e o nome da conexão; o título da aba aberta é só o nome da tabela. Duas `orders` em schemas diferentes aparecem iguais.
+- **Comportamento de referência:** Princípio: objetos homônimos precisam ser distinguíveis onde são escolhidos.
+- **Diferença identificada:** O caminho existe (`ObjectPath`), mas não aparece.
+- **Por que o comportamento atual é inferior:** Fica fácil abrir a tabela errada, e as abas ficam indistinguíveis.
+- **Comportamento recomendado:** Mostrar `schema.tabela` (ou o caminho completo esmaecido) na palette e no tooltip ou título da aba.
+- **Evidência no projeto:** `src/app/mod.rs` — `command_palette`; `src/app/connections.rs` — `open_relation` (título = último segmento), `search_cache`.
+- **Confiança:** Confirmado.
+
+### N026 — O botão Explain não executa EXPLAIN (Backlog: N024)
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Explain
+- **Comportamento atual:** Chama `ask("Explain this query")` do assistente simulado, que devolve texto fixo do exemplo de vendas, inclusive em conexões reais.
+- **Comportamento de referência:** Princípio: a ação mostra o plano real do banco. A e B têm plano de execução real (Provável; não conferido nesta auditoria).
+- **Diferença identificada:** Uma ação real da toolbar tem efeito simulado.
+- **Por que o comportamento atual é inferior:** Promete um plano que não existe.
+- **Comportamento recomendado:** Executar o `EXPLAIN` do dialeto, ou retirar ou renomear o botão enquanto for simulado.
+- **Evidência no projeto:** `src/app/workspace.rs` — botão `explain`, `ask`.
+- **Confiança:** Confirmado.
+
+### N027 — “Insert into editor” substitui todo o SQL (Backlog: N025)
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Assistente
+- **Comportamento atual:** Usa `replace_all`, sem confirmação.
+- **Comportamento de referência:** Princípio: “inserir” acrescenta no cursor ou na seleção; não substitui.
+- **Diferença identificada:** O rótulo diz inserir; o efeito é substituir.
+- **Por que o comportamento atual é inferior:** O SQL que não estava salvo é sobrescrito.
+- **Comportamento recomendado:** Inserir no cursor, ou rotular “Replace editor” e pedir confirmação.
+- **Evidência no projeto:** `src/app/workspace.rs` — `apply-ai`.
+- **Confiança:** Confirmado.
+
+### N028 — O teste de conexão não pode ser cancelado pelo próprio botão (Backlog: N029)
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Diálogo de conexão
+- **Comportamento atual:** O botão vira “Testing…” e fica inerte, sem tempo decorrido. Só cancela editando um campo ou fechando o diálogo. No Databricks, o teste pode durar até 90 s.
+- **Comportamento de referência:** Em A, é possível cancelar inclusive a abertura da conexão. A regra do próprio Jykre (`docs/ux.md`) pede tempo e cancelamento para o que passa de 2 s.
+- **Diferença identificada:** Run vira Cancel; Test não.
+- **Por que o comportamento atual é inferior:** O usuário fica preso esperando.
+- **Comportamento recomendado:** O botão vira “Cancel test” e mostra o tempo depois de 2 s.
+- **Evidência no projeto:** `src/app/connections.rs` — `test_connection`, `test-connection` no rodapé.
+- **Confiança:** Confirmado no projeto; referência documentada em A.
+
+### N029 — Salvar a conexão grava perfil e preferências em escritas separadas (Backlog: N030)
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Persistência
+- **Comportamento atual:** `repository.save` (incrementa a revisão), depois `set_row_limit`, depois `set_metadata_scope`. Se uma escrita posterior falhar, a UI mostra erro com o perfil já alterado, e uma nova tentativa usa a revisão antiga.
+- **Comportamento de referência:** Princípio: uma configuração é gravada de forma atômica.
+- **Diferença identificada:** Três escritas e um único feedback.
+- **Por que o comportamento atual é inferior:** Estado pela metade e falha enganosa; a nova tentativa tende a dar conflito.
+- **Comportamento recomendado:** Uma transação.
+- **Evidência no projeto:** `src/connection_store.rs` — `save_to`.
+- **Confiança:** Confirmado.
+
+### N030 — O status do gutter sobrevive a mudanças de espaço dentro de literais (Backlog: N032)
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Gutter
+- **Comportamento atual:** `normalized_statements` aplica `split_whitespace` ao texto inteiro, então `SELECT 'a b'` e `SELECT 'a  b'` contam como a mesma instrução.
+- **Comportamento de referência:** Princípio: o indicador é invalidado quando o texto executável muda.
+- **Diferença identificada:** A normalização de layout atinge literais.
+- **Por que o comportamento atual é inferior:** Mostra ✓ numa instrução que nunca rodou.
+- **Comportamento recomendado:** Colapsar espaço apenas entre tokens.
+- **Evidência no projeto:** `src/sql.rs` — `normalized_statements`; `src/query.rs` — `sync`.
+- **Confiança:** Confirmado.
+
+### N031 — Cópias grandes rodam na thread da UI, sem confirmação (Backlog: N033)
+- **Prioridade:** Média
+- **Aprovação:** Pendente
+- **Funcionalidade:** Clipboard
+- **Comportamento atual:** “Copy this page as CSV” e `Ctrl+C` materializam o texto no thread da UI e escrevem direto no clipboard. É um desvio registrado em `docs/results.md`.
+- **Comportamento de referência:** Princípio, e a regra do próprio Jykre: confirmar acima de 50 MiB e copiar fora da thread da UI.
+- **Diferença identificada:** Não há limite operacional.
+- **Por que o comportamento atual é inferior:** A janela pode congelar.
+- **Comportamento recomendado:** Estimar o tamanho, confirmar acima de 50 MiB e gerar fora da UI.
+- **Evidência no projeto:** `src/app/result_grid.rs` — `copy_selection`; `src/app/workspace.rs` — `export-results`.
+- **Confiança:** Confirmado.
+
+### N032 — A execução longa não mostra tempo decorrido (Backlog: N036)
+- **Prioridade:** Média
+- **Aprovação:** Pendente
 - **Funcionalidade:** Progresso
-- **Comportamento atual:** Footer: “Running…”. `RunState::Running { started_at }` já existe. Timeout agora é escolhido por aba (30 s a 1 h, ou nenhum), o que torna o relógio mais necessário. Desvio de `docs/ux.md`.
-- **Comportamento de referência:** Gerenciadores profissionais mostram a duração do job ativo e, em geral, notificam execuções longas.
-- **Diferença identificada:** O relógio está no estado e não na UI.
-- **Por que o comportamento atual é inferior:** Sem noção de proximidade do timeout.
-- **Comportamento recomendado:** Mostrar elapsed após 2 s, derivado de `started_at`.
-- **Evidência no projeto:** `src/query.rs`; `src/app/workspace.rs` (footer)
-- **Confiança:** Confirmado
+- **Comportamento atual:** O rodapé mostra “Running…” ou “Cancelling…”. `RunState::Running { started_at }` existe, mas não é exibido. O timeout é escolhido por aba (até 1 h).
+- **Comportamento de referência:** A mostra o progresso da execução e avisa quando um cancelamento fica parado. A regra do próprio Jykre pede tempo decorrido acima de 2 s.
+- **Diferença identificada:** O relógio está no estado e não na interface.
+- **Por que o comportamento atual é inferior:** Não se sabe quanto falta para o timeout nem se o cancelamento travou.
+- **Comportamento recomendado:** Mostrar o tempo decorrido depois de 2 s e avisar quando o Cancelling demora.
+- **Evidência no projeto:** `src/app/workspace.rs` — `result_footer`; `src/query.rs`.
+- **Confiança:** Confirmado no projeto; referência documentada em A.
 
-## N037 — Grupos vazios aparecem ou desaparecem conforme o histórico de abas
-
+### N033 — A palette mostra resultados antigos enquanto a nova busca corre (Backlog: N034)
 - **Prioridade:** Baixa
-- **Funcionalidade:** Tab groups
-- **Comportamento atual:** Toda conexão ganha grupo. Fechar a última aba remove o grupo (`model.close`). O render ainda trata `group.tabs.is_empty()` (“No tabs”). Reabrir recria no fim da barra.
-- **Comportamento de referência:** O grupo acompanha o data source ou some de forma estável.
-- **Diferença identificada:** Duas conexões sem abas podem ter representações diferentes.
-- **Por que o comportamento atual é inferior:** A ordem da barra muda ao reabrir a última query.
-- **Comportamento recomendado:** Grupo com a vida da conexão, ou ocultar vazios sempre.
-- **Evidência no projeto:** `src/grouped_tabs/model.rs` (`close`); `src/grouped_tabs/mod.rs`; `src/app/mod.rs` (`add_query` / `ensure_group`)
-- **Confiança:** Confirmado
+- **Aprovação:** Pendente
+- **Funcionalidade:** Busca
+- **Comportamento atual:** “Searching…” só aparece com a lista vazia; com matches antigos, nada indica que a busca está pendente.
+- **Comportamento de referência:** Princípio: um estado pendente é visível.
+- **Diferença identificada:** A lista antiga parece corresponder ao texto novo.
+- **Por que o comportamento atual é inferior:** Enter pode abrir um match antigo.
+- **Comportamento recomendado:** Um indicador de busca pendente mesmo com resultados na lista.
+- **Evidência no projeto:** `src/app/connections.rs` — `search_cache`; `src/app/mod.rs` — `command_palette`.
+- **Confiança:** Confirmado.
 
-## N038 — Explorer materializa todos os nós visíveis a cada render
-
+### N034 — Abrir o mesmo objeto de novo cria uma aba duplicada
 - **Prioridade:** Baixa
-- **Funcionalidade:** Explorer / responsividade
-- **Comportamento atual:** Filtra a coleção e cria um elemento por objeto visível (`.children(objects…)`). Páginas de 200, expansões sucessivas. Desvio em `docs/ui-guidelines.md`.
-- **Comportamento de referência:** Árvores grandes são virtualizadas/lazy.
-- **Diferença identificada:** A grade é virtualizada; o explorer não.
+- **Aprovação:** Pendente
+- **Funcionalidade:** Abas / navegação
+- **Comportamento atual:** Cada duplo clique numa tabela ou entrada da palette cria uma aba nova com o mesmo título.
+- **Comportamento de referência:**
+  - **C:** abrir em aba nova exige um comando explícito (“abrir em nova aba”), o que indica que a abertura normal não duplica.
+  - **A:** reaproveita a aba do objeto já aberto (Provável).
+  - **B:** não documentado.
+- **Diferença identificada:** Não há reaproveitamento.
+- **Por que o comportamento atual é inferior:** A barra se enche de abas iguais (e alimenta N022).
+- **Comportamento recomendado:** Focar a aba existente do mesmo objeto, com uma ação explícita “abrir outra”.
+- **Evidência no projeto:** `src/app/mod.rs` — `add_query`; `src/app/connections.rs` — `open_relation`.
+- **Confiança:** Confirmado no projeto; referência Provável.
+
+### N035 — O rodapé conta as linhas da página ignorando o filtro
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Grade / rodapé
+- **Comportamento atual:** Com o filtro ativo, o rodapé continua “1.000 rows” enquanto a grade mostra 3.
+- **Comportamento de referência:** Princípio: rodapé e grade contam a mesma coisa.
+- **Diferença identificada:** O rodapé e a grade discordam.
+- **Por que o comportamento atual é inferior:** O usuário não sabe quantas linhas casaram.
+- **Comportamento recomendado:** “3 of 1,000 rows” enquanto o filtro estiver ativo.
+- **Evidência no projeto:** `src/app/workspace.rs` — `page_summary` (`page.data.row_count()`).
+- **Confiança:** Confirmado.
+
+### N036 — A grade não aceita Home, End, PageUp, PageDown nem Ctrl+Home/End
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Grade / teclado
+- **Comportamento atual:** `key_down` trata apenas setas, Shift+setas, `Ctrl+A`, `Ctrl+C` e Esc.
+- **Comportamento de referência:** Convenção de grades e planilhas: navegar por página e ir aos extremos. Não conferido na documentação das três ferramentas.
+- **Diferença identificada:** A navegação por teclado existe, mas é incompleta.
+- **Por que o comportamento atual é inferior:** Percorrer 1.000 linhas exige segurar a seta.
+- **Comportamento recomendado:** Adicionar Home/End (linha), Ctrl+Home/End (grade) e PageUp/PageDown, com Shift estendendo a seleção.
+- **Evidência no projeto:** `src/app/result_grid.rs` — `key_down`.
+- **Confiança:** Confirmado no projeto; referência Provável.
+
+### N037 — Alternar abas pelo teclado exige foco na barra de abas
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Abas / teclado
+- **Comportamento atual:** As setas, Home e End trocam de aba apenas com o foco na barra. Não há atalho global de próxima ou anterior aba a partir do editor.
+- **Comportamento de referência:** Convenção de editores com abas: atalho global de próxima e anterior aba. Não conferido na documentação das três ferramentas.
+- **Diferença identificada:** Trocar de aba custa várias tabulações.
+- **Por que o comportamento atual é inferior:** É lento para quem trabalha só no teclado.
+- **Comportamento recomendado:** Atalhos globais de próxima e anterior aba, no keymap.
+- **Evidência no projeto:** `src/grouped_tabs/mod.rs` — `navigate`; `src/app/mod.rs` — `capture_key_down`.
+- **Confiança:** Confirmado no projeto; referência Provável.
+
+### N038 — O clique do meio não fecha a aba
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Abas
+- **Comportamento atual:** Só o X ou `Ctrl+W`/`Ctrl+F4` fecham a aba.
+- **Comportamento de referência:** Convenção de aplicações com abas (IDEs e navegadores). Não conferido na documentação das três ferramentas.
+- **Diferença identificada:** Falta um gesto padrão na interação de fechar que já existe.
+- **Por que o comportamento atual é inferior:** É preciso mirar no X, que só aparece no hover nas abas não selecionadas.
+- **Comportamento recomendado:** Clique do meio chama `CloseRequested` (com as mesmas confirmações).
+- **Evidência no projeto:** `src/grouped_tabs/mod.rs` (não há handler de `MouseButton::Middle`).
+- **Confiança:** Confirmado no projeto; referência Provável.
+
+### N039 — Nova consulta já vem com `SELECT 1;`
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Abas
+- **Comportamento atual:** `new_query` preenche `SELECT 1;` (ou `SELECT * FROM orders LIMIT 100;` sem conexão).
+- **Comportamento de referência:** Um editor novo começa vazio (Provável; não conferido na documentação).
+- **Diferença identificada:** Há conteúdo a apagar antes de digitar.
+- **Por que o comportamento atual é inferior:** Toda consulta nova começa com seleção e remoção.
+- **Comportamento recomendado:** Editor vazio, com placeholder.
+- **Evidência no projeto:** `src/app/mod.rs` — `new_query`.
+- **Confiança:** Confirmado no projeto; referência Provável.
+
+### N040 — “Load more objects” aparece no fim da conexão, longe do nó que estende
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Explorer
+- **Comportamento atual:** Os botões de mais páginas de todos os nós aparecem juntos no fim da árvore da conexão, identificados só pelo nome do pai.
+- **Comportamento de referência:** Princípio: o controle de continuação fica junto da lista que estende.
+- **Diferença identificada:** O controle está separado da lista que estende.
+- **Por que o comportamento atual é inferior:** Em schemas longos é difícil perceber que a lista está incompleta e achar o botão.
+- **Comportamento recomendado:** Renderizar o botão como último filho do nó correspondente.
+- **Evidência no projeto:** `src/app/connections.rs` — `live_connection_tree` (`metadata_more`).
+- **Confiança:** Confirmado.
+
+### N041 — O clique simples age diferente conforme o tipo de nó
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Explorer
+- **Comportamento atual:** Em banco ou schema, o clique simples seleciona **e** expande ou recolhe. Em tabela, só seleciona (as colunas abrem pela seta à esquerda). Na conexão, o clique expande ou recolhe sem selecionar.
+- **Comportamento de referência:** Consistência interna. As ferramentas variam: em B, o efeito do duplo clique (abrir ou expandir) é configurável. Nenhuma documenta três regras diferentes na mesma árvore.
+- **Diferença identificada:** Três regras de clique na mesma árvore.
+- **Por que o comportamento atual é inferior:** Selecionar um schema para usar o menu de contexto o recolhe.
+- **Comportamento recomendado:** Uma única regra: o clique simples seleciona; a expansão fica com o chevron, o duplo clique e →/←.
+- **Evidência no projeto:** `src/app/connections.rs` — `on_click` dos nós (`expandable`) e da conexão.
+- **Confiança:** Confirmado.
+
+### N042 — Tempo de execução sempre exibido em ms
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Rodapé
+- **Comportamento atual:** `format!("{} ms", elapsed_ms)`, então um run de 3 minutos aparece como “183421 ms”.
+- **Comportamento de referência:** Princípio de legibilidade: a duração é exibida na escala adequada.
+- **Diferença identificada:** Falta de escala.
+- **Por que o comportamento atual é inferior:** Execuções longas ficam difíceis de ler.
+- **Comportamento recomendado:** Formatar em s, min ou h acima de 1 s.
+- **Evidência no projeto:** `src/app/workspace.rs` — `result_footer`.
+- **Confiança:** Confirmado.
+
+### N043 — O grupo de abas some ao fechar a última aba e volta no fim da barra (Backlog: N037)
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Grupos de abas
+- **Comportamento atual:** `model.close` remove o grupo vazio e `ensure_group` o recria no fim da barra.
+- **Comportamento de referência:** Princípio: a posição dos elementos da interface é estável.
+- **Diferença identificada:** A ordem da barra muda conforme o histórico de abas.
+- **Por que o comportamento atual é inferior:** A posição dos grupos fica imprevisível.
+- **Comportamento recomendado:** Manter o grupo na posição, ou ocultar grupos vazios sempre.
+- **Evidência no projeto:** `src/grouped_tabs/model.rs` — `close`; `src/app/mod.rs` — `ensure_group`.
+- **Confiança:** Confirmado.
+
+### N044 — O explorer constrói todos os nós visíveis a cada render (Backlog: N038)
+- **Prioridade:** Baixa
+- **Aprovação:** Pendente
+- **Funcionalidade:** Explorer / desempenho
+- **Comportamento atual:** `.children(objects…)` sobre a coleção visível, com IDs montados por `format!` em cada nó. É um desvio registrado em `docs/performance.md`.
+- **Comportamento de referência:** A regra do próprio Jykre: coleções longas são virtualizadas.
+- **Diferença identificada:** A grade é virtualizada; a árvore não.
 - **Por que o comportamento atual é inferior:** Foco, busca e refresh degradam em catálogos grandes.
-- **Comportamento recomendado:** Lista achatada virtualizada por `ObjectPath`.
-- **Evidência no projeto:** `src/app/connections.rs` (render da árvore); `docs/ui-guidelines.md`
-- **Confiança:** Confirmado (risco estrutural; sem medição deste cenário)
+- **Comportamento recomendado:** Lista achatada e virtualizada.
+- **Evidência no projeto:** `src/app/connections.rs` — `live_connection_tree`.
+- **Confiança:** Confirmado (não medido).
 
-## N039 — Tamanho da fonte pode gravar fora de ordem e esconder a falha
-
+### N045 — O tamanho da fonte pode ser gravado fora de ordem (Backlog: N039)
 - **Prioridade:** Baixa
+- **Aprovação:** Pendente
 - **Funcionalidade:** Preferências
-- **Comportamento atual:** Cada Ctrl+/− dispara write sem geração. Writes rápidos podem completar invertidos. Erro vai para `app_notice`, renderizado no Explorer, não em Preferences.
-- **Comportamento de referência:** Preferência com debounce e erro junto do controle.
-- **Diferença identificada:** A UI pode mostrar 18 px e reiniciar em 14.
-- **Por que o comportamento atual é inferior:** Feedback longe da ação, persistência não-monotônica.
-- **Comportamento recomendado:** Última geração vence; aviso global ou inline em Preferences.
-- **Evidência no projeto:** `src/app/connections.rs` (`persist_font_size`); `src/app/mod.rs` (`capture_key_down`)
-- **Confiança:** Confirmado
+- **Comportamento atual:** Cada `Ctrl +/−` dispara uma escrita sem geração; erros aparecem no aviso do Explorer.
+- **Comportamento de referência:** Princípio: a última alteração vence.
+- **Diferença identificada:** A persistência não é monotônica.
+- **Por que o comportamento atual é inferior:** A UI mostra 18 px e a aplicação reinicia com 16.
+- **Comportamento recomendado:** Debounce ou geração.
+- **Evidência no projeto:** `src/app/connections.rs` — `persist_font_size`.
+- **Confiança:** Confirmado.
 
-## N040 — A seta de ordenação do demo só inverte a ordem recebida
-
+### N046 — A seta de ordenação do demo só inverte a ordem (Backlog: N040)
 - **Prioridade:** Baixa
+- **Aprovação:** Pendente
 - **Funcionalidade:** Grade (demo)
-- **Comportamento atual:** Clique na terceira coluna do resultado demo alterna `descending`. `GridView` faz `rows.reverse()`, sem comparar a coluna. Em resultado real o clique no header não ordena.
-- **Comportamento de referência:** Seta no header = sort pelos valores da coluna.
-- **Diferença identificada:** Affordance de sort por coluna, operação de reverse.
-- **Por que o comportamento atual é inferior:** Primeiro contato (demo) ensina o gesto errado.
-- **Comportamento recomendado:** Remover a seta do demo ou ordenar de verdade, com regra estável para NULL.
-- **Evidência no projeto:** `src/app/result_grid.rs` (header `index == 2 && sales`); `src/grid.rs`
-- **Confiança:** Confirmado
+- **Comportamento atual:** Na terceira coluna do resultado demo, o clique só alterna `descending` (`reverse`); em resultados reais o cabeçalho não ordena.
+- **Comportamento de referência:** Princípio: uma seta no cabeçalho ordena pelos valores da coluna.
+- **Diferença identificada:** A affordance diz ordenar; a operação inverte.
+- **Por que o comportamento atual é inferior:** O demo ensina um gesto que não existe no uso real.
+- **Comportamento recomendado:** Remover a seta do demo ou implementar ordenação de verdade.
+- **Evidência no projeto:** `src/app/result_grid.rs` — cabeçalho (`index == 2 && self.sales`).
+- **Confiança:** Confirmado.
 
-## N041 — Chamada ao vault sem timeout pode prender o diálogo de salvamento
-
+### N047 — A gravação no cofre não tem timeout e pode prender o diálogo (Backlog: N041)
 - **Prioridade:** Baixa
-- **Funcionalidade:** Vault / diálogo
-- **Comportamento atual:** Durante `connection_saving` o diálogo não fecha. `secrets.set` é `spawn_blocking` sem timeout.
-- **Comportamento de referência:** Operação de credencial tem limite e permite dispensar o modal.
-- **Diferença identificada:** Save vira espera ilimitada no keyring do SO.
-- **Por que o comportamento atual é inferior:** Backend de credenciais travado deixa o modal sem saída.
-- **Comportamento recomendado:** Timeout operacional; fechar e avisar depois.
-- **Evidência no projeto:** `src/app/connections.rs` (`close_connection_dialog`); `crates/secrets/src/lib.rs`
-- **Confiança:** Provável (depende do backend do SO)
+- **Aprovação:** Pendente
+- **Funcionalidade:** Cofre / diálogo
+- **Comportamento atual:** O diálogo não fecha durante `connection_saving`, e `secrets.set` não tem timeout.
+- **Comportamento de referência:** Princípio, e a regra do próprio Jykre: toda operação externa tem timeout.
+- **Diferença identificada:** A espera pode ser ilimitada.
+- **Por que o comportamento atual é inferior:** Um keyring travado deixa o modal sem saída.
+- **Comportamento recomendado:** Timeout e aviso.
+- **Evidência no projeto:** `src/app/connections.rs` — `close_connection_dialog`; `crates/secrets/src/lib.rs`.
+- **Confiança:** Provável (depende do backend do sistema operacional).
 
 ---
 
-## Sequência recomendada do que resta
+## 3. Tabela de prioridades
 
-1. **Diagnóstico e SQL enviado — N002, N010, N011, N015.** Sem mensagem real e com splitter/format errados, o novo modelo de cursor/sessão ainda pode mandar o SQL errado ou esconder o erro.
-2. **Autenticação e carga — N012, N013, N014, N029, N030.** Credencial no destino errado e explorer vazio.
-3. **Fechar e biblioteca — N006 (SQL/teclado), N018, N035, N005.** O que a persistência nova ainda deixa cair no chão.
-4. **Teclado e explorer — N019, N026, N027.**
-5. **Grade e gutter — N021, N022, N023, N032.**
-6. **Feedback restante — N024, N025, N028, N031, N033, N034, N036–N041.**
+Na coluna **Referência**, as letras indicam as ferramentas cuja documentação sustenta o comportamento de referência; “P” é princípio ou regra do próprio projeto, e “~” indica referência provável, não conferida.
+
+| ID | Funcionalidade | Divergência | Impacto | Referência | Prioridade | Aprovação |
+| --- | --- | --- | --- | --- | --- | --- |
+| N001 | Execução | Atalho de executar cancela | DML longo cancelado por engano | A, C | Alta | Aprovada |
+| N002 | Resultados | “Run query again” roda o cursor | Pode executar outra instrução | P | Alta | Aprovada |
+| N003 | Explorer | Abrir tabela não mostra dados | Passo extra em toda inspeção | A, B, C | Alta | Aprovada |
+| N004 | Autenticação | Senha não lembrada não é pedida | Falha e edição de perfil a cada sessão | A, B | Alta | Aprovada |
+| N005 | Conexões | Salvar perfil derruba runs e resultados | Perda de trabalho em andamento | P | Alta | Aprovada |
+| N006 | Biblioteca/histórico | Abre na primeira conexão | SQL no banco errado | A, C | Alta | Aprovada |
+| N007 | Execução | Aba sem conexão roda o demo | Dados fictícios em uso real | P | Alta | Aprovada |
+| N008 | Transações | Transação invisível | Perda ou persistência ilusória | B, A~ | Alta | Aprovada |
+| N009 | SQL | Splitter ignora o dialeto | Rotinas fatiadas | B, A~ | Alta | Aprovada |
+| N010 | Formatação | Literais MySQL e caret | Significado e posição alterados | P | Alta | Aprovada |
+| N011 | Explorer | `LIMIT 100` fixo | Paginação inútil | A, C | Média | Aprovada |
+| N012 | Result tabs | Sobrescreve o tab “mantido” | Resultado perdido | A, B | Média | Aprovada |
+| N013 | Editor | Cursor fora executa a vizinha | Execução inesperada | A, B | Média | Aprovada |
+| N014 | Grade | Filtro só na página | “Nada encontrado” falso | B~, A~ | Média | Aprovada |
+| N015 | Grade | Seleção e scroll não são por tab | Comparação difícil | B | Média | Aprovada |
+| N016 | Mensagens | Sem log de execução | Desfecho de DML some | B, A~ | Média | Aprovada |
+| N017 | Contexto | Caminho estático ou inventado | Rótulo errado | A, B | Média | Pendente |
+| N018 | Formatação | Ignora seleção | Script inteiro alterado | A, B | Média | Pendente |
+| N019 | Formatação | Junta instruções | Script ilegível | A | Média | Pendente |
+| N020 | Biblioteca | Reabertura desligada | Estado de salvo falso | P | Média | Pendente |
+| N021 | Biblioteca | Salvar remove no segundo clique | Exclusão acidental | P | Média | Pendente |
+| N022 | Biblioteca | Colisão por título | Sobrescrita silenciosa | P | Média | Pendente |
+| N023 | Histórico | Título em vez de SQL | Difícil encontrar | A, B, C | Média | Pendente |
+| N024 | Histórico | Falhas não entram | SQL a corrigir some | A, B | Média | Pendente |
+| N025 | Navegação | Sem schema | Tabela errada | P | Média | Pendente |
+| N026 | Explain | Simulado | Promessa falsa | P, A~, B~ | Média | Pendente |
+| N027 | Assistente | Inserir substitui | SQL sobrescrito | P | Média | Pendente |
+| N028 | Conexão | Teste sem cancelamento | Usuário preso | A, P | Média | Pendente |
+| N029 | Persistência | Save não atômico | Estado pela metade | P | Média | Pendente |
+| N030 | Gutter | Whitespace em literal | ✓ falso | P | Média | Pendente |
+| N031 | Clipboard | Cópia grande na UI | Congelamento | P | Média | Pendente |
+| N032 | Progresso | Sem tempo decorrido | Timeout invisível | A, P | Média | Pendente |
+| N033 | Busca | Pendente invisível | Abre match velho | P | Baixa | Pendente |
+| N034 | Abas | Abas duplicadas | Barra poluída | C, A~ | Baixa | Pendente |
+| N035 | Rodapé | Contagem ignora filtro | Números discordantes | P | Baixa | Pendente |
+| N036 | Grade | Sem Home/End/PgUp/PgDn | Navegação lenta | ~ | Baixa | Pendente |
+| N037 | Abas | Troca só com foco na barra | Teclado lento | ~ | Baixa | Pendente |
+| N038 | Abas | Sem clique do meio | Fechar exige mira | ~ | Baixa | Pendente |
+| N039 | Abas | Nova consulta pré-preenchida | Atrito | ~ | Baixa | Pendente |
+| N040 | Explorer | “Load more” longe do nó | Lista incompleta passa despercebida | P | Baixa | Pendente |
+| N041 | Explorer | Clique simples inconsistente | Recolhe sem querer | P | Baixa | Pendente |
+| N042 | Rodapé | Duração só em ms | Leitura ruim | P | Baixa | Pendente |
+| N043 | Grupos | Grupo some e volta no fim | Ordem instável | P | Baixa | Pendente |
+| N044 | Explorer | Árvore não virtualizada | Lentidão em escala | P | Baixa | Pendente |
+| N045 | Preferências | Fonte gravada fora de ordem | Valor errado ao reiniciar | P | Baixa | Pendente |
+| N046 | Demo | Seta inverte em vez de ordenar | Gesto falso | P | Baixa | Pendente |
+| N047 | Cofre | Sem timeout | Modal preso | P | Baixa | Pendente |
+
+---
+
+## 4. Comportamentos superiores do projeto (preservar)
+
+- **Cancelamento que bloqueia novo run.** `Cancelling` impede um segundo run na mesma aba e o botão mostra “Stopping…”, então nunca há duas sessões disputando o mesmo trabalho. B, por exemplo, alerta na própria documentação que execuções em paralelo podem gerar deadlocks.
+- **Paginação pelo cursor aberto, sem reexecutar.** A página seguinte nunca roda a instrução de novo, o que é seguro para consultas não determinísticas ou caras. Quando o cursor fecha, a interface diz isso.
+- **Sessão por aba com avisos honestos.** A aplicação avisa quando a sessão foi reaberta ou encerrada e que o contexto (schema, temporárias) recomeçou.
+- **Erro do servidor completo.** Título por código, mensagem original, SQLSTATE, posição, *Copy details* e “Go to the position” sem selecionar texto. Isso evita que a próxima tecla apague SQL.
+- **Mover uma aba entre conexões pergunta antes e preserva o SQL.**
+- **Fechar uma aba com SQL fora da biblioteca pergunta antes**; o workspace é restaurado entre sessões.
+- **Senha não migra entre servidores** (`keeps_password`): uma senha vazia só mantém a anterior para o mesmo driver, host, porta e usuário.
+- **Apresentação fiel de valores.** NULL distinto de vazio e de espaços (`(empty)`, `␠ N spaces`), decimais exatos, nenhuma conversão de fuso, quebras de linha como `↵`.
+- **Introspecção sob escolha do usuário**, publicada de forma atômica e com fila de refresh (que absorve nós já cobertos).
+- **Explorer e palette pelo teclado.** O clique seleciona, o duplo clique ou Enter abre, e as setas navegam a árvore e a palette.
+- **O clique direito fora da seleção seleciona a célula antes**, então o menu de contexto age sobre o que está sob o ponteiro.
+- **Timeout por aba visível na toolbar.**
+- **Gutter por instrução que acompanha o servidor** (Pending → Running → Success/Error).
+
+---
+
+## 5. Principais inconsistências transversais
+
+1. **Controles que alternam entre uma ação e o seu oposto.** O atalho de executar também cancela (N001) e o botão de salvar também remove (N021). Repetir o gesto, o erro mais comum de interface, desfaz o que o usuário acabou de pedir.
+2. **Identidade por nome.** A conexão das abas, do histórico e da biblioteca é localizada pelo nome, e a consulta salva pelo título. Daí vêm N006, N007, N020, N022 e N034. Um ID estável (`ConnectionId`, ID da consulta) resolve a família inteira.
+3. **Resultado e contexto separados da origem.** O result tab guarda `tab.sql`, mas as ações sobre ele usam o editor (N002), o alvo de substituição é “o último criado” e não o visível (N012), e o desfecho morre com o tab (N016). O indicador de contexto também não acompanha a sessão (N017).
+4. **Código de demonstração em caminhos reais.** Abas sem conexão rodam o demo (N007), Explain e o assistente são simulados (N026, N027), o banco do cabeçalho vem de uma heurística do demo (N017) e o Chart só funciona no demo.
+5. **Mudanças de estado sem diálogo.** Salvar o perfil cancela runs (N005), a transação é revertida ao fechar (N008), a senha ausente vira erro (N004), e a substituição de resultados e as falhas no histórico acontecem sem registro (N016, N024).
+6. **Atalhos fora do keymap.** O desvio documentado em `docs/ui-guidelines.md` (atalhos tratados à mão em `capture_key_down`/`on_key_down`) explica a navegação incompleta na grade e nas abas (N036, N037) e a falta de um atalho próprio de cancelar (N001).
+
+---
+
+## 6. Sequência recomendada de correções
+
+A sequência abaixo ordena todos os itens, mas só os **Aprovados** entram em desenvolvimento; os Pendentes ficam no lugar indicado quando forem aprovados.
+
+1. **Segurança do que é executado: N001, N002, N013, N007, N006.** São todos casos de executar algo diferente do que o usuário pediu, ou no lugar errado. São correções pequenas e de efeito imediato.
+2. **Conexão e sessão: N004, N005, N008.** O prompt de senha elimina o caminho que hoje força o save do perfil; o N005 deixa de derrubar trabalho; a transação visível fecha o maior risco de perda silenciosa.
+3. **Resultados como objetos próprios: N012 (fixar), N016 (log), N015 (estado por tab), N014/N035 (escopo do filtro).**
+4. **Abrir tabela de verdade: N003 e N011**, junto com N025 e N034 na navegação.
+5. **Biblioteca e histórico com ID estável: N022, N020, N021, N023, N024.** Fazer junto com o item 2 das inconsistências transversais.
+6. **SQL enviado e formatado: N009, N010, N018, N019, N030.** O splitter por dialeto vem antes da formatação, que deveria reutilizar o mesmo tokenizer.
+7. **Feedback e acabamento: N017, N026–N029, N031–N033, N036–N047.**
+
+---
+
+## Limitações
+
+- A aplicação não foi executada. Itens marcados como “Provável” na parte do projeto (scroll em N015, N047) dependem de comportamento em tempo de execução do GPUI ou do sistema operacional.
+- A documentação das três ferramentas cobre os casos de forma desigual. C tem a documentação mais enxuta, e por isso aparece menos como referência. “Não documentado” não equivale a “se comporta diferente”.
+- Os itens marcados com “~” ou “Provável” na referência não foram conferidos na documentação consultada e devem ser validados antes de orientar uma decisão de produto.
