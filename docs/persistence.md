@@ -58,10 +58,12 @@ environment.
 name, SQL, the SQL last saved to the library and the identity of that saved
 query, the table or view the tab was opened for, its context and the
 statement timeout), the tab on screen, the saved queries, each with a stable
-numeric `id` (its title is only a label; `next_id` is the next one), and the
+numeric `id` (its title is only a label; `next_id` is the next one) and its
+`tags` (labels without `#`, each once ignoring case), and the
 last 200 history entries, each with when it ended, how (`succeeded`,
 `failed`, `cancelled`), its outcome and how long it took. Values written by
-an earlier version still read: saved queries without an `id` get one, a tab
+an earlier version still read: saved queries without an `id` get one, those
+without `tags` have none, a tab
 is linked to the saved query with its title, connection and SQL, and old
 history entries have no time or status. It is
 written half a second after changes settle and when the application quits,

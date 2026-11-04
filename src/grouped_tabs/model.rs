@@ -107,6 +107,17 @@ impl<C> Model<C> {
         Ok(true)
     }
 
+    /// Changes a tab's title; `false` when it already had it.
+    pub fn set_title(&mut self, id: TabId, title: SharedString) -> Result<bool, TabsError> {
+        let (group, tab) = self.location(id).ok_or(TabsError::TabNotFound)?;
+        let tab = &mut self.groups[group].tabs[tab];
+        if tab.title == title {
+            return Ok(false);
+        }
+        tab.title = title;
+        Ok(true)
+    }
+
     pub fn select(&mut self, id: TabId) -> Result<(), TabsError> {
         let (group, _) = self.location(id).ok_or(TabsError::TabNotFound)?;
         self.active = Some(id);

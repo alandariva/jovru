@@ -131,3 +131,22 @@ fn a_tab_status_follows_the_tab_and_reports_only_changes() {
         Err(super::TabsError::TabNotFound)
     );
 }
+
+#[test]
+fn a_tab_is_renamed_in_place_and_reports_only_changes() {
+    let mut model: Model<()> = Model::default();
+    let group = model.add_group("First".into(), rgb(0x477de6).into());
+    let tab = model.add_tab(group, "Query 1".into(), ()).unwrap();
+    let other = model.add_tab(group, "Query 2".into(), ()).unwrap();
+    assert_eq!(model.set_title(tab, "Orders".into()), Ok(true));
+    assert_eq!(model.tab(tab).unwrap().title.as_ref(), "Orders");
+    // The same title again asks for no redraw, and the other tab keeps its.
+    assert_eq!(model.set_title(tab, "Orders".into()), Ok(false));
+    assert_eq!(model.tab(other).unwrap().title.as_ref(), "Query 2");
+    assert_eq!(model.location(tab), Some((0, 0)));
+    model.close(tab).unwrap();
+    assert_eq!(
+        model.set_title(tab, "x".into()),
+        Err(super::TabsError::TabNotFound)
+    );
+}

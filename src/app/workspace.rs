@@ -660,6 +660,16 @@ impl Workspace {
         self.saved_sql = Some(sql.to_owned());
     }
 
+    /// Gives the tab another title, as when its saved query is named or
+    /// renamed. The host renames the tab in the strip.
+    pub fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
+        if self.title.as_ref() != title {
+            self.title = title.to_owned().into();
+            cx.emit(WorkspaceEvent::Changed);
+            cx.notify();
+        }
+    }
+
     /// The saved query this tab edits, if any.
     pub fn saved_id(&self) -> Option<u64> {
         self.saved_id
@@ -3029,8 +3039,8 @@ pub enum WorkspaceEvent {
     /// The user chose another connection for this tab in the toolbar.
     ConnectionRequested(String),
     /// Save the SQL in the library: as the saved query `id` when the tab
-    /// edits one, otherwise as a new one. The host answers with
-    /// [`Workspace::saved`].
+    /// edits one, otherwise as a new one, which the host first asks a name
+    /// and tags for. The host answers with [`Workspace::saved`].
     Saved {
         id: Option<u64>,
         title: String,

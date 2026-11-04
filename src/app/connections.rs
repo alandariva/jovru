@@ -2165,10 +2165,17 @@ impl AppView {
     }
 
     pub(super) fn search_cache(&mut self, palette: bool, cx: &mut Context<Self>) {
-        let query = if palette {
+        let typed = if palette {
             self.command.read(cx).value().to_string()
         } else {
             self.search.read(cx).value().to_string()
+        };
+        // `#tag` filters only saved queries; tables are found by the rest.
+        let query = if palette {
+            self.match_saved_in_palette(cx);
+            jykre::workspace_state::without_tag_filters(&typed)
+        } else {
+            typed.clone()
         };
         // Previous results stay on screen until the new ones arrive, so the
         // list does not blink empty on every keystroke.
@@ -2184,6 +2191,17 @@ impl AppView {
             for connection in &mut self.connections {
                 connection.set_search_rows(Vec::new());
             }
+            cx.notify();
+            return;
+        }
+        if palette && query.is_empty() && typed.contains('#') {
+            // Only tags: no table is asked for, and those listed go.
+            self.command_searching = false;
+            self.command_matches
+                .retain(|item| matches!(item, super::PaletteItem::Saved(_)));
+            self.command_selected = self
+                .command_selected
+                .min(self.command_matches.len().saturating_sub(1));
             cx.notify();
             return;
         }
@@ -2271,7 +2289,9 @@ impl AppView {
                 let chosen = this.command_matches.get(this.command_selected).cloned();
                 if palette {
                     this.command_searching = false;
-                    this.command_matches.clear();
+                    // The saved queries stay above the tables.
+                    this.command_matches
+                        .retain(|item| matches!(item, super::PaletteItem::Saved(_)));
                 } else {
                     for connection in &mut this.connections {
                         connection.set_search_rows(Vec::new());
@@ -2298,14 +2318,16 @@ impl AppView {
                                     .into_iter()
                                     .filter(|object| object.kind.is_relation())
                                 {
-                                    this.command_matches.push(super::PaletteMatch {
-                                        connection: index,
-                                        stored_at: object
-                                            .stored_at
-                                            .clone()
-                                            .unwrap_or_else(|| object.path.clone()),
-                                        path: object.path,
-                                    });
+                                    this.command_matches.push(super::PaletteItem::Relation(
+                                        super::PaletteMatch {
+                                            connection: index,
+                                            stored_at: object
+                                                .stored_at
+                                                .clone()
+                                                .unwrap_or_else(|| object.path.clone()),
+                                            path: object.path,
+                                        },
+                                    ));
                                 }
                             } else {
                                 // The search is limited, so its rows are built

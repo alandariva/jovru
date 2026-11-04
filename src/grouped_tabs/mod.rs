@@ -351,6 +351,26 @@ impl GroupedTabs {
         Ok(())
     }
 
+    /// Renames a tab without recreating its content, as when the saved query
+    /// it edits is renamed. The tab picker shows the new title too.
+    pub fn set_tab_title(
+        &mut self,
+        tab: TabId,
+        title: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        if self.model.set_title(tab, title.into())? {
+            if let Some(picker) = &self.picker {
+                let items = self.picker_items();
+                picker.update(cx, |picker, cx| {
+                    picker.sync_items(items, self.model.active, cx)
+                });
+            }
+            cx.notify();
+        }
+        Ok(())
+    }
+
     /// What the tab shows about its content's work.
     pub fn tab_status(&self, tab: TabId) -> Option<TabStatus> {
         self.model.tab(tab).map(|tab| tab.status)
