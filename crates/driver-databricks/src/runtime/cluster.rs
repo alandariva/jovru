@@ -598,6 +598,7 @@ impl Session for ClusterSession {
         cancel: CancellationToken,
     ) -> DriverResult<DriverOutcome> {
         QueryRequest {
+            parameters: Vec::new(),
             sql: "fetch".into(),
             options: options.clone(),
         }
@@ -736,6 +737,7 @@ mod tests {
     }
     fn query(sql: &str, max_rows: u32) -> QueryRequest {
         QueryRequest {
+            parameters: Vec::new(),
             sql: sql.into(),
             options: ExecutionOptions {
                 max_rows,

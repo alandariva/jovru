@@ -1641,6 +1641,7 @@ mod tests {
         let result = session
             .execute(
                 &QueryRequest {
+                    parameters: Vec::new(),
                     sql: "SELECT 1".into(),
                     options: ExecutionOptions {
                         timeout: Some(Duration::from_millis(50)),
@@ -1676,6 +1677,7 @@ mod tests {
         session
             .execute(
                 &QueryRequest {
+                    parameters: Vec::new(),
                     sql: "SELECT amount".into(),
                     options: ExecutionOptions::default(),
                 },
@@ -1726,6 +1728,7 @@ mod tests {
         let mut session = DatabricksSession::new(client);
         let mut rows = Rows::default();
         let request = QueryRequest {
+            parameters: Vec::new(),
             sql: "SELECT n".into(),
             options: options.clone(),
         };
@@ -1852,6 +1855,7 @@ mod tests {
             "USE other.finance",
         ] {
             let request = QueryRequest {
+                parameters: Vec::new(),
                 sql: sql.into(),
                 options: ExecutionOptions::default(),
             };

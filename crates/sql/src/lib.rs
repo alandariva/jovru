@@ -712,6 +712,125 @@ pub fn string_literal(value: &str, dialect: Option<SqlDialect>) -> String {
     literal
 }
 
+/// A `:name` parameter marker of a report (ADR-0023).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedMarker {
+    pub name: String,
+    /// The marker's bytes, colon included.
+    pub range: Range<usize>,
+}
+
+/// The `:name` markers of `sql`, in order, by the rules of `dialect`. Only
+/// code counts: strings, comments and quoted names are skipped whole. A
+/// marker is a `:` right before a name (ASCII letters, digits and `_`, not
+/// starting with a digit) and not right after something it could continue:
+/// `x::int`, `a := 1`, `raw:owner`, `arr[1:2]`, `arr[lo:hi]` and `arr[:hi]`
+/// hold no marker. Finding markers changes nothing: the driver binds the
+/// values ([`jykre_core::QueryParameter`]).
+pub fn named_markers(sql: &str, dialect: Option<SqlDialect>) -> Vec<NamedMarker> {
+    let tokens = tokens(sql, dialect);
+    let mut markers = Vec::new();
+    for (index, (range, kind)) in tokens.iter().enumerate() {
+        let marker = match kind {
+            TokenKind::Parameter if sql.get(range.clone()).is_some_and(|t| t.starts_with(':')) => {
+                range.clone()
+            }
+            TokenKind::Symbol if sql.get(range.clone()) == Some(":") => {
+                let Some((word, TokenKind::Word)) = tokens.get(index + 1) else {
+                    continue;
+                };
+                if word.start != range.end || !named_parameter(sql, range.start) {
+                    continue;
+                }
+                range.start..word.end
+            }
+            _ => continue,
+        };
+        // `arr[:hi]` slices an array.
+        if sql
+            .get(..marker.start)
+            .is_some_and(|before| before.ends_with('['))
+        {
+            continue;
+        }
+        let Some(name) = sql.get(marker.start + 1..marker.end) else {
+            continue;
+        };
+        if jykre_core::is_parameter_name(name) {
+            markers.push(NamedMarker {
+                name: name.to_owned(),
+                range: marker,
+            });
+        }
+    }
+    markers
+}
+
+#[cfg(test)]
+mod named_marker_tests {
+    use super::{SqlDialect, named_markers};
+
+    const DIALECTS: [Option<SqlDialect>; 4] = [
+        Some(SqlDialect::Postgres),
+        Some(SqlDialect::MySql),
+        Some(SqlDialect::DatabricksSql),
+        None,
+    ];
+
+    fn names(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
+        named_markers(sql, dialect)
+            .into_iter()
+            .map(|marker| {
+                assert_eq!(&sql[marker.range.clone()], format!(":{}", marker.name));
+                marker.name
+            })
+            .collect()
+    }
+
+    #[test]
+    fn markers_are_found_in_every_dialect_in_order_with_repeats() {
+        for dialect in DIALECTS {
+            assert_eq!(
+                names(
+                    "SELECT * FROM t WHERE a = :start AND b <= :_end2 OR c = :start",
+                    dialect
+                ),
+                ["start", "_end2", "start"],
+                "{dialect:?}"
+            );
+            assert_eq!(names("SELECT (:a)+:b", dialect), ["a", "b"], "{dialect:?}");
+        }
+    }
+
+    #[test]
+    fn code_that_only_looks_like_a_marker_holds_none() {
+        for dialect in DIALECTS {
+            for sql in [
+                "SELECT x::int, y :: text",
+                "SELECT ':a', ' :b '",
+                "SELECT 1 -- :a",
+                "SELECT /* :a */ 1",
+                "SELECT raw:owner FROM t",
+                "SELECT arr[1:2], arr[lo:hi], arr[:hi] FROM t",
+                "SELECT : a",
+                "SELECT :1",
+                "SELECT x:=1",
+            ] {
+                assert!(names(sql, dialect).is_empty(), "{dialect:?} {sql}");
+            }
+        }
+        assert!(names("SELECT $$ :a $$, E'\\' :b'", Some(SqlDialect::Postgres)).is_empty());
+        assert!(names("SELECT \":a\"", Some(SqlDialect::Postgres)).is_empty());
+        assert!(names("SELECT `:a`", Some(SqlDialect::MySql)).is_empty());
+        assert!(names("SELECT 1 # :a", Some(SqlDialect::MySql)).is_empty());
+    }
+
+    #[test]
+    fn names_outside_ascii_are_not_markers() {
+        assert!(names("SELECT :ação", Some(SqlDialect::Postgres)).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

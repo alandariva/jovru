@@ -1487,6 +1487,7 @@ mod tests {
         let requests = ["SELECT 'synthetic-sql-marker'", "SELECT 2"]
             .into_iter()
             .map(|sql| QueryRequest {
+                parameters: Vec::new(),
                 sql: sql.into(),
                 options: ExecutionOptions::default(),
             })
@@ -1520,6 +1521,7 @@ mod tests {
         let requests = ["SELECT 1", "SELECT 2", "SELECT 3"]
             .into_iter()
             .map(|sql| QueryRequest {
+                parameters: Vec::new(),
                 sql: sql.into(),
                 options: ExecutionOptions::default(),
             })
@@ -1573,6 +1575,7 @@ mod tests {
             credentials: Credentials::default(),
         };
         let request = QueryRequest {
+            parameters: Vec::new(),
             sql: "SELECT 1".into(),
             options: ExecutionOptions {
                 max_rows,
@@ -1796,6 +1799,7 @@ mod tests {
         let requests = statements
             .iter()
             .map(|sql| QueryRequest {
+                parameters: Vec::new(),
                 sql: (*sql).into(),
                 options: ExecutionOptions::default(),
             })
@@ -1876,6 +1880,7 @@ mod tests {
         assert_eq!(cells, ["2:"], "state starts over in the new session");
         // An invalid request runs nothing and hands the session back.
         let invalid = QueryRequest {
+            parameters: Vec::new(),
             sql: String::new(),
             options: ExecutionOptions::default(),
         };
@@ -1905,6 +1910,7 @@ mod tests {
             input,
             None,
             vec![QueryRequest {
+                parameters: Vec::new(),
                 sql: "ROWS 5".into(),
                 options: options.clone(),
             }],

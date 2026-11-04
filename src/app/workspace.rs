@@ -1058,6 +1058,7 @@ impl Workspace {
                 let requests = queries
                     .iter()
                     .map(|(_, sql)| QueryRequest {
+                        parameters: Vec::new(),
                         sql: sql.clone(),
                         options: options.clone(),
                     })

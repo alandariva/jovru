@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let outcome = session
             .execute(
                 &QueryRequest {
+                    parameters: Vec::new(),
                     sql,
                     options: ExecutionOptions::default(),
                 },

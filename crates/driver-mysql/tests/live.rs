@@ -50,6 +50,7 @@ async fn keep_state(session: &mut Box<dyn Session>) {
     session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SET @jykre_kept := 'jykre-kept'".into(),
                 options: ExecutionOptions::default(),
             },
@@ -66,6 +67,7 @@ async fn assert_kept(session: &mut Box<dyn Session>) {
     session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT CAST(@jykre_kept AS CHAR)".into(),
                 options: ExecutionOptions::default(),
             },
@@ -94,7 +96,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
     keep_state(&mut session).await;
     let mut sink = Sink::default();
-    session.execute(&QueryRequest{sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
+    session.execute(&QueryRequest{parameters:Vec::new(),sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
     assert_eq!(sink.columns, 3);
     assert_eq!(sink.rows.len(), 1);
     assert_eq!(sink.rows[0][1], Cell::Null);
@@ -103,6 +105,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT 1 AS answer WHERE 1=0".into(),
                 options: ExecutionOptions::default(),
             },
@@ -149,6 +152,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     let err = session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT SLEEP(10)".into(),
                 options: ExecutionOptions {
                     timeout: Some(Duration::from_millis(100)),
@@ -187,6 +191,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     let cancelled = session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT SLEEP(10)".into(),
                 options: ExecutionOptions::default(),
             },
@@ -203,6 +208,7 @@ async fn live_connection_queries_metadata_and_timeout() {
         .unwrap();
     keep_state(&mut session).await;
     let query = QueryRequest {
+        parameters: Vec::new(),
         sql: "SELECT 1 UNION ALL SELECT 2".into(),
         options: ExecutionOptions {
             max_rows: 1,
@@ -248,6 +254,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     let failed = session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT * FROM jykre_missing_table".into(),
                 options: ExecutionOptions::default(),
             },
@@ -266,6 +273,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     // A long result cut by the row limit, then one cancelled while its rows
     // stream: the rest is drained or stopped, and the session is kept.
     let big = QueryRequest {
+        parameters: Vec::new(),
         sql: "SELECT a.n * 400 + b.n + 1 AS n, REPEAT('x', 200) FROM (WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 499) SELECT n FROM s) a CROSS JOIN (WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 399) SELECT n FROM s) b ORDER BY n".into(),
         options: ExecutionOptions {
             max_rows: 10,
@@ -308,6 +316,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     }
     let token = CancellationToken::new();
     let unlimited = QueryRequest {
+        parameters: Vec::new(),
         options: ExecutionOptions::default(),
         ..big
     };
@@ -352,6 +361,7 @@ async fn live_interrupting_a_half_read_row_keeps_the_session() {
             let cancelled = session
                 .execute(
                     &QueryRequest {
+                        parameters: Vec::new(),
                         sql: wide.into(),
                         options: ExecutionOptions::default(),
                     },
@@ -364,6 +374,7 @@ async fn live_interrupting_a_half_read_row_keeps_the_session() {
             let timed_out = session
                 .execute(
                     &QueryRequest {
+                        parameters: Vec::new(),
                         sql: wide.into(),
                         options: ExecutionOptions {
                             timeout: Some(Duration::from_millis(50)),
@@ -411,6 +422,7 @@ async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
         }
         let driver = MySqlDriver;
         let query = QueryRequest {
+            parameters: Vec::new(),
             sql: "SELECT 1 UNION ALL SELECT 2".into(),
             options: ExecutionOptions::default(),
         };
@@ -543,6 +555,7 @@ async fn text_in(session: &mut Box<dyn Session>, sql: &str, context: &SessionCon
     session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: sql.into(),
                 options: ExecutionOptions {
                     context: context.clone(),
