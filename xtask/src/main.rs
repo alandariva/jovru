@@ -494,6 +494,29 @@ fn live(root: &Path, project: &str, data: &Path) -> Result<(), String> {
                 ],
             )
             .map_err(|_| format!("Integration {service} failed"))?;
+            // The export reads real sessions through the application's
+            // backend, which no driver crate may depend on.
+            println!("> Integration jykre export ({service}) on 127.0.0.1:{port}");
+            command_env(
+                root,
+                "cargo",
+                &[
+                    "test",
+                    "-p",
+                    "jykre",
+                    "--locked",
+                    "--test",
+                    "live",
+                    "--",
+                    "--ignored",
+                ],
+                &[
+                    ("JYKRE_TEST_PORT", OsStr::new(&port)),
+                    ("JYKRE_TEST_DRIVER", OsStr::new(driver)),
+                    ("JYKRE_CONFIG_DIR", data.as_os_str()),
+                ],
+            )
+            .map_err(|_| format!("Integration jykre export ({service}) failed"))?;
             println!("[OK] Integration {service}");
         }
         Ok(())

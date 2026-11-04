@@ -15,7 +15,8 @@ is visible, and the keyboard reaches everything.
 │◷ │     ▸ schema │ │ SQL editor, status per statement in the gutter   │ │
 │⚙ │              │ │                                                  │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
-│  │              │ Results · Chart · Messages     pt-BR · filter · CSV  │
+│  │              │ Results · Chart · Messages  pt-BR · filter · CSV · ⤓ │
+│  │              │ Export bar (when open): format, options, progress    │
 │  │              │ ┌──────────────────────────────────────────────────┐ │
 │  │              │ │ Result grid                                      │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
@@ -116,13 +117,16 @@ Each state has one consistent representation.
 | Run duration | Footer, Messages, history | In the scale that reads best: `850 ms`, `12.4 s`, `3 min 3 s`, `1 h 2 min` |
 | Filtered rows | Footer | While the filter is open, the rows it shows of the page: "3 of 1,000 rows" |
 | Sorted column | Grid header | An arrow after the name; a click on a header sorts the page's rows by that column's values, ascending, then descending, then in the server's order. NULLs come last and numbers compare exactly |
-| Saved query | Editor toolbar, library | The bookmark is filled while the tab holds the saved version. It saves or updates, never removes; a saved query opens linked to its tab (an open one is shown again), and is removed from the library list, after a confirmation |
+| Saved query | Editor toolbar, library | The bookmark is filled while the tab holds the saved version. The first save asks a name (the tab's title to start with) and tags separated by commas; later saves only update the SQL, never remove. A saved query opens linked to its tab (an open one is shown again). In the library list its pencil renames it or changes its tags (an open tab takes the new name) and its bin removes it, after a confirmation |
+| Tags of saved queries | Library, under the search | Each tag once, as `#tag`; choosing one lists only the queries with it, choosing it again lists them all. The search finds tags too, and `#word` asks for a tag that starts with `word` |
+| Saved queries in the palette | **Ctrl+Shift+P** | Saved queries that match the text (name, tags, SQL, connection; `#tag` filters) are listed above the tables and views; Enter or a click opens the one highlighted. A search of tags alone lists no tables |
 | History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
 | Saved report | Report toolbar, Reports list | The save icon is a filled bookmark while the tab holds the stored definition; the list shows each report's title, connection and the start of its SQL, with its chart type as icon; a search filters by title, description, connection or SQL |
 | Report parameters | The report's form | One field per `:name` of the SQL, labelled as the definition says (`*` when required) with a placeholder for its type; a missing or malformed value is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)) |
 | Run of a report | Report toolbar, footer, tab bar | **Run** turns into **Stop** while it runs; the tab shows the run's outcome like a query tab; the footer shows the rows, the time and "Stopped at the row limit" when more rows exist |
 | Report chart | Above the report's grid | Bars (one small chart per value column), lines (one per value column on a shared scale) or a pie; at most 50 bars, 1,000 points or 10 slices plus "Other", and a line says how many rows it shows when it leaves some out. A chart that cannot be drawn says why (a column missing, a column without numbers) |
 | Connection test | Connection dialog footer | **Test connection** turns into **Cancel test** while it runs and shows the elapsed time after 2 s |
+| Export of a result | The export bar, under the result toolbar | Its options and where the rows come from (the rows held, the rest from the server, or a statement run again); while writing, a spinner, the rows and bytes written (of the total when known), the elapsed time after 2 s and **Cancel export**; at the end, how many rows went to which file, its size and time, with **Show in folder**, or why nothing was written. The toolbar's export button stays highlighted while the bar is open ([Results](results.md#export)) |
 | Plan of a statement | **Explain** in the editor toolbar | The dialect's `EXPLAIN` of the statement at the cursor (or of the one selected) runs into a new result tab; the statement itself does not run. Only queries and data changes are explained |
 
 Rules:
@@ -183,6 +187,11 @@ Rules:
   editor's save button only saves or updates.
 - Copying a selection or a page estimated above 50 MiB asks first. So does
   copying a report's result.
+- Exporting a result the tab no longer holds whole runs its statement again
+  only after asking (**Run and export**), and only for a statement that
+  only reads. Closing a tab while it exports asks first: closing cancels the
+  export, which leaves no file. An export that reads from the session counts
+  as a running query when the tab is moved or its connection saved.
 - Closing a report tab asks first when it is running (closing stops it) or
   its definition is not saved (closing loses it). Removing a saved report
   (its button in the Reports list) asks first; a tab that has it open keeps
@@ -205,6 +214,7 @@ Rules:
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Run the report on screen (all of its SQL), from anywhere in its tab | `Ctrl Enter` (or `Enter` in a parameter field) |
 | Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
+| Open or close the export bar of the result on screen | `Ctrl Shift E` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |
 | New query on the active connection | `Ctrl N` |
@@ -281,4 +291,4 @@ interactive elements expose a role, a label and their state. Details are in
 | --- | --- |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Elapsed time and cancel for work over 2 s | **Format** runs off the UI thread and the editor stays usable, but the first format per dialect (building its grammar) or a long script can take seconds, and it cannot be cancelled; a result for SQL edited meanwhile is dropped |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab and moving to the next or previous tab are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, moving to the next or previous tab and the export bar are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |

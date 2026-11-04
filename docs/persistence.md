@@ -2,11 +2,11 @@
 
 Local data lives in SQLite files owned by `jykre-storage`
 ([ADR-0003](adr/0003-sqlite-for-local-storage.md)). Passwords are never stored
-here ([Security](security.md)). Query results are never written to disk,
-with one exception the user asks for each time: a report's print HTML,
-written only to the file the user picks in the save dialog
-([ADR-0024](adr/0024-reports.md)). Report definitions live in the `reports`
-setting ([below](#schema-configdb)).
+here ([Security](security.md)). The application never writes query results
+to disk on its own: only an export the user asks for writes them, to the
+file the user chose ([Results](results.md#export)), and so does a report's
+print HTML ([ADR-0024](adr/0024-reports.md)). Report definitions live in the
+`reports` setting ([below](#schema-configdb)).
 
 ## Files
 
@@ -57,15 +57,25 @@ missing or out-of-range value reads as the default, 1,000), and
 environment this version does not know, reads as the driver's colour and no
 environment.
 
+`export.preferences` keeps the export bar's last choices
+(`jykre::export::ExportPreferences`): `{"format": "csv", "separator": ";",
+"quoting": "all", "header": true, "bom": false, "directory": "…"}`, the
+directory being the folder of the last exported file. It is read each time a
+tab opens its export bar and written when an export starts, the last write
+asked for winning across tabs. A missing or unknown value takes its default
+(CSV with `;`, every value quoted, headers, no BOM, the Downloads folder).
+
 `workspace.state` keeps the workspace between sessions
 (`jykre::workspace_state`): the open query tabs in order (title, connection
 name, SQL, the SQL last saved to the library and the identity of that saved
 query, the table or view the tab was opened for, its context and the
 statement timeout), the tab on screen, the saved queries, each with a stable
-numeric `id` (its title is only a label; `next_id` is the next one), and the
+numeric `id` (its title is only a label; `next_id` is the next one) and its
+`tags` (labels without `#`, each once ignoring case), and the
 last 200 history entries, each with when it ended, how (`succeeded`,
 `failed`, `cancelled`), its outcome and how long it took. Values written by
-an earlier version still read: saved queries without an `id` get one, a tab
+an earlier version still read: saved queries without an `id` get one, those
+without `tags` have none, a tab
 is linked to the saved query with its title, connection and SQL, and old
 history entries have no time or status. It is
 written half a second after changes settle and when the application quits,

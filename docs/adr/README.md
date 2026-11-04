@@ -44,5 +44,6 @@ something is the way it is, and so a decision is not undone by accident.
 | [0019](0019-compact-metadata-cache-keys.md) | Compact keys and a single copy of each path in the metadata cache | Accepted |
 | [0020](0020-editor-language-features-in-their-own-crates.md) | Editor language features in their own crates, apart from query execution | Proposed |
 | [0021](0021-sql-catalogs-read-at-run-time.md) | SQL dialect catalogs read at run time from a data directory | Proposed |
+| [0022](0022-result-pages-shared-across-threads.md) | Result pages shared across threads with `Arc` (supersedes in part 0012) | Proposed |
 | [0023](0023-named-parameters-bound-by-drivers.md) | Named parameters bound by the drivers (amends 0002 for report SQL) | Proposed |
 | [0024](0024-reports.md) | Reports, with stored definitions, tabs of their own and a print HTML the user saves | Proposed |

@@ -98,8 +98,8 @@ runs into these constraints:
   `cell_format::result_csv` and `cell_format::copy_cells`, with the existing
   confirmation above 50 MiB (`grid::COPY_CONFIRM_BYTES`). Reports write no CSV
   file.
-- **Print HTML.** This is the one exception to "query results are never written
-  to disk":
+- **Print HTML.** Like a result export ([Results](../results.md#export)), it
+  writes a result to disk only where the user chose, when they ask:
   - "Export for print…" opens the system's save dialog
     (`cx.prompt_for_new_path`). The application writes one HTML file, only at
     the path the user picked, and appends `.html` when the name lacks it,

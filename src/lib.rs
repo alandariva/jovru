@@ -13,6 +13,7 @@ pub mod decimal;
 pub mod drivers;
 pub mod error_report;
 pub mod explorer;
+pub mod export;
 pub mod grid;
 pub mod grouped_tabs;
 pub mod guard;

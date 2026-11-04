@@ -258,7 +258,7 @@ impl AppView {
                     if let Some(tab) = self.report_tab_of(view) {
                         let _ = self
                             .tabs
-                            .update(cx, |tabs, cx| tabs.rename_tab(tab, title, cx));
+                            .update(cx, |tabs, cx| tabs.set_tab_title(tab, title, cx));
                     }
                 }
                 self.filter_library(cx);

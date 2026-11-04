@@ -97,17 +97,6 @@ impl<C> Model<C> {
 
     /// Sets what a tab shows about its work; `false` when it already showed
     /// it, so the host redraws nothing.
-    /// Renames a tab; `Ok(false)` when it already had that title.
-    pub fn set_title(&mut self, id: TabId, title: SharedString) -> Result<bool, TabsError> {
-        let (group, tab) = self.location(id).ok_or(TabsError::TabNotFound)?;
-        let tab = &mut self.groups[group].tabs[tab];
-        if tab.title == title {
-            return Ok(false);
-        }
-        tab.title = title;
-        Ok(true)
-    }
-
     pub fn set_status(&mut self, id: TabId, status: TabStatus) -> Result<bool, TabsError> {
         let (group, tab) = self.location(id).ok_or(TabsError::TabNotFound)?;
         let tab = &mut self.groups[group].tabs[tab];
@@ -115,6 +104,17 @@ impl<C> Model<C> {
             return Ok(false);
         }
         tab.status = status;
+        Ok(true)
+    }
+
+    /// Changes a tab's title; `false` when it already had it.
+    pub fn set_title(&mut self, id: TabId, title: SharedString) -> Result<bool, TabsError> {
+        let (group, tab) = self.location(id).ok_or(TabsError::TabNotFound)?;
+        let tab = &mut self.groups[group].tabs[tab];
+        if tab.title == title {
+            return Ok(false);
+        }
+        tab.title = title;
         Ok(true)
     }
 

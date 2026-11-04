@@ -236,6 +236,67 @@ alignment only; the value itself is never converted.
   are built) ask for confirmation, and copying runs off the UI thread
   when it would exceed a frame.
 
+## Export
+
+**Export the result to a file** (the toolbar's download button, or
+`Ctrl Shift E`) opens a bar under the result toolbar for the result tab on
+screen. It writes the whole result, not the page, to a file chosen in the
+system's save dialog (`jykre::export`, `backend::export`).
+
+- **Formats:** CSV, Excel (XLSX), JSON (an array laid out as **Copy as
+  JSON**), JSON Lines (one object per line), SQL `INSERT` (one per row, as
+  **Copy as INSERT**) and Markdown. CSV starts as the CSV copy writes:
+  `;` between fields, every value quoted, the column names first, no BOM,
+  one line per record ending in `\n`. Its options are the separator (`;`,
+  `,` or tab), **Quote every value** (off: only values holding the
+  separator, a quote or a line break, and empty text), **Column names
+  first** and a **Byte order mark (BOM)**. XLSX also takes **Column names
+  first**. The bar remembers the last choices and folder
+  ([Persistence](persistence.md)).
+- **Values** follow the copies' rules, so a copy and an export of the same
+  cells write the same text: NULL is an empty CSV field and empty text is
+  `""`, numbers are written as the database wrote them (a JSON number only
+  when valid), strings are escaped by the dialect, nothing is converted
+  between time zones or changed to defend spreadsheets from formulas
+  ([Security](security.md#exported-files)).
+- **XLSX** writes one sheet, `Result`, in constant memory (each row goes to a
+  temporary file as soon as the next starts). A number column's value is a
+  number cell only when it has at most 15 significant digits, which Excel
+  keeps; any other value of the column is text, so no digit changes. Boolean
+  columns give boolean cells, everything else (dates included) text. Excel
+  has no empty text: NULL and empty text both leave the cell empty. A sheet
+  holds 1,048,576 rows and 16,384 columns, and a cell 32,767 characters; an
+  export past them fails and suggests CSV or JSON, never cuts a value.
+- **Where the rows come from** (`result_tabs::ExportSource`):
+  - the tab holds the whole result: its pages are written;
+  - the session keeps the rest open: the pages held, then the rest, read in
+    parts of about 16 MB (whatever the row limit). What the export reads goes
+    to the file only, so afterwards the tab no longer pages past what it
+    holds, and the bar says so;
+  - part of the result can no longer be read (pages released for memory,
+    the rest closed by another statement, a limit or the server): the bar
+    offers **Run again and export**, which runs the statement again in the
+    tab's session after asking and writes everything it returns, and
+    **Export the rows held**. Only a single statement that reads (a query
+    without `INTO`, `FOR UPDATE`, a data change or a call;
+    `jykre::sql::reads_only`) runs again; any other exports the rows held.
+    The statement run again is logged in Messages.
+- **While it runs** the bar shows the rows and bytes written (out of the
+  total when the tab holds them all), the elapsed time after 2 s and
+  **Cancel export**. An export that reads from the session holds it: runs,
+  page reads and transaction controls wait, and closing the tab, moving it
+  or saving its connection asks first. One that writes only the rows held
+  leaves the session free.
+- **The file appears only once it is complete.** Rows are written to a
+  temporary file next to the chosen one, which replaces it after every row is
+  written, flushed and synced. A failure or a cancellation removes the
+  temporary file and leaves the chosen file as it was; the bar says so. A
+  finished export says how many rows, the size and the time, with **Show in
+  folder**.
+- Each part is converted and written on the runtime's blocking pool, never
+  the UI thread; the held pages are shared with the export, not copied
+  ([ADR-0022](adr/0022-result-pages-shared-across-threads.md)).
+
 ## Reports
 
 A report ([ADR-0024](adr/0024-reports.md)) shows the last result of its SQL
@@ -251,8 +312,8 @@ up to the connection's row limit, without paging, in the same grid.
 - **Export for printing or PDF…** (`jykre::reports::export`) writes one HTML
   file where the user chooses: the title, description, parameters, chart (as
   SVG) and table, with every text escaped, nothing loaded from elsewhere and
-  print styles (A4, the header repeated on each page). It is the only place a
-  result reaches the disk, and only at the user's request
+  print styles (A4, the header repeated on each page). Like an export, it
+  reaches the disk only at the user's request, at the path they chose
   ([Persistence](persistence.md)).
 
 ## Footer
@@ -274,9 +335,12 @@ format ([User experience](ux.md#feedback)).
       correctly into a spreadsheet.
 - [ ] Running in one tab does not change another tab's results.
 - [ ] Sums, averages and medians of `numeric(38,10)` values are exact.
+- [ ] An export of a result larger than the tab holds writes every row in
+      order, in each format, and a cancelled or failed export leaves the
+      chosen file as it was.
 
 ## Known deviations
 
 | Standard | Current code |
 | --- | --- |
-| Copy off the UI thread when large | Copies above 50 MiB ask first, but the text is still built on the UI thread (about 85 ms for 500,000 cells): the result is shared as `Rc<ResultData>` ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)), which cannot move to another thread without changing how the result is shared |
+| Copy off the UI thread when large | Copies above 50 MiB ask first, but the text is still built on the UI thread (about 85 ms for 500,000 cells). Pages are now shared as `Arc<ResultData>` ([ADR-0022](adr/0022-result-pages-shared-across-threads.md), Proposed), which lets the copy move off the UI thread; that change is not made yet |

@@ -67,6 +67,12 @@ Demo connections and results are labelled as such and never reach a server.
   keep the last good read, and permission warnings
   keep the parts that could not be read. Each scope keeps its own state and
   timestamp.
+- **Export** (the download button, or `Ctrl Shift E`) writes the whole
+  result to CSV, Excel, JSON, JSON Lines, SQL `INSERT`s or Markdown, not only
+  the page on screen. It reads the rest of the result from the server when
+  the session still has it, or runs a read-only statement again after
+  asking; the file appears only once complete, and cancelling leaves the
+  chosen file as it was. See [Results](docs/results.md#export).
 - The metadata cache is stored locally, read page by page and browsable offline
   after a restart. Search also queries the local cache.
 - Double-click a table or view (or press Enter) for a new query on it, with

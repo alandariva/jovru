@@ -70,7 +70,11 @@ that blocks the gate must be fixed or receive a documented decision with a
 reason and a review date in `deny.toml`, never a silent suppression.
 
 It starts dedicated fixtures, waits for the health checks and runs
-`--test live -- --ignored` for each version:
+`--test live -- --ignored` for each version, first in the driver's crate and
+then in `jykre` (`tests/live.rs`, with `JYKRE_TEST_DRIVER` set to `postgres`
+or `mysql`), which exports 250,000 generated rows through the application's
+backend: the rest of an open result to CSV, a statement run again to XLSX,
+and a cancellation that must leave the chosen file as it was:
 
 | Database | Image | Compose service |
 | --- | --- | --- |
@@ -104,6 +108,7 @@ and pass the published port:
 docker compose -p jykre-manual -f docker-compose.test.yml up -d --wait
 docker compose -p jykre-manual -f docker-compose.test.yml port postgres-min 5432
 JYKRE_TEST_PORT=<port> cargo test -p jykre-driver-postgres --locked --test live -- --ignored
+JYKRE_TEST_PORT=<port> JYKRE_TEST_DRIVER=postgres cargo test -p jykre --locked --test live -- --ignored
 docker compose -p jykre-manual -f docker-compose.test.yml down --volumes
 ```
 

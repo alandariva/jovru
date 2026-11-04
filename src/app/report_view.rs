@@ -113,7 +113,7 @@ pub struct ReportView {
     /// A run waits for the user to confirm its risky statements.
     risky: bool,
     risk_confirmed: bool,
-    result: Option<Rc<ResultData>>,
+    result: Option<Arc<ResultData>>,
     /// The result stopped at the row limit or the memory ceiling.
     limited: bool,
     elapsed_ms: Option<u128>,
@@ -189,7 +189,7 @@ impl ReportView {
                 }
             }));
         }
-        let grid = cx.new(|cx| ResultGrid::new(Rc::default(), false, cx));
+        let grid = cx.new(|cx| ResultGrid::new(Arc::default(), false, cx));
         let chart = cx.new(|_| ReportChart::new());
         let mut view = Self {
             report,
@@ -738,7 +738,7 @@ impl ReportView {
                 if let Some(last) = batch.completed.into_iter().last() {
                     self.limited = last.has_more || last.limit.is_some();
                     self.elapsed_ms = Some(last.elapsed_ms);
-                    self.show_result(Rc::new(last.data), cx);
+                    self.show_result(Arc::new(last.data), cx);
                 }
                 match failed {
                     Some(error) => self.failed(&error),
@@ -764,7 +764,7 @@ impl ReportView {
         }
     }
 
-    fn show_result(&mut self, data: Rc<ResultData>, cx: &mut Context<Self>) {
+    fn show_result(&mut self, data: Arc<ResultData>, cx: &mut Context<Self>) {
         self.numeric = chart::numeric_columns(&data);
         self.suggestion = chart::suggest(&data);
         if self.report.chart.is_none() && self.saved.is_none() {
@@ -774,7 +774,7 @@ impl ReportView {
             grid.set_page(data.clone(), false, 0, None, cx)
         });
         if let Some(previous) = self.result.replace(data)
-            && let Ok(previous) = Rc::try_unwrap(previous)
+            && let Ok(previous) = Arc::try_unwrap(previous)
         {
             backend::release(previous);
         }

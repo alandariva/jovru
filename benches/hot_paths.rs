@@ -1,6 +1,7 @@
 //! Benchmarks for the hot paths listed in ADR-0010: building the grid view,
-//! converting driver rows to result data, splitting large scripts and paging
-//! metadata children from a large local cache.
+//! converting driver rows to result data, splitting large scripts, paging
+//! metadata children from a large local cache and encoding a result for an
+//! export.
 //!
 //! ```text
 //! cargo bench --bench hot_paths -- --save-baseline main   # before a change
@@ -276,12 +277,48 @@ fn metadata_paging(c: &mut Criterion) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Encoding a page for an export, as each part is before it reaches the
+/// file ([Results](../docs/results.md#export)).
+fn export_encoding(c: &mut Criterion) {
+    use jykre::export::{Encoder, ExportFormat, ExportOptions, SqlTarget};
+    let result = event_log(100_000);
+    let sql = SqlTarget {
+        table: "sales.event_log".into(),
+        ..SqlTarget::default()
+    };
+    let mut group = c.benchmark_group("export, 100,000 rows x 5 columns");
+    group.sample_size(10);
+    for format in [
+        ExportFormat::Csv,
+        ExportFormat::JsonLines,
+        ExportFormat::Insert,
+    ] {
+        let options = ExportOptions {
+            format,
+            ..ExportOptions::default()
+        };
+        group.bench_function(format.extension(), |b| {
+            b.iter(|| {
+                let mut encoder =
+                    Encoder::new(&options, result.columns(), &sql).expect("a text format");
+                let mut out = String::new();
+                encoder.begin(&mut out);
+                encoder.rows(black_box(&result), &mut out);
+                encoder.end(&mut out);
+                out
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     grid_view,
     result_conversion,
     statement_splitting,
     sql_tokens,
-    metadata_paging
+    metadata_paging,
+    export_encoding
 );
 criterion_main!(benches);
