@@ -115,7 +115,7 @@ Os números `MET-xxx` são os da auditoria original, para rastreio.
 | Verificação visual: explorer virtualizado, selo de idade, **sem acesso**, **na fila**, painel de inspeção, seletor de contexto, autocomplete e hover, campos novos do diálogo | Não feita (o app não foi aberto nestas fases) |
 | Frame do explorer com 5 mil nós expandidos (critério do MET-013) | Não medido |
 | Databricks com CLI autenticado e workspace de teste: leitura em paralelo, `omit_columns`, funções, `view_definition`, defaults em `type_json`, `include_browse` | Não feita (só mock HTTP) |
-| Tempo da consulta `pg_catalog` em um catálogo grande | Não medido |
+| Tempo da consulta `pg_catalog` em um catálogo grande | Medido em 3/11/2026, PostgreSQL 18 em Docker local, catálogo sintético de 100 schemas × 500 tabelas × 10 colunas, com PK e FK (50 mil tabelas, 500 mil colunas), consultas do driver executadas por `psql`. Um schema completo: 116 a 141 ms. Um schema só com nomes: 60 a 66 ms. Uma tabela: 54 a 63 ms. Foreign keys de um schema: 14 ms. Banco inteiro completo: 5,2 a 6,1 s (timeout de 300 s). Banco inteiro só com nomes: 0,57 s. Foreign keys do banco inteiro: 0,7 a 0,9 s. A leitura de uma tabela custa quase o mesmo que a de um schema, porque o filtro por raiz de partição (`OR rt.name = $2`) não usa índice. Não há orçamento para leituras remotas |
 | Busca de 1 ou 2 caracteres com 500 mil objetos | 114 ms, acima do orçamento de 50 ms; registrada como desvio em [Performance](performance.md) |
 | Abertura a frio do cache com 500 mil objetos | Cerca de 700 ms, uma vez por conexão no startup, fora da thread de UI |
 | ADR-0015 a ADR-0019 | *Proposed*; aguardam aceitação do mantenedor |
