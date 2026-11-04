@@ -1,8 +1,9 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-//! Which relations completion offers columns of at the cursor, over the cases
-//! of `fixtures/scopes.txt` in the three dialects.
+//! Which columns completion offers at the cursor, over the cases of
+//! `fixtures/scopes.txt` in the three dialects: the relations of the cache
+//! whose columns it reads, and the columns CTEs and derived tables make.
 use jykre_core::{ObjectKind, ObjectPath, SessionContext, SqlDialect};
-use jykre_sql_language::completion::{NameIndex, Relation, Wanted, request};
+use jykre_sql_language::completion::{NameIndex, Relation, Source, Wanted, request};
 use std::collections::HashSet;
 
 const CURSOR: char = '‸';
@@ -32,14 +33,18 @@ const RELATIONS: &[&str] = &[
     "shop.orders",
     "shop.customers",
     "hr.employees",
+    "sales.clientes",
+    "type_showcase",
     "\"Sales\".\"Orders\"",
 ];
 
 struct Case {
     line: usize,
     dialect: String,
-    /// `None` when the cursor asks for a relation name.
-    relations: Option<Vec<String>>,
+    /// The relations whose columns are offered and the columns the
+    /// statement itself makes; `None` when the cursor asks for a relation
+    /// name.
+    expected: Option<(Vec<String>, Vec<String>)>,
     sql: String,
     cursor: usize,
 }
@@ -51,17 +56,23 @@ fn cases(text: &str) -> Vec<Case> {
             continue;
         }
         if let Some(header) = line.strip_prefix("== ") {
-            let (dialect, relations) = header.split_once('|').expect("dialect | relations");
-            let relations = relations.trim();
-            cases.push(Case {
-                line: number + 1,
-                dialect: dialect.trim().to_owned(),
-                relations: (relations != "-").then(|| {
-                    relations
+            let mut fields = header.split('|').map(str::trim);
+            let dialect = fields.next().expect("a dialect");
+            let relations = fields.next().expect("relations");
+            let columns = fields.next().unwrap_or_default();
+            let list = |text: &str| -> Vec<String> {
+                match text {
+                    "" | "none" => Vec::new(),
+                    names => names
                         .split(',')
                         .map(|name| name.trim().to_owned())
-                        .collect()
-                }),
+                        .collect(),
+                }
+            };
+            cases.push(Case {
+                line: number + 1,
+                dialect: dialect.to_owned(),
+                expected: (relations != "-").then(|| (list(relations), list(columns))),
                 sql: String::new(),
                 cursor: 0,
             });
@@ -154,9 +165,9 @@ fn path(written: &str, levels: &[ObjectKind], context: &SessionContext) -> Objec
 }
 
 #[test]
-fn completion_reads_the_relations_of_the_query_around_the_cursor() {
+fn completion_offers_the_columns_of_the_query_around_the_cursor() {
     let cases = cases(include_str!("fixtures/scopes.txt"));
-    assert_eq!(cases.len(), 121);
+    assert_eq!(cases.len(), 122);
     let mut failures = Vec::new();
     for case in &cases {
         let (dialect, levels, context) = setup(&case.dialect);
@@ -169,19 +180,29 @@ fn completion_reads_the_relations_of_the_query_around_the_cursor() {
             .collect();
         let index = NameIndex::new(1, levels.clone(), dialect, relations);
         let wanted = request(&case.sql, case.cursor, &index, &context).map(|asked| asked.wanted);
-        let found: Option<HashSet<ObjectPath>> = match wanted {
-            Some(Wanted::Columns { relations, .. }) => Some(relations.into_iter().collect()),
+        let found: Option<(HashSet<ObjectPath>, HashSet<String>)> = match wanted {
+            Some(Wanted::Columns { sources, .. }) => {
+                let mut found = (HashSet::new(), HashSet::new());
+                for source in sources {
+                    match source {
+                        Source::Relation(path) => found.0.insert(path),
+                        Source::Column { name, .. } => found.1.insert(name),
+                    };
+                }
+                Some(found)
+            }
             Some(Wanted::Relations { .. }) => None,
             other => {
                 failures.push(format!("line {}: asked for {other:?}", case.line));
                 continue;
             }
         };
-        let expected: Option<HashSet<ObjectPath>> = case.relations.as_ref().map(|names| {
-            names
+        let expected = case.expected.as_ref().map(|(relations, columns)| {
+            let relations: HashSet<ObjectPath> = relations
                 .iter()
                 .map(|name| path(name, &levels, &context))
-                .collect()
+                .collect();
+            (relations, columns.iter().cloned().collect::<HashSet<_>>())
         });
         if found != expected {
             failures.push(format!(

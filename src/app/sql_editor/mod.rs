@@ -16,7 +16,7 @@ use gpui_kit::*;
 use jykre::drivers::*;
 use jykre::{backend, tr};
 use jykre_sql_language::catalog::{self, DialectCatalog, DialectFiles};
-use jykre_sql_language::completion::{CandidateKind, Relation, Request, Symbol, Wanted};
+use jykre_sql_language::completion::{CandidateKind, Relation, Request, Source, Symbol, Wanted};
 use jykre_sql_language::format::{FormatError, Formatted};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -322,13 +322,15 @@ impl SqlEditor {
             let request =
                 jykre_sql_language::completion::request(sql, offset, &self.names, &self.context);
             if let Some(Request {
-                wanted: Wanted::Columns { relations, .. },
+                wanted: Wanted::Columns { sources, .. },
                 ..
             }) = request
             {
-                let missing = relations
-                    .into_iter()
-                    .filter(|relation| !self.columns.contains_key(relation))
+                let missing = sources
+                    .iter()
+                    .flat_map(Source::relations)
+                    .filter(|relation| !self.columns.contains_key(*relation))
+                    .cloned()
                     .collect();
                 self.load_columns(missing, cx);
             }

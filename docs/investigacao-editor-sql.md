@@ -557,7 +557,7 @@ Não há gabarito para os prefixos. O modelo de escopos não depende de uma árv
 
 **Decisão.** O tree-sitter não foi adotado. O completion lê cada instrução com um modelo de escopos sobre os tokens do nosso lexer, em `crates/sql-language/src/completion/scopes.rs`, que substituiu a lista única da heurística:
 - **Consultas:** a instrução, cada subconsulta entre parênteses, cada corpo de CTE e cada ramo `SELECT` (depois de `UNION` e semelhantes, de `INSERT …`, de `CREATE … AS` ou da lista `WITH`) são consultas com as relações do seu próprio `FROM`, `JOIN`, `USING`, `UPDATE` e `INTO`.
-- **Tabelas derivadas:** o alias leva às relações que a subconsulta lê.
+- **CTEs e tabelas derivadas:** oferecem as colunas que o seu `SELECT` nomeia (as do primeiro ramo, num `UNION`), renomeadas pela lista de colunas escrita depois delas; um `*` traz as colunas do que elas leem. Cada coluna é seguida até a coluna do cache que lê, que dá o tipo na sugestão e o alvo do hover e de "ir para a definição".
 - **Alias externo:** depois de `alias.`, o nome é procurado na consulta do cursor e depois nas que a envolvem, como numa subconsulta correlacionada. Em "ir para a definição", uma coluna sem qualificador é procurada da consulta mais interna para fora.
 - **`SEMI` e `ANTI` join (Databricks):** a relação da direita só é vista na condição do join.
 - **Texto incompleto:** um parêntese aberto mantém a consulta aberta até o fim da instrução. Não há árvore que fique inválida, então não há segundo caminho.
@@ -568,9 +568,9 @@ Os motivos:
 - não acrescenta dependência nem a amarra de versão com o gpui-component (`links = "tree-sitter"`);
 - a parte trabalhosa, o modelo de escopos, teria de ser escrita também sobre a árvore: o tree-sitter não a dispensa.
 
-**O que fica de fora** (resto de P7): depois do alias de uma tabela derivada, o completion oferece as colunas das tabelas que ela lê, não só as que ela seleciona, e não os nomes calculados (`sum(total) AS spent`); as colunas de uma CTE não são oferecidas.
+**O que fica de fora:** uma expressão sem alias (`count(*)`, `x::int`) não é oferecida, porque o nome que o servidor dá a ela muda com o dialeto; o `* EXCEPT (…)` do Databricks oferece todas as colunas; uma coluna calculada (`sum(total) AS spent`) aparece sem tipo.
 
-**Regressão.** Os 121 casos dos três conjuntos estão em `crates/sql-language/tests/fixtures/scopes.txt`, verificados por `crates/sql-language/tests/scopes.rs` através de `completion::request` ([Testing](testing.md#completion-scopes)). Com o código anterior, 32 deles falham. [V]
+**Regressão.** Os 121 casos dos três conjuntos, mais o da CTE relatado pelo mantenedor, estão em `crates/sql-language/tests/fixtures/scopes.txt`, verificados por `crates/sql-language/tests/scopes.rs` através de `completion::request` ([Testing](testing.md#completion-scopes)). Com o código anterior, 32 deles falham. [V] Quando CTEs e tabelas derivadas passaram a oferecer as colunas do seu `SELECT`, 11 casos mudaram de resposta: depois do alias de uma tabela derivada, ou sem qualificador ao lado de uma CTE, eles esperavam as tabelas lidas, e agora esperam as colunas nomeadas. A tabela acima mede a versão anterior.
 
 **Semantic tokens** podem reaproveitar o modelo, que monta as relações de todas as consultas da instrução. [I]
 

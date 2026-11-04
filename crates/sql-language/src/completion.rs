@@ -5,7 +5,7 @@
 use crate::catalog::DialectCatalog;
 use jykre_core::{MetadataObject, ObjectKind, ObjectPath, SessionContext, SqlDialect};
 use jykre_sql::names::{Name, Part, name_at, parts, stored};
-use scopes::{Binding, Scopes};
+use scopes::{Binding, Output, Read, Scopes};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -126,17 +126,42 @@ pub enum Wanted {
     /// Relations, namespaces and the statement's CTEs, after `FROM` or
     /// `JOIN`; inside `qualifier`'s namespace when one is written.
     Relations { qualifier: Vec<Name> },
-    /// Columns of these relations: after `alias.`, the relation it names
-    /// (a derived table's relations); otherwise those of the query around
-    /// the cursor (the statement, a subquery, a CTE body or a `UNION`
-    /// branch). Where nothing qualifies the name it may also be a function
-    /// or a keyword.
+    /// Columns from these sources: after `alias.`, the relation it names;
+    /// otherwise those of the query around the cursor (the statement, a
+    /// subquery, a CTE body or a `UNION` branch). Where nothing qualifies
+    /// the name it may also be a function or a keyword.
     Columns {
-        relations: Vec<ObjectPath>,
+        sources: Vec<Source>,
         qualified: bool,
     },
     /// A data type, after `::`.
     Types,
+}
+
+/// Where suggested columns come from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// Every column of a relation of the cache, as read.
+    Relation(ObjectPath),
+    /// A column a CTE or a derived table makes in the statement, with the
+    /// columns of the cache it may read (relation and column, the likeliest
+    /// first), which give its type.
+    Column {
+        name: String,
+        reads: Vec<(ObjectPath, String)>,
+    },
+}
+
+impl Source {
+    /// The relations whose columns it needs: its own, or those that give
+    /// its type.
+    pub fn relations(&self) -> impl Iterator<Item = &ObjectPath> {
+        let (own, reads): (Option<&ObjectPath>, &[(ObjectPath, String)]) = match self {
+            Self::Relation(path) => (Some(path), &[]),
+            Self::Column { reads, .. } => (None, reads),
+        };
+        own.into_iter().chain(reads.iter().map(|(path, _)| path))
+    }
 }
 
 /// A completion request: what to suggest and the text it replaces.
@@ -224,26 +249,133 @@ fn is_symbol(part: Option<&Part>, symbol: &str) -> bool {
     matches!(part, Some(Part::Symbol(text)) if text == symbol)
 }
 
-/// The cache's relations that `bindings` stand for, each once and in order.
-/// CTEs and names the cache does not hold are left out.
-fn resolved<'a>(
-    bindings: impl Iterator<Item = &'a Binding>,
-    scopes: &Scopes,
-    index: &NameIndex,
-    context: &SessionContext,
-) -> Vec<ObjectPath> {
-    let mut paths: Vec<ObjectPath> = Vec::new();
-    for name in bindings.flat_map(|binding| &binding.names) {
-        if scopes.is_cte(name) {
-            continue;
+/// How deep a CTE or a derived table is read through the ones it reads; it
+/// also stops one that reads itself.
+const DEPTH: usize = 8;
+
+/// What reading the columns of a statement's relations needs.
+struct Lookup<'a> {
+    scopes: &'a Scopes,
+    index: &'a NameIndex,
+    context: &'a SessionContext,
+}
+
+impl Lookup<'_> {
+    /// The relation of the cache `binding` names.
+    fn relation(&self, binding: &Binding) -> Option<ObjectPath> {
+        let relation = self.index.resolve(binding.name.as_ref()?, self.context)?;
+        Some(relation.path.clone())
+    }
+
+    /// A qualifier as the scopes compare it: stored, in lower case.
+    fn qualifier(&self, name: Option<&Name>) -> Option<String> {
+        name.map(|name| stored(name, self.index.dialect()).to_lowercase())
+    }
+
+    /// The relations `read` (a column of `query`'s `SELECT` list) may read
+    /// from, and the column's name as stored.
+    fn read_from(&self, query: usize, read: &Read) -> (Vec<&Binding>, String) {
+        let qualifier = self.qualifier(read.qualifier.as_ref());
+        (
+            self.scopes.read_by(query, qualifier.as_deref()),
+            stored(&read.column, self.index.dialect()),
+        )
+    }
+
+    /// Where the columns of `binding` come from, added to `found`: its
+    /// relation of the cache, or the columns a CTE or a derived table makes,
+    /// `*` read through.
+    fn sources(&self, binding: &Binding, depth: usize, found: &mut Vec<Source>) {
+        let Some((query, outputs)) = self.scopes.outputs(binding) else {
+            if let Some(path) = self.relation(binding) {
+                let source = Source::Relation(path);
+                if !found.contains(&source) {
+                    found.push(source);
+                }
+            }
+            return;
+        };
+        if depth >= DEPTH {
+            return;
         }
-        if let Some(relation) = index.resolve(name, context)
-            && !paths.contains(&relation.path)
-        {
-            paths.push(relation.path.clone());
+        for output in outputs {
+            match output {
+                Output::Named { name, reads } => {
+                    let name = stored(&name, self.index.dialect());
+                    let known = found.iter().any(
+                        |source| matches!(source, Source::Column { name: known, .. } if *known == name),
+                    );
+                    if known {
+                        continue;
+                    }
+                    let mut origins = Vec::new();
+                    if let Some(read) = reads {
+                        let (bindings, column) = self.read_from(query, &read);
+                        for read in bindings {
+                            self.origins(read, &column, depth + 1, &mut origins);
+                        }
+                    }
+                    found.push(Source::Column {
+                        name,
+                        reads: origins,
+                    });
+                }
+                Output::Star(qualifier) => {
+                    let qualifier = self.qualifier(qualifier.as_ref());
+                    for star in self.scopes.read_by(query, qualifier.as_deref()) {
+                        self.sources(star, depth + 1, found);
+                    }
+                }
+                Output::Unnamed => {}
+            }
         }
     }
-    paths
+
+    /// The columns of the cache `column` of `binding` may be, added to
+    /// `found` (relation and column, the likeliest first): a CTE's or a
+    /// derived table's column is followed to what it reads.
+    fn origins(
+        &self,
+        binding: &Binding,
+        column: &str,
+        depth: usize,
+        found: &mut Vec<(ObjectPath, String)>,
+    ) {
+        let Some((query, outputs)) = self.scopes.outputs(binding) else {
+            if let Some(path) = self.relation(binding) {
+                let origin = (path, column.to_owned());
+                if !found.contains(&origin) {
+                    found.push(origin);
+                }
+            }
+            return;
+        };
+        if depth >= DEPTH {
+            return;
+        }
+        for output in outputs {
+            match output {
+                Output::Named { name, reads }
+                    if stored(&name, self.index.dialect()).eq_ignore_ascii_case(column) =>
+                {
+                    if let Some(read) = reads {
+                        let (bindings, column) = self.read_from(query, &read);
+                        for read in bindings {
+                            self.origins(read, &column, depth + 1, found);
+                        }
+                    }
+                    return;
+                }
+                Output::Star(qualifier) => {
+                    let qualifier = self.qualifier(qualifier.as_ref());
+                    for star in self.scopes.read_by(query, qualifier.as_deref()) {
+                        self.origins(star, column, depth + 1, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 /// The statement around `offset` and where it starts, split by the rules of
@@ -339,7 +471,7 @@ pub fn request(
         _ => None,
     });
     let scopes = Scopes::new(statement, index.dialect);
-    let ctes = scopes.ctes().to_vec();
+    let ctes = scopes.cte_names();
     let replace = start + prefix_start..offset;
     if qualifier.is_empty() && matches!(before.last(), Some(Part::Symbol(symbol)) if symbol == "::")
     {
@@ -360,12 +492,22 @@ pub fn request(
             ctes,
         });
     }
-    let relations = match qualifier.as_slice() {
-        [] => resolved(scopes.visible(local), &scopes, index, context),
+    let lookup = Lookup {
+        scopes: &scopes,
+        index,
+        context,
+    };
+    let mut sources = Vec::new();
+    match qualifier.as_slice() {
+        [] => {
+            for binding in scopes.visible(local) {
+                lookup.sources(binding, 0, &mut sources);
+            }
+        }
         [one] => {
             let wanted = stored(one, index.dialect()).to_lowercase();
             match scopes.qualified(local, &wanted) {
-                Some(binding) => resolved(std::iter::once(binding), &scopes, index, context),
+                Some(binding) => lookup.sources(binding, 0, &mut sources),
                 // `schema.` outside FROM: relations of that namespace.
                 None => {
                     return Some(Request {
@@ -377,16 +519,17 @@ pub fn request(
                 }
             }
         }
-        written => index
-            .resolve(written, context)
-            .map(|relation| vec![relation.path.clone()])
-            .unwrap_or_default(),
-    };
+        written => {
+            if let Some(relation) = index.resolve(written, context) {
+                sources.push(Source::Relation(relation.path.clone()));
+            }
+        }
+    }
     Some(Request {
         replace,
         prefix,
         wanted: Wanted::Columns {
-            relations,
+            sources,
             qualified: !qualifier.is_empty(),
         },
         ctes,
@@ -575,33 +718,58 @@ pub fn candidates(
                 }
             }
         }
-        Wanted::Columns {
-            relations,
-            qualified,
-        } => {
-            for relation in relations {
-                match columns(relation) {
-                    Some(objects) => {
-                        for column in objects
-                            .iter()
-                            .filter(|object| object.kind == ObjectKind::Column)
-                        {
-                            if matches_prefix(&column.name, &request.prefix)
-                                && !found
-                                    .iter()
-                                    .any(|candidate: &Candidate| candidate.label == column.name)
+        Wanted::Columns { sources, qualified } => {
+            let column = |name: &str, detail: String, found: &mut Vec<Candidate>| {
+                if matches_prefix(name, &request.prefix)
+                    && !found.iter().any(|candidate| candidate.label == name)
+                {
+                    found.push(Candidate {
+                        label: name.to_owned(),
+                        insert: quoted(name, dialect, quote, catalog),
+                        detail,
+                        documentation: None,
+                        kind: CandidateKind::Column,
+                    });
+                }
+            };
+            let unread = |relation: &ObjectPath, missing: &mut Vec<ObjectPath>| {
+                if !missing.contains(relation) {
+                    missing.push(relation.clone());
+                }
+            };
+            for source in sources {
+                match source {
+                    Source::Relation(relation) => match columns(relation) {
+                        Some(objects) => {
+                            for object in objects
+                                .iter()
+                                .filter(|object| object.kind == ObjectKind::Column)
                             {
-                                found.push(Candidate {
-                                    label: column.name.clone(),
-                                    insert: quoted(&column.name, dialect, quote, catalog),
-                                    detail: column.data_type.clone().unwrap_or_default(),
-                                    documentation: None,
-                                    kind: CandidateKind::Column,
-                                });
+                                let detail = object.data_type.clone().unwrap_or_default();
+                                column(&object.name, detail, &mut found);
                             }
                         }
+                        None => unread(relation, &mut missing),
+                    },
+                    // A CTE's or a derived table's column, with the type of
+                    // the first column it may read that is known.
+                    Source::Column { name, reads } => {
+                        let mut detail = String::new();
+                        for (relation, read) in reads {
+                            match columns(relation) {
+                                Some(objects) => {
+                                    if let Some(object) = objects.iter().find(|object| {
+                                        object.kind == ObjectKind::Column && object.name == *read
+                                    }) {
+                                        detail = object.data_type.clone().unwrap_or_default();
+                                        break;
+                                    }
+                                }
+                                None => unread(relation, &mut missing),
+                            }
+                        }
+                        column(name, detail, &mut found);
                     }
-                    None => missing.push(relation.clone()),
                 }
             }
             // Without a qualifier, the expression may be a function call or
@@ -745,37 +913,41 @@ pub fn symbol_at(
         return Some((Symbol::Relation(relation.path.clone()), range));
     }
     let scopes = Scopes::new(statement, index.dialect);
+    let lookup = Lookup {
+        scopes: &scopes,
+        index,
+        context,
+    };
     let (column, qualifier) = name.split_last()?;
     let column = stored(column, index.dialect());
-    let candidates: Vec<ObjectPath> = match qualifier {
+    // The columns of the cache it may be; a CTE's or a derived table's
+    // column is followed to the one it reads.
+    let mut candidates = Vec::new();
+    match qualifier {
         // The closest query that has the column, as a correlated subquery
         // reads it.
-        [] => resolved(scopes.outwards(local), &scopes, index, context),
+        [] => {
+            for binding in scopes.outwards(local) {
+                lookup.origins(binding, &column, 0, &mut candidates);
+            }
+        }
         [one] => {
             let wanted = stored(one, index.dialect()).to_lowercase();
-            scopes
-                .qualified(local, &wanted)
-                .map(|binding| resolved(std::iter::once(binding), &scopes, index, context))
-                .unwrap_or_default()
+            if let Some(binding) = scopes.qualified(local, &wanted) {
+                lookup.origins(binding, &column, 0, &mut candidates);
+            }
         }
-        written => index
-            .resolve(written, context)
-            .map(|relation| vec![relation.path.clone()])
-            .unwrap_or_default(),
-    };
-    candidates.into_iter().find_map(|relation| {
+        written => {
+            if let Some(relation) = index.resolve(written, context) {
+                candidates.push((relation.path.clone(), column));
+            }
+        }
+    }
+    candidates.into_iter().find_map(|(relation, name)| {
         columns(&relation)?
             .iter()
-            .any(|object| object.kind == ObjectKind::Column && object.name == column)
-            .then(|| {
-                (
-                    Symbol::Column {
-                        relation,
-                        name: column.clone(),
-                    },
-                    range.clone(),
-                )
-            })
+            .any(|object| object.kind == ObjectKind::Column && object.name == name)
+            .then(|| (Symbol::Column { relation, name }, range.clone()))
     })
 }
 
@@ -1045,7 +1217,9 @@ mod tests {
         assert_eq!(
             asked.wanted,
             Wanted::Columns {
-                relations: vec![schema("sales").child(ObjectKind::Table, "orders")],
+                sources: vec![Source::Relation(
+                    schema("sales").child(ObjectKind::Table, "orders")
+                )],
                 qualified: false,
             }
         );
@@ -1087,5 +1261,83 @@ mod tests {
         // A connection's index never answers for another one's names.
         let empty = NameIndex::default();
         assert!(symbol_at(sql, 22, &empty, &context(), &columns).is_none());
+    }
+
+    #[test]
+    fn a_cte_or_a_derived_table_suggests_the_columns_it_makes() {
+        let index = index();
+        let ask = |sql: &str| {
+            let cursor = sql.find('‸').unwrap();
+            let sql = sql.replace('‸', "");
+            let asked = request(&sql, cursor, &index, &context()).unwrap();
+            let (found, missing) = candidates(
+                &asked,
+                &index,
+                &context(),
+                '"',
+                &DialectCatalog::builtin(),
+                &columns,
+            );
+            let found: Vec<(String, String)> = found
+                .into_iter()
+                .filter(|candidate| candidate.kind == CandidateKind::Column)
+                .map(|candidate| (candidate.label, candidate.detail))
+                .collect();
+            (found, missing)
+        };
+        let pair = |label: &str, detail: &str| (label.to_owned(), detail.to_owned());
+        // The names its SELECT gives, typed by the columns they read.
+        let (found, missing) = ask("WITH t AS (SELECT total AS amount, id FROM orders) \
+             SELECT * FROM crm.customers c JOIN t x ON x.‸");
+        assert_eq!(
+            found,
+            [pair("amount", "numeric(12,2)"), pair("id", "integer")]
+        );
+        assert!(missing.is_empty());
+        // `*` reads through to the relation's columns.
+        let (found, _) = ask("WITH t AS (SELECT * FROM crm.customers) SELECT x.‸ FROM t x");
+        assert_eq!(found, [pair("email", "text")]);
+        // A derived table names an expression too; a column whose relation
+        // is not read yet has no type, and that relation is read.
+        let (found, missing) = ask(
+            "SELECT d.‸ FROM (SELECT o.id AS order_id, count(*) AS n, l.qty \
+             FROM orders o JOIN order_lines l ON true) d",
+        );
+        assert_eq!(
+            found,
+            [pair("order_id", "integer"), pair("n", ""), pair("qty", "")]
+        );
+        assert_eq!(
+            missing,
+            [schema("sales").child(ObjectKind::Table, "order_lines")]
+        );
+        // Without a qualifier, with the other relations of the query.
+        let (found, _) =
+            ask("WITH t AS (SELECT total AS amount FROM orders) SELECT ‸ FROM t, crm.customers");
+        assert_eq!(
+            found,
+            [pair("amount", "numeric(12,2)"), pair("email", "text")]
+        );
+        // A CTE that reads itself stops.
+        let (found, _) = ask("WITH RECURSIVE r AS (SELECT * FROM r) SELECT r.‸ FROM r");
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn a_cte_or_derived_table_column_leads_to_the_column_it_reads() {
+        let index = index();
+        let total = Symbol::Column {
+            relation: schema("sales").child(ObjectKind::Table, "orders"),
+            name: "total".into(),
+        };
+        let sql = "WITH t AS (SELECT total AS amount FROM orders) SELECT x.amount FROM t x";
+        let at = sql.find("x.amount").unwrap() + 3;
+        let (symbol, range) = symbol_at(sql, at, &index, &context(), &columns).unwrap();
+        assert_eq!(symbol, total);
+        assert_eq!(&sql[range], "amount");
+        // Without a qualifier, through a derived table.
+        let sql = "SELECT amount FROM (SELECT o.total AS amount FROM orders o) d";
+        let (symbol, _) = symbol_at(sql, 9, &index, &context(), &columns).unwrap();
+        assert_eq!(symbol, total);
     }
 }

@@ -137,11 +137,12 @@ offline. Each generation checks the dialect it wrote.
 
 ## Completion scopes
 
-`crates/sql-language/tests/fixtures/scopes.txt` holds 121 statements in the
-three dialects, each with the cursor marked and the relations whose columns
-completion offers there; `tests/scopes.rs` checks them through
-`completion::request`, with an index that holds every relation the cases
-read, so one read in the wrong query fails. New behaviour adds cases; a
+`crates/sql-language/tests/fixtures/scopes.txt` holds 122 statements in the
+three dialects, each with the cursor marked, the relations whose columns
+completion offers there and the columns CTEs and derived tables make;
+`tests/scopes.rs` checks them through `completion::request`, with an index
+that holds every relation the cases read, so one read in the wrong query
+fails. New behaviour adds cases; a
 change that alters a case's answer updates it and says why in the report.
 
 ## Concurrent runs

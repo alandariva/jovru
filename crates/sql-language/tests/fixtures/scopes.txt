@@ -2,13 +2,17 @@
 # tests/scopes.rs through `completion::request`.
 #
 # Each case is a header line and the SQL after it:
-#   == <dialect> | <relations>
-# <relations> are comma-separated, written schema.table, or table for the
-# tab's default schema; `-` means the cursor asks for a relation name instead.
-# After `alias.`: the relation the alias names (a derived table's relations;
-# an outer alias from inside a subquery). Otherwise: every relation of the
-# innermost query around the cursor (the statement, a subquery, a CTE body or
-# a UNION branch). A CTE is not a relation of the cache. The test's index
+#   == <dialect> | <relations> [| <columns>]
+# <relations> are the relations of the cache whose columns are offered,
+# comma-separated, written schema.table, or table for the tab's default
+# schema; `none` when there are none, and `-` alone when the cursor asks for
+# a relation name instead. <columns> are the columns the statement itself
+# makes: those the SELECT list of a CTE or a derived table names (a `*` there
+# offers the relations it reads, and a UNION names its columns by its first
+# branch).
+# After `alias.`: what the alias names (an outer alias from inside a
+# subquery too). Otherwise: what the innermost query around the cursor reads
+# (the statement, a subquery, a CTE body or a UNION branch). The test's index
 # holds every relation the cases read, so one read in the wrong query shows.
 #
 # History: docs/investigacao-editor-sql.md, section G.4.
@@ -36,7 +40,7 @@ WITH recent AS (SELECT customer_id FROM sales.orders WHERE created_at > now() - 
 == postgres | sales.orders
 WITH recent AS (SELECT customer_id FROM sales.orders WHERE ‸ > now()) SELECT * FROM recent
 
-== postgres | orders
+== postgres | none | id, total
 SELECT * FROM (SELECT id, total FROM orders WHERE total > 0) big WHERE big.‸ > 10
 
 == postgres | order_lines
@@ -125,7 +129,7 @@ DELETE FROM orders WHERE created_at < NOW() - INTERVAL 30 DAY AND ‸
 == mysql | shop.customers
 WITH big AS (SELECT customer_id FROM shop.orders WHERE total > 100) SELECT c.‸ FROM big b JOIN shop.customers c ON c.id = b.customer_id
 
-== mysql | orders
+== mysql | none | id, total
 SELECT * FROM (SELECT id, total FROM orders) t WHERE t.‸ > 1
 
 == mysql | orders
@@ -176,7 +180,7 @@ SELECT o.‸, item FROM orders o LATERAL VIEW explode(o.items) t AS item
 == databricks | crm.customers
 WITH recent AS (SELECT customer_id FROM sales.orders WHERE created_at > current_date() - 1) SELECT c.‸ FROM recent r JOIN crm.customers c ON c.id = r.customer_id
 
-== databricks | orders
+== databricks | none | id, total
 SELECT * FROM (SELECT id, total FROM orders) t WHERE t.‸ > 1
 
 == databricks | orders
@@ -217,7 +221,7 @@ SELECT o.id FROM orders o WHERE EXISTS (SELECT 1 FROM order_lines l WHERE l.‸ 
 == postgres | orders
 SELECT ‸ FROM orders o WHERE EXISTS (SELECT 1 FROM order_lines l WHERE l.order_id = o.id)
 
-== postgres | crm.customers
+== postgres | crm.customers | customer_id
 WITH r AS (SELECT customer_id FROM sales.orders) SELECT ‸ FROM r JOIN crm.customers c ON c.id = r.customer_id
 
 == postgres | sales.orders
@@ -229,7 +233,7 @@ SELECT id FROM orders UNION ALL SELECT ‸ FROM archive.orders
 == postgres | orders
 SELECT ‸ FROM orders UNION ALL SELECT id FROM archive.orders
 
-== postgres | orders
+== postgres | none | id
 SELECT t.‸ FROM (SELECT * FROM (SELECT id FROM orders) a) t
 
 == postgres | customers
@@ -272,7 +276,7 @@ UPDATE orders o JOIN customers c ON c.id = o.customer_id SET o.status = 'x' WHER
 == mysql | orders
 SELECT ‸ FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE vip = 1)
 
-== mysql | order_lines
+== mysql | none | customer_id, n
 SELECT x.‸ FROM orders o JOIN (SELECT customer_id, COUNT(*) AS n FROM order_lines GROUP BY customer_id) x ON x.customer_id = o.customer_id
 
 == mysql | orders,customers
@@ -290,10 +294,10 @@ DELETE o FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.‸ = 1
 == mysql | orders
 SELECT * FROM orders o WHERE o.total > (SELECT AVG(total) FROM orders x WHERE x.customer_id = o.customer_id) AND ‸
 
-== databricks | crm.customers
+== databricks | crm.customers, sales.orders
 WITH recent AS (SELECT * FROM sales.orders WHERE day = current_date()) SELECT ‸ FROM recent r JOIN crm.customers c ON c.id = r.customer_id
 
-== databricks | sales.orders
+== databricks | none | customer_id, spent
 SELECT s.‸ FROM (SELECT customer_id, sum(total) AS spent FROM sales.orders GROUP BY customer_id) s WHERE s.spent > 100
 
 == databricks | main.sales.orders
@@ -323,7 +327,7 @@ SELECT ‸ FROM orders o LEFT JOIN LATERAL (SELECT * FROM order_lines l WHERE l.
 == postgres | categories
 WITH RECURSIVE tree AS (SELECT id, parent_id FROM categories WHERE parent_id IS NULL UNION ALL SELECT c.id, c.parent_id FROM categories c JOIN tree t ON c.‸ = t.id) SELECT * FROM tree
 
-== postgres | orders,customers
+== postgres | none | id, name
 SELECT ‸ FROM (SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id) AS t
 
 == postgres | order_lines
@@ -356,7 +360,7 @@ SELECT ‸ FROM orders o LEFT JOIN customers c USING (customer_id) WHERE o.total
 == mysql | orders
 REPLACE INTO order_totals SELECT customer_id, SUM(‸) FROM orders GROUP BY customer_id
 
-== mysql | orders
+== mysql | none | customer_id, last_order
 SELECT t.‸ FROM (SELECT customer_id, MAX(created_at) AS last_order FROM orders GROUP BY customer_id) AS t JOIN customers c ON c.id = t.customer_id
 
 == mysql | orders
@@ -371,7 +375,7 @@ INSERT INTO orders (customer_id, total) VALUES (1, 2) ON DUPLICATE KEY UPDATE to
 == databricks | sales.orders,crm.customers
 SELECT ‸ FROM main.sales.orders o JOIN main.crm.customers c ON c.id = o.customer_id WHERE o.day >= date_sub(current_date(), 7)
 
-== databricks | sales.orders,archive.orders
+== databricks | sales.orders
 SELECT x.‸ FROM (SELECT * FROM sales.orders UNION ALL SELECT * FROM archive.orders) x
 
 == databricks | crm.customers
@@ -388,3 +392,16 @@ DELETE FROM sales.orders WHERE day < (SELECT min(day) FROM sales.keep WHERE ‸)
 
 == databricks | sales.returns
 UPDATE sales.orders SET status = 'x' WHERE id IN (SELECT order_id FROM sales.returns r WHERE r.‸ > 0)
+
+# Reported by the maintainer: the columns of a CTE after its alias.
+
+== postgres | none | num, email
+with teste as (
+  select nome as num,  email
+  from sales.clientes
+)
+SELECT *
+FROM type_showcase t
+inner join sales.clientes c on c.id = t.id
+inner join teste x on x.‸
+WHERE t.id = 23 and t.flag = true;
