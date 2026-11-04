@@ -619,6 +619,73 @@ async fn live_the_tab_context_is_applied_once_and_reported() {
     .unwrap();
 }
 
+/// The transaction state the session reports.
+async fn state(session: &mut Box<dyn Session>) -> Option<TransactionStatus> {
+    session.transaction(CancellationToken::new()).await.unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_the_transaction_state_is_reported_without_taking_a_snapshot() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let none = SessionContext::default();
+        text_in(&mut session, "SELECT 1", &none).await;
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        text_in(&mut session, "BEGIN", &none).await;
+        assert_eq!(
+            state(&mut session).await,
+            Some(TransactionStatus::Open {
+                changes: Some(false)
+            })
+        );
+        // Asking (and the context) took no snapshot: SET TRANSACTION, which
+        // must come before any query, still works in a later run.
+        let context = session.context(CancellationToken::new()).await.unwrap();
+        assert_eq!(context.catalog.as_deref(), Some("jykre"));
+        text_in(
+            &mut session,
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+            &none,
+        )
+        .await;
+        assert_eq!(
+            text_in(&mut session, "SHOW transaction_isolation", &none).await,
+            "repeatable read"
+        );
+        text_in(&mut session, "CREATE TEMP TABLE gate_tx (a int)", &none).await;
+        assert_eq!(
+            state(&mut session).await,
+            Some(TransactionStatus::Open {
+                changes: Some(true)
+            })
+        );
+        // A failure leaves the transaction failed until ROLLBACK.
+        let mut sink = Sink::default();
+        let failed = session
+            .execute(
+                &QueryRequest {
+                    sql: "SELECT missing_column FROM gate_tx".into(),
+                    options: ExecutionOptions::default(),
+                },
+                &mut sink,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(failed.is_err());
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Failed));
+        text_in(&mut session, "ROLLBACK", &none).await;
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_levels_partitions_inspection_permissions_and_databases() {

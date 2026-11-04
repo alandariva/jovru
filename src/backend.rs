@@ -912,6 +912,11 @@ pub struct SessionRun {
     /// it ([`Session::context`]). `None` when it could not be asked: the
     /// last result is still open for paging, or the session ended.
     pub context: Option<SessionContext>,
+    /// The session's transaction state after the run, as the driver reports
+    /// it ([`Session::transaction`]). `None` when the driver cannot tell or
+    /// could not be asked, under the same conditions as `context`; the
+    /// caller then infers it.
+    pub transaction: Option<TransactionStatus>,
 }
 
 /// Runs `requests` in order on the tab's `session`, opening one when there is
@@ -1025,6 +1030,7 @@ async fn run_statements(
         reopened: false,
         ended: false,
         context: None,
+        transaction: None,
     };
     if let Some(error) = requests.iter().find_map(|request| request.validate().err()) {
         run.batch = Err(error);
@@ -1102,6 +1108,7 @@ async fn run_statements(
     // asked once it is read to the end.
     if session.is_open() && !results.last().is_some_and(|result| result.has_more) {
         run.context = session_context(&mut *session, &cancel).await;
+        run.transaction = transaction_status(&mut *session, &cancel).await;
     }
     if session.is_open() {
         run.session = Some(session);
@@ -1136,6 +1143,8 @@ pub struct PageRun {
     /// Where unqualified names resolve, asked once the result was read to
     /// the end.
     pub context: Option<SessionContext>,
+    /// The session's transaction state, asked when `context` is.
+    pub transaction: Option<TransactionStatus>,
     /// The session for the tab's next run, or `None` when it was closed.
     pub session: Option<Box<dyn Session>>,
 }
@@ -1151,6 +1160,21 @@ async fn session_context(
         Ok(context) => Some(context),
         Err(error) => {
             tracing::debug!(error_code = ?error.code, "session context unavailable");
+            None
+        }
+    }
+}
+
+/// Asks the session for its transaction state. A failure only means the tab
+/// infers the state from the statements it ran.
+async fn transaction_status(
+    session: &mut dyn Session,
+    cancel: &CancellationToken,
+) -> Option<TransactionStatus> {
+    match session.transaction(cancel.clone()).await {
+        Ok(status) => status,
+        Err(error) => {
+            tracing::debug!(error_code = ?error.code, "transaction state unavailable");
             None
         }
     }
@@ -1186,11 +1210,15 @@ pub async fn fetch(
                 limit,
             }
         });
-    let context = if session.is_open() && page.as_ref().is_ok_and(|page| !page.has_more) {
-        session_context(&mut *session, &cancel).await
-    } else {
-        None
-    };
+    let (context, transaction) =
+        if session.is_open() && page.as_ref().is_ok_and(|page| !page.has_more) {
+            (
+                session_context(&mut *session, &cancel).await,
+                transaction_status(&mut *session, &cancel).await,
+            )
+        } else {
+            (None, None)
+        };
     let session = if session.is_open() {
         Some(session)
     } else {
@@ -1200,6 +1228,7 @@ pub async fn fetch(
     Ok(PageRun {
         page,
         context,
+        transaction,
         session,
     })
 }
@@ -1581,6 +1610,8 @@ mod tests {
         /// Rows of the open result not read yet (`ROWS n` opens one).
         pending: u32,
         next: u32,
+        /// `BEGIN` opened a transaction and `COMMIT` ended it.
+        in_transaction: bool,
     }
 
     impl StateSession {
@@ -1625,6 +1656,8 @@ mod tests {
                     return Err(DriverError::new(ErrorCode::Connection, "synthetic"));
                 }
                 sql if sql.starts_with("SET ") => self.settings.push(sql[4..].to_owned()),
+                "BEGIN" => self.in_transaction = true,
+                "COMMIT" => self.in_transaction = false,
                 _ => {}
             }
             sink.columns(vec![ColumnInfo {
@@ -1664,6 +1697,20 @@ mod tests {
                 catalog: None,
                 schema: self.settings.last().cloned(),
             })
+        }
+
+        /// Reports the transaction `BEGIN` opened; asking discards a result
+        /// still open, like a real connection.
+        async fn transaction(
+            &mut self,
+            _: CancellationToken,
+        ) -> DriverResult<Option<TransactionStatus>> {
+            self.pending = 0;
+            Ok(Some(if self.in_transaction {
+                TransactionStatus::Open { changes: None }
+            } else {
+                TransactionStatus::Idle
+            }))
         }
 
         async fn ping(&mut self) -> DriverResult<()> {
@@ -1707,6 +1754,7 @@ mod tests {
                 dead: self.dead.load(Ordering::SeqCst),
                 pending: 0,
                 next: 0,
+                in_transaction: false,
             }))
         }
         async fn introspect(
@@ -1775,6 +1823,15 @@ mod tests {
                 .and_then(|context| context.schema.as_deref()),
             Some("schema=sales")
         );
+        assert_eq!(run.transaction, Some(TransactionStatus::Idle));
+        // The run hands back the transaction the session reports.
+        let (run, _) = run_on(&driver, run.session, &["BEGIN"]).await;
+        assert_eq!(
+            run.transaction,
+            Some(TransactionStatus::Open { changes: None })
+        );
+        let (run, _) = run_on(&driver, run.session, &["COMMIT"]).await;
+        assert_eq!(run.transaction, Some(TransactionStatus::Idle));
         // A failed statement stops the run but keeps the session.
         let (run, cells) = run_on(&driver, run.session, &["SET role=x", "FAIL", "SELECT"]).await;
         assert_eq!(cells, ["1:schema=sales,role=x"]);
@@ -1848,8 +1905,9 @@ mod tests {
         let first = &run.batch.as_ref().unwrap().completed[0];
         assert!(first.has_more);
         assert_eq!(first.limit, Some(ResultLimit::Rows(2)));
-        // Asking for the context would close the open result.
-        assert!(run.context.is_none());
+        // Asking for the context or the transaction would close the open
+        // result.
+        assert!(run.context.is_none() && run.transaction.is_none());
         let columns = first.data.columns().to_vec();
         let mut session = run.session.unwrap();
         let mut pages = vec![first.data.value(1, 0).unwrap().to_owned()];
@@ -1865,9 +1923,12 @@ mod tests {
             .unwrap();
             session = page.session.unwrap();
             let context = page.context;
+            let transaction = page.transaction;
             let page = page.page.unwrap();
-            // Only the page that ends the result asks for the context.
+            // Only the page that ends the result asks for the context and
+            // the transaction.
             assert_eq!(context.is_some(), !page.has_more);
+            assert_eq!(transaction.is_some(), !page.has_more);
             pages.push(
                 page.data
                     .value(page.data.row_count() - 1, 0)

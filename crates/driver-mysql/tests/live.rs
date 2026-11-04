@@ -626,3 +626,36 @@ async fn live_levels_inspection_definitions_and_permissions() {
     .await
     .expect("live metadata extensions took too long");
 }
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_autocommit_off_is_reported() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = MySqlDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let none = SessionContext::default();
+        // A BEGIN is not visible without privileges; it is left to inference.
+        text_in(&mut session, "BEGIN", &none).await;
+        assert_eq!(
+            session.transaction(CancellationToken::new()).await.unwrap(),
+            None
+        );
+        text_in(&mut session, "ROLLBACK", &none).await;
+        text_in(&mut session, "SET autocommit = 0", &none).await;
+        assert_eq!(
+            session.transaction(CancellationToken::new()).await.unwrap(),
+            Some(TransactionStatus::Manual)
+        );
+        text_in(&mut session, "SET autocommit = 1", &none).await;
+        assert_eq!(
+            session.transaction(CancellationToken::new()).await.unwrap(),
+            None
+        );
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}

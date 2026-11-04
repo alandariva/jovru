@@ -233,7 +233,27 @@ out of scope. A stopped classic cluster reports an actionable error.
   MySQL (as the schema), the followed catalog and schema in Databricks.
   Asking discards a result still open for paging, so the application asks
   after a run whose last result is complete, or after its last page. The
-  default implementation reports an empty context.
+  default implementation reports an empty context. In PostgreSQL, right
+  after `BEGIN` or `START TRANSACTION` (and until a statement other than
+  `SET`, `SHOW`, `SAVEPOINT` or `RELEASE` runs) it answers from what the
+  session knows instead of querying, so it takes no snapshot.
+- `Session::transaction` reports the transaction state as the server sees
+  it (`TransactionStatus`: idle, open with or without changes, failed, or
+  MySQL's manual commit), or `None` when the driver cannot tell; the
+  application then infers it. It is asked when the context is. Asking must
+  not change what the session's statements see:
+  - PostgreSQL probes with the simple query protocol
+    (`transaction_timestamp() <> statement_timestamp()`,
+    `pg_current_xact_id_if_assigned()`); a failed transaction answers with
+    SQLSTATE 25P02. Right after `BEGIN` it answers "open, nothing written"
+    without querying, under the same rule as the context, so `SET
+    TRANSACTION` and the isolation level's snapshot keep working.
+  - MySQL reports only `autocommit = 0` (`@@autocommit`): whether a `BEGIN`
+    is open needs privileges a user may not have.
+  - Databricks reports nothing.
+
+  The protocol carries the exact state, but SQLx keeps it private; see
+  [technical debt TD-001](technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
 - `Session::close` consumes the session and can report close failures.
   Relational sessions keep physical state (`USE`, `SET`, temporary tables,
   transactions). Databricks warehouses keep a logical catalog/schema context sent with

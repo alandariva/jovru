@@ -566,6 +566,11 @@ async fn a_session_that_knows_no_context_reports_an_empty_one() {
         session.context(CancellationToken::new()).await.unwrap(),
         SessionContext::default()
     );
+    // Nor its transaction: the caller infers it.
+    assert_eq!(
+        session.transaction(CancellationToken::new()).await.unwrap(),
+        None
+    );
 }
 
 #[derive(Default)]

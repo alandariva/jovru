@@ -1,14 +1,16 @@
-//! What a query tab knows about the transaction of its session, from the
-//! statements it ran there.
+//! What a query tab knows about the transaction of its session.
 //!
-//! Drivers do not report the server's transaction status, so the state is
-//! inferred from the SQL that ran and how each statement ended: `BEGIN` or
-//! `START TRANSACTION` opens a transaction, `COMMIT` and `ROLLBACK` end it,
-//! MySQL's `SET autocommit = 0` makes every statement wait for a commit and
-//! its DDL commits implicitly, and a failure inside a PostgreSQL transaction
-//! leaves it failed until `ROLLBACK`. A transaction opened in a way these
-//! rules do not see (inside a procedure, for example) is not shown.
-use crate::drivers::SqlDialect;
+//! After each run the driver reports what the server says
+//! ([`Session::transaction`](crate::drivers::Session::transaction)), and
+//! that wins ([`Transaction::reported`]). What it leaves unknown, and every
+//! driver that cannot report, falls back to inference from the SQL that ran
+//! and how each statement ended: `BEGIN` or `START TRANSACTION` opens a
+//! transaction, `COMMIT` and `ROLLBACK` end it, MySQL's `SET autocommit = 0`
+//! makes every statement wait for a commit and its DDL commits implicitly,
+//! and a failure inside a PostgreSQL transaction leaves it failed until
+//! `ROLLBACK`. Inference alone does not see a transaction opened inside a
+//! procedure ([technical debt TD-001](../docs/technical-debt.md)).
+use crate::drivers::{SqlDialect, TransactionStatus};
 use crate::sql::{self, TokenKind};
 
 /// The transaction state of a tab's session.
@@ -36,6 +38,34 @@ impl Transaction {
     /// Something ran that a rollback would undo, or the transaction failed.
     pub fn has_changes(self) -> bool {
         matches!(self, Self::Open { changes: true, .. } | Self::Failed { .. })
+    }
+
+    /// The state once the session's own report is taken into account. The
+    /// server's answer wins; what it leaves unknown (whether a transaction
+    /// wrote, a `BEGIN` under MySQL) keeps what the statements suggested.
+    /// `None` (the driver cannot tell, or was not asked) keeps the inferred
+    /// state.
+    pub fn reported(self, status: Option<TransactionStatus>) -> Self {
+        let manual = match self {
+            Self::AutoCommit => false,
+            Self::Open { manual, .. } | Self::Failed { manual } => manual,
+        };
+        match status {
+            Some(TransactionStatus::Idle) => Self::AutoCommit,
+            Some(TransactionStatus::Open { changes }) => Self::Open {
+                changes: changes.unwrap_or(self.has_changes()),
+                manual,
+            },
+            Some(TransactionStatus::Failed) => Self::Failed { manual },
+            Some(TransactionStatus::Manual) => match self {
+                Self::Failed { .. } => self,
+                _ => Self::Open {
+                    changes: self.has_changes(),
+                    manual: true,
+                },
+            },
+            _ => self,
+        }
     }
 
     /// The state after `statement` ran in the session; `ok` is `false` when
@@ -261,6 +291,36 @@ mod tests {
         // MySQL keeps the transaction after a failed statement.
         let mysql = run(&[("BEGIN", true), ("SELECT x", false)], MYSQL);
         assert!(matches!(mysql, Open { .. }));
+    }
+
+    #[test]
+    fn the_server_report_wins_over_inference() {
+        use crate::drivers::TransactionStatus as Status;
+        // A transaction the statements did not show (opened in a procedure).
+        let report = AutoCommit.reported(Some(Status::Open {
+            changes: Some(true),
+        }));
+        assert!(report.is_open() && report.has_changes());
+        // A COMMIT that failed and rolled back is idle, whatever was inferred.
+        let open = run(&[("BEGIN", true), ("UPDATE t SET a = 1", true)], POSTGRES);
+        assert_eq!(open.reported(Some(Status::Idle)), AutoCommit);
+        assert_eq!(
+            open.reported(Some(Status::Failed)),
+            Failed { manual: false }
+        );
+        // What the server leaves unknown keeps what was inferred.
+        assert_eq!(open.reported(Some(Status::Open { changes: None })), open);
+        assert_eq!(open.reported(None), open);
+        // MySQL reports only autocommit = 0.
+        assert_eq!(
+            AutoCommit.reported(Some(Status::Manual)),
+            Open {
+                changes: false,
+                manual: true
+            }
+        );
+        let begun = run(&[("BEGIN", true)], MYSQL);
+        assert_eq!(begun.reported(None), begun);
     }
 
     #[test]

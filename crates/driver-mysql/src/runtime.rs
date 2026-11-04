@@ -179,6 +179,9 @@ enum Command {
     Context {
         reply: oneshot::Sender<DriverResult<SessionContext>>,
     },
+    Transaction {
+        reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
@@ -304,6 +307,25 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
+    /// Only `autocommit = 0` is reported. Whether a `BEGIN` is open needs
+    /// the `PROCESS` privilege (`information_schema.innodb_trx`) or a
+    /// `performance_schema` consumer a user may not have, and the protocol's
+    /// status flags are private to SQLx, so that is left to the caller
+    /// ([technical debt TD-001](../../../docs/technical-debt.md)).
+    async fn transaction(
+        &mut self,
+        cancel: CancellationToken,
+    ) -> DriverResult<Option<TransactionStatus>> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Transaction { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -412,6 +434,35 @@ impl Server {
                                 catalog: None,
                                 schema: database,
                             }));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
+                            Flow::Broken
+                        }
+                    }
+                }
+                Command::Transaction { reply } => {
+                    // Reading a system variable reads no table, so no
+                    // consistent snapshot is taken.
+                    let autocommit = tokio::time::timeout(
+                        RECOVERY,
+                        sqlx::raw_sql("SELECT CAST(@@autocommit AS CHAR)")
+                            .fetch_one(&mut connection),
+                    )
+                    .await
+                    .map(|row| row.and_then(|row| sqlx::Row::try_get::<String, _>(&row, 0)));
+                    match autocommit {
+                        Ok(Ok(value)) => {
+                            let manual = value.trim() == "0";
+                            let _ = reply.send(Ok(manual.then_some(TransactionStatus::Manual)));
                             Flow::Ready
                         }
                         Ok(Err(error)) => {

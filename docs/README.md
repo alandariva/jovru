@@ -41,6 +41,7 @@ purpose, never as a side effect of an unrelated change.
 | [Workflow](workflow.md) | How work flows, rules for agents, gate, review, Git |
 | [Testing](testing.md) | Local gate, fixtures and testing policy |
 | [Drivers](drivers.md) | Driver contracts, configuration and adding a database |
+| [Technical debt](technical-debt.md) | Accepted debts across areas, their severity and the way out |
 | [ADRs](adr/README.md) | Architecture decision records |
 
 ## Golden rules

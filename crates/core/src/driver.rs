@@ -2,7 +2,7 @@ use crate::{
     CancellationToken, ConnectionConfig, DriverError, DriverKind, DriverOutcome, DriverResult,
     ExecutionOptions, Inspection, IntrospectionLevel, IntrospectionReport, MetadataObject,
     ObjectKind, ObjectPath, QueryRequest, ResolvedConnection, RowSink, ServerInfo, SessionContext,
-    SqlDialect,
+    SqlDialect, TransactionStatus,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,23 @@ pub trait Session: Debug + Send {
     async fn context(&mut self, cancel: CancellationToken) -> DriverResult<SessionContext> {
         let _ = cancel;
         Ok(SessionContext::default())
+    }
+
+    /// The state of the session's transaction after the statements run so
+    /// far, as the server reports it, including a transaction opened or
+    /// ended in a way the caller could not see (inside a procedure, a failed
+    /// `COMMIT`). `None` when the driver cannot tell; the caller then infers
+    /// the state from the statements it ran. Asking must not change what the
+    /// session's statements see (for example, it must not take a snapshot
+    /// that the next statement would otherwise take). Like
+    /// [`Session::context`], asking discards a result still open for paging:
+    /// callers ask only when none is. The default knows nothing.
+    async fn transaction(
+        &mut self,
+        cancel: CancellationToken,
+    ) -> DriverResult<Option<TransactionStatus>> {
+        let _ = cancel;
+        Ok(None)
     }
 
     /// Checks, before a kept session is reused, that the server still

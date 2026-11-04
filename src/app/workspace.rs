@@ -596,6 +596,9 @@ impl Workspace {
                 let page = match result {
                     Ok(run) => {
                         this.session_context(lease, run.context, cx);
+                        if this.session_lease == Some(lease) {
+                            this.transaction = this.transaction.reported(run.transaction);
+                        }
                         this.return_session(lease, run.session);
                         if this.session.is_none() && this.session_lease == Some(lease) {
                             this.session_notice(false, true);
@@ -767,8 +770,10 @@ impl Workspace {
                     // superseded run's session is closed on its return.
                     let current = this.session_lease == Some(lease);
                     let dialect = this.run.dialect();
+                    let mut reported = None;
                     let result = match result {
                         Ok(run) => {
+                            reported = run.transaction;
                             if current {
                                 this.session_notice(run.reopened, run.ended);
                                 if run.reopened {
@@ -863,10 +868,14 @@ impl Workspace {
                             this.end_unfinished(&tabs, Some(report));
                         }
                     }
-                    // A session that did not come back takes its transaction
-                    // with it.
-                    if current && this.session.is_none() {
-                        this.transaction = Transaction::AutoCommit;
+                    // What the server reports wins over what the statements
+                    // suggest; a session that did not come back takes its
+                    // transaction with it.
+                    if current {
+                        this.transaction = this.transaction.reported(reported);
+                        if this.session.is_none() {
+                            this.transaction = Transaction::AutoCommit;
+                        }
                     }
                     // A COMMIT or ROLLBACK has no result tab to show its error.
                     if placement == Placement::Hidden

@@ -11,6 +11,25 @@ pub struct SessionContext {
     pub schema: Option<String>,
 }
 
+/// The transaction state of a session as the server reports it
+/// ([`crate::Session::transaction`]).
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionStatus {
+    /// No transaction is open; each statement commits on its own.
+    Idle,
+    /// A transaction is open. `changes` tells whether it already wrote
+    /// something a rollback would undo; `None` when the server does not say.
+    Open { changes: Option<bool> },
+    /// A statement failed inside the transaction: the server rejects every
+    /// other statement until it is rolled back.
+    Failed,
+    /// Statements do not commit on their own (MySQL with `autocommit = 0`):
+    /// each one waits for a `COMMIT`. Whether one ran since the last commit
+    /// is not known.
+    Manual,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
     pub max_rows: u32,

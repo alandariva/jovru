@@ -174,6 +174,7 @@ pub async fn open(
         database: PostgresConfig::parse(&input.config.options)?.database,
         open: open.clone(),
         schema: None,
+        unread: false,
     };
     tokio::spawn(server.serve(connection, receiver));
     Ok(Box::new(DatabaseSession { commands, open }))
@@ -199,6 +200,9 @@ enum Command {
     },
     Context {
         reply: oneshot::Sender<DriverResult<SessionContext>>,
+    },
+    Transaction {
+        reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
     },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
@@ -325,11 +329,121 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
+    async fn transaction(
+        &mut self,
+        cancel: CancellationToken,
+    ) -> DriverResult<Option<TransactionStatus>> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Transaction { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
         }
         self.ask(|reply| Command::Close { reply }).await
+    }
+}
+
+/// What a statement does to the first snapshot of the transaction it runs
+/// in. PostgreSQL takes that snapshot at the first query of a transaction,
+/// and some commands (`SET TRANSACTION`) are allowed only before it, so the
+/// session must not query the server while a just opened transaction has
+/// none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnapshotEffect {
+    /// `BEGIN` or `START TRANSACTION`: a transaction opens without a snapshot.
+    Opens,
+    /// `SET`, `SHOW`, `SAVEPOINT`, `RELEASE`: no snapshot is taken.
+    Keeps,
+    /// Anything else may take one.
+    Takes,
+}
+
+/// The [`SnapshotEffect`] of `sql`, from its first word after whitespace and
+/// comments.
+fn snapshot_effect(sql: &str) -> SnapshotEffect {
+    let mut rest = sql;
+    loop {
+        rest = rest.trim_start();
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = after.split_once('\n').map_or("", |(_, next)| next);
+        } else if rest.starts_with("/*") {
+            // Block comments nest in PostgreSQL.
+            let mut depth = 0usize;
+            let mut end = rest.len();
+            let bytes = rest.as_bytes();
+            let mut at = 0;
+            while at + 1 < bytes.len() {
+                match (bytes[at], bytes[at + 1]) {
+                    (b'/', b'*') => {
+                        depth += 1;
+                        at += 2;
+                    }
+                    (b'*', b'/') => {
+                        depth -= 1;
+                        at += 2;
+                        if depth == 0 {
+                            end = at;
+                            break;
+                        }
+                    }
+                    _ => at += 1,
+                }
+            }
+            rest = &rest[end..];
+        } else {
+            break;
+        }
+    }
+    let word: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    match word.as_str() {
+        "BEGIN" | "START" => SnapshotEffect::Opens,
+        "SET" | "SHOW" | "SAVEPOINT" | "RELEASE" => SnapshotEffect::Keeps,
+        _ => SnapshotEffect::Takes,
+    }
+}
+
+/// The transaction state, read with one simple-protocol query. In the
+/// simple protocol the transaction and the statement start at the same
+/// `Query` message, so their timestamps differ only inside a transaction
+/// opened earlier; the extended protocol stamps each message apart and
+/// cannot be used. Inside a failed transaction the query itself fails with
+/// SQLSTATE 25P02, which is the answer.
+async fn transaction_status(connection: &mut PgConnection) -> DriverResult<TransactionStatus> {
+    let probe = sqlx::raw_sql(sqlx::AssertSqlSafe(
+        "SELECT (transaction_timestamp() <> statement_timestamp())::text, \
+         (pg_current_xact_id_if_assigned() IS NOT NULL)::text",
+    ))
+    .fetch_one(&mut *connection)
+    .await;
+    match probe {
+        Ok(row) => {
+            let flag = |index: usize| -> DriverResult<bool> {
+                Ok(row.try_get::<String, _>(index).map_err(map_error)? == "true")
+            };
+            Ok(if flag(0)? {
+                TransactionStatus::Open {
+                    changes: Some(flag(1)?),
+                }
+            } else {
+                TransactionStatus::Idle
+            })
+        }
+        Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("25P02") => {
+            Ok(TransactionStatus::Failed)
+        }
+        Err(error) => Err(map_error(error)),
     }
 }
 
@@ -362,6 +476,10 @@ struct Server {
     /// The schema last put first in `search_path` by a request, or reported
     /// by [`Session::context`]: a request for it is not applied again.
     schema: Option<String>,
+    /// A transaction opened and nothing has taken its snapshot yet
+    /// ([`SnapshotEffect`]): the session answers about itself without
+    /// querying the server, so the user's first query takes the snapshot.
+    unread: bool,
 }
 
 impl Server {
@@ -407,6 +525,36 @@ impl Server {
                                     "Database operation timed out",
                                 ),
                             }));
+                            Flow::Broken
+                        }
+                    }
+                }
+                Command::Context { reply } if self.unread => {
+                    // Querying would take the new transaction's snapshot.
+                    let _ = reply.send(Ok(SessionContext {
+                        catalog: Some(self.database.clone()),
+                        schema: self.schema.clone(),
+                    }));
+                    Flow::Ready
+                }
+                Command::Transaction { reply } if self.unread => {
+                    let _ = reply.send(Ok(Some(TransactionStatus::Open {
+                        changes: Some(false),
+                    })));
+                    Flow::Ready
+                }
+                Command::Transaction { reply } => {
+                    match tokio::time::timeout(RECOVERY, transaction_status(&mut connection)).await
+                    {
+                        Ok(status) => {
+                            let _ = reply.send(status.map(Some));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
                             Flow::Broken
                         }
                     }
@@ -473,6 +621,10 @@ impl Server {
         mut cancel: CancellationToken,
         commands: &mut mpsc::Receiver<Command>,
     ) -> Flow {
+        // Until it ends well, the statement may have taken a snapshot (or
+        // failed the transaction): the session queries the server again.
+        let effect = snapshot_effect(&request.sql);
+        let unread = std::mem::take(&mut self.unread);
         let mut options = request.options.clone();
         // The chosen schema goes first in search_path only when it changed,
         // so a SET search_path the user ran meanwhile stays in force.
@@ -556,6 +708,11 @@ impl Server {
             match page {
                 Ok(PageEnd::Finished) => {
                     drop(stream);
+                    self.unread = match effect {
+                        SnapshotEffect::Opens => true,
+                        SnapshotEffect::Keeps => unread,
+                        SnapshotEffect::Takes => false,
+                    };
                     let outcome = DriverOutcome {
                         rows_affected: if returns_rows { None } else { affected },
                         has_more: false,
@@ -1232,3 +1389,37 @@ WHERE k.contype = 'f' AND NOT c.relispartition
     AND ($1::text IS NULL OR n.nspname = $1)
     AND ($2::text IS NULL OR c.relname = $2)
 ORDER BY n.nspname, c.relname, k.conname"#;
+
+#[cfg(test)]
+mod tests {
+    use super::{SnapshotEffect, snapshot_effect};
+
+    #[test]
+    fn statements_that_open_keep_or_take_the_first_snapshot() {
+        for sql in [
+            "BEGIN",
+            "begin;",
+            "START TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+        ] {
+            assert_eq!(snapshot_effect(sql), SnapshotEffect::Opens, "{sql}");
+        }
+        for sql in [
+            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+            "-- isolation\nset search_path to a",
+            "/* a /* nested */ b */ SHOW search_path",
+            "SAVEPOINT a",
+            "RELEASE SAVEPOINT a",
+        ] {
+            assert_eq!(snapshot_effect(sql), SnapshotEffect::Keeps, "{sql}");
+        }
+        for sql in [
+            "SELECT 1",
+            "  insert into t values (1)",
+            "",
+            "-- only",
+            "/* open",
+        ] {
+            assert_eq!(snapshot_effect(sql), SnapshotEffect::Takes, "{sql}");
+        }
+    }
+}
