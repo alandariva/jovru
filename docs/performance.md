@@ -23,8 +23,8 @@ numbers.
 | Copy of a selection | ≤ 100 ms for 500,000 cells; above that, show progress | About 85 ms for 100,000 × 5 cells | Heartbeat |
 | Cold start to an interactive window | ≤ 1.5 s | Not measured | Stopwatch and a startup timestamp |
 | Idle memory, no connection | ≤ 200 MB | Not measured | Task manager |
-| Expand an explorer node from the local cache | ≤ 50 ms p95 | 0.55 ms for a first page and 0.63 ms for the page after 4,800 children, in a cache of 500,000 objects kept open (benchmark, release, 2026-11-03); opening the file costs about 700 ms, once per connection at start. Not measured in the app | Timing around the cache read, benchmark |
-| Metadata search (`Ctrl Shift P`) over the local cache | ≤ 50 ms p95 | Not measured | Timing around the search |
+| Expand an explorer node from the local cache | ≤ 50 ms p95 | 0.65 ms for a first page and 0.68 ms for the page after 4,800 children, in a cache of 500,000 objects kept open, with paths rebuilt from compact keys (benchmark, release, 2026-11-03); opening the file costs about 680 ms, once per connection at start. Not measured in the app | Timing around the cache read, benchmark |
+| Metadata search (`Ctrl Shift P`) over the local cache | ≤ 50 ms p95 | 7.4 ms for a name of three characters or more among 500,000 objects (trigram index); 93 ms for one or two characters (benchmark, release, 2026-11-03, after the compact keys of [ADR-0019](adr/0019-compact-metadata-cache-keys.md)) | Timing around the search, benchmark |
 
 The numbers are initial targets. Changing a budget is a maintainer decision
 recorded in this table. "Not measured" rows are measured the first time a task
@@ -149,6 +149,7 @@ The existing frame probe below remains the tool for the frame budget.
 | Standard | Current code |
 | --- | --- |
 | Long collections are virtualized | Saved queries and history build all their children |
+| Metadata search within budget at any length | A query of one or two characters, which the trigram index cannot match, scans the name index: about 93 ms at 500,000 objects. Three characters or more take about 7.4 ms |
 | Frequently changing regions are cached entities | The result grid is (`ResultGrid`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); the editor and the assistant still render inside `Workspace` |
 | A grid interaction renders only the grid ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md#how-to-validate)) | Not possible in GPUI 0.3.11: a notified view renders with all its ancestors, so hover, scroll and selection also render `AppView`, `GroupedTabs` and `Workspace`, about 1.5 ms of a 3.6–4.4 ms p50 grid frame. `.cached(...)` spares the grid when only the workspace changes: typing 15 characters rendered `Workspace` 15 times and `ResultGrid` never (frame probe, release, Windows, 2026-11-02). [ADR-0013](adr/0013-thin-ancestors-of-frequently-notified-views.md) (Proposed) replaces this validation with the frame budget and keeps the ancestors thin. The editor gutter no longer splits the script on every frame, which took grid frames to 57 ms with 1,000 statements |
 | Filters are debounced | The result filter rebuilds the grid view on every keystroke |

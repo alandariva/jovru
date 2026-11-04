@@ -55,6 +55,7 @@
 | Bringing a session back to a known state after a failure, or pinging a kept session | 5 s |
 | Databricks: test, warehouse open or initial classic authentication/compute check | 90 s |
 | Databricks introspection | 300 s |
+| Inspection or definition of an object (all drivers) | 60 s |
 | Databricks HTTP request | 30 s |
 | Databricks: first wait for a statement, inside its submit request | 5 s, then status polls from 200 ms up to every 2 s |
 | Databricks compute discovery | 90 s, cancellable without starting compute |

@@ -11,6 +11,20 @@ use std::time::SystemTime;
 /// A context-menu command run against the app view.
 type MenuAction = Box<dyn Fn(&mut AppView, &mut Window, &mut Context<AppView>)>;
 
+/// What an inspection of a node shows: indexes, constraints and triggers of
+/// a relation, routines, sequences and types of a namespace.
+pub(super) struct InspectionPanel {
+    title: String,
+    state: InspectionState,
+    scroll: UniformListScrollHandle,
+}
+
+enum InspectionState {
+    Loading,
+    Ready(Vec<InspectionItem>),
+    Failed(String),
+}
+
 /// One entry of the explorer list: a connection with its details, or a row
 /// of its tree.
 #[derive(Clone, Debug)]
@@ -111,6 +125,7 @@ impl AppView {
             DriverKind::Databricks => 2,
             _ => 0,
         };
+        self.all_databases = config.options["allDatabases"].as_bool().unwrap_or(false);
         for (field, value) in [
             (&self.connection_name, name),
             (
@@ -145,6 +160,18 @@ impl AppView {
                 index
                     .map_or(DEFAULT_ROW_LIMIT, |index| self.connections[index].row_limit)
                     .to_string(),
+            ),
+            (
+                &self.connection_search_path,
+                config.options["searchPath"].as_str().unwrap_or("").into(),
+            ),
+            (
+                &self.connection_revalidate,
+                index
+                    .map(|index| self.connections[index].revalidate_hours)
+                    .filter(|hours| *hours > 0)
+                    .map(|hours| hours.to_string())
+                    .unwrap_or_default(),
             ),
         ] {
             field.update(cx, |input, cx| input.set_value(value, window, cx));
@@ -249,7 +276,7 @@ impl AppView {
             DriverKind::MySql,
             DriverKind::Databricks,
         ][self.driver];
-        let options = if driver == DriverKind::Databricks {
+        let mut options = if driver == DriverKind::Databricks {
             self.connection_databricks.read(cx).options(cx)?
         } else {
             let port: u16 = self
@@ -262,7 +289,44 @@ impl AppView {
             let database = self.connection_database.read(cx).value().trim().to_owned();
             serde_json::json!({"host":self.connection_host.read(cx).value().trim(),"port":port,"database":if driver == DriverKind::MySql && database.is_empty() { None } else { Some(database) },"user":self.connection_user.read(cx).value().trim(),"sslMode":self.connection_ssl.read(cx).value().trim()})
         };
+        // PostgreSQL only: the search_path and the other databases.
+        if driver == DriverKind::Postgres {
+            let search_path = self
+                .connection_search_path
+                .read(cx)
+                .value()
+                .trim()
+                .to_owned();
+            if !search_path.is_empty() {
+                options["searchPath"] = serde_json::Value::String(search_path);
+            }
+            if self.all_databases {
+                options["allDatabases"] = serde_json::Value::Bool(true);
+            }
+        }
         Ok(ConnectionConfig { driver, options })
+    }
+
+    /// The revalidation age typed in Options, in hours; empty means never.
+    fn form_revalidate_hours(&self, cx: &App) -> DriverResult<u32> {
+        let typed = self
+            .connection_revalidate
+            .read(cx)
+            .value()
+            .trim()
+            .to_owned();
+        if typed.is_empty() {
+            return Ok(0);
+        }
+        typed
+            .parse::<u32>()
+            .ok()
+            .filter(|hours| *hours <= 24 * 365)
+            .ok_or_else(|| {
+                DriverError::validation(tr!(
+                    "Enter a number of hours, up to 8760, or leave it empty."
+                ))
+            })
     }
 
     /// Whether the namespace list on screen came from other settings than
@@ -451,6 +515,12 @@ impl AppView {
     fn apply_cache(connection: &mut Connection, snapshot: backend::MetadataSnapshot) {
         connection.tree.replace(snapshot.version, snapshot.pages);
         connection.ages = jykre::explorer::namespace_ages(&snapshot.statuses);
+        connection.no_access = snapshot
+            .statuses
+            .iter()
+            .filter(|status| status.state == RefreshState::Warning)
+            .map(|status| status.scope.clone())
+            .collect();
         connection.metadata_statuses = snapshot.statuses;
         if snapshot.recovered {
             connection.notice = Some(tr!("The corrupted cache was preserved and recreated. Refresh the metadata to explore again.").into());
@@ -469,6 +539,7 @@ impl AppView {
             scope,
             cache,
             expanded,
+            revalidate_hours,
             warning,
         } = loaded;
         let color = match input.config.driver {
@@ -485,12 +556,16 @@ impl AppView {
             profile: Some(profile),
             input: Some(input),
             row_limit,
+            revalidate_hours,
             detail,
             color,
             group,
             expanded: true,
             tree: Tree::default(),
             ages: HashMap::new(),
+            no_access: Default::default(),
+            namespaces: Vec::new(),
+            names: None,
             metadata_statuses: Vec::new(),
             search_rows: Vec::new(),
             search_revision: 0,
@@ -523,6 +598,7 @@ impl AppView {
         let index = self.connections.len() - 1;
         // What the previous session left expanded.
         self.load_missing(index, cx);
+        self.revalidate_on_open(index, cx);
         index
     }
 
@@ -551,9 +627,12 @@ impl AppView {
                 let limit = self
                     .form_row_limit(cx)
                     .map_err(|error| (ConnectionSection::Options, error))?;
-                Ok((name, input, limit))
+                let hours = self
+                    .form_revalidate_hours(cx)
+                    .map_err(|error| (ConnectionSection::Options, error))?;
+                Ok((name, input, limit, hours))
             });
-        let (name, input, row_limit) = match form {
+        let (name, input, row_limit, revalidate_hours) = match form {
             Ok(value) => value,
             Err((section, error)) => {
                 self.connection_section = section;
@@ -628,6 +707,19 @@ impl AppView {
         let previous_scope = editing
             .map(|index| self.connections[index].scope.clone())
             .unwrap_or_default();
+        // A choice made from another server's list would name namespaces this
+        // one may not have: the list is loaded again first.
+        if scope != previous_scope && self.scope_list_is_stale(cx) {
+            self.connection_section = ConnectionSection::Metadata;
+            self.connection_status = Some(Feedback::new(
+                Tone::Error,
+                tr!(
+                    "The namespace list belongs to other connection settings. Load it again before saving a new choice."
+                ),
+            ));
+            cx.notify();
+            return;
+        }
         // A refresh in progress keeps running while the profile is saved: a
         // failed save leaves it untouched, and a successful one stops it
         // below, since it reads for the previous configuration.
@@ -648,7 +740,11 @@ impl AppView {
                     &dir,
                     profile,
                     input.credentials,
-                    connection_store::Preferences { row_limit, scope },
+                    connection_store::Preferences {
+                        row_limit,
+                        scope,
+                        revalidate_hours,
+                    },
                     &SystemSecretStore,
                 )
                 .await
@@ -697,6 +793,7 @@ impl AppView {
                             connection.profile = Some(loaded.profile);
                             connection.input = Some(loaded.input.clone());
                             connection.row_limit = loaded.row_limit;
+                            connection.revalidate_hours = loaded.revalidate_hours;
                             connection.scope = loaded.scope.clone();
                             connection.detail = connection_detail(&loaded.input.config);
                             if let Some(cache) = loaded.cache {
@@ -1189,9 +1286,356 @@ impl AppView {
         .detach();
     }
 
+    /// Reads again, once, the chosen namespaces older than the connection's
+    /// revalidation age, when it has one. No polling: only on opening.
+    fn revalidate_on_open(&mut self, index: usize, cx: &mut Context<Self>) {
+        let connection = &self.connections[index];
+        if connection.revalidate_hours == 0 {
+            return;
+        }
+        let due = jykre::explorer::due_for_revalidation(
+            &connection.metadata_statuses,
+            &connection.scope,
+            std::time::Duration::from_secs(u64::from(connection.revalidate_hours) * 3_600),
+            SystemTime::now(),
+        );
+        if !due.is_empty() {
+            let read = MetadataScope {
+                all: false,
+                include: due,
+            };
+            self.request_refresh(index, RefreshJob::Selection(read), cx);
+        }
+    }
+
+    /// Refreshes, after a short pause that gathers a burst of statements,
+    /// the namespaces a DDL statement made stale, when they are inside what
+    /// the user chose to introspect. Each waits in the connection's queue.
+    pub(super) fn refresh_after_ddl(
+        &mut self,
+        index: usize,
+        namespaces: Vec<ObjectPath>,
+        cx: &mut Context<Self>,
+    ) {
+        let connection = &self.connections[index];
+        let chosen: Vec<_> = namespaces
+            .into_iter()
+            .filter(|path| connection.scope.covers(path))
+            .collect();
+        if chosen.is_empty() {
+            return;
+        }
+        let generation = connection.refresh_generation;
+        cx.spawn(async move |weak, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.connections[index].refresh_generation < generation {
+                    return;
+                }
+                for path in chosen {
+                    this.request_refresh(index, RefreshJob::Node(path), cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Starts a refresh, or queues it behind the one running; unlike
+    /// [`AppView::toggle_refresh`], asking again never cancels.
+    fn request_refresh(&mut self, index: usize, job: RefreshJob, cx: &mut Context<Self>) {
+        let connection = &mut self.connections[index];
+        if connection.refreshing.is_none() {
+            self.start_refresh(index, job, cx);
+        } else {
+            connection.refresh_queue.push(job);
+        }
+    }
+
+    /// Reads the namespaces the cache holds and offers them to the
+    /// connection's tabs as their context.
+    fn load_context_choices(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(profile) = self.connections[index].profile.clone() else {
+            return;
+        };
+        let dir = connection_store::data_dir();
+        cx.spawn(async move |weak, cx| {
+            let names_dir = dir.clone();
+            let names_profile = profile.clone();
+            let result = backend::run(async move {
+                backend::cached_namespaces(&dir, profile.id, &profile.config).await
+            })
+            .await;
+            let current = weak
+                .update(cx, |this, cx| {
+                    match result {
+                        Ok(namespaces) => {
+                            this.connections[index].namespaces = namespaces;
+                            this.push_context_choices(index, cx);
+                        }
+                        Err(error) => {
+                            tracing::debug!(error_code = ?error.code, "namespaces unavailable")
+                        }
+                    }
+                    let connection = &this.connections[index];
+                    connection
+                        .names
+                        .as_ref()
+                        .is_some_and(|names| names.version == connection.tree.version())
+                })
+                .unwrap_or(true);
+            // The editor's names are rebuilt only for a new cache version.
+            if current {
+                return;
+            }
+            let names = backend::run(async move {
+                backend::name_index(&names_dir, names_profile.id, &names_profile.config).await
+            })
+            .await;
+            let _ = weak.update(cx, |this, cx| match names {
+                Ok(names) => {
+                    this.connections[index].names = Some(std::sync::Arc::new(names));
+                    this.push_context_choices(index, cx);
+                }
+                Err(error) => tracing::debug!(error_code = ?error.code, "editor names unavailable"),
+            });
+        })
+        .detach();
+    }
+
+    /// Reads what the node at `path` has beyond the refreshed tree from the
+    /// server and shows it in the inspection panel. Nothing is cached.
+    fn inspect_node(&mut self, index: usize, path: ObjectPath, cx: &mut Context<Self>) {
+        let Some(input) = self.connections[index].input.clone() else {
+            return;
+        };
+        self.inspection_revision += 1;
+        let revision = self.inspection_revision;
+        let title: Vec<&str> = path.0.iter().map(|part| part.name.as_str()).collect();
+        self.inspection = Some(InspectionPanel {
+            title: title.join("."),
+            state: InspectionState::Loading,
+            scroll: UniformListScrollHandle::new(),
+        });
+        let cancel = CancellationToken::new();
+        cx.spawn(async move |weak, cx| {
+            let result = backend::run(backend::inspect_object(input, path, cancel)).await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.inspection_revision != revision {
+                    return;
+                }
+                if let Some(panel) = this.inspection.as_mut() {
+                    panel.state = match result {
+                        Ok(inspection) => InspectionState::Ready(inspection.items),
+                        Err(error) => InspectionState::Failed(error.to_string()),
+                    };
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Opens the node's DDL or source, read from the server, in a new tab.
+    fn open_definition(
+        &mut self,
+        index: usize,
+        path: ObjectPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let connection = &mut self.connections[index];
+        let Some(input) = connection.input.clone() else {
+            return;
+        };
+        let group = connection.group;
+        let name = path
+            .0
+            .last()
+            .map(|part| part.name.clone())
+            .unwrap_or_default();
+        connection.status = Feedback::new(Tone::Info, tr!("Reading the definition of {0}…", name));
+        let cancel = CancellationToken::new();
+        cx.spawn_in(window, async move |weak, cx| {
+            let result = backend::run(backend::object_definition(input, path, cancel)).await;
+            let _ = weak.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(sql) => {
+                        this.connections[index].status = Feedback::new(Tone::Info, "");
+                        this.add_query(group, &tr!("Definition of {0}", name), &sql, window, cx);
+                    }
+                    Err(error) => {
+                        this.connections[index].status = Feedback::new(
+                            Tone::Error,
+                            tr!("Could not read the definition of {0}: {1}", name, error),
+                        )
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The inspection panel: a virtualized list of what was found.
+    pub(super) fn inspection_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(panel) = self.inspection.as_ref() else {
+            return div().into_any_element();
+        };
+        let body = match &panel.state {
+            InspectionState::Loading => div()
+                .p_5()
+                .child(label(tr!("Reading from the server…")))
+                .into_any_element(),
+            InspectionState::Failed(message) => div()
+                .id("inspection-error")
+                .role(Role::Alert)
+                .p_5()
+                .child(feedback_line(&Feedback::new(Tone::Error, message.clone())))
+                .into_any_element(),
+            InspectionState::Ready(items) if items.is_empty() => div()
+                .p_5()
+                .child(label(tr!("Nothing beyond what the explorer shows.")))
+                .into_any_element(),
+            InspectionState::Ready(items) => {
+                let items = items.clone();
+                uniform_list("inspection-items", items.len(), move |range, _, _| {
+                    range
+                        .map(|at| {
+                            let item = &items[at];
+                            let detail = item.detail.clone();
+                            row()
+                                .id(("inspection-item", at))
+                                .role(Role::ListItem)
+                                .aria_label(format!(
+                                    "{} {}",
+                                    jykre::explorer::inspected_kind_name(item.kind),
+                                    item.name
+                                ))
+                                .h(px(30.))
+                                .px_4()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .w(px(96.))
+                                        .flex_none()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(FAINT))
+                                        .child(jykre::explorer::inspected_kind_name(item.kind)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .max_w(px(180.))
+                                        .truncate()
+                                        .text_size(px(13.))
+                                        .child(item.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(MUTED))
+                                        .child(item.detail.clone()),
+                                )
+                                // The whole text, built only when shown.
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(detail.clone()).build(window, cx)
+                                })
+                        })
+                        .collect()
+                })
+                .track_scroll(&panel.scroll)
+                .h(px(380.))
+                .into_any_element()
+            }
+        };
+        self.overlay("inspection-backdrop", cx)
+            .child(
+                column()
+                    .id("inspection")
+                    .role(Role::Dialog)
+                    .aria_label(tr!("Inspection of {0}", panel.title))
+                    .w(px(640.))
+                    .mt(px(100.))
+                    .rounded(px(10.))
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .shadow_lg()
+                    .overflow_hidden()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(
+                        row()
+                            .p_4()
+                            .justify_between()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(tr!("Inspection of {0}", panel.title)),
+                            )
+                            .child(
+                                icon_button("close-inspection", I::X, tr!("Close")).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        this.inspection = None;
+                                        cx.notify();
+                                    }),
+                                ),
+                            ),
+                    )
+                    .child(body),
+            )
+            .into_any_element()
+    }
+
+    /// Shows `path` in the explorer (go to definition): expands its
+    /// ancestors, reads what they hold and selects the node once its row
+    /// shows.
+    pub(super) fn reveal_object(&mut self, index: usize, path: ObjectPath, cx: &mut Context<Self>) {
+        let connection = &mut self.connections[index];
+        connection.expanded = true;
+        connection.tree.reveal(&path);
+        self.pending_reveal = Some((index, path));
+        self.save_expanded_soon(index, cx);
+        self.load_missing(index, cx);
+        cx.notify();
+    }
+
+    /// Gives the connection's tabs the namespaces they may choose from.
+    pub(super) fn push_context_choices(&self, index: usize, cx: &mut Context<Self>) {
+        let connection = &self.connections[index];
+        let choices: Vec<_> = connection
+            .namespaces
+            .iter()
+            .map(jykre::ddl::namespace_context)
+            .collect();
+        for panel in self.panels.values() {
+            panel.update(cx, |panel, cx| {
+                if panel.connection_name() == connection.name {
+                    panel.set_context_choices(choices.clone(), cx);
+                    if let (Some(profile), Some(names)) = (&connection.profile, &connection.names) {
+                        panel.set_names(profile.id, names.clone());
+                    }
+                }
+            });
+        }
+    }
+
     /// Reads, in one go, the children of the nodes that are expanded but
     /// were not read: after a restart, or after the tree was read again.
     pub(super) fn load_missing(&mut self, index: usize, cx: &mut Context<Self>) {
+        // The tree was read again: the namespaces the tabs offer may differ.
+        self.load_context_choices(index, cx);
         let connection = &mut self.connections[index];
         let missing = connection.tree.missing();
         let Some(profile) = connection.profile.clone().filter(|_| !missing.is_empty()) else {
@@ -1346,14 +1790,47 @@ impl AppView {
             if current != Some(revision) {
                 return;
             }
+            // Every connection is searched at once, and one that fails does not
+            // hide the others' matches. The palette asks for relations only, so
+            // columns of the same name never push a table past the limit.
+            let names: Vec<_> = profiles
+                .iter()
+                .map(|(index, profile)| (*index, profile.name.clone()))
+                .collect();
             let result = backend::run(async move {
-                let mut found = Vec::new();
+                let mut searches = tokio::task::JoinSet::new();
                 for (index, profile) in profiles {
-                    let values =
-                        backend::search_metadata(&dir, profile.id, &profile.config, &query).await?;
-                    let driver = builtin_registry()?.get(profile.config.driver)?;
-                    found.push((index, driver, values));
+                    let dir = dir.clone();
+                    let query = query.clone();
+                    searches.spawn(async move {
+                        let relations = [
+                            ObjectKind::Table,
+                            ObjectKind::View,
+                            ObjectKind::MaterializedView,
+                        ];
+                        let found = async {
+                            let values = backend::search_metadata(
+                                &dir,
+                                profile.id,
+                                &profile.config,
+                                &query,
+                                palette.then_some(&relations[..]),
+                            )
+                            .await?;
+                            let driver = builtin_registry()?.get(profile.config.driver)?;
+                            Ok::<_, DriverError>((driver, values))
+                        }
+                        .await;
+                        (index, found)
+                    });
                 }
+                let mut found = Vec::new();
+                while let Some(joined) = searches.join_next().await {
+                    if let Ok(result) = joined {
+                        found.push(result);
+                    }
+                }
+                found.sort_by_key(|(index, _)| *index);
                 Ok(found)
             })
             .await;
@@ -1377,9 +1854,22 @@ impl AppView {
                         connection.set_search_rows(Vec::new());
                     }
                 }
+                let mut failed = Vec::new();
                 match result {
                     Ok(found) => {
-                        for (index, driver, objects) in found {
+                        for (index, found) in found {
+                            let (driver, objects) = match found {
+                                Ok(found) => found,
+                                Err(error) => {
+                                    let name = names
+                                        .iter()
+                                        .find(|(at, _)| *at == index)
+                                        .map(|(_, name)| name.clone())
+                                        .unwrap_or_default();
+                                    failed.push(tr!("{0}: {1}", name, error));
+                                    continue;
+                                }
+                            };
                             if palette {
                                 for object in objects
                                     .into_iter()
@@ -1390,7 +1880,11 @@ impl AppView {
                                     this.command_matches.push((
                                         index,
                                         object.name.clone(),
-                                        backend::preview_sql(&*driver, &object.path, row_limit),
+                                        backend::preview_sql(
+                                            &*driver,
+                                            object.stored_at.as_ref().unwrap_or(&object.path),
+                                            row_limit,
+                                        ),
                                     ));
                                 }
                             } else {
@@ -1402,10 +1896,13 @@ impl AppView {
                             }
                         }
                     }
-                    Err(error) => {
-                        this.app_notice =
-                            Some(Feedback::new(Tone::Error, tr!("Search failed: {0}", error)))
-                    }
+                    Err(error) => failed.push(error.to_string()),
+                }
+                if !failed.is_empty() {
+                    this.app_notice = Some(Feedback::new(
+                        Tone::Error,
+                        tr!("Search failed: {0}", failed.join("; ")),
+                    ));
                 }
                 if palette {
                     this.command_selected =
@@ -1672,6 +2169,17 @@ impl AppView {
         let (range, count) = jykre::explorer::changed_range(&old, &new);
         self.explorer_list.splice(range, count);
         self.explorer_entries = entries;
+        // A node go to definition asked for is selected once it shows.
+        if let Some((index, path)) = self.pending_reveal.clone()
+            && self
+                .connections
+                .get(index)
+                .is_some_and(|connection| connection.tree.shows(&path))
+        {
+            self.pending_reveal = None;
+            self.explorer_selected = Some((index, path.clone()));
+            self.reveal_explorer_node(index, &path);
+        }
     }
 
     /// The element of one explorer list entry.
@@ -1739,6 +2247,8 @@ impl AppView {
         let id = entry.id();
         let weak = cx.weak_entity();
         let path = object.path.clone();
+        // A preview reads the object where it is stored.
+        let preview = object.stored_at.clone().unwrap_or_else(|| path.clone());
         let searching = !self.search.read(cx).value().is_empty();
         // Keys and partitions refresh with their table.
         let refresh_path = jykre::explorer::refresh_scope(&path);
@@ -1753,6 +2263,15 @@ impl AppView {
         let refreshing_this = refreshing == Some(&path);
         let queued_this = connection.refresh_queue.waits_for(&path);
         let refresh_queued = connection.refresh_queue.waits_for(&refresh_path);
+        let no_access = connection.no_access.contains(&path);
+        // What the node offers beyond the tree: inspection and definition.
+        let last_level = connection
+            .namespaces
+            .first()
+            .and_then(|namespace| namespace.0.last())
+            .map(|part| part.kind);
+        let inspectable = jykre::explorer::inspectable(&object, last_level);
+        let defined = relation;
         let age = connection.ages.get(&path).map(|at| {
             jykre::explorer::format_age(SystemTime::now().duration_since(*at).unwrap_or_default())
         });
@@ -1788,6 +2307,7 @@ impl AppView {
                 let f5_path = refresh_path.clone();
                 let key_path = path.clone();
                 let click_path = path.clone();
+                let click_preview = preview.clone();
                 let described_object = object.clone();
                 div()
                     .id("node")
@@ -1877,7 +2397,7 @@ impl AppView {
                         this.select_node(index, &click_path, window, cx);
                         if opens {
                             if event.is_keyboard() || event.click_count() >= 2 {
-                                this.open_relation(index, &click_path, window, cx);
+                                this.open_relation(index, &click_preview, window, cx);
                             }
                         } else if expandable {
                             this.toggle_node(index, &click_path, cx);
@@ -1893,6 +2413,17 @@ impl AppView {
                         .text_size(px(12.))
                         .text_color(rgb(FAINT))
                         .child(age),
+                )
+            })
+            // Unreadable for lack of permission: its last good read stays.
+            .when(no_access, |s| {
+                s.child(
+                    div()
+                        .flex_none()
+                        .px_1()
+                        .text_size(px(12.))
+                        .text_color(rgb(AMBER))
+                        .child(tr!("no access")),
                 )
             })
             // Refresh lives in the context menu; only a running refresh
@@ -1920,6 +2451,9 @@ impl AppView {
                     }
                 };
                 let open_path = path.clone();
+                let open_preview = preview.clone();
+                let inspect_path = path.clone();
+                let definition_path = preview.clone();
                 let refresh_path = refresh_path.clone();
                 let copy_name = object.name.clone();
                 // Read when the menu opens, not for every node and frame.
@@ -1936,7 +2470,7 @@ impl AppView {
                     PopupMenuItem::new(tr!("New query for table"))
                         .icon(I::SquareTerminal)
                         .on_click(run(Box::new(move |this, window, cx| {
-                            this.open_relation(index, &open_path, window, cx)
+                            this.open_relation(index, &open_preview, window, cx)
                         })))
                 } else {
                     PopupMenuItem::new(if collapsed {
@@ -1966,6 +2500,24 @@ impl AppView {
                         this.toggle_refresh(index, refresh_path.clone(), cx)
                     }))),
                 )
+                .when(inspectable, |menu| {
+                    menu.item(
+                        PopupMenuItem::new(tr!("Inspect"))
+                            .icon(I::Search)
+                            .on_click(run(Box::new(move |this, _, cx| {
+                                this.inspect_node(index, inspect_path.clone(), cx)
+                            }))),
+                    )
+                })
+                .when(defined, |menu| {
+                    menu.item(
+                        PopupMenuItem::new(tr!("Show definition"))
+                            .icon(I::SquareTerminal)
+                            .on_click(run(Box::new(move |this, window, cx| {
+                                this.open_definition(index, definition_path.clone(), window, cx)
+                            }))),
+                    )
+                })
                 .separator()
                 .item(PopupMenuItem::new(tr!("Copy name")).icon(I::Copy).on_click(
                     move |_, _, cx: &mut App| {
@@ -2010,6 +2562,14 @@ impl AppView {
                     "Up to {0} rows. Reading also stops when a result reaches {1} MB.",
                     cell_format::count(MAX_ROW_LIMIT as usize),
                     DEFAULT_MEMORY_CEILING / (1024 * 1024)
+                )))
+                .child(div().h(px(12.)))
+                .child(self.dialog_field(
+                    tr!("Read the chosen metadata again on opening after (hours)"),
+                    &self.connection_revalidate,
+                ))
+                .child(label(tr!(
+                    "Only the chosen namespaces read longer ago than this, once when the application opens. Empty or 0 never does."
                 ))),
         };
         self.overlay("connection-backdrop", cx)
@@ -2312,6 +2872,42 @@ impl AppView {
                         })),
                 )
             })
+            // PostgreSQL: where unqualified names go, and other databases.
+            .when(self.driver == 0, |s| {
+                s.child(
+                    column()
+                        .gap_1()
+                        .child(field(tr!("Search path"), &self.connection_search_path))
+                        .child(label(tr!(
+                            "Schemas sessions start with, in order. The first is the suggested choice to introspect."
+                        ))),
+                )
+                .child(
+                    button(
+                        "all-databases",
+                        if self.all_databases {
+                            I::SquareCheck
+                        } else {
+                            I::Square
+                        },
+                        tr!("Offer the server's other databases to introspect"),
+                    )
+                    .role(Role::CheckBox)
+                    .aria_toggled(if self.all_databases {
+                        Toggled::True
+                    } else {
+                        Toggled::False
+                    })
+                    .when(self.all_databases, |s| s.text_color(rgb(MINT)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.connection_saving {
+                            this.all_databases = !this.all_databases;
+                            this.invalidate_connection_test();
+                            cx.notify();
+                        }
+                    })),
+                )
+            })
             .when(self.driver == 2, |s| {
                 s.child(self.connection_databricks.clone())
             })
@@ -2404,20 +3000,26 @@ impl Connection {
             .map(|status| match status.state {
                 RefreshState::Success => tr!("Updated"),
                 RefreshState::Running => tr!("Refreshing"),
-                RefreshState::Partial | RefreshState::Warning => {
-                    tr!("Partial refresh; some parts are not accessible")
-                }
+                RefreshState::Partial => tr!("Partial refresh; some parts are not accessible"),
+                RefreshState::Warning => tr!("No access; the last good read is kept"),
                 RefreshState::Failed => tr!("Last attempt failed"),
                 RefreshState::Cancelled => tr!("Last attempt cancelled"),
                 RefreshState::Interrupted => tr!("Last attempt interrupted"),
                 _ => tr!("Local cache"),
             })
             .unwrap_or(tr!("No refresh recorded"));
-        tr!(
-            "{0} · Last successful refresh: {1}",
-            state,
-            success.unwrap_or(tr!("none"))
-        )
+        if let Some(success) = success {
+            return tr!("{0} · Last successful refresh: {1}", state, success);
+        }
+        // Only partial reads so far: when the last one was published.
+        match applicable
+            .iter()
+            .rev()
+            .find_map(|status| status.last_published_at.as_deref())
+        {
+            Some(published) => tr!("{0} · Last partial refresh: {1}", state, published),
+            None => tr!("{0} · Last successful refresh: {1}", state, tr!("none")),
+        }
     }
 }
 

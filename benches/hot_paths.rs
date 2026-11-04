@@ -216,6 +216,15 @@ fn metadata_paging(c: &mut Criterion) {
     group.bench_function("page of 200 children at offset 4,800", |b| {
         b.iter(|| runtime.block_on(repository.children(black_box(&schema), after.as_ref(), 200)))
     });
+    // The palette's search among 500,000 objects (budget 50 ms): a name of
+    // three characters or more goes through the trigram index; a shorter
+    // one scans the name index.
+    group.bench_function("search a name among 500,000 objects", |b| {
+        b.iter(|| runtime.block_on(repository.search(black_box("table_04999"), None, 200)))
+    });
+    group.bench_function("search two characters among 500,000 objects", |b| {
+        b.iter(|| runtime.block_on(repository.search(black_box("zq"), None, 200)))
+    });
     group.finish();
     runtime.block_on(repository.close());
     // Best effort: the folder is temporary.

@@ -158,6 +158,11 @@ pub struct MetadataObject {
     /// What a foreign key references.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<ForeignKeyTarget>,
+    /// Where the object is stored when the tree shows it under another
+    /// node, such as a partition kept in another schema than its root
+    /// table. Queries name this path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_at: Option<ObjectPath>,
 }
 
 impl MetadataObject {
@@ -174,6 +179,7 @@ impl MetadataObject {
             default_value: None,
             primary_key: None,
             references: None,
+            stored_at: None,
         }
     }
 }
@@ -187,4 +193,52 @@ pub struct IntrospectionWarning {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IntrospectionReport {
     pub warnings: Vec<IntrospectionWarning>,
+}
+
+/// How much of a scope an introspection reads.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntrospectionLevel {
+    /// Namespaces and relations only, without columns, keys or partitions:
+    /// what the explorer can show before the rest arrives.
+    Names,
+    /// Everything a refresh reads.
+    Full,
+}
+
+/// What an inspection lists beyond the refreshed tree.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectedKind {
+    Index,
+    PrimaryKey,
+    Unique,
+    Check,
+    ForeignKey,
+    Exclusion,
+    Trigger,
+    Function,
+    Procedure,
+    Sequence,
+    Type,
+    /// A column's default the refresh does not read.
+    Default,
+}
+
+/// One thing an inspection found: its kind, its name and what the database
+/// says about it (columns, a signature with its parameters, enum labels or a
+/// definition), as the database writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectionItem {
+    pub kind: InspectedKind,
+    pub name: String,
+    pub detail: String,
+}
+
+/// What a relation or a namespace has beyond the tree a refresh reads
+/// (indexes, constraints, triggers, routines, sequences, types), read only
+/// when the user asks and never cached.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Inspection {
+    pub items: Vec<InspectionItem>,
 }

@@ -221,6 +221,19 @@ out of scope. A stopped classic cluster reports an actionable error.
   statement on the server when it may still run) or closes the session.
   `Session::is_open` tells whether it can be reused; `Session::ping` checks a
   kept session before a run, within 5 seconds.
+- The context in `ExecutionOptions::context` (the tab's catalog and schema)
+  is applied only when it differs from the last context the session applied
+  or reported, so a `USE` or `SET search_path` the user ran is not undone by
+  the next statement. PostgreSQL puts the chosen schema first in
+  `search_path` (`"schema", "$user", public`) and refuses another database;
+  MySQL runs `USE`; Databricks sends the catalog and schema with each
+  statement (warehouses) or switches the cluster's SQL context.
+- `Session::context` reports where unqualified names resolve now:
+  `current_database()` and `current_schema()` in PostgreSQL, `DATABASE()` in
+  MySQL (as the schema), the followed catalog and schema in Databricks.
+  Asking discards a result still open for paging, so the application asks
+  after a run whose last result is complete, or after its last page. The
+  default implementation reports an empty context.
 - `Session::close` consumes the session and can report close failures.
   Relational sessions keep physical state (`USE`, `SET`, temporary tables,
   transactions). Databricks warehouses keep a logical catalog/schema context sent with
@@ -228,6 +241,41 @@ out of scope. A stopped classic cluster reports an actionable error.
   `USE [SCHEMA | DATABASE]` statements, without promising transactions or
   other SQL state between statements. Classic clusters keep their actual SQL
   execution context, including successful context changes, between runs.
+- [ADR-0017](adr/0017-driver-metadata-contract-batch.md) adds, all with
+  defaults that keep the previous behaviour:
+  - `cache_identity`: the options that decide which catalog a cache
+    describes. PostgreSQL: host, port, database and user; MySQL: host,
+    port and user; Databricks: the CLI profile.
+  - `introspect_level` with `IntrospectionLevel::Names` (namespaces and
+    relations only) or `Full`. A namespace read for the first time is
+    published at `Names` and then `Full`.
+  - `inspect`: what a relation (indexes, constraints, triggers; for
+    Databricks keys and column defaults) or a last-level namespace
+    (functions, procedures with their parameters, sequences, custom types
+    and enums) has beyond the refreshed tree, read only when the user asks,
+    within 60 seconds, never cached.
+  - `definition`: a view's source, or a table's DDL (`SHOW CREATE` in MySQL,
+    built from the catalog in PostgreSQL). Databricks gives table DDL only
+    through SQL compute, which metadata never starts.
+  - `left_out_of_everything`: Databricks leaves the `system` catalog out of
+    **Everything** until it is chosen by name.
+- A chosen namespace the user may not read is reported as an
+  `IntrospectionWarning` on its path instead of being omitted: PostgreSQL
+  checks `USAGE` on the schema; MySQL tries `USE` (for a login without
+  global privileges MySQL answers "access denied" for a missing database
+  too, so both read as no access); Databricks reports permission errors
+  per catalog or schema. The cache keeps that subtree's last good read.
+- PostgreSQL options: `searchPath` (the `search_path` sessions start with;
+  its first schema is the suggested choice) and `allDatabases` (the root of
+  discovery lists every database that accepts connections, each read
+  through a connection of its own; sessions stay in `database`). A partition
+  kept in another schema than its root table is listed under the root, with
+  `stored_at` naming where it is read.
+- Databricks reads one schema with its table listing alone (no GET of its
+  catalog and schema first), asks for `omit_columns` at `Names`, and reads
+  column defaults from `type_json` (`CURRENT_DEFAULT`). Whether
+  `include_browse` should list objects the user can only browse was not
+  verified without a real workspace.
 - `Driver::discover_namespaces` validates the configuration and the parent,
   honours cancellation and has a 60-second limit. It needs no SQL session and
   never starts compute. The default implementation reports `NotImplemented`.

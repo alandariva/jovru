@@ -50,6 +50,9 @@ pub struct LoadedConnection {
     pub cache: Option<MetadataSnapshot>,
     /// Explorer nodes the previous session left expanded.
     pub expanded: Vec<ObjectPath>,
+    /// Hours after which opening the connection reads its chosen namespaces
+    /// again; 0 never does.
+    pub revalidate_hours: u32,
     pub warning: Option<String>,
 }
 
@@ -261,6 +264,14 @@ async fn load_from(
             }
         };
         let expanded = stored_expanded(repository, profile.id).await;
+        let revalidate_hours = repository
+            .setting(&revalidate_key(profile.id))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.as_u64())
+            .and_then(|hours| u32::try_from(hours).ok())
+            .unwrap_or(0);
         loaded.push(LoadedConnection {
             profile,
             input,
@@ -268,6 +279,7 @@ async fn load_from(
             scope,
             cache,
             expanded,
+            revalidate_hours,
             warning,
         });
     }
@@ -284,6 +296,9 @@ pub struct Preferences {
     /// What to introspect; pending (nothing chosen) is allowed, for example
     /// when the server could not be reached to list its namespaces.
     pub scope: MetadataScope,
+    /// Hours after which opening the connection reads its chosen namespaces
+    /// again; 0 never does.
+    pub revalidate_hours: u32,
 }
 
 /// Saves a profile, its preferences and, when asked to remember it, its
@@ -312,7 +327,11 @@ async fn save_to(
     secrets: &dyn SecretStore,
     repository: &ConfigRepository,
 ) -> DriverResult<LoadedConnection> {
-    let Preferences { row_limit, scope } = preferences;
+    let Preferences {
+        row_limit,
+        scope,
+        revalidate_hours,
+    } = preferences;
     // Another profile that cannot be read does not block this one.
     let previous = repository
         .list_each()
@@ -377,6 +396,12 @@ async fn save_to(
     repository
         .set_metadata_scope(profile.id, &scope.to_value())
         .await?;
+    repository
+        .set_setting(
+            &revalidate_key(profile.id),
+            &serde_json::json!(revalidate_hours),
+        )
+        .await?;
     let had_entry = previous
         .as_ref()
         .is_some_and(|previous| previous.remember_password);
@@ -413,6 +438,7 @@ async fn save_to(
         scope,
         cache,
         expanded: Vec::new(),
+        revalidate_hours,
         warning,
     })
 }
@@ -496,7 +522,8 @@ async fn stored_scope(
     let Some(last) = levels.last() else {
         return Ok((MetadataScope::default(), false));
     };
-    let cache = MetadataRepository::open(dir, profile.id, &profile.config).await?;
+    let cache =
+        MetadataRepository::open(dir, profile.id, &backend::cache_config(&profile.config)?).await?;
     let paths = cache.paths(*last).await;
     cache.close().await;
     let scope = MetadataScope {
@@ -524,6 +551,11 @@ async fn prepare_cache(
     let mut snapshot = backend::cached_metadata(dir, profile.id, &profile.config, recover).await?;
     snapshot.recovered |= recovered;
     Ok(snapshot)
+}
+
+/// The setting that holds a connection's revalidation age, in hours.
+fn revalidate_key(id: ConnectionId) -> String {
+    format!("connection.{id}.revalidate_hours")
 }
 
 /// The explorer nodes a connection left expanded. A missing or unreadable

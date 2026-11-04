@@ -76,7 +76,11 @@ Services publish only on 127.0.0.1. Database/user: `jykre`; the public,
 fixture-only password is `jykre-test`. Images follow these version lines and
 are not pinned by digest. Seeds in `tests/fixtures/` create tables with keys,
 defaults and comments, a view, a materialized view and a partitioned table
-(PostgreSQL), a foreign key (MySQL) and synthetic data. Never use production credentials or data.
+(PostgreSQL, with a partition kept in another schema), a foreign key (MySQL),
+an index, a check constraint, a trigger and a routine for inspection, an enum
+and a sequence (PostgreSQL), and a login `gate_reader` (same fixture-only
+password) that may not use one schema or database, for permission warnings,
+with synthetic data. Never use production credentials or data.
 
 Each run creates a Compose project `jykre-gate-<pid>` and tries to remove it,
 with its volumes, at the end, even if startup or a test fails. An abrupt

@@ -14,6 +14,7 @@
 | Serialization | `serde`, `serde_json` | Configuration options and local JSON columns |
 | Cancellation | `tokio-util` `CancellationToken` | Every long operation |
 | Logs | `tracing`, `tracing-subscriber` (`env-filter`, `json`), `tracing-appender` | [ADR-0009](adr/0009-structured-logging-and-timings.md). Used by the `jykre` crate |
+| Editor language features | `lsp-types` 0.97 with `proposed`, the version `gpui-kit` uses | The SQL editor's completion, hover and go to definition implement `gpui-component`'s providers, whose signatures take these types. Approved 2026-11-03; upgrade with the GPUI family |
 | Platform | `dirs` (data folder), `sys-locale` (UI language) | |
 
 Development tools: `criterion` 0.8 without default features (benchmarks,
@@ -72,4 +73,4 @@ Mechanics:
 
 | Standard | Current code |
 | --- | --- |
-| Shared versions only in `[workspace.dependencies]` | The root package declares `gpui-kit`, `sys-locale` and `dirs` with local versions |
+| Shared versions only in `[workspace.dependencies]` | The root package declares `gpui-kit`, `lsp-types`, `sys-locale` and `dirs` with local versions |

@@ -398,12 +398,13 @@ fn name(value: &Value) -> DriverResult<&str> {
 pub async fn introspect(
     input: &ResolvedConnection,
     scope: &ObjectPath,
+    level: IntrospectionLevel,
     sink: &mut dyn IntrospectionSink,
     cancel: CancellationToken,
 ) -> DriverResult<IntrospectionReport> {
     bounded(&cancel, Duration::from_secs(300), async {
         let client = Client::new(input).await?;
-        client.introspect(scope, sink).await
+        client.introspect(scope, level, sink).await
     })
     .await
 }
@@ -476,19 +477,35 @@ impl Client {
     async fn introspect(
         &self,
         scope: &ObjectPath,
+        level: IntrospectionLevel,
         sink: &mut dyn IntrospectionSink,
     ) -> DriverResult<IntrospectionReport> {
         let client = self;
+        let names_only = level == IntrospectionLevel::Names;
         let mut report = IntrospectionReport::default();
-        for catalog in client
-            .metadata_items(
-                "/api/2.1/unity-catalog/catalogs",
-                "catalogs",
-                vec![],
-                scope.name_of(ObjectKind::Catalog).map(str::to_owned),
-            )
-            .await?
-        {
+        // Reading one schema needs no GET of its catalog and schema first:
+        // listing its tables says whether it exists.
+        let namespace = match (
+            scope.name_of(ObjectKind::Catalog),
+            scope.name_of(ObjectKind::Schema),
+        ) {
+            (Some(catalog), Some(schema)) => Some((catalog.to_owned(), schema.to_owned())),
+            _ => None,
+        };
+        let catalogs = match &namespace {
+            Some((catalog, _)) => vec![json!({ "name": catalog })],
+            None => {
+                client
+                    .metadata_items(
+                        "/api/2.1/unity-catalog/catalogs",
+                        "catalogs",
+                        vec![],
+                        scope.name_of(ObjectKind::Catalog).map(str::to_owned),
+                    )
+                    .await?
+            }
+        };
+        for catalog in catalogs {
             if name(&catalog)? == "hive_metastore"
                 || scope
                     .name_of(ObjectKind::Catalog)
@@ -498,29 +515,32 @@ impl Client {
             }
             let cat =
                 MetadataObject::new(ObjectKind::Catalog, &ObjectPath::default(), name(&catalog)?);
-            if cat.path.is_within(scope) {
+            if namespace.is_none() && cat.path.is_within(scope) {
                 sink.batch(vec![cat.clone()]).await?;
             }
-            let schemas = match client
-                .metadata_items(
-                    "/api/2.1/unity-catalog/schemas",
-                    "schemas",
-                    vec![("catalog_name".into(), cat.name.clone())],
-                    scope
-                        .name_of(ObjectKind::Schema)
-                        .map(|schema| format!("{}.{schema}", cat.name)),
-                )
-                .await
-            {
-                Ok(v) => v,
-                Err(e) if e.code == ErrorCode::PermissionDenied => {
-                    report.warnings.push(IntrospectionWarning {
-                        path: cat.path,
-                        message: e.message,
-                    });
-                    continue;
-                }
-                Err(e) => return Err(e),
+            let schemas = match &namespace {
+                Some((_, schema)) => vec![json!({ "name": schema })],
+                None => match client
+                    .metadata_items(
+                        "/api/2.1/unity-catalog/schemas",
+                        "schemas",
+                        vec![("catalog_name".into(), cat.name.clone())],
+                        scope
+                            .name_of(ObjectKind::Schema)
+                            .map(|schema| format!("{}.{schema}", cat.name)),
+                    )
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) if e.code == ErrorCode::PermissionDenied => {
+                        report.warnings.push(IntrospectionWarning {
+                            path: cat.path,
+                            message: e.message,
+                        });
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                },
             };
             for schema in schemas {
                 if scope
@@ -530,17 +550,22 @@ impl Client {
                     continue;
                 }
                 let sch = MetadataObject::new(ObjectKind::Schema, &cat.path, name(&schema)?);
-                if sch.path.is_within(scope) {
+                if namespace.is_none() && sch.path.is_within(scope) {
                     sink.batch(vec![sch.clone()]).await?;
+                }
+                let mut query = vec![
+                    ("catalog_name".into(), cat.name.clone()),
+                    ("schema_name".into(), sch.name.clone()),
+                ];
+                if names_only {
+                    // Names first: the columns come with the full read.
+                    query.push(("omit_columns".into(), "true".into()));
                 }
                 let tables = match client
                     .metadata_items(
                         "/api/2.1/unity-catalog/tables",
                         "tables",
-                        vec![
-                            ("catalog_name".into(), cat.name.clone()),
-                            ("schema_name".into(), sch.name.clone()),
-                        ],
+                        query,
                         scope
                             .name_of(ObjectKind::Table)
                             .or(scope.name_of(ObjectKind::View))
@@ -556,8 +581,20 @@ impl Client {
                         });
                         continue;
                     }
+                    // The schema (or its catalog) no longer exists.
+                    Err(e) if e.code == ErrorCode::NotFound && namespace.is_some() => continue,
                     Err(e) => return Err(e),
                 };
+                if namespace.is_some() {
+                    // The namespace exists: its nodes come with what it holds.
+                    let nodes: Vec<_> = [cat.clone(), sch.clone()]
+                        .into_iter()
+                        .filter(|object| object.path.is_within(scope))
+                        .collect();
+                    if !nodes.is_empty() {
+                        sink.batch(nodes).await?;
+                    }
+                }
                 for table in tables {
                     if scope
                         .name_of(ObjectKind::Table)
@@ -573,29 +610,32 @@ impl Client {
                     };
                     let mut rel = MetadataObject::new(kind, &sch.path, name(&table)?);
                     rel.comment = table["comment"].as_str().map(str::to_owned);
-                    let constraints = Constraints::read(&table["table_constraints"]);
                     let mut batch = vec![rel.clone()];
-                    for column in table["columns"].as_array().into_iter().flatten() {
-                        let mut object =
-                            MetadataObject::new(ObjectKind::Column, &rel.path, name(column)?);
-                        object.data_type = column["type_text"].as_str().map(str::to_owned);
-                        object.nullable = column["nullable"].as_bool();
-                        object.ordinal = column["position"]
-                            .as_u64()
-                            .and_then(|v| u32::try_from(v + 1).ok());
-                        object.comment = column["comment"].as_str().map(str::to_owned);
-                        object.primary_key = constraints
-                            .primary_key
-                            .iter()
-                            .position(|key| *key == object.name)
-                            .and_then(|at| u32::try_from(at + 1).ok());
-                        batch.push(object);
-                    }
-                    for (key, target) in constraints.foreign_keys {
-                        let mut object =
-                            MetadataObject::new(ObjectKind::ForeignKey, &rel.path, key);
-                        object.references = Some(target);
-                        batch.push(object);
+                    if !names_only {
+                        let constraints = Constraints::read(&table["table_constraints"]);
+                        for column in table["columns"].as_array().into_iter().flatten() {
+                            let mut object =
+                                MetadataObject::new(ObjectKind::Column, &rel.path, name(column)?);
+                            object.data_type = column["type_text"].as_str().map(str::to_owned);
+                            object.nullable = column["nullable"].as_bool();
+                            object.ordinal = column["position"]
+                                .as_u64()
+                                .and_then(|v| u32::try_from(v + 1).ok());
+                            object.comment = column["comment"].as_str().map(str::to_owned);
+                            object.default_value = column_default(column);
+                            object.primary_key = constraints
+                                .primary_key
+                                .iter()
+                                .position(|key| *key == object.name)
+                                .and_then(|at| u32::try_from(at + 1).ok());
+                            batch.push(object);
+                        }
+                        for (key, target) in constraints.foreign_keys {
+                            let mut object =
+                                MetadataObject::new(ObjectKind::ForeignKey, &rel.path, key);
+                            object.references = Some(target);
+                            batch.push(object);
+                        }
                     }
                     batch.retain(|object| object.path.is_within(scope));
                     if !batch.is_empty() {
@@ -606,6 +646,161 @@ impl Client {
         }
         Ok(report)
     }
+
+    /// The table's information, read on its own.
+    async fn table(&self, catalog: &str, schema: &str, table: &str) -> DriverResult<Value> {
+        let full = format!("{catalog}.{schema}.{table}");
+        self.metadata_items(
+            "/api/2.1/unity-catalog/tables",
+            "tables",
+            vec![],
+            Some(full),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| DriverError::new(ErrorCode::NotFound, "The object no longer exists"))
+    }
+}
+
+/// A column's default from its Delta metadata (`CURRENT_DEFAULT` in
+/// `type_json`), which Unity Catalog reports with the column.
+fn column_default(column: &Value) -> Option<String> {
+    let metadata = match &column["type_json"] {
+        Value::String(text) => serde_json::from_str::<Value>(text).ok()?,
+        other => other.clone(),
+    };
+    metadata["metadata"]["CURRENT_DEFAULT"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// A table's keys and column defaults, or a schema's functions with their
+/// parameters. Unity Catalog has no indexes.
+pub async fn inspect(
+    input: &ResolvedConnection,
+    path: &ObjectPath,
+    cancel: CancellationToken,
+) -> DriverResult<Inspection> {
+    let (Some(catalog), Some(schema)) = (
+        path.name_of(ObjectKind::Catalog).map(str::to_owned),
+        path.name_of(ObjectKind::Schema).map(str::to_owned),
+    ) else {
+        return Err(DriverError::validation(
+            "Choose a schema, a table or a view",
+        ));
+    };
+    let relation = path.relation().map(str::to_owned);
+    bounded(&cancel, Duration::from_secs(60), async {
+        let client = Client::new(input).await?;
+        let mut items = Vec::new();
+        if let Some(relation) = relation {
+            let table = client.table(&catalog, &schema, &relation).await?;
+            for constraint in table["table_constraints"].as_array().into_iter().flatten() {
+                let columns = |key: &Value| {
+                    key["child_columns"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if let Some(key) = constraint.get("primary_key_constraint") {
+                    items.push(InspectionItem {
+                        kind: InspectedKind::PrimaryKey,
+                        name: key["name"].as_str().unwrap_or_default().to_owned(),
+                        detail: format!("({})", columns(key)),
+                    });
+                }
+                if let Some(key) = constraint.get("foreign_key_constraint") {
+                    items.push(InspectionItem {
+                        kind: InspectedKind::ForeignKey,
+                        name: key["name"].as_str().unwrap_or_default().to_owned(),
+                        detail: format!(
+                            "({}) → {}",
+                            columns(key),
+                            key["parent_table"].as_str().unwrap_or_default()
+                        ),
+                    });
+                }
+            }
+            for column in table["columns"].as_array().into_iter().flatten() {
+                if let Some(default) = column_default(column) {
+                    items.push(InspectionItem {
+                        kind: InspectedKind::Default,
+                        name: name(column)?.to_owned(),
+                        detail: default,
+                    });
+                }
+            }
+            return Ok(Inspection { items });
+        }
+        let functions = client
+            .pages(
+                "/api/2.1/unity-catalog/functions",
+                "functions",
+                vec![
+                    ("catalog_name".into(), catalog),
+                    ("schema_name".into(), schema),
+                ],
+            )
+            .await?;
+        for function in functions {
+            let parameters: Vec<String> = function["input_params"]["parameters"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|parameter| {
+                    format!(
+                        "{} {}",
+                        parameter["name"].as_str().unwrap_or_default(),
+                        parameter["type_text"].as_str().unwrap_or_default()
+                    )
+                })
+                .collect();
+            let mut detail = format!("({})", parameters.join(", "));
+            if let Some(returns) = function["full_data_type"].as_str() {
+                detail.push_str(&format!(" → {returns}"));
+            }
+            items.push(InspectionItem {
+                kind: InspectedKind::Function,
+                name: name(&function)?.to_owned(),
+                detail,
+            });
+        }
+        Ok(Inspection { items })
+    })
+    .await
+}
+
+/// A view's definition from Unity Catalog. Table DDL needs SQL compute
+/// (`SHOW CREATE TABLE`), which reading metadata never starts.
+pub async fn definition(
+    input: &ResolvedConnection,
+    path: &ObjectPath,
+    cancel: CancellationToken,
+) -> DriverResult<String> {
+    let (Some(catalog), Some(schema), Some(relation)) = (
+        path.name_of(ObjectKind::Catalog).map(str::to_owned),
+        path.name_of(ObjectKind::Schema).map(str::to_owned),
+        path.relation().map(str::to_owned),
+    ) else {
+        return Err(DriverError::validation("Choose a table or a view"));
+    };
+    bounded(&cancel, Duration::from_secs(60), async {
+        let client = Client::new(input).await?;
+        let table = client.table(&catalog, &schema, &relation).await?;
+        match table["view_definition"].as_str() {
+            Some(definition) => Ok(format!(
+                "CREATE VIEW `{catalog}`.`{schema}`.`{relation}` AS\n{definition}"
+            )),
+            None => Err(DriverError::validation(
+                "Databricks gives a table's DDL only through SQL compute; run SHOW CREATE TABLE in a query tab",
+            )),
+        }
+    })
+    .await
 }
 
 /// The keys Unity Catalog reports for a table (`table_constraints`).
@@ -668,6 +863,10 @@ struct DatabricksSession {
     client: Client,
     catalog: Option<String>,
     schema: Option<String>,
+    /// The context last requested by a run, or reported by
+    /// [`Session::context`]: a request for it is not applied again, so a
+    /// `USE` that succeeded meanwhile stays in force.
+    requested: SessionContext,
     /// The rows of the last result not delivered yet, while it has more.
     pending: Option<Pending>,
 }
@@ -697,6 +896,7 @@ impl DatabricksSession {
         Self {
             catalog: client.config.default_catalog.clone(),
             schema: client.config.default_schema.clone(),
+            requested: SessionContext::default(),
             client,
             pending: None,
         }
@@ -912,22 +1112,20 @@ impl Session for DatabricksSession {
             .saturating_mul(SERVER_PAGES)
             .min(100_000);
         let mut body = json!({"warehouse_id":self.client.config.warehouse_id,"statement":request.sql,"wait_timeout":FIRST_WAIT,"on_wait_timeout":"CONTINUE","format":"JSON_ARRAY","disposition":"INLINE","row_limit":row_limit});
-        if let Some(catalog) = request
-            .options
-            .context
-            .catalog
-            .as_ref()
-            .or(self.catalog.as_ref())
-        {
+        let context = &request.options.context;
+        if *context != self.requested {
+            if let Some(catalog) = &context.catalog {
+                self.catalog = Some(catalog.clone());
+            }
+            if let Some(schema) = &context.schema {
+                self.schema = Some(schema.clone());
+            }
+            self.requested = context.clone();
+        }
+        if let Some(catalog) = &self.catalog {
             body["catalog"] = json!(catalog);
         }
-        if let Some(schema) = request
-            .options
-            .context
-            .schema
-            .as_ref()
-            .or(self.schema.as_ref())
-        {
+        if let Some(schema) = &self.schema {
             body["schema"] = json!(schema);
         }
         let started = tokio::time::Instant::now();
@@ -1061,6 +1259,16 @@ impl Session for DatabricksSession {
             self.pending = Some(pending);
         }
         Ok(outcome)
+    }
+    /// The catalog and schema the session follows, from the profile's
+    /// defaults and the `USE` statements that succeeded; nothing is asked of
+    /// the server, and an open result stays open.
+    async fn context(&mut self, _: CancellationToken) -> DriverResult<SessionContext> {
+        self.requested = SessionContext {
+            catalog: self.catalog.clone(),
+            schema: self.schema.clone(),
+        };
+        Ok(self.requested.clone())
     }
     async fn ping(&mut self) -> DriverResult<()> {
         Ok(())
@@ -1604,14 +1812,14 @@ mod tests {
 
     #[tokio::test]
     async fn relation_kinds_and_keys_come_from_the_table_listing() {
+        // A schema is read with its table listing alone: no GET of the
+        // catalog or the schema first.
         let (client, task) = fixture(vec![
-            (200, json!({"name":"cat"})),
-            (200, json!({"name":"sch"})),
             (
                 200,
                 json!({"tables":[
                     {"name":"orders","table_type":"MANAGED","columns":[
-                        {"name":"id","type_text":"BIGINT","position":0,"nullable":false},
+                        {"name":"id","type_text":"BIGINT","position":0,"nullable":false,"type_json":"{\"name\":\"id\",\"type\":\"long\",\"metadata\":{\"CURRENT_DEFAULT\":\"42\"}}"},
                         {"name":"customer_id","type_text":"BIGINT","position":1}
                     ],"table_constraints":[
                         {"primary_key_constraint":{"name":"orders_pk","child_columns":["id"]}},
@@ -1627,8 +1835,13 @@ mod tests {
             .child(ObjectKind::Catalog, "cat")
             .child(ObjectKind::Schema, "sch");
         let mut metadata = Metadata::default();
-        client.introspect(&schema, &mut metadata).await.unwrap();
-        task.await.unwrap();
+        client
+            .introspect(&schema, IntrospectionLevel::Full, &mut metadata)
+            .await
+            .unwrap();
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET /api/2.1/unity-catalog/tables?"));
         let find = |path: &ObjectPath| {
             metadata
                 .0
@@ -1637,11 +1850,12 @@ mod tests {
                 .unwrap()
                 .clone()
         };
+        // The schema node still comes with what it holds.
+        find(&schema);
         let orders = schema.child(ObjectKind::Table, "orders");
-        assert_eq!(
-            find(&orders.child(ObjectKind::Column, "id")).primary_key,
-            Some(1)
-        );
+        let id = find(&orders.child(ObjectKind::Column, "id"));
+        assert_eq!(id.primary_key, Some(1));
+        assert_eq!(id.default_value.as_deref(), Some("42"));
         assert_eq!(
             find(&orders.child(ObjectKind::Column, "customer_id")).primary_key,
             None
@@ -1665,8 +1879,6 @@ mod tests {
     async fn table_and_column_refresh_request_only_the_selected_relation() {
         for column_only in [false, true] {
             let (client, task) = fixture(vec![
-                (200, json!({"name":"cat"})),
-                (200, json!({"name":"sch"})),
                 (200, json!({"name":"target","table_type":"MANAGED","columns":[{"name":"id","type_text":"BIGINT","position":0},{"name":"other","type_text":"STRING","position":1}]})),
             ]).await;
             let mut scope = ObjectPath::default()
@@ -1677,7 +1889,10 @@ mod tests {
                 scope = scope.child(ObjectKind::Column, "id");
             }
             let mut metadata = Metadata::default();
-            client.introspect(&scope, &mut metadata).await.unwrap();
+            client
+                .introspect(&scope, IntrospectionLevel::Full, &mut metadata)
+                .await
+                .unwrap();
             assert!(
                 metadata
                     .0
@@ -1686,26 +1901,23 @@ mod tests {
             );
             assert_eq!(metadata.0.len(), if column_only { 1 } else { 3 });
             let requests = task.await.unwrap();
-            assert!(requests[0].starts_with("GET /api/2.1/unity-catalog/catalogs/cat "));
-            assert!(requests[1].starts_with("GET /api/2.1/unity-catalog/schemas/cat.sch "));
-            assert!(requests[2].starts_with("GET /api/2.1/unity-catalog/tables/cat.sch.target "));
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("GET /api/2.1/unity-catalog/tables/cat.sch.target "));
         }
     }
 
     #[tokio::test]
     async fn deleted_scoped_table_returns_an_empty_successful_snapshot() {
-        let (client, task) = fixture(vec![
-            (200, json!({"name":"cat"})),
-            (200, json!({"name":"sch"})),
-            (404, json!({})),
-        ])
-        .await;
+        let (client, task) = fixture(vec![(404, json!({}))]).await;
         let scope = ObjectPath::default()
             .child(ObjectKind::Catalog, "cat")
             .child(ObjectKind::Schema, "sch")
             .child(ObjectKind::Table, "gone");
         let mut metadata = Metadata::default();
-        client.introspect(&scope, &mut metadata).await.unwrap();
+        client
+            .introspect(&scope, IntrospectionLevel::Full, &mut metadata)
+            .await
+            .unwrap();
         assert!(metadata.0.is_empty());
         task.await.unwrap();
     }
@@ -1741,6 +1953,86 @@ mod tests {
                 .unwrap_err()
                 .code,
             ErrorCode::Protocol
+        );
+    }
+
+    #[tokio::test]
+    async fn names_omit_columns_and_a_schema_gone_reads_as_empty() {
+        let (client, task) = fixture(vec![(
+            200,
+            json!({"tables":[{"name":"orders","table_type":"MANAGED"}]}),
+        )])
+        .await;
+        let schema = ObjectPath::default()
+            .child(ObjectKind::Catalog, "cat")
+            .child(ObjectKind::Schema, "sch");
+        let mut metadata = Metadata::default();
+        client
+            .introspect(&schema, IntrospectionLevel::Names, &mut metadata)
+            .await
+            .unwrap();
+        let requests = task.await.unwrap();
+        assert!(requests[0].contains("omit_columns=true"));
+        assert!(metadata.0.iter().any(|object| object.name == "orders"));
+        assert!(
+            !metadata
+                .0
+                .iter()
+                .any(|object| object.kind == ObjectKind::Column)
+        );
+        // A schema that no longer exists publishes nothing, not even itself.
+        let (client, task) =
+            fixture(vec![(404, json!({"error_code":"SCHEMA_DOES_NOT_EXIST"}))]).await;
+        let mut metadata = Metadata::default();
+        client
+            .introspect(&schema, IntrospectionLevel::Full, &mut metadata)
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert!(metadata.0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inspection_lists_keys_defaults_and_functions_and_views_have_definitions() {
+        let table = json!({"name":"orders","table_type":"MANAGED",
+            "columns":[{"name":"status","type_text":"STRING","position":0,"type_json":{"name":"status","metadata":{"CURRENT_DEFAULT":"'new'"}}}],
+            "table_constraints":[{"primary_key_constraint":{"name":"orders_pk","child_columns":["id"]}}]});
+        let (client, task) = fixture(vec![(200, table)]).await;
+        let found = client.table("cat", "sch", "orders").await.unwrap();
+        task.await.unwrap();
+        assert_eq!(
+            column_default(&found["columns"][0]).as_deref(),
+            Some("'new'")
+        );
+        let (client, task) = fixture(vec![(
+            200,
+            json!({"functions":[{"name":"add_one","full_data_type":"INT","input_params":{"parameters":[{"name":"x","type_text":"INT"}]}}]}),
+        )])
+        .await;
+        let functions = client
+            .pages("/api/2.1/unity-catalog/functions", "functions", vec![])
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert_eq!(name(&functions[0]).unwrap(), "add_one");
+    }
+
+    #[test]
+    fn the_profile_identifies_the_cache_and_system_waits_to_be_chosen() {
+        use crate::DatabricksDriver;
+        let config = |warehouse: &str| ConnectionConfig {
+            driver: DriverKind::Databricks,
+            options: json!({"profile":"dev","warehouseId":warehouse,"defaultCatalog":"main"}),
+        };
+        assert_eq!(
+            DatabricksDriver.cache_identity(&config("a")),
+            DatabricksDriver.cache_identity(&config("b"))
+        );
+        let system = ObjectPath::default().child(ObjectKind::Catalog, "system");
+        assert!(DatabricksDriver.left_out_of_everything(&system));
+        assert!(
+            !DatabricksDriver
+                .left_out_of_everything(&ObjectPath::default().child(ObjectKind::Catalog, "main"))
         );
     }
 }

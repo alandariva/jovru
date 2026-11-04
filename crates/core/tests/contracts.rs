@@ -555,3 +555,64 @@ fn objects_cached_before_keys_existed_still_read_and_new_kinds_keep_their_level(
     );
     assert!(driver.default_namespaces(&connection().config).is_empty());
 }
+
+#[tokio::test]
+async fn a_session_that_knows_no_context_reports_an_empty_one() {
+    let mut session: Box<dyn Session> = Box::new(TestSession {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        closed: Arc::new(AtomicBool::new(false)),
+    });
+    assert_eq!(
+        session.context(CancellationToken::new()).await.unwrap(),
+        SessionContext::default()
+    );
+}
+
+#[derive(Default)]
+struct Kept(Vec<MetadataObject>);
+
+#[async_trait]
+impl IntrospectionSink for Kept {
+    async fn batch(&mut self, objects: Vec<MetadataObject>) -> DriverResult<()> {
+        self.0.extend(objects);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_metadata_extensions_default_to_todays_behaviour() {
+    let driver = TestDriver::new("defaults");
+    let mut config = connection().config;
+    config.options = json!({"host": "db", "sslMode": "require"});
+    // The whole configuration identifies the cache unless the driver says.
+    assert_eq!(driver.cache_identity(&config), config.options);
+    assert!(
+        !driver.left_out_of_everything(&ObjectPath::default().child(ObjectKind::Catalog, "system"))
+    );
+    // Names read everything when the driver cannot read less.
+    let mut names = Kept::default();
+    driver
+        .introspect_level(
+            &connection(),
+            &ObjectPath::default(),
+            IntrospectionLevel::Names,
+            &mut names,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(names.0.len(), 2);
+    let table = ObjectPath::default().child(ObjectKind::Table, "t");
+    for error in [
+        driver
+            .inspect(&connection(), &table, CancellationToken::new())
+            .await
+            .unwrap_err(),
+        driver
+            .definition(&connection(), &table, CancellationToken::new())
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(error.code, ErrorCode::NotImplemented);
+    }
+}

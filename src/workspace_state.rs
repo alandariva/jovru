@@ -38,6 +38,10 @@ pub struct TabState {
     /// The SQL the tab opened with (a template or a table preview), which
     /// closing the tab does not lose. `None` for tabs from older versions.
     pub opened_sql: Option<String>,
+    /// Where unqualified names resolved in the tab (its catalog and schema),
+    /// applied again to the session the next run opens.
+    pub catalog: Option<String>,
+    pub schema: Option<String>,
 }
 
 impl TabState {
@@ -108,6 +112,8 @@ impl WorkspaceState {
                 saved_sql: tab["saved_sql"].as_str().map(str::to_owned),
                 timeout_seconds: tab["timeout_seconds"].as_u64(),
                 opened_sql: tab["opened_sql"].as_str().map(str::to_owned),
+                catalog: tab["catalog"].as_str().map(str::to_owned),
+                schema: tab["schema"].as_str().map(str::to_owned),
             })
             .collect();
         let mut history = entries("history");
@@ -142,6 +148,8 @@ impl WorkspaceState {
                 "saved_sql": tab.saved_sql,
                 "timeout_seconds": tab.timeout_seconds,
                 "opened_sql": tab.opened_sql,
+                "catalog": tab.catalog,
+                "schema": tab.schema,
             })).collect::<Vec<_>>(),
             "active": self.active,
             "saved_queries": entries(&self.saved_queries),
@@ -171,6 +179,8 @@ mod tests {
                 saved_sql: Some("SELECT 'é';".into()),
                 timeout_seconds: TabState::store_timeout(None),
                 opened_sql: Some("SELECT 1;".into()),
+                catalog: Some("shop".into()),
+                schema: Some("sales".into()),
             }],
             active: Some(0),
             saved_queries: vec![QueryEntry {
@@ -186,6 +196,7 @@ mod tests {
         let old = serde_json::json!({"tabs": [{"title": "Old", "sql": "SELECT 1"}], "active": 7, "extra": true});
         let read = WorkspaceState::from_value(Some(old));
         assert_eq!(read.tabs[0].title, "Old");
+        assert_eq!(read.tabs[0].schema, None);
         assert_eq!(
             read.tabs[0].timeout(Some(Duration::from_secs(300))),
             Some(Duration::from_secs(300))

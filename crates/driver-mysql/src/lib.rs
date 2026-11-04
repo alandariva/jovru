@@ -52,6 +52,19 @@ impl Driver for MySqlDriver {
         MySqlConfig::parse(options).map(|_| ())
     }
 
+    /// The server and the user decide which databases the catalog shows;
+    /// the default database and TLS do not.
+    fn cache_identity(&self, config: &ConnectionConfig) -> serde_json::Value {
+        match MySqlConfig::parse(&config.options) {
+            Ok(parsed) => serde_json::json!({
+                "host": parsed.host,
+                "port": parsed.port,
+                "user": parsed.user,
+            }),
+            Err(_) => config.options.clone(),
+        }
+    }
+
     /// The configured database, when there is one.
     fn default_namespaces(&self, config: &ConnectionConfig) -> Vec<ObjectPath> {
         config.options["database"]
@@ -85,7 +98,14 @@ impl Driver for MySqlDriver {
         cancel: CancellationToken,
     ) -> DriverResult<IntrospectionReport> {
         self.prepare(connection, &cancel)?;
-        runtime::introspect(connection, &ObjectPath::default(), sink, cancel).await
+        runtime::introspect(
+            connection,
+            &ObjectPath::default(),
+            IntrospectionLevel::Full,
+            sink,
+            cancel,
+        )
+        .await
     }
     async fn discover_namespaces(
         &self,
@@ -106,6 +126,36 @@ impl Driver for MySqlDriver {
     ) -> DriverResult<IntrospectionReport> {
         self.prepare(connection, &cancel)?;
         scope.validate_scope(&self.descriptor().capabilities.hierarchy)?;
-        runtime::introspect(connection, scope, sink, cancel).await
+        runtime::introspect(connection, scope, IntrospectionLevel::Full, sink, cancel).await
+    }
+    async fn introspect_level(
+        &self,
+        connection: &ResolvedConnection,
+        scope: &ObjectPath,
+        level: IntrospectionLevel,
+        sink: &mut dyn IntrospectionSink,
+        cancel: CancellationToken,
+    ) -> DriverResult<IntrospectionReport> {
+        self.prepare(connection, &cancel)?;
+        scope.validate_scope(&self.descriptor().capabilities.hierarchy)?;
+        runtime::introspect(connection, scope, level, sink, cancel).await
+    }
+    async fn inspect(
+        &self,
+        connection: &ResolvedConnection,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<Inspection> {
+        self.prepare(connection, &cancel)?;
+        runtime::inspect(connection, path, cancel).await
+    }
+    async fn definition(
+        &self,
+        connection: &ResolvedConnection,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<String> {
+        self.prepare(connection, &cancel)?;
+        runtime::definition(connection, path, cancel).await
     }
 }

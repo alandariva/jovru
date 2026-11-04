@@ -3571,6 +3571,7 @@ dependencies = [
  "jykre-driver-postgres",
  "jykre-secrets",
  "jykre-storage",
+ "lsp-types",
  "serde_json",
  "sys-locale",
  "tokio",

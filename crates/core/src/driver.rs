@@ -1,7 +1,8 @@
 use crate::{
     CancellationToken, ConnectionConfig, DriverError, DriverKind, DriverOutcome, DriverResult,
-    ExecutionOptions, IntrospectionReport, MetadataObject, ObjectKind, ObjectPath, QueryRequest,
-    ResolvedConnection, RowSink, ServerInfo, SqlDialect,
+    ExecutionOptions, Inspection, IntrospectionLevel, IntrospectionReport, MetadataObject,
+    ObjectKind, ObjectPath, QueryRequest, ResolvedConnection, RowSink, ServerInfo, SessionContext,
+    SqlDialect,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -94,6 +95,18 @@ pub trait Session: Debug + Send {
         true
     }
 
+    /// Where unqualified names resolve now, as the server reports it after
+    /// the statements run so far, including a `USE` or `SET` the user ran and
+    /// indirect changes (a procedure, a rolled back `SET`). The reported
+    /// context becomes the one the session considers applied, so a request
+    /// carrying it is not applied again. Asking discards a result still open
+    /// for paging: callers ask only when none is. The default knows nothing
+    /// and returns an empty context.
+    async fn context(&mut self, cancel: CancellationToken) -> DriverResult<SessionContext> {
+        let _ = cancel;
+        Ok(SessionContext::default())
+    }
+
     /// Checks, before a kept session is reused, that the server still
     /// answers, within a short deadline. A failure closes the session
     /// ([`Session::is_open`] turns `false`). Sessions without a connection of
@@ -172,6 +185,20 @@ pub trait Driver: Debug + Send + Sync + 'static {
         Vec::new()
     }
 
+    /// The options that decide which catalog a metadata cache describes: a
+    /// change of anything else (compute, defaults, TLS) keeps the cache. The
+    /// default is every option.
+    fn cache_identity(&self, config: &ConnectionConfig) -> serde_json::Value {
+        config.options.clone()
+    }
+
+    /// Namespaces that choosing everything leaves out until they are chosen
+    /// by name, such as a catalog of system tables. The default is none.
+    fn left_out_of_everything(&self, path: &ObjectPath) -> bool {
+        let _ = path;
+        false
+    }
+
     async fn test(
         &self,
         connection: &ResolvedConnection,
@@ -230,5 +257,55 @@ pub trait Driver: Debug + Send + Sync + 'static {
                 "scoped metadata",
             ))
         }
+    }
+
+    /// Reads `scope` at `level`, with the same rules as
+    /// [`Driver::introspect_scoped`]. At [`IntrospectionLevel::Names`] only
+    /// namespaces and relations are delivered, so they show before their
+    /// columns. The default reads everything at either level.
+    async fn introspect_level(
+        &self,
+        connection: &ResolvedConnection,
+        scope: &ObjectPath,
+        level: IntrospectionLevel,
+        sink: &mut dyn IntrospectionSink,
+        cancel: CancellationToken,
+    ) -> DriverResult<IntrospectionReport> {
+        let _ = level;
+        self.introspect_scoped(connection, scope, sink, cancel)
+            .await
+    }
+
+    /// What the relation or namespace at `path` has beyond the refreshed
+    /// tree (indexes, constraints, triggers; routines, sequences, types),
+    /// read only when the user asks. Like introspection it needs no SQL
+    /// session, honours cancellation and has a time limit. The default
+    /// reports `NotImplemented`.
+    async fn inspect(
+        &self,
+        connection: &ResolvedConnection,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<Inspection> {
+        let _ = (connection, path, cancel);
+        Err(DriverError::not_implemented(
+            &self.descriptor().display_name,
+            "inspection",
+        ))
+    }
+
+    /// The DDL or source of the relation or routine at `path`, read only
+    /// when the user asks. The default reports `NotImplemented`.
+    async fn definition(
+        &self,
+        connection: &ResolvedConnection,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<String> {
+        let _ = (connection, path, cancel);
+        Err(DriverError::not_implemented(
+            &self.descriptor().display_name,
+            "definitions",
+        ))
     }
 }

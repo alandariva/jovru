@@ -143,6 +143,22 @@ impl Tree {
         paths
     }
 
+    /// Expands every ancestor of `path`, so the node shows once their
+    /// children are read ([`Tree::missing`]).
+    pub fn reveal(&mut self, path: &ObjectPath) {
+        for length in 1..path.0.len() {
+            self.expanded.insert(ObjectPath(path.0[..length].to_vec()));
+        }
+        self.rebuild();
+    }
+
+    /// Whether `path` is one of the rows shown.
+    pub fn shows(&self, path: &ObjectPath) -> bool {
+        self.rows
+            .iter()
+            .any(|row| row.object().is_some_and(|object| object.path == *path))
+    }
+
     /// Expands `paths`, as a previous session left them.
     pub fn set_expanded(&mut self, paths: impl IntoIterator<Item = ObjectPath>) {
         self.expanded = paths.into_iter().collect();
@@ -318,6 +334,38 @@ pub fn namespace_ages(statuses: &[RefreshStatus]) -> HashMap<ObjectPath, SystemT
         .collect()
 }
 
+/// The chosen namespaces last read longer ago than `max_age` (as of `now`),
+/// by their last complete read or, failing that, their last publication:
+/// what opening the connection reads again when the user asked for it.
+/// Namespaces never read are left to the regular read of the choice.
+pub fn due_for_revalidation(
+    statuses: &[RefreshStatus],
+    scope: &crate::metadata_scope::MetadataScope,
+    max_age: Duration,
+    now: SystemTime,
+) -> Vec<ObjectPath> {
+    statuses
+        .iter()
+        .filter(|status| {
+            status.scope.0.last().is_some_and(|part| {
+                matches!(
+                    part.kind,
+                    ObjectKind::Database | ObjectKind::Catalog | ObjectKind::Schema
+                )
+            }) && scope.covers(&status.scope)
+        })
+        .filter(|status| {
+            status
+                .last_success_at
+                .as_deref()
+                .or(status.last_published_at.as_deref())
+                .and_then(parse_utc)
+                .is_some_and(|at| now.duration_since(at).unwrap_or_default() > max_age)
+        })
+        .map(|status| status.scope.clone())
+        .collect()
+}
+
 /// Reads the cache's UTC timestamps (`2026-11-03T12:30:05.123Z`).
 pub fn parse_utc(text: &str) -> Option<SystemTime> {
     let (date, time) = text.strip_suffix('Z')?.split_once('T')?;
@@ -406,6 +454,50 @@ pub fn detail(object: &MetadataObject) -> Option<String> {
         }),
         _ => None,
     }
+}
+
+/// What a kind of object is called, for hovers and tooltips.
+pub fn kind_name(kind: ObjectKind) -> String {
+    match kind {
+        ObjectKind::Table => tr!("table"),
+        ObjectKind::View => tr!("view"),
+        ObjectKind::MaterializedView => tr!("materialized view"),
+        ObjectKind::Column => tr!("column"),
+        ObjectKind::Schema => tr!("schema"),
+        ObjectKind::Database => tr!("database"),
+        ObjectKind::Catalog => tr!("catalog"),
+        ObjectKind::ForeignKey => tr!("foreign key"),
+        ObjectKind::Partition => tr!("partition"),
+        _ => "",
+    }
+    .into()
+}
+
+/// What an inspected item is called in the inspection panel.
+pub fn inspected_kind_name(kind: crate::drivers::InspectedKind) -> String {
+    use crate::drivers::InspectedKind;
+    match kind {
+        InspectedKind::Index => tr!("Index"),
+        InspectedKind::PrimaryKey => tr!("Primary key"),
+        InspectedKind::Unique => tr!("Unique"),
+        InspectedKind::Check => tr!("Check"),
+        InspectedKind::ForeignKey => tr!("Foreign key"),
+        InspectedKind::Exclusion => tr!("Exclusion"),
+        InspectedKind::Trigger => tr!("Trigger"),
+        InspectedKind::Function => tr!("Function"),
+        InspectedKind::Procedure => tr!("Procedure"),
+        InspectedKind::Sequence => tr!("Sequence"),
+        InspectedKind::Type => tr!("Type"),
+        InspectedKind::Default => tr!("Default"),
+        _ => "",
+    }
+    .into()
+}
+
+/// Whether a node can be inspected: a relation, or a namespace of the last
+/// level (its routines, sequences and types).
+pub fn inspectable(object: &MetadataObject, last_level: Option<ObjectKind>) -> bool {
+    object.kind.is_relation() || Some(object.kind) == last_level
 }
 
 /// Everything known about a node beyond its name, one fact per line, for
@@ -656,6 +748,24 @@ mod tests {
         assert!(tree.append(1, source[1].path.clone(), page(&[source[2].clone()])));
         assert!(tree.missing().is_empty());
         assert_eq!(names(tree.rows()), ["sales", "orders", "id", "catalog"]);
+        // Revealing a column expands its schema and table.
+        let mut revealed = Tree::default();
+        revealed.replace(
+            1,
+            vec![(
+                ObjectPath::default(),
+                page(&[source[0].clone(), source[5].clone()]),
+            )],
+        );
+        revealed.reveal(&source[3].path);
+        assert_eq!(
+            revealed.missing(),
+            [source[0].path.clone(), source[1].path.clone()]
+        );
+        assert!(!revealed.shows(&source[3].path));
+        assert!(revealed.append(1, source[0].path.clone(), page(&[source[1].clone()])));
+        assert!(revealed.append(1, source[1].path.clone(), page(&[source[3].clone()])));
+        assert!(revealed.shows(&source[3].path));
         // A node under a collapsed one is not read until it shows.
         let mut tree = Tree::default();
         tree.set_expanded([source[1].path.clone()]);
@@ -794,6 +904,35 @@ mod tests {
         let ages = namespace_ages(&statuses);
         assert_eq!(ages.len(), 1);
         assert_eq!(ages.get(&schema.path), Some(&at));
+        // Revalidation picks chosen namespaces read too long ago.
+        let other = object(&[(ObjectKind::Database, "db"), (ObjectKind::Schema, "hr")]);
+        let mut statuses = statuses.to_vec();
+        statuses.push(RefreshStatus {
+            scope: other.path.clone(),
+            last_published_at: Some("2026-11-01T12:30:05.250Z".into()),
+            ..RefreshStatus::default()
+        });
+        let chosen = crate::metadata_scope::MetadataScope {
+            all: false,
+            include: vec![schema.path.clone(), other.path.clone()],
+        };
+        let now = at + Duration::from_secs(3_600);
+        assert_eq!(
+            due_for_revalidation(&statuses, &chosen, Duration::from_secs(24 * 3_600), now),
+            std::slice::from_ref(&other.path)
+        );
+        assert_eq!(
+            due_for_revalidation(&statuses, &chosen, Duration::from_secs(60), now),
+            [schema.path.clone(), other.path.clone()]
+        );
+        let narrower = crate::metadata_scope::MetadataScope {
+            all: false,
+            include: vec![schema.path.clone()],
+        };
+        assert_eq!(
+            due_for_revalidation(&statuses, &narrower, Duration::from_secs(60), now),
+            std::slice::from_ref(&schema.path)
+        );
         assert_eq!(format_age(Duration::from_secs(20)), "just now");
         assert_eq!(format_age(Duration::from_secs(5 * 60)), "5 min ago");
         assert_eq!(format_age(Duration::from_secs(3 * 3_600)), "3 h ago");

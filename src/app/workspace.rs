@@ -13,6 +13,7 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
+use jykre::completion::{CandidateKind, NameIndex, Symbol};
 use jykre::tr;
 use jykre::{
     backend, cell_format, connection_store,
@@ -24,8 +25,10 @@ use jykre::{
     run_log::{LogEntry, LogOutcome, RunLog},
     transaction::Transaction,
 };
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Key context of the SQL editor, for the run shortcuts.
@@ -97,6 +100,20 @@ pub struct Workspace {
     timeout: Option<Duration>,
     /// The connections this tab can switch to, by name.
     connection_choices: Vec<String>,
+    /// Where unqualified names resolve in this tab: chosen in the header,
+    /// then as the session reports it after each run. Applied to the
+    /// session only when it changes, and again to a session that reopened.
+    context: SessionContext,
+    /// The namespaces the header offers, from the connection's cache.
+    context_choices: Vec<SessionContext>,
+    /// The connection's cache this tab reads names from, and its name
+    /// index; empty until the explorer has read the cache.
+    cache_id: Option<ConnectionId>,
+    names: Arc<NameIndex>,
+    /// The columns read so far for the index's relations, and those being
+    /// read.
+    columns: HashMap<ObjectPath, Vec<MetadataObject>>,
+    columns_loading: HashSet<ObjectPath>,
     /// The result grid, its own entity ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
     grid: Entity<ResultGrid>,
     /// Visible cells selected in the grid, as it last reported.
@@ -139,6 +156,16 @@ impl Workspace {
                 .default_value(sql)
         });
         set_highlighter(&editor, None, cx);
+        let workspace = cx.entity().downgrade();
+        editor.update(cx, |editor, _| {
+            // Completion, hover and go to definition from the tab's connection.
+            let providers = super::sql_providers::SqlProviders::new(workspace.clone());
+            let lsp = editor.lsp_mut();
+            lsp.completion_provider = Some(providers.clone());
+            lsp.hover_provider = Some(providers.clone());
+            lsp.definition_provider = Some(providers);
+            lsp.show_document = Some(super::sql_providers::show_object(workspace));
+        });
         let prompt =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Ask about your data…")));
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter results…")));
@@ -260,6 +287,12 @@ impl Workspace {
             row_limit: DEFAULT_ROW_LIMIT,
             timeout: ExecutionOptions::default().timeout,
             connection_choices: Vec::new(),
+            context: SessionContext::default(),
+            context_choices: Vec::new(),
+            cache_id: None,
+            names: Arc::default(),
+            columns: HashMap::new(),
+            columns_loading: HashSet::new(),
             grid,
             selected_cells: 0,
             result_view: ResultView::Table,
@@ -501,7 +534,22 @@ impl Workspace {
         ExecutionOptions {
             max_rows: self.row_limit,
             timeout: self.timeout,
-            ..ExecutionOptions::default()
+            context: self.context.clone(),
+        }
+    }
+
+    /// Shows the context the session reported after a run or a last page.
+    fn session_context(
+        &mut self,
+        lease: u64,
+        context: Option<SessionContext>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(context) = context.filter(|_| self.session_lease == Some(lease))
+            && context != self.context
+        {
+            self.context = context;
+            cx.emit(WorkspaceEvent::Changed);
         }
     }
 
@@ -547,6 +595,7 @@ impl Workspace {
                 this.fetching = false;
                 let page = match result {
                     Ok(run) => {
+                        this.session_context(lease, run.context, cx);
                         this.return_session(lease, run.session);
                         if this.session.is_none() && this.session_lease == Some(lease) {
                             this.session_notice(false, true);
@@ -670,6 +719,7 @@ impl Workspace {
             // its session is back unless it was lost.
             let (session, lease) = self.lease_session(true);
             let options = self.options();
+            let before = options.context.clone();
             // The gutter follows the server: each statement shows as running
             // when the backend sends it, the later ones as waiting.
             let (progress, mut started) = tokio::sync::mpsc::unbounded_channel::<usize>();
@@ -725,12 +775,20 @@ impl Workspace {
                                     this.transaction = Transaction::AutoCommit;
                                 }
                             }
+                            this.session_context(lease, run.context, cx);
                             this.return_session(lease, run.session);
                             run.batch
                         }
                         Err(error) => Err(error),
                     };
                     let failed: Option<ErrorReport>;
+                    if let Ok(batch) = &result {
+                        this.structure_changed(
+                            &queries[..batch.completed.len().min(queries.len())],
+                            &before,
+                            cx,
+                        );
+                    }
                     match result {
                         Ok(batch) => {
                             let completed = batch.completed.len();
@@ -1075,6 +1133,297 @@ impl Workspace {
             })
     }
 
+    /// Tells the explorer which namespaces the DDL among `statements` (the
+    /// ones that succeeded) made stale. Unqualified names count in the
+    /// context before the run and in the one after it.
+    fn structure_changed(
+        &mut self,
+        statements: &[(usize, String)],
+        before: &SessionContext,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = &self.input else {
+            return;
+        };
+        let Ok(driver) = builtin_registry().and_then(|registry| registry.get(input.config.driver))
+        else {
+            return;
+        };
+        let descriptor = driver.descriptor();
+        let texts: Vec<String> = statements.iter().map(|(_, sql)| sql.clone()).collect();
+        let namespaces = jykre::ddl::stale_namespaces(
+            &texts,
+            &descriptor.capabilities.namespace_levels(),
+            descriptor.dialect,
+            &[before.clone(), self.context.clone()],
+        );
+        if !namespaces.is_empty() {
+            cx.emit(WorkspaceEvent::StructureChanged {
+                connection: self.connection.to_string(),
+                namespaces,
+            });
+        }
+    }
+
+    /// Where unqualified names resolve, as the header shows it.
+    fn context_label(&self) -> String {
+        let parts: Vec<&str> = [&self.context.catalog, &self.context.schema]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        if parts.is_empty() {
+            tr!("Session default").into()
+        } else {
+            parts.join(".")
+        }
+    }
+
+    /// The header's context selector: the schema (PostgreSQL), database
+    /// (MySQL) or catalog and schema (Databricks) unqualified names resolve
+    /// in. Choosing one applies it from the next run.
+    fn context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = cx.entity().downgrade();
+        let current = self.context.clone();
+        let choices = self.context_choices.clone();
+        let label = self.context_label();
+        Button::new("tab-context")
+            .ghost()
+            .small()
+            .icon(I::Layers)
+            .label(label.clone())
+            .dropdown_caret(true)
+            .accessibility_label(tr!("Context: {0}", label))
+            .tooltip(tr!("Where unqualified names resolve in this tab"))
+            .dropdown_menu(move |mut menu, _, _| {
+                if choices.is_empty() {
+                    menu = menu.label(tr!("Refresh the metadata to list namespaces"));
+                }
+                for choice in &choices {
+                    let workspace = workspace.clone();
+                    let chosen = choice.clone();
+                    let text: Vec<&str> = [&choice.catalog, &choice.schema]
+                        .into_iter()
+                        .flatten()
+                        .map(String::as_str)
+                        .collect();
+                    menu = menu.item(
+                        PopupMenuItem::new(text.join("."))
+                            .checked(*choice == current)
+                            .on_click(move |_, _, cx| {
+                                let _ = workspace.update(cx, |this, cx| {
+                                    this.context = chosen.clone();
+                                    cx.emit(WorkspaceEvent::Changed);
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+    }
+
+    /// Uses `names` for completion, hover and go to definition. A newer
+    /// index (or another connection's) drops the columns read for the old
+    /// one.
+    pub fn set_names(&mut self, id: ConnectionId, names: Arc<NameIndex>) {
+        if self.cache_id != Some(id) || self.names.version != names.version {
+            self.columns.clear();
+            self.columns_loading.clear();
+        }
+        self.cache_id = Some(id);
+        self.names = names;
+    }
+
+    /// The identifier quote and the connection, for reading the cache.
+    fn cache_target(&self) -> Option<(ConnectionId, ConnectionConfig, char)> {
+        let input = self.input.as_ref()?;
+        let quote = builtin_registry()
+            .and_then(|registry| registry.get(input.config.driver))
+            .map(|driver| driver.descriptor().capabilities.identifier_quote)
+            .unwrap_or('"');
+        Some((self.cache_id?, input.config.clone(), quote))
+    }
+
+    /// The editor's suggestions at `offset`. Relations whose columns were
+    /// not read yet show as loading and are read in the background, so the
+    /// next keystroke completes them; typing never waits.
+    pub(super) fn completion_items(
+        &mut self,
+        sql: &str,
+        offset: usize,
+        text: &gpui_kit::component::Rope,
+        cx: &mut Context<Self>,
+    ) -> Vec<lsp_types::CompletionItem> {
+        use gpui_kit::component::RopeExt as _;
+        let Some((_, _, quote)) = self.cache_target() else {
+            return Vec::new();
+        };
+        let Some(request) = jykre::completion::request(sql, offset, &self.names, &self.context)
+        else {
+            return Vec::new();
+        };
+        let columns = &self.columns;
+        let (found, missing) = jykre::completion::candidates(
+            &request,
+            &self.names,
+            &self.context,
+            quote,
+            &|relation| columns.get(relation).cloned(),
+        );
+        let range = lsp_types::Range {
+            start: text.offset_to_position(request.replace.start),
+            end: text.offset_to_position(request.replace.end),
+        };
+        let mut items: Vec<_> = found
+            .into_iter()
+            .map(|candidate| lsp_types::CompletionItem {
+                label: candidate.label,
+                kind: Some(match candidate.kind {
+                    CandidateKind::Namespace => lsp_types::CompletionItemKind::MODULE,
+                    CandidateKind::Relation => lsp_types::CompletionItemKind::CLASS,
+                    CandidateKind::View => lsp_types::CompletionItemKind::INTERFACE,
+                    CandidateKind::Column => lsp_types::CompletionItemKind::FIELD,
+                    CandidateKind::Cte => lsp_types::CompletionItemKind::REFERENCE,
+                }),
+                detail: Some(candidate.detail),
+                text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+                    range,
+                    new_text: candidate.insert,
+                })),
+                ..lsp_types::CompletionItem::default()
+            })
+            .collect();
+        if !missing.is_empty() {
+            items.push(lsp_types::CompletionItem {
+                label: tr!("Loading columns…").into(),
+                detail: Some(tr!("Type again to see them").into()),
+                // Choosing it changes nothing.
+                text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+                    range,
+                    new_text: request.prefix.clone(),
+                })),
+                ..lsp_types::CompletionItem::default()
+            });
+            self.load_columns(missing, cx);
+        }
+        items
+    }
+
+    /// Reads the columns of `relations` from the cache, off the UI thread.
+    fn load_columns(&mut self, relations: Vec<ObjectPath>, cx: &mut Context<Self>) {
+        let Some((id, config, _)) = self.cache_target() else {
+            return;
+        };
+        let version = self.names.version;
+        for relation in relations {
+            if !self.columns_loading.insert(relation.clone()) {
+                continue;
+            }
+            let config = config.clone();
+            let dir = jykre::connection_store::data_dir();
+            cx.spawn(async move |weak, cx| {
+                let read = relation.clone();
+                let result = backend::run(async move {
+                    backend::relation_columns(&dir, id, &config, read).await
+                })
+                .await;
+                let _ = weak.update(cx, |this, _| {
+                    this.columns_loading.remove(&relation);
+                    if this.names.version != version || this.cache_id != Some(id) {
+                        return;
+                    }
+                    match result {
+                        Ok(columns) => {
+                            this.columns.insert(relation, columns);
+                        }
+                        Err(error) => {
+                            tracing::debug!(error_code = ?error.code, "columns unavailable")
+                        }
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// The relation or column under `offset`, from the names read so far.
+    /// A relation whose columns were not read is read for next time.
+    pub(super) fn symbol_at(
+        &mut self,
+        sql: &str,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<(Symbol, std::ops::Range<usize>)> {
+        self.cache_target()?;
+        let columns = &self.columns;
+        let found =
+            jykre::completion::symbol_at(sql, offset, &self.names, &self.context, &|relation| {
+                columns.get(relation).cloned()
+            });
+        if found.is_none() {
+            // The name may be a column of a relation not read yet.
+            let request = jykre::completion::request(sql, offset, &self.names, &self.context);
+            if let Some(jykre::completion::Request {
+                wanted: jykre::completion::Wanted::Columns { relations },
+                ..
+            }) = request
+            {
+                let missing = relations
+                    .into_iter()
+                    .filter(|relation| !self.columns.contains_key(relation))
+                    .collect();
+                self.load_columns(missing, cx);
+            }
+        }
+        found
+    }
+
+    /// What the hover shows for a symbol: a column's type, nullability,
+    /// key, default and comment, or a relation's kind and name.
+    pub(super) fn describe(&self, symbol: &Symbol) -> Option<String> {
+        match symbol {
+            Symbol::Column { relation, name } => {
+                let column = self
+                    .columns
+                    .get(relation)?
+                    .iter()
+                    .find(|object| object.kind == ObjectKind::Column && object.name == *name)?;
+                let details = jykre::explorer::description(column);
+                Some(format!(
+                    "**{}**\n\n{}",
+                    column.name,
+                    details.replace('\n', "\n\n")
+                ))
+            }
+            Symbol::Relation(path) => {
+                let name: Vec<&str> = path.0.iter().map(|part| part.name.as_str()).collect();
+                let kind = path.0.last().map(|part| part.kind)?;
+                Some(format!(
+                    "**{}**\n\n{}",
+                    name.join("."),
+                    jykre::explorer::kind_name(kind)
+                ))
+            }
+        }
+    }
+
+    /// Asks the explorer to show `path` (go to definition).
+    pub(super) fn reveal(&mut self, path: ObjectPath, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::Reveal {
+            connection: self.connection.to_string(),
+            path,
+        });
+    }
+
+    /// Sets the namespaces the header offers.
+    pub fn set_context_choices(&mut self, choices: Vec<SessionContext>, cx: &mut Context<Self>) {
+        if self.context_choices != choices {
+            self.context_choices = choices;
+            cx.notify();
+        }
+    }
+
     /// Sets the connections the toolbar offers.
     pub fn set_connection_choices(&mut self, choices: Vec<String>, cx: &mut Context<Self>) {
         if self.connection_choices != choices {
@@ -1314,13 +1663,15 @@ impl Workspace {
                             .child(icon(I::Database, self.connection_color))
                             .child(label(self.connection.clone()))
                             .child(label("/"))
-                            .child(label(self.database.clone()))
-                            .child(label("/"))
-                            .child(label(if self.input.is_none() && self.demo {
-                                "public"
-                            } else {
-                                "SQL"
-                            })),
+                            .map(|s| {
+                                if self.input.is_some() {
+                                    s.child(self.context_menu(cx))
+                                } else {
+                                    s.child(label(self.database.clone()))
+                                        .child(label("/"))
+                                        .child(label(if self.demo { "public" } else { "SQL" }))
+                                }
+                            }),
                     )
                     .child(
                         row()
@@ -2295,6 +2646,18 @@ pub enum WorkspaceEvent {
         connection: String,
         sql: String,
     },
+    /// Statements that ran changed the structure of these last-level
+    /// namespaces (`CREATE`, `ALTER`, `DROP`, ...), so their metadata is
+    /// stale.
+    StructureChanged {
+        connection: String,
+        namespaces: Vec<ObjectPath>,
+    },
+    /// Go to definition chose this object: the explorer shows it.
+    Reveal {
+        connection: String,
+        path: ObjectPath,
+    },
 }
 impl EventEmitter<WorkspaceEvent> for Workspace {}
 
@@ -2337,6 +2700,8 @@ impl Workspace {
             saved_sql: self.saved_sql.clone(),
             timeout_seconds: jykre::workspace_state::TabState::store_timeout(self.timeout),
             opened_sql: self.opened_sql.clone(),
+            catalog: self.context.catalog.clone(),
+            schema: self.context.schema.clone(),
         }
     }
 
@@ -2354,6 +2719,11 @@ impl Workspace {
         self.saved_sql = state.saved_sql.clone();
         self.opened_sql = state.opened_sql.clone();
         self.timeout = state.timeout(self.timeout);
+        // Applied to the session the next run opens.
+        self.context = SessionContext {
+            catalog: state.catalog.clone(),
+            schema: state.schema.clone(),
+        };
     }
 
     /// A statement or a page read is in progress.
@@ -2395,6 +2765,7 @@ impl Workspace {
         }
         self.describe_connection(&input, cx);
         self.input = Some(input);
+        self.forget_server();
         self.notice = Some(Feedback::new(
             Tone::Info,
             tr!(
@@ -2486,6 +2857,7 @@ impl Workspace {
         self.choosing_connection = false;
         self.describe_connection(&input, cx);
         self.input = Some(input);
+        self.forget_server();
         self.assistant_open = false;
         self.results.clear();
         self.show_active(cx);
@@ -2516,6 +2888,17 @@ impl Workspace {
             self.statement_lines = jykre::sql::statement_lines(&self.editor_sql, dialect).into();
             set_highlighter(&self.editor, dialect, cx);
         }
+    }
+
+    /// Another server: its namespaces and the names read from its cache are
+    /// not this one's.
+    fn forget_server(&mut self) {
+        self.context = SessionContext::default();
+        self.context_choices.clear();
+        self.cache_id = None;
+        self.names = Arc::default();
+        self.columns.clear();
+        self.columns_loading.clear();
     }
 
     /// Puts the keyboard in the SQL editor.

@@ -152,6 +152,7 @@ pub async fn open(
         input: input.clone(),
         backend,
         open: open.clone(),
+        database: None,
     };
     tokio::spawn(server.serve(connection, receiver));
     Ok(Box::new(DatabaseSession { commands, open }))
@@ -174,6 +175,9 @@ enum Command {
     },
     Ping {
         reply: oneshot::Sender<DriverResult<()>>,
+    },
+    Context {
+        reply: oneshot::Sender<DriverResult<SessionContext>>,
     },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
@@ -289,6 +293,17 @@ impl Session for DatabaseSession {
     async fn ping(&mut self) -> DriverResult<()> {
         self.ask(|reply| Command::Ping { reply }).await
     }
+    async fn context(&mut self, cancel: CancellationToken) -> DriverResult<SessionContext> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Context { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -322,10 +337,17 @@ struct Server {
     input: ResolvedConnection,
     backend: i64,
     open: Arc<AtomicBool>,
+    /// The database last chosen with `USE` by a request, or reported by
+    /// [`Session::context`]: a request for it is not applied again.
+    database: Option<String>,
 }
 
 impl Server {
-    async fn serve(self, mut connection: MySqlConnection, mut commands: mpsc::Receiver<Command>) {
+    async fn serve(
+        mut self,
+        mut connection: MySqlConnection,
+        mut commands: mpsc::Receiver<Command>,
+    ) {
         let mut next = None;
         loop {
             let command = match next.take() {
@@ -371,6 +393,40 @@ impl Server {
                         }
                     }
                 }
+                Command::Context { reply } => {
+                    // The text protocol, like the statements the user runs:
+                    // a prepared statement may answer with the database the
+                    // connection was described with.
+                    let context = tokio::time::timeout(
+                        RECOVERY,
+                        sqlx::raw_sql("SELECT DATABASE()").fetch_one(&mut connection),
+                    )
+                    .await
+                    .map(|row| {
+                        row.and_then(|row| sqlx::Row::try_get::<Option<String>, _>(&row, 0))
+                    });
+                    match context {
+                        Ok(Ok(database)) => {
+                            self.database.clone_from(&database);
+                            let _ = reply.send(Ok(SessionContext {
+                                catalog: None,
+                                schema: database,
+                            }));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
+                            Flow::Broken
+                        }
+                    }
+                }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
                     let _ = reply.send(connection.close().await.map_err(map_error));
@@ -399,7 +455,7 @@ impl Server {
     /// Runs one statement and serves its pages until the result ends or
     /// another command arrives.
     async fn execute(
-        &self,
+        &mut self,
         connection: &mut MySqlConnection,
         request: QueryRequest,
         mut events: mpsc::Sender<Event>,
@@ -407,19 +463,30 @@ impl Server {
         commands: &mut mpsc::Receiver<Command>,
     ) -> Flow {
         let mut options = request.options.clone();
-        let columns = bounded(&cancel, options.timeout, async {
-            if let Some(database) = options
-                .context
-                .schema
-                .as_ref()
-                .or(options.context.catalog.as_ref())
-            {
-                let sql = format!("USE `{}`", database.replace('`', "``"));
+        // The chosen database is applied only when it changed, so a USE the
+        // user ran meanwhile stays in force.
+        let apply = options
+            .context
+            .schema
+            .clone()
+            .or(options.context.catalog.clone())
+            .filter(|database| self.database.as_ref() != Some(database));
+        if let Some(database) = &apply {
+            let sql = format!("USE `{}`", database.replace('`', "``"));
+            let applied = bounded(&cancel, options.timeout, async {
                 sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
                     .execute(&mut *connection)
                     .await
-                    .map_err(map_error)?;
+                    .map_err(map_error)
+                    .map(|_| ())
+            })
+            .await;
+            if let Err(error) = applied {
+                return self.fail(connection, error, &events).await;
             }
+            self.database = apply;
+        }
+        let columns = bounded(&cancel, options.timeout, async {
             let description = connection
                 .prepare(sqlx::AssertSqlSafe(request.sql.as_str()).into_sql_str())
                 .await
@@ -435,11 +502,24 @@ impl Server {
                 .collect::<Vec<_>>())
         })
         .await;
+        // Some statements (USE, and others MySQL cannot prepare: error 1295)
+        // run as text only; their columns, if any, come with their rows.
+        let mut describe = Describe::Prepared;
         let columns = match columns {
             Ok(columns) => columns,
+            Err(error)
+                if error
+                    .server
+                    .as_ref()
+                    .and_then(|server| server.vendor_code.as_deref())
+                    == Some("1295") =>
+            {
+                describe = Describe::FromRows;
+                Vec::new()
+            }
             Err(error) => return self.fail(connection, error, &events).await,
         };
-        let returns_rows = !columns.is_empty();
+        let mut returns_rows = !columns.is_empty();
         if returns_rows && events.send(Event::Columns(columns)).await.is_err() {
             return self.recover(connection, false).await;
         }
@@ -455,11 +535,15 @@ impl Server {
                     &mut stream,
                     &mut ahead,
                     &mut affected,
+                    &mut describe,
                     options.max_rows,
                     &events,
                 ),
             )
             .await;
+            if describe == Describe::Sent {
+                returns_rows = true;
+            }
             match page {
                 Ok(PageEnd::Finished) => {
                     drop(stream);
@@ -568,10 +652,22 @@ impl Server {
 
 /// Sends up to `max_rows` rows, starting with the one read ahead last time,
 /// and reads one row ahead to tell a full page from the end of the result.
+/// Where a statement's columns come from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Describe {
+    /// Preparing the statement described them before it ran.
+    Prepared,
+    /// The statement could not be prepared; columns come with the first row.
+    FromRows,
+    /// They came with the first row and were sent.
+    Sent,
+}
+
 async fn read_page<S>(
     stream: &mut S,
     ahead: &mut Option<Row>,
     affected: &mut Option<u64>,
+    describe: &mut Describe,
     max_rows: u32,
     events: &mpsc::Sender<Event>,
 ) -> DriverResult<PageEnd>
@@ -594,6 +690,21 @@ where
         match item {
             sqlx::Either::Left(result) => *affected = Some(result.rows_affected()),
             sqlx::Either::Right(row) => {
+                if *describe == Describe::FromRows {
+                    let columns = row
+                        .columns()
+                        .iter()
+                        .map(|column| ColumnInfo {
+                            name: column.name().into(),
+                            data_type: column.type_info().name().into(),
+                            nullable: None,
+                        })
+                        .collect();
+                    if events.send(Event::Columns(columns)).await.is_err() {
+                        return Ok(PageEnd::Gone);
+                    }
+                    *describe = Describe::Sent;
+                }
                 let mut cells = Vec::with_capacity(row.len());
                 for index in 0..row.len() {
                     let value = row.try_get_raw(index).map_err(map_error)?;
@@ -639,9 +750,11 @@ where
 pub async fn introspect(
     input: &ResolvedConnection,
     scope: &ObjectPath,
+    level: IntrospectionLevel,
     sink: &mut dyn IntrospectionSink,
     cancel: CancellationToken,
 ) -> DriverResult<IntrospectionReport> {
+    let names_only = level == IntrospectionLevel::Names;
     let mut connection = connect(input, &cancel).await?;
     bounded(&cancel, Some(Duration::from_secs(300)), async {
         let mut seen = HashSet::new();
@@ -649,6 +762,7 @@ pub async fn introspect(
         let relation = scope.relation();
         let column = scope.name_of(ObjectKind::Column);
         let mut rows = sqlx::query(METADATA_SQL)
+            .bind(names_only)
             .bind(database)
             .bind(database)
             .bind(relation)
@@ -715,6 +829,28 @@ pub async fn introspect(
             }
         }
         drop(rows);
+        // A chosen database that lists nothing is either gone or hidden by
+        // privileges; only USE tells them apart.
+        if let Some(database) = database.filter(|_| seen.is_empty()) {
+            let sql = format!("USE `{}`", database.replace('`', "``"));
+            if let Err(error) = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+                .execute(&mut connection)
+                .await
+                .map_err(map_error)
+                && error.code == ErrorCode::PermissionDenied
+            {
+                return Ok(IntrospectionReport {
+                    warnings: vec![IntrospectionWarning {
+                        path: ObjectPath::default().child(ObjectKind::Database, database),
+                        message: "No permission to use this database".into(),
+                    }],
+                });
+            }
+            return Ok(IntrospectionReport::default());
+        }
+        if names_only {
+            return Ok(IntrospectionReport::default());
+        }
         if column.is_none() {
             let mut keys = sqlx::query(FOREIGN_KEYS_SQL)
                 .bind(database)
@@ -787,6 +923,133 @@ pub async fn introspect(
     })
     .await
 }
+/// Indexes, constraints and triggers of a table; routines of a database.
+pub async fn inspect(
+    input: &ResolvedConnection,
+    path: &ObjectPath,
+    cancel: CancellationToken,
+) -> DriverResult<Inspection> {
+    let Some(database) = path.name_of(ObjectKind::Database) else {
+        return Err(DriverError::validation(
+            "Choose a database, a table or a view",
+        ));
+    };
+    let mut connection = connect(input, &cancel).await?;
+    bounded(&cancel, Some(Duration::from_secs(60)), async {
+        let mut items = Vec::new();
+        let item = |kind, name: String, detail: Option<String>| InspectionItem {
+            kind,
+            name,
+            detail: detail.unwrap_or_default(),
+        };
+        if let Some(table) = path.relation() {
+            let indexes: Vec<(String, i64, Option<String>)> = sqlx::query_as(
+                "SELECT index_name, CAST(MAX(non_unique) AS SIGNED), GROUP_CONCAT(column_name ORDER BY seq_in_index SEPARATOR ', ') FROM information_schema.statistics WHERE table_schema = ? AND table_name = ? AND index_name <> 'PRIMARY' GROUP BY index_name ORDER BY index_name",
+            )
+            .bind(database)
+            .bind(table)
+            .fetch_all(&mut connection)
+            .await
+            .map_err(map_error)?;
+            for (name, non_unique, columns) in indexes {
+                let detail = columns.map(|columns| {
+                    format!("{}({columns})", if non_unique == 0 { "UNIQUE " } else { "" })
+                });
+                items.push(item(InspectedKind::Index, name, detail));
+            }
+            let constraints: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT t.constraint_name, t.constraint_type, COALESCE(c.check_clause, (SELECT GROUP_CONCAT(k.column_name ORDER BY k.ordinal_position SEPARATOR ', ') FROM information_schema.key_column_usage k WHERE k.constraint_schema = t.constraint_schema AND k.table_name = t.table_name AND k.constraint_name = t.constraint_name)) FROM information_schema.table_constraints t LEFT JOIN information_schema.check_constraints c ON c.constraint_schema = t.constraint_schema AND c.constraint_name = t.constraint_name WHERE t.table_schema = ? AND t.table_name = ? ORDER BY t.constraint_type, t.constraint_name",
+            )
+            .bind(database)
+            .bind(table)
+            .fetch_all(&mut connection)
+            .await
+            .map_err(map_error)?;
+            for (name, kind, detail) in constraints {
+                let kind = match kind.as_str() {
+                    "PRIMARY KEY" => InspectedKind::PrimaryKey,
+                    "UNIQUE" => InspectedKind::Unique,
+                    "CHECK" => InspectedKind::Check,
+                    "FOREIGN KEY" => InspectedKind::ForeignKey,
+                    _ => continue,
+                };
+                items.push(item(kind, name, detail));
+            }
+            let triggers: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+                "SELECT trigger_name, action_timing, event_manipulation, action_statement FROM information_schema.triggers WHERE event_object_schema = ? AND event_object_table = ? ORDER BY trigger_name",
+            )
+            .bind(database)
+            .bind(table)
+            .fetch_all(&mut connection)
+            .await
+            .map_err(map_error)?;
+            for (name, timing, event, statement) in triggers {
+                let detail = format!("{timing} {event}: {}", statement.unwrap_or_default());
+                items.push(item(InspectedKind::Trigger, name, Some(detail)));
+            }
+            return Ok(Inspection { items });
+        }
+        let routines: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT r.routine_name, r.routine_type, (SELECT GROUP_CONCAT(TRIM(CONCAT(COALESCE(p.parameter_mode, ''), ' ', p.parameter_name, ' ', p.dtd_identifier)) ORDER BY p.ordinal_position SEPARATOR ', ') FROM information_schema.parameters p WHERE p.specific_schema = r.routine_schema AND p.specific_name = r.specific_name AND p.ordinal_position > 0), NULLIF(r.dtd_identifier, '') FROM information_schema.routines r WHERE r.routine_schema = ? ORDER BY r.routine_name",
+        )
+        .bind(database)
+        .fetch_all(&mut connection)
+        .await
+        .map_err(map_error)?;
+        for (name, kind, parameters, result) in routines {
+            let kind = if kind == "PROCEDURE" {
+                InspectedKind::Procedure
+            } else {
+                InspectedKind::Function
+            };
+            let mut detail = format!("({})", parameters.unwrap_or_default());
+            if let Some(result) = result {
+                detail.push_str(&format!(" → {result}"));
+            }
+            items.push(item(kind, name, Some(detail)));
+        }
+        Ok(Inspection { items })
+    })
+    .await
+}
+
+/// The `SHOW CREATE` text of a table or view.
+pub async fn definition(
+    input: &ResolvedConnection,
+    path: &ObjectPath,
+    cancel: CancellationToken,
+) -> DriverResult<String> {
+    let (Some(database), Some(relation)) = (path.name_of(ObjectKind::Database), path.relation())
+    else {
+        return Err(DriverError::validation("Choose a table or a view"));
+    };
+    let keyword = if path.name_of(ObjectKind::View).is_some() {
+        "VIEW"
+    } else {
+        "TABLE"
+    };
+    let quoted = |name: &str| format!("`{}`", name.replace('`', "``"));
+    let sql = format!(
+        "SHOW CREATE {keyword} {}.{}",
+        quoted(database),
+        quoted(relation)
+    );
+    let mut connection = connect(input, &cancel).await?;
+    bounded(&cancel, Some(Duration::from_secs(60)), async {
+        let row = sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+            .fetch_one(&mut connection)
+            .await
+            .map_err(map_error)?;
+        // The second column holds the statement for tables and views alike.
+        let value = row.try_get_raw(1).map_err(map_error)?;
+        let bytes = <Vec<u8> as sqlx::Decode<sqlx::MySql>>::decode(value)
+            .map_err(|_| DriverError::new(ErrorCode::Protocol, "Invalid database value"))?;
+        String::from_utf8(bytes)
+            .map_err(|_| DriverError::new(ErrorCode::Protocol, "Invalid database value"))
+    })
+    .await
+}
+
 /// The root holds the databases the user can see, without the system ones;
 /// a database holds no further namespace.
 pub async fn discover(
@@ -812,12 +1075,13 @@ pub async fn discover(
 }
 const DATABASES_SQL: &str = r#"SELECT schema_name AS db FROM information_schema.schemata WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys') ORDER BY schema_name"#;
 /// Databases, relations and columns, with defaults, comments and each
-/// column's position in the primary key. Pairs of placeholders filter the
-/// database, the relation and the column; each pair may be NULL.
+/// column's position in the primary key. The first placeholder reads names
+/// only, without columns; pairs of placeholders then filter the database,
+/// the relation and the column, each pair may be NULL.
 const METADATA_SQL: &str = r#"SELECT s.schema_name AS db, t.table_name AS rel, t.table_type AS reltype, NULLIF(t.table_comment, '') AS relcomment, c.column_name AS col, c.column_type AS dtype, c.is_nullable AS isnull, CAST(c.ordinal_position AS SIGNED) AS pos, c.column_default AS dflt, NULLIF(c.column_comment, '') AS colcomment, CAST(k.ordinal_position AS SIGNED) AS pk
 FROM information_schema.schemata s
 LEFT JOIN information_schema.tables t ON t.table_schema = s.schema_name
-LEFT JOIN information_schema.columns c ON c.table_schema = t.table_schema AND c.table_name = t.table_name
+LEFT JOIN information_schema.columns c ON c.table_schema = t.table_schema AND c.table_name = t.table_name AND NOT ?
 LEFT JOIN information_schema.key_column_usage k ON k.table_schema = c.table_schema AND k.table_name = c.table_name AND k.column_name = c.column_name AND k.constraint_name = 'PRIMARY'
 WHERE s.schema_name NOT IN ('mysql','information_schema','performance_schema','sys') AND (? IS NULL OR s.schema_name = ?) AND (? IS NULL OR t.table_name = ?) AND (? IS NULL OR c.column_name = ?)
 ORDER BY s.schema_name, t.table_name, c.ordinal_position"#;

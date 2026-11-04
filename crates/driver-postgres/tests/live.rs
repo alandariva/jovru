@@ -528,3 +528,287 @@ async fn live_metadata_has_exact_types_keys_comments_and_relation_kinds() {
     .await
     .expect("live metadata took too long");
 }
+
+/// Runs `sql` with `context` and returns the first cell as text.
+async fn text_in(session: &mut Box<dyn Session>, sql: &str, context: &SessionContext) -> String {
+    let mut sink = Sink::default();
+    session
+        .execute(
+            &QueryRequest {
+                sql: sql.into(),
+                options: ExecutionOptions {
+                    context: context.clone(),
+                    ..ExecutionOptions::default()
+                },
+            },
+            &mut sink,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    match sink.rows.first().and_then(|row| row.first()) {
+        Some(Cell::Text(text)) => text.clone(),
+        // A statement without rows, such as SET.
+        _ => String::new(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_the_tab_context_is_applied_once_and_reported() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let none = SessionContext::default();
+        text_in(
+            &mut session,
+            "CREATE SCHEMA IF NOT EXISTS gate_context",
+            &none,
+        )
+        .await;
+        let chosen = SessionContext {
+            catalog: Some("jykre".into()),
+            schema: Some("gate_context".into()),
+        };
+        assert_eq!(
+            text_in(&mut session, "SELECT current_schema()", &chosen).await,
+            "gate_context"
+        );
+        // The user's SET is not undone by the next statement of the same tab.
+        text_in(&mut session, "SET search_path TO public", &chosen).await;
+        assert_eq!(
+            text_in(&mut session, "SELECT current_schema()", &chosen).await,
+            "public"
+        );
+        let reported = session.context(CancellationToken::new()).await.unwrap();
+        assert_eq!(reported.catalog.as_deref(), Some("jykre"));
+        assert_eq!(reported.schema.as_deref(), Some("public"));
+        // Choosing again applies the new choice once.
+        assert_eq!(
+            text_in(&mut session, "SELECT current_schema()", &chosen).await,
+            "gate_context"
+        );
+        // Another database cannot be chosen within the session.
+        let other = SessionContext {
+            catalog: Some("other".into()),
+            schema: None,
+        };
+        assert!(
+            session
+                .execute(
+                    &QueryRequest {
+                        sql: "SELECT 1".into(),
+                        options: ExecutionOptions {
+                            context: other,
+                            ..ExecutionOptions::default()
+                        },
+                    },
+                    &mut Sink::default(),
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
+        text_in(&mut session, "DROP SCHEMA gate_context", &none).await;
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_levels_partitions_inspection_permissions_and_databases() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let driver = PostgresDriver;
+        let input = input();
+        let cancel = CancellationToken::new();
+        let db = ObjectPath::default().child(ObjectKind::Database, "jykre");
+        let public = db.child(ObjectKind::Schema, "public");
+        // TLS and the search path do not change which catalog a cache holds.
+        let mut tuned = input.config.clone();
+        tuned.options["sslMode"] = json!("require");
+        tuned.options["searchPath"] = json!("sales, public");
+        assert_eq!(
+            driver.cache_identity(&tuned),
+            driver.cache_identity(&input.config)
+        );
+        assert_eq!(
+            driver.default_namespaces(&tuned),
+            [db.child(ObjectKind::Schema, "sales")]
+        );
+        // A session starts with the configured search_path.
+        let mut archive_first = input.clone();
+        archive_first.config.options["searchPath"] = json!("gate_archive, public");
+        let mut session = driver
+            .open_session(&archive_first, cancel.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            text_in(
+                &mut session,
+                "SELECT current_schema()",
+                &SessionContext::default()
+            )
+            .await,
+            "gate_archive"
+        );
+        session.close().await.unwrap();
+        // Names only: relations without their columns.
+        let mut names = Metadata::default();
+        driver
+            .introspect_level(
+                &input,
+                &public,
+                IntrospectionLevel::Names,
+                &mut names,
+                cancel.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(names.0.iter().any(|object| object.name == "gate_fixture"));
+        assert!(
+            !names
+                .0
+                .iter()
+                .any(|object| object.kind == ObjectKind::Column)
+        );
+        // A partition kept in another schema hangs under its root table and
+        // is read where it is stored.
+        let mut full = Metadata::default();
+        driver
+            .introspect_scoped(&input, &public, &mut full, cancel.clone())
+            .await
+            .unwrap();
+        let events = public.child(ObjectKind::Table, "gate_events");
+        let archived = full
+            .0
+            .iter()
+            .find(|object| object.path == events.child(ObjectKind::Partition, "gate_events_2025"))
+            .expect("the archived partition under its root");
+        assert_eq!(
+            archived.stored_at,
+            Some(
+                db.child(ObjectKind::Schema, "gate_archive")
+                    .child(ObjectKind::Table, "gate_events_2025")
+            )
+        );
+        let mut archive = Metadata::default();
+        driver
+            .introspect_scoped(
+                &input,
+                &db.child(ObjectKind::Schema, "gate_archive"),
+                &mut archive,
+                cancel.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !archive
+                .0
+                .iter()
+                .any(|object| object.kind == ObjectKind::Table)
+        );
+        // Inspection: what the refresh does not read.
+        let fixture = public.child(ObjectKind::Table, "gate_fixture");
+        let inspection = driver
+            .inspect(&input, &fixture, cancel.clone())
+            .await
+            .unwrap();
+        let has = |kind, name: &str| {
+            inspection
+                .items
+                .iter()
+                .any(|item| item.kind == kind && item.name == name)
+        };
+        assert!(has(InspectedKind::Index, "gate_fixture_label"));
+        assert!(has(InspectedKind::Check, "gate_fixture_amount"));
+        assert!(has(InspectedKind::PrimaryKey, "gate_fixture_pkey"));
+        assert!(has(InspectedKind::Trigger, "gate_fixture_touch"));
+        assert!(
+            !full
+                .0
+                .iter()
+                .any(|object| object.name == "gate_fixture_label")
+        );
+        let schema = driver
+            .inspect(&input, &public, cancel.clone())
+            .await
+            .unwrap();
+        let detail = |kind, name: &str| {
+            schema
+                .items
+                .iter()
+                .find(|item| item.kind == kind && item.name == name)
+                .map(|item| item.detail.clone())
+        };
+        assert_eq!(
+            detail(InspectedKind::Function, "gate_touch").as_deref(),
+            Some("(day date, steps integer) → date")
+        );
+        assert!(
+            detail(InspectedKind::Sequence, "gate_counter")
+                .is_some_and(|text| text.contains("start 10"))
+        );
+        assert_eq!(
+            detail(InspectedKind::Type, "gate_mood").as_deref(),
+            Some("enum: calm, busy")
+        );
+        // Definitions only by explicit action.
+        let view = driver
+            .definition(
+                &input,
+                &public.child(ObjectKind::View, "gate_fixture_view"),
+                cancel.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(view.starts_with("CREATE VIEW \"public\".\"gate_fixture_view\" AS"));
+        let table = driver
+            .definition(&input, &fixture, cancel.clone())
+            .await
+            .unwrap();
+        assert!(table.contains("\"amount\" numeric(20,2)"));
+        assert!(table.contains("CONSTRAINT \"gate_fixture_amount\" CHECK"));
+        // A chosen schema the login may not use is a warning, not a gap.
+        let mut reader = input.clone();
+        reader.config.options["user"] = json!("gate_reader");
+        let private = db.child(ObjectKind::Schema, "gate_private");
+        let mut denied = Metadata::default();
+        let report = driver
+            .introspect_scoped(&reader, &private, &mut denied, cancel.clone())
+            .await
+            .unwrap();
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].path, private);
+        assert!(denied.0.is_empty());
+        // The server's other databases, when the profile offers them.
+        let mut every = input.clone();
+        every.config.options["allDatabases"] = json!(true);
+        let databases = driver
+            .discover_namespaces(&every, &ObjectPath::default(), cancel.clone())
+            .await
+            .unwrap();
+        let names: Vec<_> = databases
+            .iter()
+            .map(|object| object.name.as_str())
+            .collect();
+        assert!(names.contains(&"jykre") && names.contains(&"postgres"));
+        let other = ObjectPath::default().child(ObjectKind::Database, "postgres");
+        driver
+            .discover_namespaces(&every, &other, cancel.clone())
+            .await
+            .unwrap();
+        assert!(
+            driver
+                .discover_namespaces(&input, &other, cancel)
+                .await
+                .is_err()
+        );
+    })
+    .await
+    .expect("live metadata extensions took too long");
+}

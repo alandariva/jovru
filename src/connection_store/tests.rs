@@ -6,6 +6,7 @@ fn preferences(row_limit: u32) -> Preferences {
     Preferences {
         row_limit,
         scope: MetadataScope::default(),
+        revalidate_hours: 0,
     }
 }
 
@@ -559,6 +560,7 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
                 all: false,
                 include: vec![sales.clone()],
             },
+            revalidate_hours: 0,
         },
         &vault,
     )
@@ -578,9 +580,13 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
     repository.close().await;
     let empty = load(&dir, &vault).await.unwrap().connections.remove(0);
     assert!(empty.scope.is_pending());
-    let cache = MetadataRepository::open(&dir, profile.id, &profile.config)
-        .await
-        .unwrap();
+    let cache = MetadataRepository::open(
+        &dir,
+        profile.id,
+        &backend::cache_config(&profile.config).unwrap(),
+    )
+    .await
+    .unwrap();
     let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "fixture");
     let schemas =
         ["public", "sales"].map(|name| MetadataObject::new(ObjectKind::Schema, &db.path, name));

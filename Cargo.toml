@@ -61,6 +61,8 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 
 [dependencies]
 gpui-kit = "0.9.0"
+# The editor providers take LSP types; the same version gpui-kit uses.
+lsp-types = { version = "0.97.0", features = ["proposed"] }
 jykre-core = { path = "crates/core" }
 jykre-driver-postgres = { path = "crates/driver-postgres" }
 jykre-driver-mysql = { path = "crates/driver-mysql" }
