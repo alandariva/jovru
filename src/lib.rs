@@ -24,6 +24,7 @@ pub mod performance;
 pub mod probe;
 pub mod query;
 pub mod refresh_queue;
+pub mod reports;
 pub mod result;
 pub mod result_tabs;
 pub mod run_log;
