@@ -65,14 +65,16 @@ reason and a review date in `deny.toml`, never a silent suppression.
 It starts dedicated fixtures, waits for the health checks and runs
 `--test live -- --ignored` for each version:
 
-| Database | Image | Local port |
+| Database | Image | Compose service |
 | --- | --- | --- |
-| PostgreSQL | postgres:14 | 55424 |
-| PostgreSQL | postgres:18 | 55428 |
-| MySQL | mysql:8.4 | 55394 |
-| MySQL | mysql:9.7 | 55399 |
+| PostgreSQL | postgres:14 | `postgres-min` |
+| PostgreSQL | postgres:18 | `postgres-max` |
+| MySQL | mysql:8.4 | `mysql-lts` |
+| MySQL | mysql:9.7 | `mysql-current` |
 
-Services publish only on 127.0.0.1. Database/user: `jykre`; the public,
+Services publish only on 127.0.0.1, on a free port Docker picks for each run;
+the gate reads it with `docker compose port` and hands it to the tests in
+`JYKRE_TEST_PORT`. Database/user: `jykre`; the public,
 fixture-only password is `jykre-test`. Images follow these version lines and
 are not pinned by digest. Seeds in `tests/fixtures/` create tables with keys,
 defaults and comments, a view, a materialized view and a partitioned table
@@ -82,11 +84,21 @@ and a sequence (PostgreSQL), and a login `gate_reader` (same fixture-only
 password) that may not use one schema or database, for permission warnings,
 with synthetic data. Never use production credentials or data.
 
-Each run creates a Compose project `jykre-gate-<pid>` and tries to remove it,
-with its volumes, at the end, even if startup or a test fails. An abrupt
-interruption can leave resources behind: run
+Each run creates a Compose project `jykre-gate-<pid>-<suffix>` and tries to
+remove it, with its volumes, at the end, even if startup or a test fails. An
+abrupt interruption can leave resources behind: run
 `docker compose -p <project> -f docker-compose.test.yml down --volumes` only
-for that run's project. Ports are fixed, so concurrent full runs can conflict.
+for that run's project.
+
+To run one live suite by hand, start the fixtures under a project of your own
+and pass the published port:
+
+```bash
+docker compose -p jykre-manual -f docker-compose.test.yml up -d --wait
+docker compose -p jykre-manual -f docker-compose.test.yml port postgres-min 5432
+JYKRE_TEST_PORT=<port> cargo test -p jykre-driver-postgres --locked --test live -- --ignored
+docker compose -p jykre-manual -f docker-compose.test.yml down --volumes
+```
 
 The tests cover connection, invalid authentication, exact values and NULL,
 empty results, metadata, timeout, cancellation, row limits and stops requested
@@ -94,6 +106,20 @@ by the receiver. A session must keep its state after a database error, a
 timeout, a cancellation and an interruption by a limit or the receiver; a new
 session must run normally. TLS with certificates and effective server-side interruption need
 additional scenarios before the guarantees are extended.
+
+## Concurrent runs
+
+Gates (basic or full) can run at the same time from separate worktrees. Each
+run has its own Compose project, its own published ports and its own
+application data folder: the gate sets `JYKRE_CONFIG_DIR` to an empty
+temporary folder for the tests and the benchmarks, fails if anything is
+written there, and removes it at the end. The user's real `config.db`,
+metadata caches and logs are never used.
+
+Two runs in the same checkout share `target/`: Cargo makes the second wait
+for the first, and the benchmark output in `target/criterion` is shared.
+Concurrent runs also slow each other down, so benchmark numbers taken then are
+not comparable.
 
 ## Local databases for manual testing
 
@@ -137,7 +163,10 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
 - Do not remove, ignore or weaken tests to pass the gate. Fixing an incorrect
   test requires explaining why in the report.
 - Tests use synthetic data and isolated resources, do not depend on order and
-  must have a bounded duration. Flakiness requires a record, an owner and a fix;
+  must have a bounded duration. They never call
+  `connection_store::data_dir()` or touch the application data folder: open
+  repositories in a temporary folder with a unique name, and bind servers to
+  port 0. Flakiness requires a record, an owner and a fix;
   retrying until it passes does not replace investigation.
 - Ignored tests need a reason and a way to run them. Relational `live` tests
   always run in full mode; authenticated Databricks tests are separate.

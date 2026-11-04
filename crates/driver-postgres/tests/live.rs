@@ -28,9 +28,12 @@ impl IntrospectionSink for Metadata {
     }
 }
 fn input() -> ResolvedConnection {
+    // The fixture port is chosen by Docker for each run: `cargo xtask check
+    // --full` sets it, and docs/testing.md shows how to run these by hand.
     let port: u16 = std::env::var("JYKRE_TEST_PORT")
-        .map(|value| value.parse().expect("JYKRE_TEST_PORT must be a valid port"))
-        .unwrap_or(55424);
+        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/testing.md)")
+        .parse()
+        .expect("JYKRE_TEST_PORT must be a valid port");
     ResolvedConnection {
         config: ConnectionConfig {
             driver: DriverKind::Postgres,
