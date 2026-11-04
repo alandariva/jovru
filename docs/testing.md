@@ -103,8 +103,9 @@ docker compose -p jykre-manual -f docker-compose.test.yml down --volumes
 The tests cover connection, invalid authentication, exact values and NULL,
 empty results, metadata, timeout, cancellation, row limits and stops requested
 by the receiver. A session must keep its state after a database error, a
-timeout, a cancellation and an interruption by a limit or the receiver; a new
-session must run normally. TLS with certificates and effective server-side interruption need
+timeout, a cancellation and an interruption by a limit or the receiver, also
+when the interruption lands halfway through reading a row (MySQL, with rows of
+several megabytes); a new session must run normally. TLS with certificates and effective server-side interruption need
 additional scenarios before the guarantees are extended.
 
 ## Concurrent runs

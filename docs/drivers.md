@@ -391,7 +391,12 @@ on the server and then reads up to the end of the response, each limited to 5
 seconds; if that fails the session is closed, so an incomplete protocol is
 never reused. MySQL first reads and drops the rest of a result interrupted by
 a limit, and kills the statement only when that takes too long, because the
-statement may already be done. A lost connection closes the session.
+statement may already be done. MySQL never abandons a read on a session's
+connection halfway: SQLx reads a packet's header and its payload in separate
+steps, and a read dropped between them would put the protocol out of step.
+When a cancellation, a timeout or the drain's limit arrives during a read,
+the statement is killed first and that read is then finished, within the same
+5 seconds as the rest of the response. A lost connection closes the session.
 PostgreSQL inspects the configured database; MySQL inspects the visible
 databases, excluding internal schemas. Both read only the namespaces the user
 chose, and respect what the user is allowed to see.

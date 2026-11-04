@@ -322,6 +322,67 @@ async fn live_connection_queries_metadata_and_timeout() {
     }).await.expect("live scenario exceeded its time budget");
 }
 
+/// SQLx reads a packet's header and its payload in separate steps. Rows of
+/// several megabytes keep the reader inside a payload most of the time, so a
+/// cancellation or a time limit almost always lands halfway through a row;
+/// the session must still be kept, with its state.
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_interrupting_a_half_read_row_keeps_the_session() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        struct CancelAtFirst(CancellationToken);
+        impl RowSink for CancelAtFirst {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                SinkControl::Continue
+            }
+            fn row(&mut self, _: Row) -> SinkControl {
+                self.0.cancel();
+                SinkControl::Continue
+            }
+        }
+        let wide = "SELECT n, REPEAT('x', 4194304) FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 32) SELECT n FROM s) t";
+        let driver = MySqlDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        keep_state(&mut session).await;
+        for _ in 0..5 {
+            let token = CancellationToken::new();
+            let cancelled = session
+                .execute(
+                    &QueryRequest {
+                        sql: wide.into(),
+                        options: ExecutionOptions::default(),
+                    },
+                    &mut CancelAtFirst(token.clone()),
+                    token,
+                )
+                .await;
+            assert_eq!(cancelled.unwrap_err().code, ErrorCode::Cancelled);
+            assert_kept(&mut session).await;
+            let timed_out = session
+                .execute(
+                    &QueryRequest {
+                        sql: wide.into(),
+                        options: ExecutionOptions {
+                            timeout: Some(Duration::from_millis(50)),
+                            ..ExecutionOptions::default()
+                        },
+                    },
+                    &mut Sink::default(),
+                    CancellationToken::new(),
+                )
+                .await;
+            assert_eq!(timed_out.unwrap_err().code, ErrorCode::Timeout);
+            assert_kept(&mut session).await;
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live scenario exceeded its time budget");
+}
+
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
 async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
