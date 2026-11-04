@@ -2,7 +2,11 @@
 
 Local data lives in SQLite files owned by `jykre-storage`
 ([ADR-0003](adr/0003-sqlite-for-local-storage.md)). Passwords are never stored
-here ([Security](security.md)); query results are never written to disk.
+here ([Security](security.md)). Query results are never written to disk,
+with one exception the user asks for each time: a report's print HTML,
+written only to the file the user picks in the save dialog
+([ADR-0024](adr/0024-reports.md)). Report definitions live in the `reports`
+setting ([below](#schema-configdb)).
 
 ## Files
 
@@ -68,6 +72,19 @@ written half a second after changes settle and when the application quits,
 and read once the connections are loaded. A tab whose connection no longer
 exists reopens in a group of its own, without a connection. A value that
 cannot be read starts an empty workspace. Results are never stored.
+
+`reports` keeps the report definitions ([ADR-0024](adr/0024-reports.md),
+`jykre::reports`): `{"version": 1, "next_id": n, "reports": [...]}`, each
+report with a stable numeric `id`, its title, description, connection
+(`{"id": …, "name": …}`), SQL, parameters (name, label, kind, default,
+required), optional chart and when it was created and last changed. Keys
+this version does not know are kept. It stores definitions only: never
+results, and never the values typed for a run, only each parameter's
+default. It lives apart from `workspace.state`, whose writer keeps only the
+fields it knows, so an older version cannot erase reports. A missing value is
+an empty library; a value that cannot be read is reported and never written
+over. It is written half a second after changes settle and when the
+application quits; the demo writes nothing.
 
 `connection.<connection-id>.explorer` keeps what the explorer shows expanded
 for that connection (`{"expanded": [paths]}`), written half a second after a
@@ -223,7 +240,9 @@ The standard for schema changes:
   SQL.
 - Repositories take and return `jykre-core` types, never raw rows.
 - Reads for the UI are paged (children of a node, search with a limit).
-- Nothing secret is stored, and no query result is written to disk.
+- Nothing secret is stored, and no query result is written to disk, apart
+  from a report's print HTML at the path the user picks
+  ([ADR-0024](adr/0024-reports.md)).
 - A schema change follows [Migrations](#migrations) and needs an ADR when it
   changes what is stored.
 
