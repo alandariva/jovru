@@ -80,6 +80,8 @@ pub struct Workspace {
     next_lease: u64,
     /// The next page of a result is being read; runs wait for it.
     fetching: bool,
+    /// The SQL is being formatted off the UI thread.
+    formatting: bool,
     cancellation: CancellationToken,
     numbers_pt_br: bool,
     editor: Entity<EditorState>,
@@ -249,6 +251,7 @@ impl Workspace {
             session_lease: None,
             next_lease: 0,
             fetching: false,
+            formatting: false,
             cancellation: CancellationToken::new(),
             numbers_pt_br: false,
             editor,
@@ -2534,33 +2537,91 @@ impl Workspace {
             .child(divider())
     }
 
-    /// Formats the SQL by the tab's dialect. Only whitespace and keyword
-    /// case change, so the caret, the selection and the caret's place on
-    /// screen are kept.
+    /// Formats the SQL by the tab's dialect, off the UI thread: the
+    /// formatter's grammar takes long to build, and the work grows with the
+    /// script. Only whitespace and keyword case change, so the caret, the
+    /// selection and the caret's place on screen are kept. A result for SQL
+    /// edited meanwhile is dropped.
     fn format_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (sql, selection, reversed, scroll) = {
+        if self.formatting {
+            return;
+        }
+        let sql = self.editor_sql.clone();
+        let dialect = self.run.dialect();
+        self.formatting = true;
+        self.notice = Some(Feedback::new(Tone::Info, tr!("Formatting the SQL…")));
+        cx.notify();
+        let source = sql.clone();
+        let task = cx.background_spawn(async move { jykre::sql::format(&source, dialect) });
+        cx.spawn_in(window, async move |weak, cx| {
+            let result = task.await;
+            let _ = weak.update_in(cx, |this, window, cx| {
+                this.formatting = false;
+                this.apply_format(&sql, result, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Puts the formatted SQL in the editor, when the editor still holds the
+    /// SQL it was made from, and says how it went.
+    fn apply_format(
+        &mut self,
+        sql: &str,
+        result: Result<jykre::sql::Formatted, jykre::sql::FormatError>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let notice = |tone, text: &str| Some(Feedback::new(tone, text));
+        let formatted = match result {
+            _ if self.editor_sql != sql => {
+                self.notice = notice(
+                    Tone::Info,
+                    tr!("The SQL changed while it was being formatted. Format it again."),
+                );
+                return;
+            }
+            Err(jykre::sql::FormatError::Failed) => {
+                self.notice = notice(
+                    Tone::Error,
+                    tr!("The SQL could not be formatted. It was left as it was."),
+                );
+                return;
+            }
+            Ok(formatted) => formatted,
+        };
+        let partial = formatted.partial;
+        let formatted = formatted.sql;
+        if formatted == sql {
+            self.notice = if partial {
+                notice(
+                    Tone::Warning,
+                    tr!(
+                        "The SQL does not parse in this connection's dialect, so it was left as it was."
+                    ),
+                )
+            } else {
+                notice(Tone::Info, tr!("SQL is already formatted."))
+            };
+            return;
+        }
+        let (selection, reversed, scroll) = {
             let editor = self.editor.read(cx);
             (
-                editor.text().to_string(),
                 editor.selected_range(),
                 editor.is_selection_reversed(),
                 editor.scroll_offset(),
             )
         };
-        let formatted = jykre::sql::format(&sql, self.run.dialect());
-        if formatted == sql {
-            self.notice = Some(Feedback::new(Tone::Info, tr!("SQL is already formatted.")));
-            cx.notify();
-            return;
-        }
-        let map = |offset| jykre::sql::map_offset(&sql, &formatted, offset);
+        let map = |offset| jykre::sql::map_offset(sql, &formatted, offset);
         let range = map(selection.start)..map(selection.end);
         let caret = |text: &str, range: &Range<usize>| {
             let at = if reversed { range.start } else { range.end };
             text.get(..at)
                 .map_or(0, |before| before.matches('\n').count())
         };
-        let moved = caret(&formatted, &range) as f32 - caret(&sql, &selection) as f32;
+        let moved = caret(&formatted, &range) as f32 - caret(sql, &selection) as f32;
         self.editor.update(cx, |editor, cx| {
             // `replace_all` keeps the undo history, so Ctrl+Z restores the
             // previous layout; it also moves to the start, undone here.
@@ -2570,11 +2631,16 @@ impl Workspace {
                 editor.set_scroll_offset(point(scroll.x, scroll.y - line_height * moved), cx);
             }
         });
-        self.notice = Some(Feedback::new(
-            Tone::Success,
-            tr!("SQL formatted. Use Ctrl+Z to undo."),
-        ));
-        cx.notify();
+        self.notice = if partial {
+            notice(
+                Tone::Warning,
+                tr!(
+                    "SQL formatted, except a part that does not parse in this connection's dialect, which was left as it was. Use Ctrl+Z to undo."
+                ),
+            )
+        } else {
+            notice(Tone::Success, tr!("SQL formatted. Use Ctrl+Z to undo."))
+        };
     }
 
     fn assistant(&self, cx: &mut Context<Self>) -> Div {

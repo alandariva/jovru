@@ -164,11 +164,15 @@ sequenceDiagram
   tab each statement fills (`Placement`, which never replaces a pinned tab)
   and keeps each tab's pages; the next page is read with `backend::fetch`
   from the result the session keeps open.
-- Splitting, highlighting and formatting share one tokenizer whose rules
-  follow the connection's `SqlDialect` (`jykre::sql`): MySQL backslash
-  escapes, `#` comments, `DELIMITER` and routine bodies; PostgreSQL `E''`
-  strings, dollar quotes and `BEGIN ATOMIC`; Databricks compound statements.
-  A tab without a connection uses generic rules.
+- Splitting and highlighting share one tokenizer whose rules follow the
+  connection's `SqlDialect` (`jykre::sql`): MySQL backslash escapes, `#`
+  comments, `DELIMITER` and routine bodies; PostgreSQL `E''` strings, dollar
+  quotes and `BEGIN ATOMIC`; Databricks compound statements. A tab without a
+  connection uses generic rules.
+- **Format** parses with `sqruff-lib` in the same dialect (ANSI without a
+  connection), off the UI thread. Only whitespace and keyword case may
+  change: a result that changes anything else is refused, and what does not
+  parse is left as it was.
 - Each tab keeps one session between runs ([ADR-0014](adr/0014-a-session-per-tab.md)).
   Databricks warehouses keep logical catalog/schema state; classic clusters keep
   a server SQL context. CLI authentication and HTTP pools are shared across

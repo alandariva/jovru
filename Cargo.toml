@@ -58,6 +58,8 @@ tracing = { version = "0.1", default-features = false, features = ["std", "attri
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "json", "tracing-log"] }
 tracing-appender = "0.2"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# SQL formatting by dialect (N010); it has no default features to turn off.
+sqruff-lib = "0.44.0"
 
 [dependencies]
 gpui-kit = "0.9.0"
@@ -71,6 +73,7 @@ jykre-storage = { path = "crates/storage" }
 jykre-secrets = { path = "crates/secrets" }
 tokio.workspace = true
 serde_json.workspace = true
+sqruff-lib.workspace = true
 sys-locale = "0.3"
 dirs = "7"
 tracing.workspace = true

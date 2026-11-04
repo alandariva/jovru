@@ -216,4 +216,5 @@ interactive elements expose a role, a label and their state. Details are in
 | --- | --- |
 | Elapsed time and cancel for runs over 2 s | The Run button cancels, but the footer shows "Running…" without the elapsed time |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
+| Elapsed time and cancel for work over 2 s | **Format** runs off the UI thread and the editor stays usable, but the first format per dialect (building its grammar) or a long script can take seconds, and it cannot be cancelled; a result for SQL edited meanwhile is dropped |
 | Shortcuts as actions in one keymap | Only the three run shortcuts are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |

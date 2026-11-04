@@ -494,78 +494,98 @@ pub fn preview_error(sql: &str) -> Option<&'static str> {
     }
 }
 
-/// Format token boundaries while preserving comments and string contents.
-/// Only whitespace and the case of keywords change, so [`map_offset`] finds
-/// any position again in the result.
-pub fn format(sql: &str, dialect: Option<SqlDialect>) -> String {
-    let mut output = String::new();
-    let mut depth = 0usize;
-    let mut previous = "";
-    let mut select_list = false;
-    for (range, kind) in tokens(sql, dialect) {
-        let original = &sql[range];
-        let upper = original.to_ascii_uppercase();
-        let token = if kind == TokenKind::Keyword || kind == TokenKind::Function {
-            upper.as_str()
-        } else {
-            original
-        };
-        let newline = kind == TokenKind::Comment
-            || depth == 0
-                && matches!(
-                    token,
-                    "SELECT"
-                        | "FROM"
-                        | "WHERE"
-                        | "JOIN"
-                        | "LEFT"
-                        | "RIGHT"
-                        | "INNER"
-                        | "GROUP"
-                        | "ORDER"
-                        | "HAVING"
-                        | "LIMIT"
-                        | "AND"
-                        | "OR"
-                );
-        if newline && !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        if token == "SELECT" {
-            select_list = true;
-        } else if token == "FROM" {
-            select_list = false;
-        }
-        let space = !output.is_empty()
-            && !output.ends_with([' ', '\n'])
-            && !matches!(token, "," | "." | ")" | ";")
-            && previous != "."
-            && previous != "("
-            && !(token == "("
-                && kind == TokenKind::Symbol
-                && !matches!(previous, "AS" | "IN" | "FROM" | "WITH"));
-        if space {
-            output.push(' ');
-        }
-        output.push_str(token);
-        if kind == TokenKind::Comment {
-            output.push('\n');
-        }
-        if token == "(" {
-            depth += 1;
-        } else if token == ")" {
-            depth = depth.saturating_sub(1);
-        }
-        if token == "," && depth == 0 && select_list {
-            output.push_str("\n    ");
-        }
-        previous = if kind == TokenKind::Function {
-            "FUNCTION"
-        } else {
-            original
-        };
+/// Why [`format`] could not format the SQL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatError {
+    /// The formatter failed on this input, or its result would change more
+    /// than layout and keyword case; the SQL is left as it was.
+    Failed,
+}
+
+/// The SQL as [`format`] laid it out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Formatted {
+    pub sql: String,
+    /// Part of the SQL does not parse in the dialect and was left as it was.
+    pub partial: bool,
+}
+
+/// The rules [`format`] applies: layout (spacing, indentation, line breaks,
+/// blank lines) and keyword capitalisation. Each changes only whitespace
+/// and the case of keywords; rules that rewrite SQL (aliases, quoting,
+/// semicolons, identifier case) are left out.
+const FORMAT_RULES: &str =
+    "LT01,LT02,LT03,LT04,LT05,LT06,LT07,LT08,LT09,LT10,LT11,LT12,LT13,LT14,LT15,CP01";
+
+/// The formatter for `dialect`, built once: building one sets up its
+/// dialect's grammar, which takes long. `None` when it could not be built.
+fn formatter(
+    dialect: Option<SqlDialect>,
+) -> Option<&'static sqruff_lib::core::linter::core::Linter> {
+    use sqruff_lib::core::{config::FluffConfig, linter::core::Linter};
+    use std::sync::OnceLock;
+    static FORMATTERS: [OnceLock<Option<Linter>>; 4] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+    ];
+    let (slot, name) = match dialect {
+        Some(SqlDialect::Postgres) => (0, "postgres"),
+        Some(SqlDialect::MySql) => (1, "mysql"),
+        Some(SqlDialect::DatabricksSql) => (2, "databricks"),
+        _ => (3, "ansi"),
+    };
+    FORMATTERS[slot]
+        .get_or_init(|| {
+            // In memory only: no configuration file is read, and files of any
+            // size are formatted.
+            let source = format!(
+                "[sqruff]\ndialect = {name}\nrules = {FORMAT_RULES}\nlarge_file_skip_byte_limit = 0\n\n\
+                 [sqruff:rules:capitalisation.keywords]\ncapitalisation_policy = upper\n"
+            );
+            let config = FluffConfig::try_from_source(&source, None).ok()?;
+            Linter::new(config, None, None, false).ok()
+        })
+        .as_ref()
+}
+
+/// Whether `after` holds the same text as `before` but for whitespace and
+/// ASCII letter case.
+fn same_text(before: &str, after: &str) -> bool {
+    let text = |sql: &str| {
+        sql.chars()
+            .filter(|ch| !ch.is_whitespace())
+            .map(|ch| ch.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+    };
+    text(before) == text(after)
+}
+
+/// Lays out `sql` by the rules of `dialect` with sqruff: spacing,
+/// indentation, line breaks and upper-case keywords. Only whitespace and the
+/// case of keywords change, so literals, comments and identifiers keep their
+/// meaning and [`map_offset`] finds any position again; a result that would
+/// change anything else is refused. What does not parse in the dialect is
+/// left as it was (`partial`).
+///
+/// It is CPU work that grows with the SQL, and the first call per dialect
+/// builds its grammar: callers run it off the UI thread.
+pub fn format(sql: &str, dialect: Option<SqlDialect>) -> Result<Formatted, FormatError> {
+    // A failure of the formatter on some input must not take the
+    // application down: it is reported as such and the SQL stays.
+    let run = std::panic::AssertUnwindSafe(|| {
+        let linted = formatter(dialect)?.lint_string(sql, None, true).ok()?;
+        let partial = linted.has_parse_or_templating_errors();
+        Some(Formatted {
+            sql: linted.fix_string(),
+            partial,
+        })
+    });
+    match std::panic::catch_unwind(run) {
+        Ok(Some(formatted)) if same_text(sql, &formatted.sql) => Ok(formatted),
+        _ => Err(FormatError::Failed),
     }
-    output.trim_end().to_string()
 }
 
 /// Where byte `offset` of `before` is in `after`, when the two differ only
@@ -608,11 +628,15 @@ mod tests {
             .collect()
     }
 
+    fn formatted(sql: &str, dialect: Option<SqlDialect>) -> String {
+        format(sql, dialect).expect("the formatter runs").sql
+    }
+
     #[test]
     fn format_keeps_operators_literals_and_parameters_intact() {
         let sql = "select a from t where a>=1 and b<=2 and c<>3 and d!=4 and e::int=5 \
                    and f||'x'='y' and g->>'k'=$1 and h=$$a >= b;$$ and i=$q$x$q$";
-        let formatted = format(sql, None);
+        let formatted = formatted(sql, POSTGRES);
         for kept in [
             ">= 1",
             "<= 2",
@@ -627,21 +651,25 @@ mod tests {
         ] {
             assert!(formatted.contains(kept), "{kept:?} in {formatted:?}");
         }
+        assert!(formatted.starts_with("SELECT"), "{formatted:?}");
         assert!(!formatted.contains("> ="), "{formatted:?}");
         assert!(!formatted.contains(": :"), "{formatted:?}");
         // Formatting is stable, so a second run changes nothing.
-        assert_eq!(format(&formatted, None), formatted);
+        assert_eq!(super::format(&formatted, POSTGRES).unwrap().sql, formatted);
     }
 
     #[test]
-    fn format_and_splitting_agree_on_mysql_backslash_escapes() {
+    fn format_keeps_mysql_backslash_escapes_and_the_statements_apart() {
         // `'a\'b'` is one literal in MySQL: formatting must not treat the
         // rest of the line as a string and change what follows it.
-        let sql = "select 'a\\'b' as x, 'c' from t where y = 'd;e'";
-        let formatted = format(sql, MYSQL);
+        let sql = "select 'a\\'b' as x, 'c' from t where y = 'd;e';\n\ninsert into t values (1);";
+        let formatted = formatted(sql, MYSQL);
         assert!(formatted.contains("'a\\'b' AS x"), "{formatted:?}");
         assert!(formatted.contains("'d;e'"), "{formatted:?}");
-        assert_eq!(split(&formatted, MYSQL).len(), 1);
+        assert!(formatted.contains("INSERT INTO t"), "{formatted:?}");
+        // Statements stay apart, with the blank line between them.
+        assert!(formatted.contains(";\n\nINSERT"), "{formatted:?}");
+        assert_eq!(split(&formatted, MYSQL).len(), 2);
         let kinds: Vec<_> = tokens(sql, MYSQL)
             .into_iter()
             .map(|(range, kind)| (&sql[range], kind))
@@ -653,9 +681,34 @@ mod tests {
     }
 
     #[test]
+    fn what_does_not_parse_is_left_as_it_was() {
+        let sql = "select a from t;\nselect * from orders where";
+        let result = format(sql, POSTGRES).unwrap();
+        assert!(result.partial);
+        assert!(
+            result.sql.starts_with("SELECT a FROM t;"),
+            "{:?}",
+            result.sql
+        );
+        assert!(result.sql.contains("where"), "{:?}", result.sql);
+        let clean = format("select 1", DATABRICKS).unwrap();
+        assert!(!clean.partial);
+        assert_eq!(clean.sql.trim_end(), "SELECT 1");
+        // Without a connection the generic rules apply.
+        assert_eq!(formatted("select 1", None).trim_end(), "SELECT 1");
+    }
+
+    #[test]
+    fn only_layout_and_keyword_case_may_change() {
+        assert!(super::same_text("select  a\nfrom t", "SELECT a FROM t"));
+        assert!(!super::same_text("select 'a b'", "select 'a', 'b'"));
+        assert!(!super::same_text("select a", "select a;"));
+    }
+
+    #[test]
     fn map_offset_follows_the_text_through_formatting() {
         let sql = "select a,\n   b from t\nwhere   a = 1";
-        let formatted = format(sql, None);
+        let formatted = formatted(sql, POSTGRES);
         for word in ["a,", "b", "t", "where", "1"] {
             let at = sql.find(word).unwrap();
             let mapped = map_offset(sql, &formatted, at + word.len());
@@ -667,7 +720,10 @@ mod tests {
             );
         }
         assert_eq!(map_offset(sql, &formatted, 0), 0);
-        assert_eq!(map_offset(sql, &formatted, sql.len()), formatted.len());
+        assert_eq!(
+            map_offset(sql, &formatted, sql.len()),
+            formatted.trim_end().len()
+        );
         assert_eq!(map_offset("é  x", "é x", "é  x".len()), "é x".len());
     }
 
