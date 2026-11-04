@@ -8,7 +8,7 @@ Data: 3 de novembro de 2026 · Branch `release/0.1.0` (`15446f2` + alterações 
 
 **Como ler a referência.** Cada item diz quais ferramentas documentam o comportamento de referência. “Não documentado” significa que a documentação consultada não cobre o caso; não significa que a ferramenta se comporte diferente. Quando as ferramentas divergem entre si, o item diz isso, e o achado só se sustenta se o Jykre for pior que todas as abordagens ou inconsistente consigo mesmo. Alguns itens não dependem de nenhuma ferramenta: são violações de princípios gerais (não executar algo diferente do pedido, não perder dados em silêncio, consistência interna). Nesses casos a referência aparece como **Princípio**.
 
-**Aprovação.** Cada pendência tem a propriedade **Aprovação**. Só as pendências **Aprovadas** estão ativas para desenvolvimento; as **Pendentes** aguardam a decisão do mantenedor e não devem ser implementadas. Quando a aprovação vem com uma decisão que muda a recomendação, o item tem uma linha **Decisão**, e ela prevalece sobre o *Comportamento recomendado*.
+**Aprovação.** Cada pendência tem a propriedade **Aprovação**. Só as pendências **Aprovadas** estão ativas para desenvolvimento; as **Pendentes** aguardam a decisão do mantenedor e não devem ser implementadas. Quando a aprovação vem com uma decisão que muda a recomendação, o item tem uma linha **Decisão**, e ela prevalece sobre o *Comportamento recomendado*. Uma pendência implementada tem a linha **Status**, com a data, os commits e o desvio em relação à decisão, quando houver.
 
 **Relação com o backlog anterior.** A versão anterior deste arquivo (até `15446f2`) usava números `Nxxx` próprios. Esta auditoria renumera tudo a partir de N001. Itens daquele backlog que **continuam abertos no código atual** aparecem de novo, marcados com “Backlog: Nxxx” (o número antigo). Dois itens que o backlog ainda listava como abertos já estão corrigidos no código: N028 (o status do refresh agora avisa quando a árvore não recarregou, `node_status`) e N031 (salvar só cancela o refresh depois de gravar). Ambos ficaram fora desta lista.
 
@@ -26,7 +26,7 @@ As divergências que pesam ficam nas bordas desse núcleo:
 4. **Fluxos de conexão sem diálogo.** Senha não lembrada nunca é pedida (A e B pedem ao conectar). Salvar o perfil derruba os runs abertos sem avisar.
 5. **Abrir tabela não mostra dados.** Nas três ferramentas, abrir uma tabela leva aos dados (ou ao editor do objeto) com paginação. No Jykre, cria uma aba com `SELECT … LIMIT 100` que não é executada.
 
-São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, sem nenhuma crítica. Dessas, 15 são reconfirmações do backlog anterior. **16 estão aprovadas** (N001–N016) e ativas para desenvolvimento; as outras 31 aguardam aprovação.
+São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, sem nenhuma crítica. Dessas, 15 são reconfirmações do backlog anterior. **16 estão aprovadas** (N001–N016) e **implementadas** (`f18136c`, de 3 de novembro de 2026, com `8208602` para N008 e `66f262b` para N010, de 4 de novembro); as outras 31 aguardam aprovação.
 
 ---
 
@@ -35,6 +35,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N001 — O atalho de executar cancela a execução em andamento, num toque e sem confirmação
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Execução / cancelamento
 - **Comportamento atual:** Com um run ativo, `Ctrl+Enter`, `Ctrl+Shift+Enter` e `Ctrl+Alt+Enter` chamam `stop_execution`. O mesmo vale para o botão do gutter de uma instrução *Pending* e para um segundo clique em Run (que vira “Stop” no mesmo lugar). O cancelamento é imediato e sem confirmação.
 - **Comportamento de referência:** As ferramentas divergem quanto ao botão, mas nenhuma documenta cancelar pelo atalho de executar:
@@ -51,6 +52,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N002 — “Run query again” executa a instrução do cursor, não a do resultado
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Resultados
 - **Comportamento atual:** O botão ↻ “Run query again”, na barra do result tab, chama `execute_current`. Isso roda a seleção ou a instrução sob o cursor do editor *agora* e grava o resultado no último tab criado. O SQL guardado no próprio tab (`tab.sql`) não é usado.
 - **Comportamento de referência:** Princípio: reexecutar a partir de um resultado repete o que gerou aquele resultado. Nenhuma das três documenta um botão equivalente; a referência é a expectativa criada pelo próprio rótulo.
@@ -63,6 +65,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N003 — Abrir uma tabela não mostra os dados
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Explorer / navegação
 - **Comportamento atual:** Duplo clique, Enter, “Open preview” ou Enter na palette chamam `add_query` com `SELECT * FROM … LIMIT 100;`. Abre uma aba de consulta com o SQL e o estado vazio “Ready to explore — Run the query”. Nada é executado.
 - **Comportamento de referência:** Nas três ferramentas, abrir a tabela leva aos dados ou ao editor do objeto:
@@ -79,6 +82,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N004 — Senha não lembrada nunca é solicitada ao conectar
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Autenticação
 - **Comportamento atual:** Sem “Remember password” e após reiniciar, a conexão carrega sem credencial. O primeiro run (ou refresh) falha com “Could not sign in”. O único caminho é abrir *Configure connection*, digitar a senha e salvar o perfil; o aviso do save chega a dizer “Enter the password before querying the server”.
 - **Comportamento de referência:**
@@ -94,6 +98,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N005 — Salvar a conexão cancela runs e apaga resultados de todas as abas, sem aviso
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Conexões × abas
 - **Comportamento atual:** Quando qualquer opção do perfil muda (host, porta, banco padrão, sslMode…), `update_connection` chama `set_connection` em cada aba daquela conexão. O resultado: `abandon_run` (cancela o run, fecha a sessão e reverte uma transação aberta), `results.clear()` e o assistente fechado. Nenhuma confirmação antes e nenhuma notificação na aba depois.
 - **Comportamento de referência:** Princípio: uma edição de configuração não destrói trabalho em andamento sem perguntar. O próprio Jykre segue esse princípio ao mover uma aba de conexão (pergunta antes). As três ferramentas não documentam o efeito de editar um data source conectado.
@@ -106,6 +111,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N006 — Consulta salva ou do histórico abre em outra conexão quando a original não existe
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Biblioteca / histórico
 - **Comportamento atual:** O clique numa entrada procura a conexão pelo nome e, se não encontra, usa `.or(this.connections.first())`: abre a aba na primeira conexão da lista, sem aviso.
 - **Comportamento de referência:**
@@ -121,6 +127,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N007 — Uma aba sem conexão executa o SQL contra dados simulados
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Execução / estado de conexão
 - **Comportamento atual:** Com `input == None`, `execute_queries` cai no ramo do demo: `sample_result` gera linhas fictícias, `preview_error` recusa o que não é leitura e o rodapé mostra “Demo data · MOCK”. Fora do modo `JYKRE_DEMO`, isso acontece em abas restauradas cuja conexão não existe mais (grupo órfão) ou movidas para “Without connection”. O cabeçalho mostra o banco inventado pela heurística do demo (`commerce`/`finance`/`analytics`).
 - **Comportamento de referência:** Princípio: sem conexão não há execução; a ferramenta pede uma conexão.
@@ -133,6 +140,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N008 — Transação explícita fica invisível e é revertida ao fechar a aba (Backlog: N005)
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 e 4 de novembro de 2026; `f18136c`, `8208602`). Desvio: o estado vem do driver (`Session::transaction`): o PostgreSQL consulta o servidor sem tirar o snapshot, e o MySQL informa só `autocommit = 0`. O que o driver não sabe (um `BEGIN` no MySQL) é inferido pelas instruções. A leitura do protocolo está registrada como débito crítico [TD-001](technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
 - **Funcionalidade:** Transações
 - **Comportamento atual:** Só autocommit é suportado. Um `BEGIN` continua aberto na sessão da aba, sem indicador e sem Commit/Rollback. Fechar a aba, trocar de conexão, salvar o perfil (N005) ou perder a sessão reverte a transação em silêncio. A mensagem de falha parcial afirma “Previous statements were not rolled back automatically”, o que é falso dentro de uma transação abortada no PostgreSQL.
 - **Comportamento de referência:**
@@ -149,6 +157,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N009 — A separação de instruções ignora o dialeto (Backlog: N010)
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`). Desvio: o splitter segue o dialeto do driver (`SqlDialect`), mas fica na aplicação (`jykre::sql`), não no driver; blocos são reconhecidos por palavra-chave. Ver os Known deviations de [Architecture](architecture.md#known-deviations).
 - **Funcionalidade:** SQL enviado
 - **Comportamento atual:** Todo `;` fora de aspas, comentário ou dollar-quote encerra uma instrução. Corpos `BEGIN … END` de procedure/trigger do MySQL e `BEGIN ATOMIC` do PostgreSQL são fatiados. Não há `DELIMITER`, e um `/*! … */` inicial é descartado como comentário.
 - **Comportamento de referência:** As ferramentas divergem:
@@ -164,6 +173,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N010 — Format pode alterar strings do MySQL e joga o cursor para o início (Backlog: N011)
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 e 4 de novembro de 2026; `f18136c`, `66f262b`). A formatação usa `sqruff-lib` 0.44, escolhida pelo mantenedor, só com regras de layout e de caixa de palavras-chave, fora da thread da UI.
 - **Funcionalidade:** Formatação
 - **Comportamento atual:** `tokens()` (usado por `format`) não trata `\` dentro de strings; `statements()` trata. Isso faz com que `'a\'b'` seja tokenizado de forma diferente nos dois caminhos. A aplicação usa `replace_all`, que reposiciona o caret e zera o scroll.
 - **Comportamento de referência:** Princípio: formatar nunca muda o significado de um literal e não tira o usuário do ponto de edição.
@@ -177,6 +187,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N011 — A prévia de tabela tem `LIMIT 100` fixo e ignora o limite de linhas da conexão
 - **Prioridade:** Média
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Explorer / paginação
 - **Comportamento atual:** `preview_sql` sempre gera `SELECT * FROM x LIMIT 100;`. O limite por conexão (1 a 100.000, padrão 1.000) e a paginação ficam sem efeito: a página 1 tem 100 linhas e não existe próxima.
 - **Comportamento de referência:**
@@ -193,6 +204,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N012 — `Ctrl+Enter` sobrescreve justamente o result tab aberto com `Ctrl+Shift+Enter`
 - **Prioridade:** Média
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Result tabs
 - **Comportamento atual:** `ReplaceLast` reaproveita o tab de maior número (`last_created`), seja ele o visível ou não. Um tab aberto com `Ctrl+Shift+Enter` para preservar um resultado é o primeiro a ser substituído no próximo `Ctrl+Enter`. Com Result 1 na tela, o novo resultado vai para o Result 3.
 - **Comportamento de referência:**
@@ -208,6 +220,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N013 — Com o cursor fora de qualquer instrução, a instrução vizinha é executada
 - **Prioridade:** Média
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Editor / execução
 - **Comportamento atual:** `statement_at` escolhe a próxima instrução quando o cursor está numa linha entre duas, e a mais próxima antes da primeira ou depois da última. Executa sem perguntar.
 - **Comportamento de referência:**
@@ -224,6 +237,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N014 — O filtro da grade busca só na página carregada, sem dizer isso
 - **Prioridade:** Média
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Grade
 - **Comportamento atual:** “Filter results…” filtra no cliente apenas as linhas da página atual (até o limite de linhas). Quando a linha procurada está em outra página, a grade diz “No results for this selection. The query or the current filter returned no rows.”
 - **Comportamento de referência:**
@@ -239,6 +253,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N015 — Trocar de result tab perde a seleção e herda o scroll do outro tab
 - **Prioridade:** Média
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Grade / result tabs
 - **Comportamento atual:** Um único `ResultGrid` atende todos os result tabs. `set_page` limpa a seleção a cada troca. O `UniformListScrollHandle` é o mesmo para todos, então o deslocamento do tab anterior passa para o próximo.
 - **Comportamento de referência:** Em B, cada result tab é uma instância própria do editor de dados. Nas outras duas ferramentas, não documentado.
@@ -251,6 +266,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N016 — Messages não é um log: o desfecho de um DML some quando o tab é substituído
 - **Prioridade:** Média
 - **Aprovação:** Aprovada (3 de novembro de 2026)
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
 - **Funcionalidade:** Saída / mensagens
 - **Comportamento atual:** Messages lista apenas os result tabs existentes (status e SQL), sem horário nem duração. Quando `Ctrl+Enter` substitui um tab, ou `Ctrl+Alt+Enter` substitui todos, o “5 rows affected” do `UPDATE` anterior desaparece. O histórico também não guarda linhas afetadas.
 - **Comportamento de referência:**
@@ -658,22 +674,22 @@ Na coluna **Referência**, as letras indicam as ferramentas cuja documentação 
 
 | ID | Funcionalidade | Divergência | Impacto | Referência | Prioridade | Aprovação |
 | --- | --- | --- | --- | --- | --- | --- |
-| N001 | Execução | Atalho de executar cancela | DML longo cancelado por engano | A, C | Alta | Aprovada |
-| N002 | Resultados | “Run query again” roda o cursor | Pode executar outra instrução | P | Alta | Aprovada |
-| N003 | Explorer | Abrir tabela não mostra dados | Passo extra em toda inspeção | A, B, C | Alta | Aprovada |
-| N004 | Autenticação | Senha não lembrada não é pedida | Falha e edição de perfil a cada sessão | A, B | Alta | Aprovada |
-| N005 | Conexões | Salvar perfil derruba runs e resultados | Perda de trabalho em andamento | P | Alta | Aprovada |
-| N006 | Biblioteca/histórico | Abre na primeira conexão | SQL no banco errado | A, C | Alta | Aprovada |
-| N007 | Execução | Aba sem conexão roda o demo | Dados fictícios em uso real | P | Alta | Aprovada |
-| N008 | Transações | Transação invisível | Perda ou persistência ilusória | B, A~ | Alta | Aprovada |
-| N009 | SQL | Splitter ignora o dialeto | Rotinas fatiadas | B, A~ | Alta | Aprovada |
-| N010 | Formatação | Literais MySQL e caret | Significado e posição alterados | P | Alta | Aprovada |
-| N011 | Explorer | `LIMIT 100` fixo | Paginação inútil | A, C | Média | Aprovada |
-| N012 | Result tabs | Sobrescreve o tab “mantido” | Resultado perdido | A, B | Média | Aprovada |
-| N013 | Editor | Cursor fora executa a vizinha | Execução inesperada | A, B | Média | Aprovada |
-| N014 | Grade | Filtro só na página | “Nada encontrado” falso | B~, A~ | Média | Aprovada |
-| N015 | Grade | Seleção e scroll não são por tab | Comparação difícil | B | Média | Aprovada |
-| N016 | Mensagens | Sem log de execução | Desfecho de DML some | B, A~ | Média | Aprovada |
+| N001 | Execução | Atalho de executar cancela | DML longo cancelado por engano | A, C | Alta | Aprovada · Implementada |
+| N002 | Resultados | “Run query again” roda o cursor | Pode executar outra instrução | P | Alta | Aprovada · Implementada |
+| N003 | Explorer | Abrir tabela não mostra dados | Passo extra em toda inspeção | A, B, C | Alta | Aprovada · Implementada |
+| N004 | Autenticação | Senha não lembrada não é pedida | Falha e edição de perfil a cada sessão | A, B | Alta | Aprovada · Implementada |
+| N005 | Conexões | Salvar perfil derruba runs e resultados | Perda de trabalho em andamento | P | Alta | Aprovada · Implementada |
+| N006 | Biblioteca/histórico | Abre na primeira conexão | SQL no banco errado | A, C | Alta | Aprovada · Implementada |
+| N007 | Execução | Aba sem conexão roda o demo | Dados fictícios em uso real | P | Alta | Aprovada · Implementada |
+| N008 | Transações | Transação invisível | Perda ou persistência ilusória | B, A~ | Alta | Aprovada · Implementada |
+| N009 | SQL | Splitter ignora o dialeto | Rotinas fatiadas | B, A~ | Alta | Aprovada · Implementada |
+| N010 | Formatação | Literais MySQL e caret | Significado e posição alterados | P | Alta | Aprovada · Implementada |
+| N011 | Explorer | `LIMIT 100` fixo | Paginação inútil | A, C | Média | Aprovada · Implementada |
+| N012 | Result tabs | Sobrescreve o tab “mantido” | Resultado perdido | A, B | Média | Aprovada · Implementada |
+| N013 | Editor | Cursor fora executa a vizinha | Execução inesperada | A, B | Média | Aprovada · Implementada |
+| N014 | Grade | Filtro só na página | “Nada encontrado” falso | B~, A~ | Média | Aprovada · Implementada |
+| N015 | Grade | Seleção e scroll não são por tab | Comparação difícil | B | Média | Aprovada · Implementada |
+| N016 | Mensagens | Sem log de execução | Desfecho de DML some | B, A~ | Média | Aprovada · Implementada |
 | N017 | Contexto | Caminho estático ou inventado | Rótulo errado | A, B | Média | Pendente |
 | N018 | Formatação | Ignora seleção | Script inteiro alterado | A, B | Média | Pendente |
 | N019 | Formatação | Junta instruções | Script ilegível | A | Média | Pendente |
