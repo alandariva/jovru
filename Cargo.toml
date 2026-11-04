@@ -83,6 +83,9 @@ dirs = "7"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+# Export to XLSX (approved 2026-11-04). Constant memory mode writes each row
+# to a temporary file as it is added, so an export never holds the sheet.
+rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["constant_memory"] }
 
 [lints]
 workspace = true

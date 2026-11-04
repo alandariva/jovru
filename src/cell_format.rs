@@ -136,6 +136,34 @@ pub fn duration(ms: u64) -> String {
     crate::tr!("{0} h {1} min", minutes / 60, minutes % 60)
 }
 
+/// A file size for user-facing text, in the scale that reads best: bytes,
+/// then KB, MB and GB (powers of 1,024), with one decimal from MB on in the
+/// UI language's decimal separator. Truncated, never rounded up.
+pub fn size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes < KB {
+        return crate::tr!("{0} B", bytes);
+    }
+    if bytes < MB {
+        return crate::tr!("{0} KB", bytes / KB);
+    }
+    let (unit, scale) = if bytes < GB { (MB, "MB") } else { (GB, "GB") };
+    let separator = if crate::i18n::locale().starts_with("pt") {
+        ','
+    } else {
+        '.'
+    };
+    let tenths = bytes / (unit / 10);
+    let value = format!("{}{separator}{}", tenths / 10, tenths % 10);
+    if scale == "MB" {
+        crate::tr!("{0} MB", value)
+    } else {
+        crate::tr!("{0} GB", value)
+    }
+}
+
 pub fn number_pt_br(value: &str) -> String {
     let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
     let mut parts = unsigned.split('.');
@@ -426,6 +454,16 @@ mod tests {
             result_csv(&result),
             "\"id\";\"no\"\"te\"\n\"1\";\n\"2\";\"a;\"\"b\"\"\nc\""
         );
+    }
+
+    #[test]
+    fn sizes_read_in_their_own_scale() {
+        assert_eq!(size(0), "0 B");
+        assert_eq!(size(1_023), "1023 B");
+        assert_eq!(size(1_536), "1 KB");
+        assert_eq!(size(13_002_342), "12.4 MB");
+        assert_eq!(size(1024 * 1024 - 1), "1023 KB");
+        assert_eq!(size(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
     }
 
     #[test]

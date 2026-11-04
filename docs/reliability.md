@@ -15,6 +15,7 @@
 | Corrupted metadata cache | The cache is set aside and recreated; the user is told to refresh | The application failing to start |
 | OS vault unavailable | The password is used for this session only; the UI says why | Falling back to a file |
 | A saved connection, the font size or the last session's tabs cannot be read at start | That item is left out or takes its default, and the explorer says which | Hiding the other connections or the restored tabs |
+| An export fails or is cancelled (disk full, no permission, the server, the user) | The export bar says why; the temporary file is removed and the chosen file keeps what it had; the session comes back to the tab unless it was lost | A half-written file, a replaced file, or a session left out |
 
 ## Mechanisms
 
@@ -65,6 +66,8 @@
 | Databricks classic context destroy | 5 s, including recovery after an unconfirmed cancel |
 | Databricks CLI token reuse | At most 5 min or 30 s before reported expiry; shared by auth identity, one coordinated forced refresh on 401 |
 | Databricks CLI (token resolution) | 60 s |
+| Export: each part read from the session | `ExecutionOptions.timeout` of the tab, as any page |
+| Export: creating, writing one part (about 16 MB) or finishing the file | 60 s (`backend::FILE_TIMEOUT`), so a network share that stops answering fails the export |
 
 A new network operation gets an explicit timeout and a row in this table.
 

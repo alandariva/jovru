@@ -5,7 +5,7 @@ use gpui_kit::*;
 use jykre::{performance as metrics, tr};
 use serde_json::json;
 use std::{
-    rc::Rc,
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,13 +16,13 @@ struct PerformanceView {
 
 impl PerformanceView {
     fn new(cx: &mut Context<Self>) -> Self {
-        let grid = cx.new(|cx| ResultGrid::new(Rc::default(), false, cx));
+        let grid = cx.new(|cx| ResultGrid::new(Arc::default(), false, cx));
         cx.spawn(async move |weak, cx| {
             let mut results = Vec::new();
             for rows in [1000, 100_000] {
                 let data = cx.background_executor().spawn(async move { metrics::fixture(rows) }).await;
                 if weak.update(cx, |view, cx| {
-                    view.grid.update(cx, |grid, cx| grid.set_page(Rc::new(data), false, 0, None, cx));
+                    view.grid.update(cx, |grid, cx| grid.set_page(Arc::new(data), false, 0, None, cx));
                     cx.notify();
                 }).is_err() { return; }
                 cx.background_executor().timer(Duration::from_secs(2)).await;

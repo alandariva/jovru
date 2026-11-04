@@ -670,6 +670,91 @@ pub fn explain(
     Ok(format!("EXPLAIN {body}"))
 }
 
+/// Whether `sql` is one statement that only reads: it starts as a query
+/// (`SELECT`, `WITH`, `VALUES`, `TABLE`, `SHOW`, `DESCRIBE`, `DESC` or
+/// `EXPLAIN`) and no word of its code writes, locks or runs something else
+/// (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `INTO`, `FOR UPDATE`, `CALL`,
+/// `ANALYZE`, ...). Words are read by the dialect's tokens, so a string or a
+/// comment holding `DELETE` does not count; a name such as a column called
+/// `update` does, and the statement is refused: the answer errs on the side
+/// of not running. A MySQL executable comment (`/*! … */`) is code, so it
+/// refuses too. Functions with side effects (`nextval`) cannot be told
+/// apart, which is why running a statement again for an export also asks
+/// the user.
+pub fn reads_only(sql: &str, dialect: Option<SqlDialect>) -> bool {
+    const STARTS: &[&str] = &[
+        "SELECT", "WITH", "VALUES", "TABLE", "SHOW", "DESCRIBE", "DESC", "EXPLAIN",
+    ];
+    const WRITES: &[&str] = &[
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "MERGE",
+        "UPSERT",
+        "REPLACE",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "TRUNCATE",
+        "RENAME",
+        "COMMENT",
+        "GRANT",
+        "REVOKE",
+        "CALL",
+        "EXEC",
+        "EXECUTE",
+        "DO",
+        "COPY",
+        "INTO",
+        "LOCK",
+        "SHARE",
+        "ANALYZE",
+        "ANALYSE",
+        "VACUUM",
+        "OPTIMIZE",
+        "REFRESH",
+        "CLUSTER",
+        "REINDEX",
+        "SET",
+        "RESET",
+        "BEGIN",
+        "START",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT",
+        "PREPARE",
+        "DEALLOCATE",
+        "HANDLER",
+        "LOAD",
+        "NOTIFY",
+        "LISTEN",
+        "USE",
+    ];
+    if statements(sql, dialect).len() != 1 {
+        return false;
+    }
+    let mut first = true;
+    for token in tokens(sql, dialect) {
+        match token.1 {
+            TokenKind::Comment => continue,
+            TokenKind::Executable => return false,
+            _ => {}
+        }
+        let word = word(sql, &token);
+        if first {
+            first = false;
+            if !word.as_deref().is_some_and(|word| STARTS.contains(&word)) {
+                return false;
+            }
+            continue;
+        }
+        if word.as_deref().is_some_and(|word| WRITES.contains(&word)) {
+            return false;
+        }
+    }
+    !first
+}
+
 /// Where byte `offset` of `before` is in `after`, when the two differ only
 /// in whitespace and letter case (as [`format`] guarantees): the position
 /// after the same number of non-whitespace characters. Used to keep the
@@ -783,6 +868,42 @@ mod tests {
             normalized_statements("SELECT 'a  b'\n  FROM t;", None),
             normalized_statements("SELECT 'a  b' FROM    t;", None)
         );
+    }
+
+    #[test]
+    fn only_a_single_query_that_writes_nothing_reads_only() {
+        use super::reads_only;
+        for sql in [
+            "SELECT * FROM t WHERE note = 'DELETE' -- update later",
+            "  /* insert? */ with x as (select 1) select * from x;",
+            "VALUES (1), (2)",
+            "SHOW TABLES",
+            "EXPLAIN SELECT 1",
+            "SELECT nextval('s')",
+        ] {
+            assert!(reads_only(sql, POSTGRES), "{sql}");
+        }
+        for sql in [
+            "WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone",
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT * FROM t FOR SHARE",
+            "SELECT * INTO copy_of_t FROM t",
+            "EXPLAIN ANALYZE SELECT 1",
+            "UPDATE t SET a = 1",
+            "SELECT 1; DELETE FROM t",
+            "CALL refresh()",
+            // A column named like a keyword errs on the side of refusing.
+            "SELECT update FROM t",
+            "",
+            "-- only a comment",
+        ] {
+            assert!(!reads_only(sql, POSTGRES), "{sql}");
+        }
+        assert!(!reads_only("SELECT 1 /*! , (DELETE FROM t) */", MYSQL));
+        assert!(!reads_only("SELECT * FROM t INTO OUTFILE '/tmp/x'", MYSQL));
+        assert!(!reads_only("SELECT * FROM t LOCK IN SHARE MODE", MYSQL));
+        assert!(reads_only("SELECT `delete` FROM t", MYSQL));
+        assert!(reads_only("SELECT * FROM `cat`.`sch`.`t`", DATABRICKS));
     }
 
     #[test]

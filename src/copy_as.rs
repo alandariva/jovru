@@ -106,8 +106,13 @@ pub fn copy_as(format: CopyFormat, block: &Block, style: &SqlStyle) -> String {
     }
 }
 
-/// A value as a SQL literal.
-fn literal(value: Option<&str>, family: ValueFamily, dialect: Option<SqlDialect>) -> String {
+/// A value as a SQL literal. Shared with [`crate::export`], so a copy and an
+/// export write the same literal.
+pub(crate) fn literal(
+    value: Option<&str>,
+    family: ValueFamily,
+    dialect: Option<SqlDialect>,
+) -> String {
     let Some(value) = value else {
         return "NULL".into();
     };
@@ -184,14 +189,15 @@ fn json_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
 }
 
-fn json(block: &Block) -> String {
-    // Repeated names (`a.id`, `b.id`) get a suffix, so no key hides another.
+/// The JSON keys of the columns `names`, already quoted. Repeated names
+/// (`a.id`, `b.id`) get a suffix, so no key hides another. Shared with
+/// [`crate::export`].
+pub(crate) fn json_keys<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     let mut used = HashSet::new();
-    let keys: Vec<String> = block
-        .names
-        .iter()
+    names
+        .into_iter()
         .map(|name| {
-            let mut key = (*name).to_owned();
+            let mut key = name.to_owned();
             let mut copy = 1;
             while !used.insert(key.clone()) {
                 copy += 1;
@@ -199,7 +205,27 @@ fn json(block: &Block) -> String {
             }
             json_string(&key)
         })
-        .collect();
+        .collect()
+}
+
+/// A value as JSON: a number of a number column as written when it is a
+/// valid JSON number, a boolean as `true`/`false`, NULL as `null`, anything
+/// else as a string. Shared with [`crate::export`].
+pub(crate) fn json_value(value: Option<&str>, family: ValueFamily) -> String {
+    match (value, family) {
+        (None, _) => "null".to_owned(),
+        (Some(value), ValueFamily::Number) if json_number(value) => value.to_owned(),
+        (Some(value), ValueFamily::Boolean) => match value.to_ascii_lowercase().as_str() {
+            "t" | "true" | "1" => "true".into(),
+            "f" | "false" | "0" => "false".into(),
+            _ => json_string(value),
+        },
+        (Some(value), _) => json_string(value),
+    }
+}
+
+fn json(block: &Block) -> String {
+    let keys = json_keys(block.names.iter().copied());
     let objects: Vec<String> = block
         .rows
         .iter()
@@ -208,23 +234,7 @@ fn json(block: &Block) -> String {
                 .iter()
                 .zip(&block.families)
                 .zip(&keys)
-                .map(|((value, family), key)| {
-                    let value = match (value, family) {
-                        (None, _) => "null".to_owned(),
-                        (Some(value), ValueFamily::Number) if json_number(value) => {
-                            (*value).to_owned()
-                        }
-                        (Some(value), ValueFamily::Boolean) => {
-                            match value.to_ascii_lowercase().as_str() {
-                                "t" | "true" | "1" => "true".into(),
-                                "f" | "false" | "0" => "false".into(),
-                                _ => json_string(value),
-                            }
-                        }
-                        (Some(value), _) => json_string(value),
-                    };
-                    format!("{key}: {value}")
-                })
+                .map(|((value, family), key)| format!("{key}: {}", json_value(*value, *family)))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("  {{{fields}}}")
@@ -237,14 +247,27 @@ fn json(block: &Block) -> String {
     }
 }
 
+/// A value inside a Markdown table cell: `\` and `|` escaped, line breaks
+/// as `<br>`. Shared with [`crate::export`].
+pub(crate) fn markdown_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace("\r\n", "<br>")
+        .replace(['\n', '\r'], "<br>")
+}
+
+/// The alignment row's cell for a column: numbers to the right.
+pub(crate) fn markdown_alignment(family: ValueFamily) -> &'static str {
+    if family == ValueFamily::Number {
+        "---:"
+    } else {
+        "---"
+    }
+}
+
 fn markdown(block: &Block) -> String {
-    let cell = |value: &str| {
-        value
-            .replace('\\', "\\\\")
-            .replace('|', "\\|")
-            .replace("\r\n", "<br>")
-            .replace(['\n', '\r'], "<br>")
-    };
+    let cell = markdown_cell;
     let mut lines = vec![
         format!(
             "| {} |",
@@ -260,11 +283,7 @@ fn markdown(block: &Block) -> String {
             block
                 .families
                 .iter()
-                .map(|family| if *family == ValueFamily::Number {
-                    "---:"
-                } else {
-                    "---"
-                })
+                .map(|family| markdown_alignment(*family))
                 .collect::<Vec<_>>()
                 .join(" | ")
         ),

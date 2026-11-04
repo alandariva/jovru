@@ -14,7 +14,8 @@ is visible, and the keyboard reaches everything.
 │◷ │   ▾ database │ ┌──────────────────────────────────────────────────┐ │
 │⚙ │     ▸ schema │ │ SQL editor, status per statement in the gutter   │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
-│  │              │ Results · Chart · Messages     pt-BR · filter · CSV  │
+│  │              │ Results · Chart · Messages  pt-BR · filter · CSV · ⤓ │
+│  │              │ Export bar (when open): format, options, progress    │
 │  │              │ ┌──────────────────────────────────────────────────┐ │
 │  │              │ │ Result grid                                      │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
@@ -105,6 +106,7 @@ Each state has one consistent representation.
 | Saved queries in the palette | **Ctrl+Shift+P** | Saved queries that match the text (name, tags, SQL, connection; `#tag` filters) are listed above the tables and views; Enter or a click opens the one highlighted. A search of tags alone lists no tables |
 | History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
 | Connection test | Connection dialog footer | **Test connection** turns into **Cancel test** while it runs and shows the elapsed time after 2 s |
+| Export of a result | The export bar, under the result toolbar | Its options and where the rows come from (the rows held, the rest from the server, or a statement run again); while writing, a spinner, the rows and bytes written (of the total when known), the elapsed time after 2 s and **Cancel export**; at the end, how many rows went to which file, its size and time, with **Show in folder**, or why nothing was written. The toolbar's export button stays highlighted while the bar is open ([Results](results.md#export)) |
 | Plan of a statement | **Explain** in the editor toolbar | The dialect's `EXPLAIN` of the statement at the cursor (or of the one selected) runs into a new result tab; the statement itself does not run. Only queries and data changes are explained |
 
 Rules:
@@ -164,6 +166,11 @@ Rules:
   that has it open keeps its SQL, which closing then asks about. The
   editor's save button only saves or updates.
 - Copying a selection or a page estimated above 50 MiB asks first.
+- Exporting a result the tab no longer holds whole runs its statement again
+  only after asking (**Run and export**), and only for a statement that
+  only reads. Closing a tab while it exports asks first: closing cancels the
+  export, which leaves no file. An export that reads from the session counts
+  as a running query when the tab is moved or its connection saved.
 - On a connection marked **Production**, running a statement that changes
   every row of a table (`UPDATE` or `DELETE` without a `WHERE` of its own) or
   drops data (`DROP`, `TRUNCATE`, an `ALTER` that drops something) asks
@@ -178,6 +185,7 @@ Rules:
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
+| Open or close the export bar of the result on screen | `Ctrl Shift E` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |
 | New query on the active connection | `Ctrl N` |
@@ -254,4 +262,4 @@ interactive elements expose a role, a label and their state. Details are in
 | --- | --- |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Elapsed time and cancel for work over 2 s | **Format** runs off the UI thread and the editor stays usable, but the first format per dialect (building its grammar) or a long script can take seconds, and it cannot be cancelled; a result for SQL edited meanwhile is dropped |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab and moving to the next or previous tab are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, moving to the next or previous tab and the export bar are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
