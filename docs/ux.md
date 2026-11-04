@@ -11,8 +11,9 @@ is visible, and the keyboard reaches everything.
 ├──┬──────────────┬──────────────────────────────────────────────────────┤
 │▣ │ Explorer     │ Tab groups, one per connection: [PostgreSQL · Local] │
 │☆ │ ▾ connection │ Toolbar: Run · Explain · Format        save · panel  │
-│◷ │   ▾ database │ ┌──────────────────────────────────────────────────┐ │
-│⚙ │     ▸ schema │ │ SQL editor, status per statement in the gutter   │ │
+│▤ │   ▾ database │ ┌──────────────────────────────────────────────────┐ │
+│◷ │     ▸ schema │ │ SQL editor, status per statement in the gutter   │ │
+│⚙ │              │ │                                                  │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
 │  │              │ Results · Chart · Messages     pt-BR · filter · CSV  │
 │  │              │ ┌──────────────────────────────────────────────────┐ │
@@ -24,6 +25,21 @@ is visible, and the keyboard reaches everything.
 │ Status bar: workspace · connections · local data · version             │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+The rail holds, from the top: Explorer, Saved queries, Reports, History and,
+at the bottom, Preferences.
+
+A **report** ([ADR-0024](adr/0024-reports.md)) opens in a tab of its own in
+its connection's group: a toolbar (title, connection, **Edit**, save, copy,
+**Export for printing or PDF…**, **Run**), the definition while editing
+(description, SQL, one row per `:name` parameter with its label, type,
+default and whether it is required), the parameter form, the chart settings
+(none, bars, lines or pie; the column that labels it and the number columns
+it shows), the chart, the result grid and a footer with the rows, the time
+and **Show the SQL that ran**. A report is created with **+** in the Reports
+section or with **Save as report** in a query tab's toolbar, which takes the
+selection, the statement at the cursor or the whole script; nothing is
+stored until **Save report**. Report tabs are not reopened after a restart.
 
 Dividers are adjustable with the mouse and the arrow keys. The assistant panel (simulated today)
 opens to the right of the query area, and says at its top that it is pending
@@ -102,6 +118,10 @@ Each state has one consistent representation.
 | Sorted column | Grid header | An arrow after the name; a click on a header sorts the page's rows by that column's values, ascending, then descending, then in the server's order. NULLs come last and numbers compare exactly |
 | Saved query | Editor toolbar, library | The bookmark is filled while the tab holds the saved version. It saves or updates, never removes; a saved query opens linked to its tab (an open one is shown again), and is removed from the library list, after a confirmation |
 | History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
+| Saved report | Report toolbar, Reports list | The save icon is a filled bookmark while the tab holds the stored definition; the list shows each report's title, connection and the start of its SQL, with its chart type as icon; a search filters by title, description, connection or SQL |
+| Report parameters | The report's form | One field per `:name` of the SQL, labelled as the definition says (`*` when required) with a placeholder for its type; a missing or malformed value is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)) |
+| Run of a report | Report toolbar, footer, tab bar | **Run** turns into **Stop** while it runs; the tab shows the run's outcome like a query tab; the footer shows the rows, the time and "Stopped at the row limit" when more rows exist |
+| Report chart | Above the report's grid | Bars (one small chart per value column), lines (one per value column on a shared scale) or a pie; at most 50 bars, 1,000 points or 10 slices plus "Other", and a line says how many rows it shows when it leaves some out. A chart that cannot be drawn says why (a column missing, a column without numbers) |
 | Connection test | Connection dialog footer | **Test connection** turns into **Cancel test** while it runs and shows the elapsed time after 2 s |
 | Plan of a statement | **Explain** in the editor toolbar | The dialect's `EXPLAIN` of the statement at the cursor (or of the one selected) runs into a new result tab; the statement itself does not run. Only queries and data changes are explained |
 
@@ -161,7 +181,15 @@ Rules:
 - Removing a saved query (its button in the library list) asks first; a tab
   that has it open keeps its SQL, which closing then asks about. The
   editor's save button only saves or updates.
-- Copying a selection or a page estimated above 50 MiB asks first.
+- Copying a selection or a page estimated above 50 MiB asks first. So does
+  copying a report's result.
+- Closing a report tab asks first when it is running (closing stops it) or
+  its definition is not saved (closing loses it). Removing a saved report
+  (its button in the Reports list) asks first; a tab that has it open keeps
+  it as an unsaved draft.
+- **Export for printing or PDF…** asks where to save the document; nothing is
+  written until a path is chosen, and the file opens in the browser, which
+  prints it or saves it as PDF.
 - On a connection marked **Production**, running a statement that changes
   every row of a table (`UPDATE` or `DELETE` without a `WHERE` of its own) or
   drops data (`DROP`, `TRUNCATE`, an `ALTER` that drops something) asks
@@ -175,6 +203,7 @@ Rules:
 | Run the selection, or the statement at the cursor, in place of the result tab on screen (asks before cancelling while a run is active) | `Ctrl Enter` |
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
+| Run the report on screen (all of its SQL), from anywhere in its tab | `Ctrl Enter` (or `Enter` in a parameter field) |
 | Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |

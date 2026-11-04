@@ -236,6 +236,25 @@ alignment only; the value itself is never converted.
   are built) ask for confirmation, and copying runs off the UI thread
   when it would exceed a frame.
 
+## Reports
+
+A report ([ADR-0024](adr/0024-reports.md)) shows the last result of its SQL
+up to the connection's row limit, without paging, in the same grid.
+
+- Its chart (`jykre::reports::chart`) finds its columns by name and draws at
+  most 50 bars, 1,000 line points or 10 pie slices plus an "Other" slice that
+  sums the rest. Numbers become floating point only for the drawing: the
+  tooltips, the table and the print document keep the database's text, and
+  the "Other" slice is summed exactly (`jykre::decimal::Sum`).
+- **Copy as CSV** and **Copy for a spreadsheet** copy the result with the
+  rules above, asking first above 50 MiB.
+- **Export for printing or PDF…** (`jykre::reports::export`) writes one HTML
+  file where the user chooses: the title, description, parameters, chart (as
+  SVG) and table, with every text escaped, nothing loaded from elsewhere and
+  print styles (A4, the header repeated on each page). It is the only place a
+  result reaches the disk, and only at the user's request
+  ([Persistence](persistence.md)).
+
 ## Footer
 
 The footer is the single place that reports how the last run ended: rows,

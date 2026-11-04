@@ -19,6 +19,7 @@ own, across areas.
 | ID | Severity | Area | Debt | Status |
 | --- | --- | --- | --- | --- |
 | TD-001 | Critical | Transactions, drivers | The transaction state is not read from the database protocol, and the probes that replace it can change what the session's statements see | Mitigated; fix open |
+| TD-002 | Low | Reports, PostgreSQL driver | Binding a report's parameters runs a `SELECT set_config(...)` before the statement, which can take the snapshot of a transaction the report opened | Open |
 
 ## TD-001 — Transaction state is not read from the protocol
 
@@ -102,3 +103,34 @@ What the application does instead, and why each falls short:
   what the user's next statement sees; a live test covers `BEGIN` followed
   by `SET TRANSACTION ISOLATION LEVEL` in another run.
 - Inference remains only for drivers that cannot report the state.
+
+## TD-002 — Binding report parameters in PostgreSQL runs a query first
+
+- **Severity:** Low
+- **Area:** Reports; `jykre-driver-postgres`
+- **Registered:** 2026-11-04
+- **Status:** Open
+
+### Problem
+
+A report statement with parameters is preceded, in the same session, by
+`SELECT set_config(name, value, false) FROM unnest($1, $2)`, which binds the
+values ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)). In a
+transaction that the report's SQL opened (`BEGIN` before the statement) and
+that has no snapshot yet, that query takes the snapshot just before the
+statement would. It runs only for statements that carry parameters, which
+are queries that take a snapshot anyway, so what they read does not change;
+but a parameterized statement that must come first in a transaction cannot
+have parameters. The values also stay in the report tab's session until its
+next run.
+
+### Way out
+
+Bind the values with the extended protocol of the statement itself once
+results can be decoded in binary, or with a protocol-level setting that
+takes no snapshot.
+
+### Done when
+
+- Binding a report's parameters adds no query that takes a snapshot.
+

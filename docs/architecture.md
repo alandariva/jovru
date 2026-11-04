@@ -108,7 +108,7 @@ checked in review.
 ├── src/
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
-│   │                       # drivers, grouped_tabs, i18n, query, sql (jykre-sql)
+│   │                       # drivers, grouped_tabs, i18n, query, reports, sql (jykre-sql)
 │   └── app/                # the application's GPUI views; demo/ holds the demo data,
 │                           # sql_editor/ the editor's language features adapter
 ├── crates/
@@ -235,6 +235,26 @@ sequenceDiagram
 - Cancelling fires the run's `CancellationToken`; the driver interrupts the
   server-side work and keeps the session when it can bring it back to a known
   state, or closes it.
+
+### Run a report
+
+1. `ReportView` (`src/app/report_view.rs`) reads the form and builds one
+   `QueryRequest` per statement with `jykre::reports::params::requests`. The
+   library finds the `:name` markers with `jykre_sql::named_markers`, checks
+   each value against its kind and puts the parameters a statement uses in
+   its request, with the byte ranges of their markers. The values never go
+   into the SQL text ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)).
+2. As in a query tab, a missing password is asked for first, and a run on a
+   production connection with risky statements is confirmed first.
+3. `backend::query` runs the requests on the report tab's own session. Each
+   driver binds the values (PostgreSQL with `set_config`, MySQL with a
+   prepared `SET`, Databricks warehouses with the Statement API's
+   `parameters`) and replaces each marker with a fixed reference to its
+   value (`QueryRequest::with_references`). Classic Databricks clusters
+   refuse parameters.
+4. The last statement's result goes to the report's `ResultGrid`, and
+   `jykre::reports::chart::derive` computes the chart's data once per result
+   or chart change; the `ReportChart` entity draws it.
 
 ### Refresh metadata
 

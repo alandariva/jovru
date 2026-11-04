@@ -92,6 +92,14 @@ Demo connections and results are labelled as such and never reach a server.
   spreadsheets; the context menu also copies it with headers. **pt-BR
   numbers** groups digits without converting decimals or integers to floating
   point. CSV copy keeps the original values regardless of presentation.
+- **Reports** (a section of the rail) turn saved SQL into a report: a title,
+  a description, `:name` parameters filled in before each run (text, number,
+  true or false, date, date and time; bound by the database driver, never
+  written into the SQL), the result grid and a bar, line or pie chart. Create
+  one with **+** or with **Save as report** in a query tab. Copy the result
+  as CSV or for a spreadsheet, or export a print document (HTML) that the
+  browser prints or saves as PDF. Parameters need a SQL warehouse on
+  Databricks.
 - `Ctrl B` toggles the explorer and `Ctrl Shift B` the assistant. Dividers and
   the SQL font size are adjustable.
 
@@ -120,7 +128,8 @@ the demo data are not translatable yet.
 
 | Data | Location |
 | --- | --- |
-| Connections, preferences | `config.db` in the data folder |
+| Connections, preferences, report definitions | `config.db` in the data folder |
+| A report's print document | Only where you save it with **Export for printing or PDF…** |
 | Metadata cache | `metadata/<connection-id>.db` in the data folder |
 | Copies of `config.db` (the five most recent, one per start) | `backups/` in the data folder; offered for restore when `config.db` cannot be opened |
 | Passwords (only with **Remember password**) | OS vault, service `JykreStudio` |
