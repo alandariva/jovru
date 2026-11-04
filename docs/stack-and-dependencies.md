@@ -16,7 +16,8 @@
 | Logs | `tracing`, `tracing-subscriber` (`env-filter`, `json`), `tracing-appender` | [ADR-0009](adr/0009-structured-logging-and-timings.md). Used by the `jykre` crate |
 | Editor language features | `lsp-types` 0.97 with `proposed`, the version `gpui-kit` uses | The SQL editor's completion, hover and go to definition implement `gpui-component`'s providers, whose signatures take these types. Approved 2026-11-03; upgrade with the GPUI family |
 | SQL formatting | `sqruff-lib` 0.44 (Apache-2.0) | **Format** in the editor, by the connection's dialect (`jykre_sql_language::format`, behind its default `sqruff` feature), with layout and keyword capitalisation rules only. Approved 2026-11-04 (N010). Declared only by `jykre-sql-language` ([ADR-0020](adr/0020-editor-language-features-in-their-own-crates.md)). It builds all of sqruff's dialects: `sqruff-lib` asks for `sqruff-lib-dialects` with its default features, which cannot be turned off from here. It also brings `serde_yaml`/`unsafe-libyaml`, declared by `sqruff-lib-dialects` but not used by its code |
-| Platform | `dirs` (data folder), `sys-locale` (UI language) | |
+| Excel export | `rust_xlsxwriter` 0.102 (MIT OR Apache-2.0) without default features, with `constant_memory` | Writes XLSX for **Export** ([Results](results.md#export)), one row at a time to temporary files, so an export never holds the sheet. Approved 2026-11-04. It brings `zip` (with `zopfli` for deflate), `typed-path`, `tempfile` and, on Unix, `nix`. Used only by `jykre::export` |
+| Platform | `dirs` (data folder, the export's default folder), `sys-locale` (UI language) | |
 
 Development tools: `criterion` 0.8 without default features (benchmarks,
 [ADR-0010](adr/0010-benchmarks-with-criterion.md)), `cargo xtask` (gate and catalogs), `cargo-deny` (audit),

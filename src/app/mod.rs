@@ -133,7 +133,10 @@ actions!(
         /// Ctrl+Tab or Ctrl+Page Down: the next query tab, from anywhere.
         NextTab,
         /// Ctrl+Shift+Tab or Ctrl+Page Up: the previous query tab.
-        PreviousTab
+        PreviousTab,
+        /// Ctrl+Shift+E: opens or closes the export bar of the result on
+        /// screen.
+        ExportResult
     ]
 );
 
@@ -1058,15 +1061,16 @@ impl AppView {
     /// cancels it), a transaction is open (closing rolls it back) or its SQL
     /// is not saved (closing loses it).
     fn request_close(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let (busy, unsaved, transaction) =
+        let (busy, unsaved, transaction, exporting) =
             self.panels
                 .get(&tab)
-                .map_or((false, false, false), |panel| {
+                .map_or((false, false, false, false), |panel| {
                     let panel = panel.read(cx);
                     (
                         panel.is_busy(),
                         panel.has_unsaved_sql(),
                         panel.has_open_transaction(),
+                        panel.is_exporting(),
                     )
                 });
         let tabs = self.tabs.downgrade();
@@ -1078,6 +1082,36 @@ impl AppView {
                 }
             });
         };
+        if exporting {
+            let description = if unsaved {
+                tr!(
+                    "Closing the tab cancels the export, which leaves no file, and loses its SQL, which is not in the saved queries."
+                )
+            } else {
+                tr!("Closing the tab cancels the export, which leaves no file.")
+            };
+            let description = if transaction {
+                format!(
+                    "{description} {}",
+                    tr!("The open transaction is rolled back.")
+                )
+            } else {
+                description.to_owned()
+            };
+            confirm(
+                window,
+                cx,
+                Confirmation {
+                    title: tr!("An export is running in this tab.").to_string(),
+                    description: description.to_string(),
+                    ok: tr!("Close and cancel"),
+                    cancel: tr!("Keep the tab"),
+                    focus: ConfirmFocus::Dialog,
+                },
+                move |window, cx| close(Some(window), cx),
+            );
+            return;
+        }
         if transaction && !busy {
             let description = if unsaved {
                 tr!(
@@ -2252,6 +2286,20 @@ impl Render for AppView {
                     this.request_close(tab, window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ExportResult, _, cx| {
+                if this.connection_open || this.command_open || this.password_prompt.is_some() {
+                    return;
+                }
+                if let Some(panel) = this
+                    .tabs
+                    .read(cx)
+                    .active_tab()
+                    .and_then(|tab| this.panels.get(&tab))
+                    .cloned()
+                {
+                    panel.update(cx, Workspace::toggle_export);
+                }
+            }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     if this.password_prompt.is_some() {
@@ -2464,6 +2512,8 @@ pub fn run() {
             KeyBinding::new("ctrl-pagedown", NextTab, Some(&editor)),
             KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(&editor)),
             KeyBinding::new("ctrl-pageup", PreviousTab, Some(&editor)),
+            KeyBinding::new("ctrl-shift-e", ExportResult, None),
+            KeyBinding::new("ctrl-shift-e", ExportResult, Some(&editor)),
         ]);
         Theme::change(ThemeMode::Dark, None, cx);
         Theme::update(cx, |theme| {

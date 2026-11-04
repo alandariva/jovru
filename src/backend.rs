@@ -16,6 +16,12 @@ use std::{
 };
 use tracing::Instrument as _;
 
+mod exporting;
+pub use exporting::{
+    ExportProgress, ExportRead, ExportRequest, ExportRun, Exported, FILE_TIMEOUT, export,
+    export_with,
+};
+
 /// How long a read from the local metadata cache is expected to take
 /// ([Performance](../docs/performance.md#budgets)).
 const CACHE_READ_BUDGET: Duration = Duration::from_millis(50);
@@ -1049,27 +1055,14 @@ async fn run_statements(
         run.session = session;
         return run;
     }
-    let kept = match session {
-        Some(mut session) => match session.ping().await {
-            Ok(()) if session.is_open() => Some(session),
-            _ => {
-                tracing::debug!("kept session no longer answers; opening another");
-                close_session(Some(session)).await;
-                run.reopened = true;
-                None
-            }
-        },
-        None => None,
-    };
-    let mut session = match kept {
-        Some(session) => session,
-        None => match driver.open_session(&input, cancel.clone()).await {
-            Ok(session) => session,
-            Err(error) => {
-                run.batch = Err(error);
-                return run;
-            }
-        },
+    let (session, reopened) = session_for_run(&*driver, &input, session, &cancel).await;
+    run.reopened = reopened;
+    let mut session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            run.batch = Err(error);
+            return run;
+        }
     };
     let mut results = Vec::new();
     let mut failure = None;
@@ -1133,6 +1126,29 @@ async fn run_statements(
         error: failure,
     });
     run
+}
+
+/// The tab's kept session when it still answers its ping, otherwise a new
+/// one; `true` when a kept session had to be replaced, so the caller tells
+/// the user that session state started over.
+async fn session_for_run(
+    driver: &dyn Driver,
+    input: &ResolvedConnection,
+    session: Option<Box<dyn Session>>,
+    cancel: &CancellationToken,
+) -> (DriverResult<Box<dyn Session>>, bool) {
+    let mut reopened = false;
+    if let Some(mut session) = session {
+        match session.ping().await {
+            Ok(()) if session.is_open() => return (Ok(session), false),
+            _ => {
+                tracing::debug!("kept session no longer answers; opening another");
+                close_session(Some(session)).await;
+                reopened = true;
+            }
+        }
+    }
+    (driver.open_session(input, cancel.clone()).await, reopened)
 }
 
 /// The page's data and the limit that ended it: the memory ceiling when the

@@ -25,7 +25,7 @@ use jykre::tr;
 use jykre_core::SqlDialect;
 use std::collections::HashMap;
 use std::time::Duration;
-use std::{ops::Range, rc::Rc};
+use std::{ops::Range, rc::Rc, sync::Arc};
 
 /// What the grid reports to the view that embeds it.
 pub enum ResultGridEvent {
@@ -145,7 +145,7 @@ const RECORD_WIDTH: f32 = 280.;
 const FIELD_WIDTH: f32 = 220.;
 
 pub struct ResultGrid {
-    result: Rc<ResultData>,
+    result: Arc<ResultData>,
     /// The result tab and page on screen, when it is a result tab's.
     shown: Option<(ResultId, usize)>,
     /// Where each other result tab was left, so switching back to it
@@ -230,7 +230,7 @@ impl ResultGrid {
         }
     }
 
-    pub fn new(result: Rc<ResultData>, sales: bool, cx: &mut Context<Self>) -> Self {
+    pub fn new(result: Arc<ResultData>, sales: bool, cx: &mut Context<Self>) -> Self {
         Self {
             result,
             shown: None,
@@ -280,13 +280,13 @@ impl ResultGrid {
     /// nothing selected.
     pub fn set_page(
         &mut self,
-        result: Rc<ResultData>,
+        result: Arc<ResultData>,
         sales: bool,
         first_row: usize,
         shown: Option<(ResultId, usize)>,
         cx: &mut Context<Self>,
     ) {
-        if Rc::ptr_eq(&self.result, &result)
+        if Arc::ptr_eq(&self.result, &result)
             && self.first_row == first_row
             && self.sales == sales
             && self.shown == shown
@@ -636,7 +636,7 @@ impl ResultGrid {
         let generation = self.summary_generation;
         // A weak handle: the task never keeps a result alive, so a released
         // result is still freed off the UI thread.
-        let result = Rc::downgrade(&self.result);
+        let result = Arc::downgrade(&self.result);
         let chunk = (CHUNK_CELLS / columns.len().max(1)).max(1);
         self.summary_task = Some(cx.spawn(async move |this, cx| {
             let mut sample = Sample::default();
@@ -724,7 +724,7 @@ impl ResultGrid {
             .get(column)
             .copied()
             .unwrap_or(ValueFamily::Text);
-        let result = Rc::downgrade(&self.result);
+        let result = Arc::downgrade(&self.result);
         self.column_task = Some(cx.spawn(async move |this, cx| {
             let mut sample = Sample::default();
             for rows in rows.chunks(CHUNK_CELLS) {

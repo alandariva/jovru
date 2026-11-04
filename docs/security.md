@@ -107,6 +107,26 @@ Values from databases, error messages from servers and metadata names are
 rendered as **text**. They are never interpreted as markup, file paths or
 commands.
 
+### Exported files
+
+- An export writes only to the file the user chose in the system's save
+  dialog. A table or tab name only suggests the file's name: characters a
+  file name cannot hold become `_`, names Windows reserves (`CON`, `NUL`,
+  `COM1`) get a `_` in front, and no folder comes from it
+  (`jykre::export::suggested_file_name`).
+- Values are written as the database returned them. Nothing is changed to
+  stop a spreadsheet from reading a value that starts with `=`, `+`, `-` or
+  `@` as a formula, since changing values would break
+  [golden rule 9](README.md#golden-rules) (approved 2026-11-04). Quotes in a
+  CSV do not stop a spreadsheet from evaluating such a value: a file exported
+  from data others wrote is as untrusted as that data when opened in one. In
+  XLSX every value is a string, a number or a boolean cell, never a formula.
+- Messages about the file never name its folder, which may hold the user's
+  name; logs record the format, rows, bytes and duration, never the path.
+- Temporary files (the export being written and Excel's constant-memory
+  rows) live next to the chosen file and are removed when the export ends,
+  fails or is cancelled.
+
 ## Dependencies
 
 `cargo deny --locked check` (in `cargo xtask check --full`, in CI and weekly)

@@ -66,7 +66,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), copies as SQL, JSON or Markdown (`copy_as`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view; use the editor's language features |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), copies as SQL, JSON or Markdown (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
@@ -235,6 +235,31 @@ sequenceDiagram
 - Cancelling fires the run's `CancellationToken`; the driver interrupts the
   server-side work and keeps the session when it can bring it back to a known
   state, or closes it.
+
+### Export a result
+
+1. The export bar (`src/app/workspace/export.rs`) asks the result tab where
+   its rows are (`result_tabs::ResultTab::export_source`): all held, held
+   then still open in the session, or partly gone. A partly gone result runs
+   its statement again only when `jykre::sql::reads_only` allows it and the
+   user confirms; otherwise only the rows held are written.
+2. The system's save dialog (`App::prompt_for_new_path`) picks the file. The
+   view hands `backend::export` the held pages (shared as
+   `Arc<ResultData>`, [ADR-0022](adr/0022-result-pages-shared-across-threads.md)),
+   and the tab's session when the rest is read from it or the statement runs
+   again; the session is leased as for a page read, so nothing else uses it
+   meanwhile.
+3. On the runtime, `jykre::export::ExportFile` creates a temporary file next
+   to the chosen one. Each held page, then each part read with
+   `Session::fetch` (about 16 MB, sized from the rows read so far), is
+   encoded row by row and written on the blocking pool, with progress sent
+   through a `watch` channel. A part that reached the memory ceiling fails
+   the export rather than leave rows out.
+4. When every row is written, the file is flushed, synced and renamed over
+   the chosen one. A failure or a cancellation drops the temporary file. The
+   session comes back to the tab, with its context and transaction state
+   when the result was read to its end; a rest read for the file is closed in
+   the tab.
 
 ### Refresh metadata
 

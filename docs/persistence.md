@@ -2,7 +2,9 @@
 
 Local data lives in SQLite files owned by `jykre-storage`
 ([ADR-0003](adr/0003-sqlite-for-local-storage.md)). Passwords are never stored
-here ([Security](security.md)); query results are never written to disk.
+here ([Security](security.md)). The application never writes query results
+to disk on its own: only an export the user asks for writes them, to the
+file the user chose ([Results](results.md#export)).
 
 ## Files
 
@@ -52,6 +54,14 @@ missing or out-of-range value reads as the default, 1,000), and
 `jykre::connection_appearance`). A missing value, or one naming a colour or
 environment this version does not know, reads as the driver's colour and no
 environment.
+
+`export.preferences` keeps the export bar's last choices
+(`jykre::export::ExportPreferences`): `{"format": "csv", "separator": ";",
+"quoting": "all", "header": true, "bom": false, "directory": "…"}`, the
+directory being the folder of the last exported file. It is read each time a
+tab opens its export bar and written when an export starts, the last write
+asked for winning across tabs. A missing or unknown value takes its default
+(CSV with `;`, every value quoted, headers, no BOM, the Downloads folder).
 
 `workspace.state` keeps the workspace between sessions
 (`jykre::workspace_state`): the open query tabs in order (title, connection

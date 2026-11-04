@@ -30,6 +30,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+mod export;
+use export::{ExportBar, ExportState};
+
 /// Key context of the SQL editor, for the run shortcuts.
 pub const SQL_EDITOR_CONTEXT: &str = "SqlEditor";
 
@@ -87,6 +90,8 @@ pub struct Workspace {
     next_lease: u64,
     /// The next page of a result is being read; runs wait for it.
     fetching: bool,
+    /// The export bar and the export it runs ([Results](../../docs/results.md#export)).
+    export: ExportBar,
     cancellation: CancellationToken,
     numbers_pt_br: bool,
     editor: Entity<EditorState>,
@@ -223,7 +228,7 @@ impl Workspace {
         let first = results
             .active()
             .and_then(ResultTab::current)
-            .map_or_else(|| Rc::new(ResultData::default()), |page| page.data.clone());
+            .map_or_else(|| Arc::new(ResultData::default()), |page| page.data.clone());
         let grid = cx.new(|cx| ResultGrid::new(first, sales, cx));
         // The grid notifies only itself; the workspace keeps the little it
         // shows: the selected count and notices.
@@ -282,6 +287,7 @@ impl Workspace {
             session_lease: None,
             next_lease: 0,
             fetching: false,
+            export: ExportBar::default(),
             cancellation: CancellationToken::new(),
             numbers_pt_br: false,
             editor,
@@ -549,7 +555,7 @@ impl Workspace {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let ticking = weak
                     .update(cx, |this, cx| {
-                        if this.run.is_active() {
+                        if this.run.is_active() || this.is_exporting() {
                             cx.notify();
                             true
                         } else {
@@ -773,19 +779,19 @@ impl Workspace {
                     page.first_row,
                     Some((tab.id, tab.page_number())),
                 ),
-                None => (Rc::new(ResultData::default()), false, 0, None),
+                None => (Arc::new(ResultData::default()), false, 0, None),
             },
-            None => (Rc::new(ResultData::default()), false, 0, None),
+            None => (Arc::new(ResultData::default()), false, 0, None),
         };
         let open: Vec<ResultId> = self.results.tabs().iter().map(|tab| tab.id).collect();
         self.grid.update(cx, |grid, cx| {
             grid.set_page(data, sales, first_row, shown, cx);
             grid.retain_places(&open);
         });
+        // Whoever holds a page last frees it; here, that is the runtime
+        // ([ADR-0022](../../docs/adr/0022-result-pages-shared-across-threads.md)).
         for page in self.results.take_dropped() {
-            if let Ok(page) = Rc::try_unwrap(page) {
-                backend::release(page);
-            }
+            backend::release(page);
         }
         cx.notify();
     }
@@ -854,7 +860,7 @@ impl Workspace {
             self.show_active(cx);
             return;
         }
-        if self.run.is_active() || self.fetching {
+        if self.run.is_active() || self.fetching || self.export_uses_session() {
             return;
         }
         let Some(tab) = self.results.active() else {
@@ -945,6 +951,16 @@ impl Workspace {
             self.notice = Some(Feedback::new(
                 Tone::Info,
                 tr!("Reading the next page. Run again when it arrives."),
+            ));
+            cx.notify();
+            return;
+        }
+        if self.export_uses_session() {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!(
+                    "An export is reading from the session. Wait for it, or cancel it in the export bar."
+                ),
             ));
             cx.notify();
             return;
@@ -2191,15 +2207,22 @@ impl Workspace {
                                     })),
                             )
                             .child(
+                                icon_button("copy-page-csv", I::Copy, tr!("Copy this page as CSV"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.copy_page_csv(false, window, cx)
+                                    })),
+                            )
+                            .child({
+                                let open = !matches!(self.export.state, ExportState::Closed);
                                 icon_button(
                                     "export-results",
                                     I::Download,
-                                    tr!("Copy this page as CSV"),
+                                    tr!("Export the result to a file (Ctrl+Shift+E)"),
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| this.copy_page_csv(false, window, cx),
-                                )),
-                            )
+                                .aria_selected(open)
+                                .when(open, |s| s.bg(rgb(HOVER)))
+                                .on_click(cx.listener(|this, _, _, cx| this.toggle_export(cx)))
+                            })
                             .child(
                                 icon_button(
                                     "refresh-results",
@@ -2220,6 +2243,7 @@ impl Workspace {
                         .when_some(self.filter_scope(), |s, scope| s.child(label(scope))),
                 )
             })
+            .when_some(self.export_bar(cx), |s, bar| s.child(bar))
             .child(
                 div()
                     .flex_1()
@@ -3139,9 +3163,10 @@ impl Workspace {
         self.run.state().tab_status()
     }
 
-    /// A statement or a page read is in progress.
+    /// A statement, a page read or an export that reads from the session is
+    /// in progress.
     pub fn is_busy(&self) -> bool {
-        self.run.is_active() || self.fetching
+        self.run.is_active() || self.fetching || self.export_uses_session()
     }
 
     /// Applies a saved connection's new name, password, row limit or
@@ -3267,6 +3292,11 @@ impl Workspace {
     /// when it comes back.
     fn abandon_run(&mut self) {
         self.cancellation.cancel();
+        // An export that has the session out stops with it; one that only
+        // writes the rows held goes on.
+        if self.export_uses_session() {
+            self.export.cancel();
+        }
         self.run.reset();
         self.results.cancel_running();
         self.session_lease = None;
@@ -3738,6 +3768,7 @@ impl Render for Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         self.cancellation.cancel();
+        self.export.cancel();
         if let Some(session) = self.session.take() {
             backend::close_in_background(session);
         }
