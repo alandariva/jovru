@@ -146,9 +146,14 @@ alignment only; the value itself is never converted.
 
 - A row-number column, then one column per result column.
 - Selection: click a cell; Shift+click or Shift+arrows extend a rectangular
-  block; click a row number to select the row, Shift+click another row number
-  to extend; `Ctrl A` selects everything visible; `Esc` clears. Arrows move the
-  focused cell and scroll it into view. `Home` and `End` go to the first and
+  block; pressing a cell and dragging selects the block up to the cell under
+  the pointer, and dragging past an edge of the grid scrolls (faster the
+  further the pointer goes) while the block grows; click a row number to
+  select the row, Shift+click another row number to extend, or drag over row
+  numbers to select those rows; `Ctrl`+click a header selects its column over
+  the displayed rows (`Ctrl Shift`+click extends to it from the anchor's
+  column); `Ctrl A` selects everything visible; `Esc` clears. Arrows move the
+  focused cell and scroll it into view, rows and columns. `Home` and `End` go to the first and
   last cell of the row, `Ctrl Home` and `Ctrl End` to the first and last cell
   of the page, `Page Up` and `Page Down` a screen of rows; `Shift` extends the
   block from its anchor.
@@ -159,7 +164,39 @@ alignment only; the value itself is never converted.
   values keep the server's order. Like the filter, it sorts only the rows
   held for the page; another result tab starts unsorted.
 - The footer shows the number of selected cells when more than one is
-  selected.
+  selected, and, when number columns are among them, the **sum, average,
+  median, minimum and maximum** of their numbers (`jykre::stats`), in the
+  number format on screen; its tooltip says how many numbers they come from.
+  They are exact: added and divided as decimal text (`jykre::decimal`), never
+  as floats. The average and a median between two values keep six decimals
+  past the values' own, rounded half away from zero, without trailing zeros.
+  Text such as `NaN` is skipped, NULL is not a value, and a number too far
+  from the decimal point to add (`1e500`) shows the sum and average as `—`.
+  Up to 20,000 cells are summarized at once; a larger selection shows
+  "Calculating…" while it is read 40,000 cells per frame and summarized off
+  the UI thread. A drag is summarized when it ends.
+- A header's right edge resizes its column (48 to 1,600 px); a double click on
+  it, or **Fit the column to its values** in the menu, fits the column to its
+  header and the values of the first 5,000 displayed rows. **Reset column
+  widths** goes back to the measured ones. Widths belong to the result tab:
+  its pages share them and switching tabs restores them.
+- A double click on a cell, or `Enter`, opens the side panel on the cell's
+  **full value**: read-only text that can be selected, JSON laid out with
+  indentation without changing any token, up to the first 1 MB (**Copy**
+  copies all of it), NULL shown as NULL. The panel follows the focused cell.
+  Its other tab, **Column statistics** (also in the menu), shows for the
+  focused column, over the rows of the page the filter shows: NULLs,
+  distinct values (numbers by value), empty texts, minimum and maximum in the
+  order the header sorts by, sum, average and median for numbers, the shortest
+  and longest text, and the five most frequent values. They are read a chunk
+  per frame and computed off the UI thread. `Esc` closes the panel.
+- **Show the selected rows as records** (toolbar or menu) shows the rows of
+  the selection side by side: one line per column, one column per row, up to
+  50 rows. A click on a value shows it in the side panel. `Esc` goes back to
+  the table.
+- Result tabs can be dragged to another place in their bar, or moved with
+  `Ctrl Shift ←` and `Ctrl Shift →` on the focused tab. The tab on screen,
+  numbers, pins and what a run replaces do not change.
 - Right-clicking outside the selection selects the cell under the pointer
   first, so the context menu acts on what is under it.
 - The filter bar matches text in any column, ignoring case, and stops hiding
@@ -183,6 +220,18 @@ alignment only; the value itself is never converted.
 - **Copy this page as CSV** copies the page on screen with headers, `;` as the
   separator and every value quoted, using the original values regardless of
   presentation; NULL becomes an empty field.
+- **Copy as** (`jykre::copy_as`) copies the selection as an `IN` list (its
+  distinct values, without NULLs), `INSERT` statements (one per row, into the
+  table the tab was opened for, otherwise `table_name`), JSON (an array with
+  an object per row; repeated names get `_2`, `_3`), a Markdown table (`|`
+  escaped, line breaks as `<br>`, NULL as `NULL`) or the column names. Values
+  are never reinterpreted: a number of a number column is written as the
+  database wrote it (in JSON only when it is a valid JSON number), booleans as
+  `TRUE`/`FALSE` (`true`/`false`), NULL as `NULL` (`null`), anything else as a
+  string escaped as the connection's dialect reads strings
+  (`jykre::sql::string_literal`: PostgreSQL doubles the quote, MySQL and
+  Databricks escape with a backslash). Names are quoted only when the
+  dialect needs it, as the editor's suggestions quote them.
 - Copies estimated above 50 MiB (from the length of the cells, before they
   are built) ask for confirmation, and copying runs off the UI thread
   when it would exceed a frame.
@@ -205,6 +254,7 @@ format ([User experience](ux.md#feedback)).
 - [ ] Cell, block and row selections copy with and without headers and paste
       correctly into a spreadsheet.
 - [ ] Running in one tab does not change another tab's results.
+- [ ] Sums, averages and medians of `numeric(38,10)` values are exact.
 
 ## Known deviations
 

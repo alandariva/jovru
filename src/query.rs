@@ -248,6 +248,16 @@ impl QueryRun {
         }
     }
 
+    /// The statements [`QueryRun::start`] would run for `scope`, without
+    /// starting anything: what a check before running reads.
+    pub fn statements_for(&self, sql: &str, scope: &Scope) -> Vec<String> {
+        self.select(sql, scope.clone())
+            .0
+            .into_iter()
+            .map(|(_, sql)| sql)
+            .collect()
+    }
+
     /// Starts a run of the statements of `sql` that `scope` picks. Returns
     /// `None` when there is nothing to run or a run is still active: one
     /// that is `Cancelling` may still change data on the server, so the next
@@ -256,6 +266,29 @@ impl QueryRun {
         if self.is_active() {
             return None;
         }
+        let ranges = sql::statements(sql, self.dialect);
+        let (statements, starts) = self.select(sql, scope);
+        if statements.is_empty() {
+            return None;
+        }
+        self.sql = sql.to_owned();
+        self.sync();
+        self.statuses.resize(ranges.len(), StatementStatus::Ready);
+        self.current = RunId(self.current.0 + 1);
+        self.planned = statements.iter().map(|(index, _)| *index).collect();
+        self.state = RunState::Running {
+            started_at: Instant::now(),
+        };
+        Some(Plan {
+            id: self.current,
+            statements,
+            starts,
+        })
+    }
+
+    /// The statements `scope` picks in `sql`, each with its index among the
+    /// editor's statements, and where each starts.
+    fn select(&self, sql: &str, scope: Scope) -> (Vec<(usize, String)>, Vec<usize>) {
         let dialect = self.dialect;
         let ranges = sql::statements(sql, dialect);
         let whole = |index: usize| -> Option<(usize, String)> {
@@ -303,22 +336,7 @@ impl QueryRun {
                 }
             }
         };
-        if statements.is_empty() {
-            return None;
-        }
-        self.sql = sql.to_owned();
-        self.sync();
-        self.statuses.resize(ranges.len(), StatementStatus::Ready);
-        self.current = RunId(self.current.0 + 1);
-        self.planned = statements.iter().map(|(index, _)| *index).collect();
-        self.state = RunState::Running {
-            started_at: Instant::now(),
-        };
-        Some(Plan {
-            id: self.current,
-            statements,
-            starts,
-        })
+        (statements, starts)
     }
 
     /// Marks one planned statement as running. Returns `false` when the run

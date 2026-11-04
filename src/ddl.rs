@@ -6,7 +6,8 @@
 //! statement leaves the cache as it was, which a refresh fixes, so anything
 //! unclear is ignored rather than guessed.
 use crate::drivers::{ObjectKind, ObjectPath, SessionContext, SqlDialect};
-use crate::sql::{TokenKind, tokens};
+pub use jykre_sql::names::Name;
+use jykre_sql::names::{Part, name_at, parts, stored};
 
 /// What a statement changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,49 +26,6 @@ pub enum NamespaceWord {
     Schema,
     Database,
     Catalog,
-}
-
-/// One part of a qualified name, unquoted, and whether it was quoted.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Name {
-    pub text: String,
-    pub quoted: bool,
-}
-
-/// A token reduced to what the classification needs.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Part {
-    /// An unquoted word, upper-cased for comparison, with its text.
-    Word(String, String),
-    /// A quoted identifier, unquoted.
-    Quoted(String),
-    Symbol(String),
-    Other,
-}
-
-pub(crate) fn parts(sql: &str) -> Vec<Part> {
-    tokens(sql, None)
-        .into_iter()
-        .filter(|(_, kind)| *kind != TokenKind::Comment)
-        .map(|(range, kind)| {
-            let text = &sql[range];
-            match kind {
-                TokenKind::Word | TokenKind::Keyword | TokenKind::Function => {
-                    Part::Word(text.to_ascii_uppercase(), text.to_owned())
-                }
-                TokenKind::String if text.starts_with(['"', '`']) => {
-                    let quote = &text[..1];
-                    let inner = text
-                        .strip_prefix(quote)
-                        .map(|rest| rest.strip_suffix(quote).unwrap_or(rest))
-                        .unwrap_or(text);
-                    Part::Quoted(inner.replace(&format!("{quote}{quote}"), quote))
-                }
-                TokenKind::Symbol => Part::Symbol(text.to_owned()),
-                _ => Part::Other,
-            }
-        })
-        .collect()
 }
 
 /// Words that may sit between `CREATE` and the kind of object.
@@ -100,31 +58,6 @@ const OBJECTS: &[&str] = &[
     "TYPE",
     "DOMAIN",
 ];
-
-/// Reads the name starting at `at`: words or quoted identifiers joined by
-/// dots. Returns it and the position after it.
-pub(crate) fn name_at(parts: &[Part], mut at: usize) -> Option<(Vec<Name>, usize)> {
-    let mut name = Vec::new();
-    loop {
-        match parts.get(at)? {
-            Part::Word(_, text) => name.push(Name {
-                text: text.clone(),
-                quoted: false,
-            }),
-            Part::Quoted(text) => name.push(Name {
-                text: text.clone(),
-                quoted: true,
-            }),
-            _ => return None,
-        }
-        at += 1;
-        if parts.get(at) == Some(&Part::Symbol(".".into())) {
-            at += 1;
-        } else {
-            return Some((name, at));
-        }
-    }
-}
 
 fn word(parts: &[Part], at: usize) -> Option<&str> {
     match parts.get(at) {
@@ -164,7 +97,7 @@ fn namespace_word(word: &str) -> Option<NamespaceWord> {
 /// What one statement changed; empty when it changes nothing the explorer
 /// shows or cannot be read with confidence.
 pub fn targets(sql: &str) -> Vec<Target> {
-    let parts = parts(sql);
+    let parts = parts(sql, None);
     let Some(verb) = word(&parts, 0) else {
         return Vec::new();
     };
@@ -296,19 +229,6 @@ fn comment_targets(parts: &[Part]) -> Vec<Target> {
             Some(namespace) => vec![Target::Namespace(namespace, name)],
             None => Vec::new(),
         },
-    }
-}
-
-/// How the server stores a name: quoted as written; unquoted folded the way
-/// the dialect folds it (PostgreSQL and Unity Catalog to lower case, MySQL as
-/// written).
-pub(crate) fn stored(name: &Name, dialect: SqlDialect) -> String {
-    if name.quoted {
-        return name.text.clone();
-    }
-    match dialect {
-        SqlDialect::MySql => name.text.clone(),
-        _ => name.text.to_lowercase(),
     }
 }
 

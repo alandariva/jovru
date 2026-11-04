@@ -3672,10 +3672,11 @@ dependencies = [
  "jykre-driver-mysql",
  "jykre-driver-postgres",
  "jykre-secrets",
+ "jykre-sql",
+ "jykre-sql-language",
  "jykre-storage",
  "lsp-types",
  "serde_json",
- "sqruff-lib",
  "sys-locale",
  "tokio",
  "tracing",
@@ -3743,6 +3744,24 @@ dependencies = [
  "keyring",
  "secrecy",
  "tokio",
+]
+
+[[package]]
+name = "jykre-sql"
+version = "0.1.0"
+dependencies = [
+ "jykre-core",
+]
+
+[[package]]
+name = "jykre-sql-language"
+version = "0.1.0"
+dependencies = [
+ "jykre-core",
+ "jykre-sql",
+ "serde",
+ "serde_json",
+ "sqruff-lib",
 ]
 
 [[package]]

@@ -33,6 +33,14 @@ pub enum Placement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ResultId(u64);
 
+impl ResultId {
+    /// The number behind the identity, for element IDs that follow a tab
+    /// wherever it moves.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResultState {
     Running,
@@ -238,6 +246,22 @@ impl ResultTabs {
         if let Some(tab) = self.tabs.get_mut(index) {
             tab.pinned = !tab.pinned;
         }
+    }
+
+    /// Moves the tab at `from` to position `to`; the tab on screen stays
+    /// on screen. Numbers, pins and what a run replaces do not change.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return;
+        }
+        let active = self.tabs[self.active].id;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active)
+            .unwrap_or_default();
     }
 
     /// Closes the tab at `index`; the one before it becomes active.
@@ -525,6 +549,28 @@ pub fn rows_label(count: usize, first_row: usize, paged: bool, filtered: Option<
 mod tests {
     use super::*;
     use crate::result::ResultColumn;
+
+    #[test]
+    fn moving_a_tab_keeps_the_one_on_screen_and_what_runs_replace() {
+        let mut tabs = ResultTabs::new(usize::MAX);
+        let ids = tabs.begin(&["a".into(), "b".into(), "c".into()], Placement::New);
+        tabs.select(1);
+        tabs.move_tab(0, 2);
+        let order: Vec<_> = tabs.tabs().iter().map(|tab| tab.id).collect();
+        assert_eq!(order, [ids[1], ids[2], ids[0]]);
+        assert_eq!(tabs.active().map(|tab| tab.id), Some(ids[1]));
+        // Out of range or onto itself changes nothing.
+        tabs.move_tab(5, 0);
+        tabs.move_tab(1, 1);
+        assert_eq!(
+            tabs.tabs().iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            order
+        );
+        // Ctrl+Enter still replaces the tab on screen, wherever it sits.
+        tabs.begin(&["d".into()], Placement::ReplaceActive);
+        assert_eq!(tabs.active_index(), 0);
+        assert_eq!(tabs.tabs()[0].number, 2);
+    }
 
     #[test]
     fn the_footer_counts_the_rows_the_filter_shows() {

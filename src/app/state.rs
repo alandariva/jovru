@@ -89,7 +89,7 @@ impl AppView {
             let group = self.group_for(&tab.connection, cx);
             if let Some(id) = self.add_query(group, &tab.title, &tab.sql, window, cx) {
                 if let Some(panel) = self.panels.get(&id) {
-                    panel.update(cx, |panel, _| panel.restore(tab));
+                    panel.update(cx, |panel, cx| panel.restore(tab, cx));
                 }
                 opened.push(id);
             }

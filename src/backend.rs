@@ -266,48 +266,50 @@ pub async fn cached_namespaces(
     result
 }
 
-/// Builds the editor's index of the connection's cached relations, off the
-/// UI thread. Its version tells a tab whether the index it holds is current.
-pub async fn name_index(
+/// Every relation the connection's cache holds (tables, views and
+/// materialized views) with its kind, and the cache version they were read
+/// from: what the editor builds its name index from. Only the read happens
+/// here; what the editor makes of the names is the editor's business.
+pub async fn cached_relations(
     dir: &Path,
     id: ConnectionId,
     config: &ConnectionConfig,
-) -> DriverResult<crate::completion::NameIndex> {
-    let started = Instant::now();
-    let descriptor = builtin_registry()?.get(config.driver)?.descriptor();
+) -> DriverResult<(i64, Vec<(ObjectPath, ObjectKind)>)> {
     let result = match cache(dir, id, config).await {
         Ok((repository, _)) => repository.relations().await,
         Err(error) => Err(error),
     };
-    let (version, relations) = match result {
-        Ok(read) => read,
-        Err(error) => {
-            forget_cache(dir, id);
-            return Err(error);
-        }
-    };
-    let count = relations.len();
-    // Grouping thousands of names is CPU work; it stays on the runtime.
-    let index = tokio::task::spawn_blocking(move || {
-        crate::completion::NameIndex::new(
-            version,
-            descriptor.capabilities.namespace_levels(),
-            descriptor.dialect,
-            relations
-                .into_iter()
-                .map(|(path, kind)| crate::completion::Relation { path, kind })
-                .collect(),
-        )
-    })
-    .await
-    .map_err(|_| DriverError::new(ErrorCode::Internal, tr!("Database task failed")))?;
-    tracing::debug!(
-        connection_id = %id,
-        relations = count,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "editor name index built"
-    );
-    Ok(index)
+    if result.is_err() {
+        forget_cache(dir, id);
+    }
+    result
+}
+
+/// The texts of `files` (paths relative to `dir`), read on the runtime: how
+/// the editor's SQL catalogs are read from their data directory. A file that
+/// is missing, larger than `max_bytes` or not UTF-8 is `None`; one that exists
+/// but cannot be used is logged.
+pub async fn read_text_files(dir: &Path, files: &[String], max_bytes: u64) -> Vec<Option<String>> {
+    let mut texts = Vec::with_capacity(files.len());
+    for file in files {
+        let path = dir.join(file);
+        let text = match tokio::fs::metadata(&path).await {
+            Ok(found) if found.len() > max_bytes => {
+                tracing::warn!(file = %file, bytes = found.len(), "data file too large; ignored");
+                None
+            }
+            Ok(_) => match tokio::fs::read_to_string(&path).await {
+                Ok(text) => Some(text),
+                Err(error) => {
+                    tracing::warn!(file = %file, error = %error, "data file unreadable; ignored");
+                    None
+                }
+            },
+            Err(_) => None,
+        };
+        texts.push(text);
+    }
+    texts
 }
 
 /// The columns and keys of one relation, read from the cache: what the

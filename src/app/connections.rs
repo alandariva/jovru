@@ -118,6 +118,9 @@ impl AppView {
         self.editing_connection = index;
         self.connection_open = true;
         self.connection_section = ConnectionSection::Connection;
+        self.connection_appearance = index
+            .map(|index| self.connections[index].appearance)
+            .unwrap_or_default();
         let (name, config) = index.and_then(|index| self.connections[index].input.as_ref().map(|input| (self.connections[index].name.clone(), input.config.clone())))
             .unwrap_or_else(|| (String::new(), ConnectionConfig { driver: DriverKind::Postgres, options: serde_json::json!({"host":"localhost","port":5432,"database":"","user":"postgres","sslMode":"prefer"}) }));
         self.driver = match config.driver {
@@ -587,13 +590,10 @@ impl AppView {
             cache,
             expanded,
             revalidate_hours,
+            appearance,
             warning,
         } = loaded;
-        let color = match input.config.driver {
-            DriverKind::MySql => BLUE,
-            DriverKind::Databricks => PURPLE,
-            _ => MINT,
-        };
+        let color = connection_shade(input.config.driver, appearance);
         let group = self.tabs.update(cx, |tabs, cx| {
             tabs.add_group(profile.name.clone(), rgb(color).into(), cx)
         });
@@ -606,6 +606,7 @@ impl AppView {
             revalidate_hours,
             detail,
             color,
+            appearance,
             group,
             expanded: true,
             tree: Tree::default(),
@@ -679,6 +680,7 @@ impl AppView {
                     .map_err(|error| (ConnectionSection::Options, error))?;
                 Ok((name, input, limit, hours))
             });
+        let appearance = self.connection_appearance;
         let (name, input, row_limit, revalidate_hours) = match form {
             Ok(value) => value,
             Err((section, error)) => {
@@ -791,6 +793,7 @@ impl AppView {
                         row_limit,
                         scope,
                         revalidate_hours,
+                        appearance,
                     },
                     &SystemSecretStore,
                 )
@@ -841,6 +844,9 @@ impl AppView {
                             connection.input = Some(loaded.input.clone());
                             connection.row_limit = loaded.row_limit;
                             connection.revalidate_hours = loaded.revalidate_hours;
+                            connection.appearance = loaded.appearance;
+                            connection.color =
+                                connection_shade(loaded.input.config.driver, loaded.appearance);
                             connection.scope = loaded.scope.clone();
                             connection.detail = connection_detail(&loaded.input.config);
                             if let Some(cache) = loaded.cache {
@@ -856,8 +862,15 @@ impl AppView {
                                 None => Feedback::new(Tone::Success, tr!("Connection saved.")),
                             };
                             let _ = this.tabs.update(cx, |tabs, cx| {
-                                tabs.rename_group(connection.group, connection.name.clone(), cx)
+                                tabs.rename_group(connection.group, connection.name.clone(), cx)?;
+                                tabs.set_group_color(
+                                    connection.group,
+                                    rgb(connection.color).into(),
+                                    cx,
+                                )
                             });
+                            let (color, environment) =
+                                (connection.color, connection.appearance.environment);
                             for panel in this.panels.values() {
                                 panel.update(cx, |panel, cx| {
                                     if panel.connection_name() == old_name {
@@ -867,6 +880,7 @@ impl AppView {
                                             loaded.row_limit,
                                             cx,
                                         );
+                                        panel.set_appearance(color, environment, cx);
                                     }
                                 });
                             }
@@ -1437,10 +1451,9 @@ impl AppView {
             if current {
                 return;
             }
-            let names = backend::run(async move {
-                backend::name_index(&names_dir, names_profile.id, &names_profile.config).await
-            })
-            .await;
+            let names =
+                super::sql_editor::name_index(names_dir, names_profile.id, names_profile.config)
+                    .await;
             let _ = weak.update(cx, |this, cx| match names {
                 Ok(names) => {
                     this.connections[index].names = Some(std::sync::Arc::new(names));
@@ -1671,7 +1684,7 @@ impl AppView {
                 if panel.connection_name() == connection.name {
                     panel.set_context_choices(choices.clone(), cx);
                     if let (Some(profile), Some(names)) = (&connection.profile, &connection.names) {
-                        panel.set_names(profile.id, names.clone());
+                        panel.set_names(profile.id, names.clone(), cx);
                     }
                 }
             });
@@ -1809,7 +1822,7 @@ impl AppView {
         {
             let object = path.clone();
             panel.update(cx, |panel, cx| {
-                panel.set_object(Some(object));
+                panel.set_object(Some(object), cx);
                 panel.focus_editor(window, cx);
             });
         }
@@ -2010,6 +2023,9 @@ impl AppView {
                     .id(("live-connection-row", index))
                     .px_2()
                     .h(px(38.))
+                    // The colour its tab group shows.
+                    .border_l_3()
+                    .border_color(rgb(connection.color))
                     // As every node: the chevron expands or collapses, and
                     // so do a double click, Enter and the arrows; a single
                     // click only takes the focus.
@@ -2032,10 +2048,20 @@ impl AppView {
                     )
                     .child(
                         button(("live-connection", index), I::Database, "")
-                            .aria_label(connection.name.clone())
+                            .aria_label(match connection.appearance.environment {
+                                Some(environment) => SharedString::from(format!(
+                                    "{}, {}",
+                                    connection.name,
+                                    environment_name(environment)
+                                )),
+                                None => connection.name.clone().into(),
+                            })
                             .aria_expanded(expanded)
                             .flex_1()
                             .child(div().truncate().child(connection.name.clone()))
+                            .when_some(connection.appearance.environment, |s, environment| {
+                                s.child(environment_badge(environment))
+                            })
                             .on_key_down(cx.listener(
                                 move |this, event: &KeyDownEvent, window, cx| {
                                     let modified = event.keystroke.modifiers.modified();
@@ -2720,7 +2746,9 @@ impl AppView {
                 ))
                 .child(label(tr!(
                     "Only the chosen namespaces read longer ago than this, once when the application opens. Empty or 0 never does."
-                ))),
+                )))
+                .child(div().h(px(12.)))
+                .child(self.appearance_fields(cx)),
         };
         self.overlay("connection-backdrop", cx)
             .child(
@@ -2950,6 +2978,110 @@ impl AppView {
                 this.connection_section = target;
                 cx.notify();
             }))
+    }
+
+    /// The connection's colour and environment, in **Options**.
+    fn appearance_fields(&self, cx: &mut Context<Self>) -> Div {
+        use jykre::connection_appearance::{ConnectionColor, Environment};
+        let chosen = self.connection_appearance;
+        let toggled = |on: bool| if on { Toggled::True } else { Toggled::False };
+        let chip = |id: (&'static str, usize), text: &'static str, on: bool, color: u32| {
+            row()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(text)
+                .aria_toggled(toggled(on))
+                .focusable()
+                .tab_index(0)
+                .h(px(28.))
+                .px_3()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(rgb(if on { color } else { BORDER }))
+                .focus_visible(|s| s.border_color(rgb(MINT)))
+                .when(on, |s| s.bg(Hsla::from(rgb(color)).opacity(0.12)))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(rgb(if on { TEXT } else { MUTED }))
+                .hover(|s| s.bg(rgb(HOVER)))
+                .child(text)
+        };
+        column()
+            .gap_2()
+            .child(label(tr!("Colour")))
+            .child(
+                row()
+                    .gap_2()
+                    .child(
+                        chip(("connection-color-auto", 0), tr!("Driver's"), chosen.color.is_none(), MINT)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.connection_appearance.color = None;
+                                cx.notify();
+                            })),
+                    )
+                    .children(ConnectionColor::ALL.into_iter().enumerate().map(|(index, color)| {
+                        let on = chosen.color == Some(color);
+                        let shade = connection_color(color);
+                        div()
+                            .id(("connection-color", index))
+                            .role(Role::Button)
+                            .aria_label(connection_color_name(color))
+                            .aria_toggled(toggled(on))
+                            .focusable()
+                            .tab_index(0)
+                            .size(px(22.))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(rgb(shade))
+                            .border_2()
+                            .border_color(rgb(if on { TEXT } else { PANEL }))
+                            .focus_visible(|s| s.border_color(rgb(MINT)))
+                            .cursor_pointer()
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(connection_color_name(color)).build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.connection_appearance.color = Some(color);
+                                cx.notify();
+                            }))
+                    })),
+            )
+            .child(label(tr!(
+                "The connection's entry in the explorer, its tab group and its tabs show this colour."
+            )))
+            .child(div().h(px(8.)))
+            .child(label(tr!("Environment")))
+            .child(
+                row()
+                    .gap_2()
+                    .child(
+                        chip(("environment", 0), tr!("Not set"), chosen.environment.is_none(), MINT)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.connection_appearance.environment = None;
+                                cx.notify();
+                            })),
+                    )
+                    .children(Environment::ALL.into_iter().enumerate().map(|(index, environment)| {
+                        let color = match environment {
+                            Environment::Development => MINT,
+                            Environment::Staging => AMBER,
+                            Environment::Production => RED,
+                        };
+                        chip(
+                            ("environment", index + 1),
+                            environment_name(environment),
+                            chosen.environment == Some(environment),
+                            color,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.connection_appearance.environment = Some(environment);
+                            cx.notify();
+                        }))
+                    })),
+            )
+            .child(label(tr!(
+                "A badge after the name tells environments apart. Production asks before running a statement that changes every row of a table or drops data."
+            )))
     }
 
     fn dialog_field(&self, title: &'static str, state: &Entity<InputState>) -> Div {
@@ -3403,4 +3535,19 @@ fn connection_detail(config: &ConnectionConfig) -> String {
         },
         None => base.into(),
     }
+}
+
+/// The colour of a connection: the one the user chose, or its driver's.
+fn connection_shade(
+    driver: DriverKind,
+    appearance: jykre::connection_appearance::Appearance,
+) -> u32 {
+    appearance
+        .color
+        .map(connection_color)
+        .unwrap_or(match driver {
+            DriverKind::MySql => BLUE,
+            DriverKind::Databricks => PURPLE,
+            _ => MINT,
+        })
 }

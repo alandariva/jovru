@@ -44,7 +44,12 @@ value that cannot be read is reported and treated as nothing chosen; a cache
 written before the choice existed becomes the choice of its last-level
 namespaces, once), and
 `connection.<connection-id>.row_limit` for each connection's row limit (a
-missing or out-of-range value reads as the default, 1,000).
+missing or out-of-range value reads as the default, 1,000), and
+`connection.<connection-id>.appearance` for its colour and environment
+(`{"color": "red", "environment": "production"}`, either key optional;
+`jykre::connection_appearance`). A missing value, or one naming a colour or
+environment this version does not know, reads as the driver's colour and no
+environment.
 
 `workspace.state` keeps the workspace between sessions
 (`jykre::workspace_state`): the open query tabs in order (title, connection
@@ -72,7 +77,7 @@ snapshot; a value that cannot be read starts collapsed.
 password and token fields there. `revision` provides optimistic concurrency:
 a save names the revision it edited, so a change made in another window is
 rejected instead of silently overwritten. Saving a connection writes its
-profile, row limit, metadata choice and revalidation hours in one
+profile, row limit, metadata choice, revalidation hours and appearance in one
 transaction (`ConfigRepository::save_with_settings`): a failure writes none
 of them and the profile keeps its revision, so a retry is not refused.
 

@@ -47,7 +47,7 @@ status, **Test connection** and **Save connection** in view, and switches
 three sections between them: **Connection** (name, server, credentials, TLS
 or the Databricks profile and compute), **Metadata** (what to introspect;
 its tab shows how much is chosen, amber when nothing is) and **Options**
-(row limit). Only the section scrolls, and the dialog keeps its height when
+(row limit, colour and environment). Only the section scrolls, and the dialog keeps its height when
 switching. A field that fails validation on save opens its section.
 
 In **Metadata**, **Load list** reads the
@@ -82,13 +82,17 @@ Each state has one consistent representation.
 | Inspection | **Inspect** in a relation's or a schema's menu | A panel with indexes, constraints and triggers (relations) or functions, procedures with their parameters, sequences and types (schemas), read from the server when asked; `Esc` closes it |
 | Definition | **Show definition** in a relation's menu | A new tab with the view's source or the table's DDL, read from the server |
 | Revalidation | Connection dialog, **Options** | Hours after which opening the application reads the chosen namespaces again, once; empty or 0 never does |
-| Editor suggestions | The SQL editor | After `FROM` or `JOIN`, the relations of the tab's context (or of the schema written before the dot), its CTEs and namespaces; after `alias.`, the columns of that relation; elsewhere, the columns of the statement's relations. Only the tab's own connection is suggested. Columns not read yet show "Loading columns…" and are read in the background; typing never waits. Hovering a column shows its type, nullability, key, default and comment; `Ctrl`-click on a relation or column shows it in the explorer |
+| Editor suggestions | The SQL editor | After `FROM` or `JOIN`, the relations of the tab's context (or of the schema written before the dot), its CTEs and namespaces; after `alias.`, the columns of that relation; elsewhere, the columns of the statement's relations. Without a qualifier, an expression also suggests the dialect's functions (with their signature and description; choosing one inserts `name(`) and keywords (`WHERE`, `CASE`), after the columns; after `::`, the dialect's types. Names that start exactly as typed come first. Keywords, functions and types come from the SQL catalogs, so they show even before the cache is read. Only the tab's own connection is suggested. Columns not read yet show "Loading columns…" and are read in the background; typing never waits. A name the dialect reserves (`order`, `user`) is inserted quoted. Hovering a column shows its type, nullability, key, default and comment, and hovering a function before its `(` its signatures, description and page; `Ctrl`-click on a relation or column shows it in the explorer |
 | Structure changed by SQL | The explorer | A `CREATE`, `ALTER`, `DROP`, `RENAME` or `COMMENT` that ran queues a refresh of the namespaces it touched, when they are chosen to be introspected, about 300 ms later |
 | Explorer expansion | The explorer | The nodes left expanded come back after a restart, read from the local cache; "Load more" after a node reads its next page only |
 | What a node is | Explorer node | Icon by kind (table, view, materialized view, column, key column, foreign key, partition), the column's type or what a key references after the name, and a tooltip with nullability, primary key position, default and comment |
 | Demo versus server data | Footer badge | `MOCK` or `SQL`; a tab without a connection outside the demo shows "No connection" and runs nothing |
 | Transaction of the tab's session | Editor toolbar, for drivers with transactions | **Auto-commit**, **Transaction open** (or **Manual commit** after MySQL's `SET autocommit = 0`), **Uncommitted changes** (amber) or **Transaction failed** (red, PostgreSQL), with **Commit** and **Rollback** while one is open. Reported by the driver after each run, inferred from the statements the tab ran when it cannot tell (`jykre::transaction`) |
 | Pinned result | Result tab | Its pin icon is mint; no run replaces it |
+| Selection statistics | Footer, after the selected count | Sum, average, median, minimum and maximum of the numbers selected, exact; "Calculating…" while a large selection is read |
+| Full value, column statistics | Side panel of the grid | The focused cell's full value (JSON laid out), or its column's statistics over the rows the filter shows; a spinner while they are computed |
+| Records | Result grid | The selected rows side by side, one line per column; the toolbar's records button is highlighted |
+| A connection's colour and environment | Explorer entry (a stripe on its left), its tab group and the editor header | The colour chosen in the connection dialog, or the driver's; a `DEV`, `STAGING` or `PROD` badge after the name |
 | What ran in the tab | Messages | A log of every statement that ended, independent of the result tabs |
 | Run duration | Footer, Messages, history | In the scale that reads best: `850 ms`, `12.4 s`, `3 min 3 s`, `1 h 2 min` |
 | Filtered rows | Footer | While the filter is open, the rows it shows of the page: "3 of 1,000 rows" |
@@ -150,6 +154,11 @@ Rules:
   that has it open keeps its SQL, which closing then asks about. The
   editor's save button only saves or updates.
 - Copying a selection or a page estimated above 50 MiB asks first.
+- On a connection marked **Production**, running a statement that changes
+  every row of a table (`UPDATE` or `DELETE` without a `WHERE` of its own) or
+  drops data (`DROP`, `TRUNCATE`, an `ALTER` that drops something) asks
+  first, naming each such statement of the run (`jykre::guard`). Nothing
+  runs until the user confirms.
 
 ## Keyboard shortcuts
 
@@ -158,6 +167,7 @@ Rules:
 | Run the selection, or the statement at the cursor, in place of the result tab on screen (asks before cancelling while a run is active) | `Ctrl Enter` |
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
+| Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |
 | New query on the active connection | `Ctrl N` |
@@ -175,6 +185,10 @@ Rules:
 | Grid: first or last cell of the row, first or last cell of the page, a screen up or down (`Shift` extends) | `Home`, `End`, `Ctrl Home`, `Ctrl End`, `Page Up`, `Page Down` |
 | Grid: select all, clear | `Ctrl A`, `Esc` |
 | Grid: copy, copy with headers | `Ctrl C`, `Ctrl Shift C` |
+| Grid: show the focused cell's full value in the side panel | `Enter` (or a double click) |
+| Grid: close the side panel, then the records view, then clear the selection | `Esc` |
+| Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |
+| Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
 | Tab bar: move between tabs | Arrows, `Home`, `End` |
 
 Shortcuts are GPUI actions in one keymap ([UI guidelines](ui-guidelines.md#actions-and-shortcuts)).

@@ -7,6 +7,7 @@ fn preferences(row_limit: u32) -> Preferences {
         row_limit,
         scope: MetadataScope::default(),
         revalidate_hours: 0,
+        appearance: Appearance::default(),
     }
 }
 
@@ -561,6 +562,10 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
                 include: vec![sales.clone()],
             },
             revalidate_hours: 0,
+            appearance: Appearance {
+                color: Some(crate::connection_appearance::ConnectionColor::Red),
+                environment: Some(crate::connection_appearance::Environment::Production),
+            },
         },
         &vault,
     )
@@ -569,6 +574,9 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
     assert_eq!(saved.scope.include, std::slice::from_ref(&sales));
     let loaded = load(&dir, &vault).await.unwrap().connections.remove(0);
     assert_eq!(loaded.scope.include, [sales]);
+    // The colour and environment are saved with the other preferences.
+    assert_eq!(loaded.appearance, saved.appearance);
+    assert!(loaded.appearance.is_production());
     assert!(loaded.warning.is_none());
     backend::release_caches(&dir).await;
     std::fs::remove_dir_all(&dir).unwrap();

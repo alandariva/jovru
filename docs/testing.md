@@ -16,8 +16,11 @@ cargo deny --locked check
 ```
 
 The basic gate checks the direct dependencies between crates (including dev
-and build), formatting, Clippy with warnings treated as errors and
-`cargo test --workspace --locked`. It includes binary, library, contract,
+and build), the SQL catalogs in `catalog/` (`cargo xtask catalogs check`),
+formatting, Clippy with warnings treated as errors and
+`cargo test --workspace --locked`, then Clippy and the tests of
+`jykre-sql-language` without its default features (the built-in formatter
+instead of sqruff). It includes binary, library, contract,
 local Databricks HTTP and gate tests, plus the `compile_fail` credential
 doctests. Clippy also checks the examples. `live` tests are compiled but
 ignored in basic mode; Cargo prints their names and counts. No database,
@@ -46,6 +49,10 @@ no fallback that skips checks.
 - Drivers depend on core and external libraries; they do not depend on the
   application, other drivers or the UI.
 - The application composes the drivers; `xtask` is a separate tool.
+- `jykre-sql` depends only on core and on no editor engine;
+  `jykre-sql-language` only on core and `jykre-sql`; neither on GPUI or
+  `lsp-types`. No library file outside `src/app/` and `src/main.rs` uses
+  `jykre_sql_language` (a source check).
 - The check covers direct Cargo edges, including dev and build dependencies.
   Where logic lives and transitive dependencies still need review.
 
@@ -107,6 +114,26 @@ timeout, a cancellation and an interruption by a limit or the receiver, also
 when the interruption lands halfway through reading a row (MySQL, with rows of
 several megabytes); a new session must run normally. TLS with certificates and effective server-side interruption need
 additional scenarios before the guarantees are extended.
+
+## SQL catalogs
+
+`catalog/` holds the SQL dialect catalogs the editor reads at run time
+([ADR-0021](adr/0021-sql-catalogs-read-at-run-time.md)). The basic gate only
+checks them, offline. Regenerating them is a task of its own, reviewed in
+the diff:
+
+```bash
+# PostgreSQL: kwlist.h, pg_proc.dat and pg_type.dat of each release tag (network)
+cargo xtask catalogs postgresql REL_14_0,REL_15_0,REL_16_0,REL_17_0,REL_18_0 --verified-through 18.6
+# MySQL: the gate's MySQL services in Docker (8.4 and 9.7)
+cargo xtask catalogs mysql
+# Databricks: Apache Spark's keyword table and function schema (network),
+# optionally with exports from a workspace
+cargo xtask catalogs databricks v4.0.1 [--keywords sql_keywords.csv] [--functions functions.csv]
+```
+
+Downloads are kept in `target/catalog-sources/`, so a second run works
+offline. Each generation checks the dialect it wrote.
 
 ## Concurrent runs
 

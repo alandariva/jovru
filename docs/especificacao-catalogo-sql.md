@@ -365,9 +365,14 @@ Quem não quer lidar com faixas usa o snapshot da versão.
 
 ### 10.3 Consumo pelo Jykre Studio
 
-- Um comando `cargo xtask catalogs sync <tag>` baixa a release fixada (ou lê um checkout local), confere o `SHA256SUMS` e copia `manifest.json` e os `.jsonl` dos três dialetos para dentro do repositório (dados vendorizados, revisados no diff).
-- O app embute os arquivos com `include_str!` e os lê na primeira vez que precisa de cada dialeto.
-- Em execução, resolve a versão do servidor quando o driver a conhece, ou usa a última.
+Enquanto o repositório separado não existe, os dados ficam em `catalog/` no próprio projeto, gerados por `cargo xtask catalogs` ([ADR-0021](adr/0021-sql-catalogs-read-at-run-time.md)):
+
+- O app lê os arquivos **em tempo de execução**, no início e fora da UI, do primeiro diretório que tiver um catálogo:
+  1. `JYKRE_SQL_CATALOG_DIR`;
+  2. `catalog` ao lado do executável (o pacote de release leva o diretório);
+  3. em build de desenvolvimento, o `catalog` do repositório.
+- Apontar `JYKRE_SQL_CATALOG_DIR` para um checkout do repositório externo já simula o arranjo final.
+- Hoje resolve sempre a última versão de cada dialeto. Usar a versão do servidor depende de o driver informá-la por sessão (Q9).
 - Rede só no `xtask`, sob comando, nunca no build nem em execução.
 
 ## 11. Questões em aberto

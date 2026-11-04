@@ -42,3 +42,5 @@ something is the way it is, and so a decision is not undone by accident.
 | [0017](0017-driver-metadata-contract-batch.md) | Cache identity, reading levels and on-demand inspection in the driver contract | Proposed |
 | [0018](0018-metadata-cache-migrations.md) | Numbered migrations for the metadata cache, starting with search names and publication times | Proposed |
 | [0019](0019-compact-metadata-cache-keys.md) | Compact keys and a single copy of each path in the metadata cache | Accepted |
+| [0020](0020-editor-language-features-in-their-own-crates.md) | Editor language features in their own crates, apart from query execution | Proposed |
+| [0021](0021-sql-catalogs-read-at-run-time.md) | SQL dialect catalogs read at run time from a data directory | Proposed |

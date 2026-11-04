@@ -1,6 +1,8 @@
 // xtask is a command-line tool: printing its progress is its job (ADR-0011).
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+mod catalogs;
+
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeSet,
@@ -16,6 +18,7 @@ use std::{
 enum Task {
     Check { full: bool },
     Catalog(String),
+    Catalogs(catalogs::Job),
 }
 
 fn main() -> ExitCode {
@@ -32,6 +35,13 @@ fn main() -> ExitCode {
             }
             Err(error) => {
                 eprintln!("Gate failed: {error}\nLater steps were not run.");
+                ExitCode::FAILURE
+            }
+        },
+        Ok(Task::Catalogs(job)) => match catalogs::run(root, job) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("SQL catalogs not updated: {error}");
                 ExitCode::FAILURE
             }
         },
@@ -86,7 +96,9 @@ fn gate(root: &Path, full: bool, id: &str, data: &Path) -> Result<(), String> {
     }
     let metadata: Value = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
     architecture(&metadata)?;
+    library_without_language_features(root)?;
     println!("[OK] Architecture (direct dependencies, including dev and build)");
+    catalogs::check(&root.join("catalog"))?;
     command(root, "cargo", &["fmt", "--all", "--check"])?;
     command(
         root,
@@ -106,6 +118,36 @@ fn gate(root: &Path, full: bool, id: &str, data: &Path) -> Result<(), String> {
         root,
         "cargo",
         &["test", "--workspace", "--locked"],
+        &isolated,
+    )?;
+    untouched(data)?;
+    // The editor's language features also build, lint and pass without their
+    // optional engines, which is what makes those engines replaceable.
+    command(
+        root,
+        "cargo",
+        &[
+            "clippy",
+            "-p",
+            "jykre-sql-language",
+            "--no-default-features",
+            "--all-targets",
+            "--locked",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+    command_env(
+        root,
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "jykre-sql-language",
+            "--no-default-features",
+            "--locked",
+        ],
         &isolated,
     )?;
     untouched(data)?;
@@ -138,7 +180,11 @@ fn options(args: &[String]) -> Result<Task, String> {
         ["check"] => Ok(Task::Check { full: false }),
         ["check", "--full"] => Ok(Task::Check { full: true }),
         ["i18n", tag] => Ok(Task::Catalog(tag.to_string())),
-        _ => Err("Usage: cargo xtask check [--full] | cargo xtask i18n <locale>. Offline: set CARGO_NET_OFFLINE=true.".into()),
+        ["catalogs", rest @ ..] => catalogs::options(rest).map(Task::Catalogs),
+        _ => Err(format!(
+            "Usage: cargo xtask check [--full] | cargo xtask i18n <locale> | {}. Offline: set CARGO_NET_OFFLINE=true.",
+            catalogs::USAGE
+        )),
     }
 }
 
@@ -250,13 +296,53 @@ fn architecture(metadata: &Value) -> Result<(), String> {
             let backend = name == "jykre-core" || adapter;
             let internal = target == "jykre" || target == "xtask" || target.starts_with("jykre-");
             let ui = target.starts_with("gpui") || target == "tauri";
+            // The SQL crates are pure text handling (ADR-0020): `jykre-sql`
+            // serves query execution and must stay free of the editor's
+            // engines; `jykre-sql-language` holds the editor's features and
+            // knows neither the UI nor the editor's LSP types.
+            let sql = name == "jykre-sql";
+            let language = name == "jykre-sql-language";
+            let editor_engine = target == "sqruff-lib" || target.starts_with("tree-sitter");
             let forbidden = (backend && ui)
                 || (name == "jykre-core" && (internal || target == "sqlx" || target == "reqwest"))
-                || (adapter && internal && target != "jykre-core");
+                || (adapter && internal && target != "jykre-core")
+                || ((sql || language) && (ui || target == "lsp-types"))
+                || (sql && ((internal && target != "jykre-core") || editor_engine))
+                || (language && internal && !matches!(target, "jykre-core" | "jykre-sql"));
             if forbidden {
                 return Err(format!(
                     "Dependency forbidden by the architecture: {name} -> {target}"
                 ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `jykre` library (everything in `src/` but the application in
+/// `src/main.rs` and `src/app/`) runs queries and reads metadata; it never
+/// uses the editor's language features, so they can be removed without
+/// touching it (ADR-0020).
+fn library_without_language_features(root: &Path) -> Result<(), String> {
+    let src = root.join("src");
+    let mut pending = vec![src.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path == src.join("app") || path == src.join("main.rs") {
+                continue;
+            }
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let source =
+                    fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                if source.contains("jykre_sql_language") {
+                    return Err(format!(
+                        "{} uses the editor's language features (jykre_sql_language); only src/app may",
+                        path.display()
+                    ));
+                }
             }
         }
     }
@@ -436,6 +522,17 @@ mod tests {
             ("jykre-storage", "jykre-driver-postgres"),
             ("jykre-secrets", "jykre-storage"),
             ("jykre-core", "jykre-storage"),
+            ("jykre-sql", "jykre"),
+            ("jykre-sql", "jykre-sql-language"),
+            ("jykre-sql", "jykre-storage"),
+            ("jykre-sql", "sqruff-lib"),
+            ("jykre-sql", "tree-sitter"),
+            ("jykre-sql", "gpui-kit"),
+            ("jykre-sql-language", "jykre"),
+            ("jykre-sql-language", "jykre-storage"),
+            ("jykre-sql-language", "jykre-driver-postgres"),
+            ("jykre-sql-language", "gpui-kit"),
+            ("jykre-sql-language", "lsp-types"),
         ] {
             for kind in [Value::Null, json!("dev"), json!("build")] {
                 assert!(architecture(&json!({"packages":[{"name":name,"dependencies":[{"name":target,"kind":kind}]}]})).is_err());
@@ -449,8 +546,36 @@ mod tests {
             {"name":"jykre-driver-postgres","dependencies":[{"name":"jykre-core"},{"name":"sqlx"}]},
             {"name":"jykre","dependencies":[{"name":"gpui-kit"},{"name":"jykre-driver-postgres"},{"name":"jykre-storage"},{"name":"jykre-secrets"}]},
             {"name":"jykre-storage","dependencies":[{"name":"jykre-core"},{"name":"sqlx"}]},
-            {"name":"jykre-secrets","dependencies":[{"name":"jykre-core"},{"name":"keyring"}]}
+            {"name":"jykre-secrets","dependencies":[{"name":"jykre-core"},{"name":"keyring"}]},
+            {"name":"jykre-sql","dependencies":[{"name":"jykre-core"}]},
+            {"name":"jykre-sql-language","dependencies":[{"name":"jykre-core"},{"name":"jykre-sql"},{"name":"sqruff-lib"}]}
         ]})).is_ok());
+    }
+
+    #[test]
+    fn the_library_never_uses_the_editor_language_features() {
+        let root = env::temp_dir().join(format!("xtask-library-{}", std::process::id()));
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("src/lib.rs", "pub mod query;");
+        write("src/query.rs", "pub fn run() {}");
+        // The application may use them.
+        write(
+            "src/app/sql_editor/mod.rs",
+            "use jykre_sql_language::format;",
+        );
+        write("src/main.rs", "use jykre_sql_language as _;");
+        assert!(library_without_language_features(&root).is_ok());
+        write(
+            "src/backend/names.rs",
+            "use jykre_sql_language::completion;",
+        );
+        let refused = library_without_language_features(&root);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(refused.is_err_and(|error| error.contains("names.rs")));
     }
 
     #[test]

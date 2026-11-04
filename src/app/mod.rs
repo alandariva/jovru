@@ -8,8 +8,7 @@ pub mod performance;
 mod probe;
 mod result_grid;
 mod scope_picker;
-mod sql;
-mod sql_providers;
+mod sql_editor;
 mod state;
 mod ui;
 mod workspace;
@@ -22,7 +21,7 @@ use gpui_kit::component::{
     ActiveTheme, Sizable, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogClose, DialogFooter},
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, ShowCompletions},
     resizable::{ResizableState, h_resizable, resizable_panel},
     scroll::ScrollableElement,
     tooltip::Tooltip,
@@ -171,7 +170,7 @@ struct Connection {
     namespaces: Vec<ObjectPath>,
     /// The editor's index of the cached relations, built off the UI thread
     /// after each read of the cache.
-    names: Option<std::sync::Arc<jykre::completion::NameIndex>>,
+    names: Option<std::sync::Arc<sql_editor::NameIndex>>,
     /// The rows of the current explorer search.
     search_rows: Vec<TreeRow>,
     /// Bumped whenever `search_rows` changes.
@@ -181,7 +180,11 @@ struct Connection {
     expanded_revision: usize,
     refresh_generation: usize,
     detail: String,
+    /// The colour its explorer entry and tab group share: the one the user
+    /// chose, or the driver's.
     color: u32,
+    /// The colour and environment the user chose.
+    appearance: jykre::connection_appearance::Appearance,
     group: TabGroupId,
     expanded: bool,
     input: Option<ResolvedConnection>,
@@ -216,6 +219,9 @@ struct PaletteMatch {
 struct AppView {
     tabs: Entity<GroupedTabs>,
     panels: HashMap<TabId, Entity<Workspace>>,
+    /// What each SQL dialect has built in, read at start from the catalog
+    /// directory and handed to every tab; the built-in words until then.
+    sql_catalogs: std::sync::Arc<sql_editor::SqlCatalogs>,
     explorer_split: Entity<ResizableState>,
     assistant_split: Entity<ResizableState>,
     saved_queries: Vec<QueryEntry>,
@@ -265,6 +271,8 @@ struct AppView {
     driver: usize,
     connection_port: Entity<InputState>,
     connection_row_limit: Entity<InputState>,
+    /// The colour and environment chosen in the connection dialog.
+    connection_appearance: jykre::connection_appearance::Appearance,
     connection_password: Entity<InputState>,
     connection_ssl: Entity<InputState>,
     /// PostgreSQL: the search_path sessions start with.
@@ -333,6 +341,15 @@ impl AppView {
         let assistant_split = cx.new(|_| ResizableState::default());
         let explorer_resize = cx.observe(&explorer_split, |_, _, cx| cx.notify());
         let assistant_resize = cx.observe(&assistant_split, |_, _, cx| cx.notify());
+        // The SQL catalogs are read off the UI thread; tabs use the built-in
+        // words until they arrive.
+        cx.spawn(async move |weak, cx| {
+            let catalogs = sql_editor::load_catalogs().await;
+            let _ = weak.update(cx, |this: &mut Self, cx| {
+                this.set_sql_catalogs(catalogs, cx)
+            });
+        })
+        .detach();
         let tab_subscription =
             cx.subscribe_in(&tabs, window, |this, _, event, window, cx| match event {
                 GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
@@ -346,6 +363,13 @@ impl AppView {
                     this.request_move(*tab, *group, *index, window, cx)
                 }
                 GroupedTabsEvent::TabMoved { tab, from, to, .. } if from != to => {
+                    let appearance = this
+                        .connections
+                        .iter()
+                        .find(|connection| connection.group == *to)
+                        .map_or((FAINT, None), |connection| {
+                            (connection.color, connection.appearance.environment)
+                        });
                     let target = this
                         .connections
                         .iter()
@@ -376,7 +400,8 @@ impl AppView {
                         (this.panels.get(tab), target)
                     {
                         panel.update(cx, |panel, cx| {
-                            panel.rebind_connection(name, input, row_limit, cx)
+                            panel.rebind_connection(name, input, row_limit, cx);
+                            panel.set_appearance(appearance.0, appearance.1, cx);
                         });
                     }
                     this.save_state_soon(cx);
@@ -429,6 +454,7 @@ impl AppView {
             explorer_split,
             assistant_split,
             panels: HashMap::new(),
+            sql_catalogs: std::sync::Arc::default(),
             saved_queries: vec![QueryEntry {
                 id: 1,
                 title: tr!("Active customers").into(),
@@ -478,6 +504,7 @@ impl AppView {
             connection_port: cx.new(|cx| InputState::new(window, cx).default_value("5432")),
             connection_row_limit: cx
                 .new(|cx| InputState::new(window, cx).default_value(DEFAULT_ROW_LIMIT.to_string())),
+            connection_appearance: Default::default(),
             connection_password: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
@@ -612,6 +639,7 @@ impl AppView {
                     refresh_generation: 0,
                     detail: detail.into(),
                     color,
+                    appearance: Default::default(),
                     group,
                     expanded: app.connections.is_empty(),
                     input: None,
@@ -813,6 +841,8 @@ impl AppView {
                 cx,
             )
         });
+        let catalogs = self.sql_catalogs.clone();
+        panel.update(cx, |panel, cx| panel.set_catalogs(catalogs, cx));
         if let Some((input, row_limit)) = self
             .connections
             .iter()
@@ -820,6 +850,14 @@ impl AppView {
             .and_then(|connection| Some((connection.input.clone()?, connection.row_limit)))
         {
             panel.update(cx, |panel, cx| panel.set_connection(input, row_limit, cx));
+        }
+        if let Some(connection) = self
+            .connections
+            .iter()
+            .find(|connection| connection.group == group && connection.input.is_some())
+        {
+            let (color, environment) = (connection.color, connection.appearance.environment);
+            panel.update(cx, |panel, cx| panel.set_appearance(color, environment, cx));
         }
         let subscription = cx.subscribe_in(
             &panel,
@@ -857,6 +895,26 @@ impl AppView {
                         }
                     }
                     WorkspaceEvent::Changed => {}
+                    WorkspaceEvent::ConfirmRisk {
+                        connection,
+                        description,
+                    } => {
+                        let panel = panel_entity.downgrade();
+                        confirm(
+                            window,
+                            cx,
+                            Confirmation {
+                                title: tr!("Run on {0}?", connection),
+                                description: description.clone(),
+                                ok: tr!("Run"),
+                                cancel: tr!("Cancel"),
+                                focus: ConfirmFocus::Dialog,
+                            },
+                            move |_, cx| {
+                                let _ = panel.update(cx, |panel, cx| panel.confirm_risk(cx));
+                            },
+                        );
+                    }
                     WorkspaceEvent::PasswordRequired => {
                         let name = panel_entity.read(cx).connection_name().to_owned();
                         if let Some(index) = this.connections.iter().position(|c| c.name == name) {
@@ -1713,12 +1771,48 @@ impl AppView {
             })
     }
 
+    /// Hands the SQL catalogs to every tab, and to the ones opened later.
+    fn set_sql_catalogs(
+        &mut self,
+        catalogs: std::sync::Arc<sql_editor::SqlCatalogs>,
+        cx: &mut Context<Self>,
+    ) {
+        for panel in self.panels.values() {
+            let catalogs = catalogs.clone();
+            panel.update(cx, |panel, cx| panel.set_catalogs(catalogs, cx));
+        }
+        self.sql_catalogs = catalogs;
+        cx.notify();
+    }
+
+    /// Which SQL catalogs the editor uses, for Settings.
+    fn sql_catalog_status(&self) -> Div {
+        let loaded: Vec<String> = self
+            .sql_catalogs
+            .loaded()
+            .map(|(_, catalog)| match &catalog.version {
+                Some(version) => format!("{} {version}", catalog.name),
+                None => catalog.name.clone(),
+            })
+            .collect();
+        let text = if loaded.is_empty() {
+            tr!("Not found: built-in keywords only").to_owned()
+        } else {
+            loaded.join(" · ")
+        };
+        row()
+            .justify_between()
+            .child(label(tr!("SQL catalogs")))
+            .child(label(text))
+    }
+
     fn preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         column().id("appearance-preferences").overflow_y_scroll().gap_3()
             .child(label(tr!("Appearance")))
             .child(row().justify_between().child(label(tr!("Theme"))).child(badge("Graphite", MINT)))
             .child(row().justify_between().child(label(tr!("SQL font"))).child(label("Cascadia Code")))
             .child(row().justify_between().child(label(tr!("SQL size"))).child(badge(format!("{} px", f32::from(cx.theme().mono_font_size)), MINT)))
+            .child(self.sql_catalog_status())
             .child(row().gap_1().children([12., 14., 16., 18., 20.].into_iter().enumerate().map(|(index, size)| {
                 div().id(("sql-font-size", index)).role(Role::Button).aria_label(tr!("SQL font at {0} pixels", size))
                     .focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))).w(px(37.)).h(px(32.)).flex().items_center().justify_center()
@@ -2285,6 +2379,8 @@ pub fn run() {
             KeyBinding::new("ctrl-shift-enter", ExecuteCurrentQueryInNewResult, None),
             KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, None),
             KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, Some(&editor)),
+            // Suggestions on demand, also with nothing typed yet.
+            KeyBinding::new("ctrl-space", ShowCompletions, Some(&editor)),
             KeyBinding::new(
                 "ctrl-shift-enter",
                 ExecuteCurrentQueryInNewResult,

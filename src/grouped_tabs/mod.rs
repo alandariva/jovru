@@ -233,6 +233,24 @@ impl GroupedTabs {
         Ok(())
     }
 
+    /// Recolour a connection group, as when its connection's colour changes.
+    pub fn set_group_color(
+        &mut self,
+        group: TabGroupId,
+        color: Hsla,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        let group = self
+            .model
+            .groups
+            .iter_mut()
+            .find(|candidate| candidate.id == group)
+            .ok_or(TabsError::GroupNotFound)?;
+        group.color = color;
+        cx.notify();
+        Ok(())
+    }
+
     /// Removing a group closes its tabs and emits `TabClosed` for each one.
     pub fn remove_group(
         &mut self,

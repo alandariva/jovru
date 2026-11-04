@@ -58,7 +58,8 @@ tracing = { version = "0.1", default-features = false, features = ["std", "attri
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "json", "tracing-log"] }
 tracing-appender = "0.2"
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
-# SQL formatting by dialect (N010); it has no default features to turn off.
+# SQL formatting by dialect (N010), behind jykre-sql-language's `sqruff`
+# feature; it has no default features to turn off.
 sqruff-lib = "0.44.0"
 
 [dependencies]
@@ -71,9 +72,12 @@ jykre-driver-mysql = { path = "crates/driver-mysql" }
 jykre-driver-databricks = { path = "crates/driver-databricks" }
 jykre-storage = { path = "crates/storage" }
 jykre-secrets = { path = "crates/secrets" }
+jykre-sql = { path = "crates/sql" }
+# The editor's language features, used only by the editor adapter
+# (src/app/sql_editor); query execution never depends on them.
+jykre-sql-language = { path = "crates/sql-language" }
 tokio.workspace = true
 serde_json.workspace = true
-sqruff-lib.workspace = true
 sys-locale = "0.3"
 dirs = "7"
 tracing.workspace = true

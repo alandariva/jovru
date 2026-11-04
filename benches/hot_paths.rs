@@ -143,6 +143,34 @@ fn statement_splitting(c: &mut Criterion) {
     });
 }
 
+/// The editor's tokens of a 10 MB script: reading it all, as an opened
+/// file is, and again after one keystroke in the middle, as typing does.
+fn sql_tokens(c: &mut Criterion) {
+    let line = "SELECT o.id, 'a;b' AS text, count(*) FROM sales.orders o /* ; */ WHERE o.id > 42;
+";
+    let script = line.repeat(10 * 1024 * 1024 / line.len());
+    let tokens = jykre::sql::tokens(&script, None);
+    let middle = script.len() / 2;
+    let middle = (middle..script.len())
+        .find(|at| script.is_char_boundary(*at))
+        .unwrap_or(middle);
+    let mut edited = script.clone();
+    edited.insert(middle, 'x');
+    let edit = jykre::sql::Edit {
+        start: middle,
+        old_end: middle,
+        new_end: middle + 1,
+    };
+    let mut group = c.benchmark_group("sql tokens of a 10 MB script");
+    group.bench_function("whole text", |b| {
+        b.iter(|| jykre::sql::tokens(black_box(&script), None))
+    });
+    group.bench_function("after one keystroke", |b| {
+        b.iter(|| jykre::sql::relex(black_box(&tokens), black_box(&edited), edit, None))
+    });
+    group.finish();
+}
+
 fn large_cache_config() -> ConnectionConfig {
     ConnectionConfig {
         driver: DriverKind::Postgres,
@@ -253,6 +281,7 @@ criterion_group!(
     grid_view,
     result_conversion,
     statement_splitting,
+    sql_tokens,
     metadata_paging
 );
 criterion_main!(benches);

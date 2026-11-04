@@ -15,6 +15,18 @@ pub const BLUE: u32 = 0x8eb9ef;
 pub const PURPLE: u32 = 0xb5a0e8;
 pub const RED: u32 = 0xef8b91;
 pub const AMBER: u32 = 0xe6bb78;
+pub const TEAL: u32 = 0x7fd0d6;
+pub const PINK: u32 = 0xd995a7;
+pub const SLATE: u32 = 0x8f9bb0;
+
+// SQL editor syntax.
+pub const SQL_KEYWORD: u32 = PURPLE;
+pub const SQL_FUNCTION: u32 = BLUE;
+pub const SQL_TYPE: u32 = AMBER;
+pub const SQL_STRING: u32 = MINT;
+pub const SQL_NUMBER: u32 = 0xd9b584;
+pub const SQL_COMMENT: u32 = FAINT;
+pub const SQL_PARAMETER: u32 = 0xd995a7;
 
 // Result grid.
 pub const GRID_BG: u32 = 0x13171d;
@@ -257,4 +269,55 @@ pub fn spinner_button(
 
 pub fn divider() -> Div {
     div().w(px(1.)).h(px(16.)).flex_none().bg(rgb(BORDER))
+}
+
+/// The shade of a connection colour the user chose.
+pub fn connection_color(color: jykre::connection_appearance::ConnectionColor) -> u32 {
+    use jykre::connection_appearance::ConnectionColor as C;
+    match color {
+        C::Mint => MINT,
+        C::Teal => TEAL,
+        C::Blue => BLUE,
+        C::Purple => PURPLE,
+        C::Pink => PINK,
+        C::Red => RED,
+        C::Amber => AMBER,
+        C::Slate => SLATE,
+    }
+}
+
+/// What a connection colour is called, for its swatch's label.
+pub fn connection_color_name(color: jykre::connection_appearance::ConnectionColor) -> &'static str {
+    use jykre::connection_appearance::ConnectionColor as C;
+    match color {
+        C::Mint => jykre::tr!("Mint"),
+        C::Teal => jykre::tr!("Teal"),
+        C::Blue => jykre::tr!("Blue"),
+        C::Purple => jykre::tr!("Purple"),
+        C::Pink => jykre::tr!("Pink"),
+        C::Red => jykre::tr!("Red"),
+        C::Amber => jykre::tr!("Amber"),
+        C::Slate => jykre::tr!("Slate"),
+    }
+}
+
+/// The badge an environment shows after the connection's name.
+pub fn environment_badge(environment: jykre::connection_appearance::Environment) -> Div {
+    use jykre::connection_appearance::Environment as E;
+    let (text, color) = match environment {
+        E::Development => (jykre::tr!("DEV"), MINT),
+        E::Staging => (jykre::tr!("STAGING"), AMBER),
+        E::Production => (jykre::tr!("PROD"), RED),
+    };
+    badge(text, color)
+}
+
+/// What an environment is called in the connection dialog.
+pub fn environment_name(environment: jykre::connection_appearance::Environment) -> &'static str {
+    use jykre::connection_appearance::Environment as E;
+    match environment {
+        E::Development => jykre::tr!("Development"),
+        E::Staging => jykre::tr!("Staging"),
+        E::Production => jykre::tr!("Production"),
+    }
 }

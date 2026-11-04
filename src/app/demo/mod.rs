@@ -310,3 +310,39 @@ pub fn sample_result(sql: &str) -> ResultData {
         ResultData::new(vec![ResultColumn::new("preview", "text")])
     }
 }
+
+/// Why the demo would refuse to run `sql`, or `None` when it accepts it. The
+/// demo only simulates read queries; real connections never use this check.
+pub fn preview_error(sql: &str) -> Option<&'static str> {
+    let first = jykre::sql::tokens(sql, None).into_iter().next()?;
+    let command = sql[first.0].to_ascii_uppercase();
+    if !matches!(
+        command.as_str(),
+        "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "DESCRIBE" | "VALUES"
+    ) {
+        Some(jykre::tr!(
+            "The demo accepts only read queries (SELECT, WITH, EXPLAIN, SHOW, DESCRIBE or VALUES)."
+        ))
+    } else if command == "SELECT"
+        && sql
+            .trim_end_matches([';', ' ', '\n', '\r'])
+            .trim()
+            .eq_ignore_ascii_case("SELECT")
+    {
+        Some(jykre::tr!("SELECT needs an expression or column."))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::preview_error;
+
+    #[test]
+    fn the_demo_runs_only_read_queries_with_something_to_select() {
+        assert!(preview_error("SELECT;").is_some());
+        assert!(preview_error("DELETE FROM orders;").is_some());
+        assert!(preview_error("SELECT 1;").is_none());
+    }
+}

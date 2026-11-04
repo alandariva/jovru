@@ -482,6 +482,84 @@ Se H1 ou H2 reprovarem, a fase 3 é substituída pela heurística evoluída (A3)
 | H6 | Os catálogos podem ser gerados de forma reproduzível a partir das fontes oficiais |
 | H7 | O `NameIndex` de 500 000 objetos cabe no orçamento de memória quando compartilhado por conexão |
 
+### G.4 Resultados da PoC (4 de novembro de 2026)
+
+**Como foi feita.**
+- A PoC é um projeto Cargo descartável, fora do repositório, que usa `crates/sql` e `crates/sql-language` por `path`, com `tree-sitter` 0.26.13 e `tree-sitter-sequel` 0.3.11. Nada foi adicionado ao projeto.
+- **Máscara:** o lexer do dialeto troca strings, comentários, parâmetros e bytes não ASCII por texto neutro do mesmo tamanho.
+- **Sentinela:** um nome é inserido no cursor quando ali não há palavra sendo digitada.
+- **Parênteses:** os que ficaram abertos antes do cursor são fechados depois dele.
+- **Extração:** relações e aliases do `statement` ou `subquery` mais próximo, CTEs dos ancestrais, tabelas de origem das tabelas derivadas, e a cláusula no cursor.
+- **Comparação:** contra a heurística atual (`completion::request`), resolvendo os nomes num `NameIndex` com todas as tabelas do corpus.
+- **Corpus:** 64 instruções escritas à mão, com o cursor marcado e um gabarito de cláusula e tabelas em escopo: 25 do PostgreSQL, 19 do MySQL e 20 do Databricks. É menos que os 50 por dialeto previstos.
+- **Ajustes de gabarito depois da primeira rodada:**
+  - o cursor dentro do `ORDER BY` de uma janela passou de `select` para `order_by`;
+  - no `LATERAL` do PostgreSQL, as tabelas da tabela derivada entraram no escopo.
+- **Correções de extração:** CTEs deixaram de contar como tabelas, e `INSERT … SELECT`, `MERGE` e `JOIN LATERAL (…)` passaram a ser tratados. São lógica do motor, não limitações da gramática. [V]
+
+**Editando no meio de uma instrução** (gabarito, com texto depois do cursor):
+
+| Dialeto | Cláusula certa (tree-sitter) | Tabelas certas (tree-sitter) | Ambas | Tabelas certas (heurística atual) | Instruções completas sem `ERROR` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PostgreSQL | 96% | 100% | 96% | 75% | 96% |
+| MySQL | 95% | 95% | 95% | 84% | 68% |
+| Databricks | 100% | 90% | 90% | 85% | 65% |
+
+A heurística erra onde ela achata a instrução (P7): relações de CTEs e subconsultas que vazam para o escopo externo e aliases de tabelas derivadas. [V]
+
+**Digitando no fim** (cada prefixo da instrução preenchida, cursor no fim):
+
+| Dialeto | Posições onde se espera um nome | Contexto limpo (tree-sitter) | Sem fechar parênteses | Todas as posições: cláusula achada | Heurística responde |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| PostgreSQL | 320 | 87% | 74% | 71–73% | 98–100% |
+| MySQL | 196 | 90% | 79% | 70% | 98–100% |
+| Databricks | 234 | 80% | 69% | 67–68% | 98–100% |
+
+"Contexto limpo" significa uma cláusula achada sem nó de erro em volta do cursor. As posições "onde se espera um nome" são as que vêm depois de `.`, `,`, `(`, de um operador ou de palavras como `SELECT`, `WHERE`, `ON`, `BY` e `SET`. [V]
+
+**Lacunas da gramática encontradas:**
+- PostgreSQL: `DISTINCT ON`;
+- MySQL: `STRAIGHT_JOIN`;
+- Databricks: `LATERAL VIEW`, `PIVOT` e `QUALIFY` (lido como alias ou região de erro);
+- `MERGE … UPDATE SET *` termina em erro. [V]
+
+**Custo** (release, máquina do mantenedor):
+
+| Medida | Resultado |
+| --- | --- |
+| Máscara, sentinela, parse e extração | p50 19 µs, p95 102 µs, máximo 0,4 ms, em 2 486 análises de instruções até ~400 bytes |
+| Instrução de 19,6 KB | p95 4,35 ms |
+| Instrução de ~10 KB | p95 2,0 ms |
+| Peso no executável | o executável da PoC tem 2,9 MB no total, contra 69,4 MB do app em release, ou seja, ≤ +4% |
+
+**Achado lateral (corrigido).** A heurística não respondia com o cursor depois de um espaço no fim da última instrução (`WHERE |`): `Ctrl+Space` ali não sugeria nada. `completion::statement_at` passou a considerar esse cursor parte da instrução, e um teste cobre o caso.
+
+**Decisão quanto às hipóteses:**
+
+| ID | Resultado |
+| --- | --- |
+| H1 | **Não passou no critério combinado** (≥ 90% nos prefixos): 87%, 90% e 80% nas posições onde se espera nome, e 60–73% em todas as posições. Passou no gabarito de edição no meio (96%, 95% e 90%, contra 75%, 84% e 85% da heurística) |
+| H2 | **Não passou** em 20 KB (p95 4,35 ms, contra ≤ 2 ms). Passou nas instruções típicas (p95 0,1 ms) e em ~10 KB |
+| H3, H4 | Substituídas: o mantenedor aprovou e integrou o sqruff (N010) |
+| H5 | **Não passou:** `relex` custa 5,3 ms por tecla em 10 MB, contra 57 ms de retokenizar tudo. A cópia do vetor de tokens é o que sobra |
+| H6 | Passou: `cargo xtask catalogs` gera os três dialetos de forma reproduzível |
+| H7 | Não medida |
+
+**Recomendação.** Pela regra combinada no plano, a etapa 5 **não adota o tree-sitter agora** e segue pela heurística evoluída (A3): um modelo de escopos sobre os tokens que já temos, sem dependência nova.
+- **CTEs:** corpo delimitado por parênteses depois de `nome AS`.
+- **Subconsultas:** escopo próprio, delimitado por parênteses.
+- **Tabelas derivadas:** expõem as tabelas e colunas de origem.
+- **Fechamento de parênteses:** o mesmo da PoC.
+
+Os motivos:
+- a vantagem do tree-sitter está justamente nos escopos aninhados, que um modelo sobre tokens pode tratar;
+- nos prefixos o tree-sitter falha em 10–40% das posições, então a heurística continuaria necessária como reserva;
+- MySQL e Databricks têm erro de gramática em cerca de um terço das instruções completas.
+
+**Critério de aceitação da etapa 5:** com o corpus da PoC promovido a teste, o modelo de tokens precisa acertar ≥ 90% em cada dialeto (o nível do tree-sitter) e responder em 100% dos prefixos.
+
+**Quando reabrir o tree-sitter:** se o modelo de tokens não chegar a esse nível, ou quando diagnósticos de sintaxe exigirem uma árvore completa. O código da PoC, o corpus e os resultados ficaram fora do repositório, no scratchpad da sessão. [I]
+
 ---
 
 ## H. Fontes

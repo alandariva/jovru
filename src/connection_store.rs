@@ -1,4 +1,5 @@
 //! Application connection service: validation, SQLite migration and vault policy.
+use crate::connection_appearance::{Appearance, appearance_key};
 use crate::tr;
 use crate::{
     backend::{self, MetadataSnapshot},
@@ -53,6 +54,8 @@ pub struct LoadedConnection {
     /// Hours after which opening the connection reads its chosen namespaces
     /// again; 0 never does.
     pub revalidate_hours: u32,
+    /// Its colour and environment.
+    pub appearance: Appearance,
     pub warning: Option<String>,
 }
 
@@ -272,6 +275,14 @@ async fn load_from(
             .and_then(|value| value.as_u64())
             .and_then(|hours| u32::try_from(hours).ok())
             .unwrap_or(0);
+        let appearance = Appearance::from_value(
+            repository
+                .setting(&appearance_key(profile.id))
+                .await
+                .ok()
+                .flatten()
+                .as_ref(),
+        );
         loaded.push(LoadedConnection {
             profile,
             input,
@@ -280,6 +291,7 @@ async fn load_from(
             cache,
             expanded,
             revalidate_hours,
+            appearance,
             warning,
         });
     }
@@ -299,6 +311,8 @@ pub struct Preferences {
     /// Hours after which opening the connection reads its chosen namespaces
     /// again; 0 never does.
     pub revalidate_hours: u32,
+    /// Its colour and environment.
+    pub appearance: Appearance,
 }
 
 /// Saves a profile, its preferences and, when asked to remember it, its
@@ -331,6 +345,7 @@ async fn save_to(
         row_limit,
         scope,
         revalidate_hours,
+        appearance,
     } = preferences;
     // Another profile that cannot be read does not block this one.
     let previous = repository
@@ -395,6 +410,7 @@ async fn save_to(
             revalidate_key(profile.id),
             serde_json::json!(revalidate_hours),
         ),
+        (appearance_key(profile.id), appearance.to_value()),
     ];
     let profile = match repository.save_with_settings(&profile, &settings).await {
         Ok(profile) => profile,
@@ -444,6 +460,7 @@ async fn save_to(
         cache,
         expanded: Vec::new(),
         revalidate_hours,
+        appearance,
         warning,
     })
 }

@@ -113,6 +113,7 @@ impl AppView {
             row_limit: connection.row_limit,
             scope: connection.scope.clone(),
             revalidate_hours: connection.revalidate_hours,
+            appearance: connection.appearance,
         };
         let dir = connection_store::data_dir();
         cx.spawn_in(window, async move |weak, cx| {

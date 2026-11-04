@@ -1,6 +1,7 @@
 use super::demo::{self, OPTIMIZED_SQL, SALES, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
-use super::result_grid::{ResultGrid, ResultGridEvent};
+use super::result_grid::{GridSql, ResultGrid, ResultGridEvent, Summary};
+use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
@@ -13,7 +14,6 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::completion::{CandidateKind, NameIndex, Symbol};
 use jykre::tr;
 use jykre::{
     backend, cell_format, connection_store,
@@ -25,7 +25,6 @@ use jykre::{
     run_log::{LogEntry, LogOutcome, RunLog},
     transaction::Transaction,
 };
-use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -69,6 +68,14 @@ pub struct Workspace {
     choosing_connection: bool,
     /// A run waiting for the password of the connection.
     pending_run: Option<(Scope, Placement)>,
+    /// A run on a production connection that waits for the user to confirm
+    /// its risky statements.
+    risky_run: Option<(Scope, Placement)>,
+    /// The waiting risky run was confirmed: the next start skips the check.
+    risk_confirmed: bool,
+    /// The environment of the tab's connection; production asks before
+    /// risky statements.
+    environment: Option<jykre::connection_appearance::Environment>,
     /// The tab's session, kept between runs so `USE`, `SET`, temporary
     /// tables and transactions carry over. Out with the run while one is
     /// running; `None` until the first run or after it was lost.
@@ -80,8 +87,6 @@ pub struct Workspace {
     next_lease: u64,
     /// The next page of a result is being read; runs wait for it.
     fetching: bool,
-    /// The SQL is being formatted off the UI thread.
-    formatting: bool,
     cancellation: CancellationToken,
     numbers_pt_br: bool,
     editor: Entity<EditorState>,
@@ -108,18 +113,15 @@ pub struct Workspace {
     context: SessionContext,
     /// The namespaces the header offers, from the connection's cache.
     context_choices: Vec<SessionContext>,
-    /// The connection's cache this tab reads names from, and its name
-    /// index; empty until the explorer has read the cache.
-    cache_id: Option<ConnectionId>,
-    names: Arc<NameIndex>,
-    /// The columns read so far for the index's relations, and those being
-    /// read.
-    columns: HashMap<ObjectPath, Vec<MetadataObject>>,
-    columns_loading: HashSet<ObjectPath>,
+    /// Highlighting, completion, hover, go to definition and Format: the
+    /// editor's language features, told what they need by the tab.
+    sql_editor: Entity<SqlEditor>,
     /// The result grid, its own entity ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
     grid: Entity<ResultGrid>,
     /// Visible cells selected in the grid, as it last reported.
     selected_cells: usize,
+    /// The statistics of the selected cells, as the grid last reported.
+    selection_summary: Summary,
     result_view: ResultView,
     assistant_open: bool,
     messages: Vec<Message>,
@@ -170,17 +172,21 @@ impl Workspace {
                 ))
                 .default_value(sql)
         });
-        set_highlighter(&editor, None, cx);
-        let workspace = cx.entity().downgrade();
-        editor.update(cx, |editor, _| {
-            // Completion, hover and go to definition from the tab's connection.
-            let providers = super::sql_providers::SqlProviders::new(workspace.clone());
-            let lsp = editor.lsp_mut();
-            lsp.completion_provider = Some(providers.clone());
-            lsp.hover_provider = Some(providers.clone());
-            lsp.definition_provider = Some(providers);
-            lsp.show_document = Some(super::sql_providers::show_object(workspace));
-        });
+        // Highlighting, completion, hover, go to definition and Format.
+        let sql_editor = cx.new(|cx| SqlEditor::new(&editor, cx));
+        let sql_editor_subscription = cx.subscribe(
+            &sql_editor,
+            |this, _, event: &SqlEditorEvent, cx| match event {
+                SqlEditorEvent::Reveal(path) => cx.emit(WorkspaceEvent::Reveal {
+                    connection: this.connection.to_string(),
+                    path: path.clone(),
+                }),
+                SqlEditorEvent::Notice(notice) => {
+                    this.notice = Some(notice.clone());
+                    cx.notify();
+                }
+            },
+        );
         let prompt =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Ask about your data…")));
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter results…")));
@@ -235,6 +241,11 @@ impl Workspace {
                     this.notice = Some(notice.clone());
                     cx.notify();
                 }
+                ResultGridEvent::Summary(summary) => {
+                    this.selection_summary = summary.clone();
+                    cx.notify();
+                }
+                ResultGridEvent::RecordsShown => cx.notify(),
             });
         let resize_subscription = cx.observe(&assistant_split, |_, _, cx| cx.notify());
         let query_split = cx.new(|_| ResizableState::default());
@@ -264,11 +275,13 @@ impl Workspace {
             started_position: 0,
             choosing_connection: false,
             pending_run: None,
+            risky_run: None,
+            risk_confirmed: false,
+            environment: None,
             session: None,
             session_lease: None,
             next_lease: 0,
             fetching: false,
-            formatting: false,
             cancellation: CancellationToken::new(),
             numbers_pt_br: false,
             editor,
@@ -309,12 +322,10 @@ impl Workspace {
             connection_choices: Vec::new(),
             context: SessionContext::default(),
             context_choices: Vec::new(),
-            cache_id: None,
-            names: Arc::default(),
-            columns: HashMap::new(),
-            columns_loading: HashSet::new(),
+            sql_editor,
             grid,
             selected_cells: 0,
+            selection_summary: Summary::default(),
             result_view: ResultView::Table,
             assistant_open: true,
             messages: if sql == SALES_SQL {
@@ -357,6 +368,7 @@ impl Workspace {
                 resize_subscription,
                 query_resize,
                 editor_observation,
+                sql_editor_subscription,
             ],
         }
     }
@@ -713,8 +725,29 @@ impl Workspace {
         self.object.as_ref()
     }
 
-    pub fn set_object(&mut self, object: Option<ObjectPath>) {
+    pub fn set_object(&mut self, object: Option<ObjectPath>, cx: &mut Context<Self>) {
         self.object = object;
+        self.update_grid_sql(cx);
+    }
+
+    /// Tells the grid how copies as SQL write names, strings and the table
+    /// the tab was opened for.
+    fn update_grid_sql(&mut self, cx: &mut Context<Self>) {
+        let mut sql = GridSql {
+            dialect: self.run.dialect(),
+            ..GridSql::default()
+        };
+        if let Some(quote) = self.sql_editor.read(cx).name_quoter() {
+            sql.quote_name = quote;
+        }
+        sql.table = self.object.as_ref().and_then(|path| {
+            let input = self.input.as_ref()?;
+            let driver = builtin_registry()
+                .and_then(|registry| registry.get(input.config.driver))
+                .ok()?;
+            Some(driver.relation_name(path))
+        });
+        self.grid.update(cx, |grid, _| grid.set_sql(sql));
     }
 
     /// The result tab on screen has rows or a completed statement to show.
@@ -807,6 +840,8 @@ impl Workspace {
         if let Some(context) = context.filter(|_| self.session_lease == Some(lease))
             && context != self.context
         {
+            self.sql_editor
+                .update(cx, |editor, _| editor.set_context(context.clone()));
             self.context = context;
             cx.emit(WorkspaceEvent::Changed);
         }
@@ -945,6 +980,21 @@ impl Workspace {
             return;
         }
         let sql = self.editor.read(cx).text().to_string();
+        let confirmed = std::mem::take(&mut self.risk_confirmed);
+        if self.environment == Some(jykre::connection_appearance::Environment::Production)
+            && !confirmed
+        {
+            let statements = self.run.statements_for(&sql, &scope);
+            let risks = jykre::guard::risks(&statements, self.run.dialect());
+            if !risks.is_empty() {
+                self.risky_run = Some((scope, placement));
+                cx.emit(WorkspaceEvent::ConfirmRisk {
+                    connection: self.connection.to_string(),
+                    description: risk_description(&risks, statements.len()),
+                });
+                return;
+            }
+        }
         let off_statement = self.run.off_statement(&sql, &scope);
         let Some(plan) = self.run.start(&sql, scope) else {
             self.notice = Some(Feedback::new(
@@ -1175,7 +1225,7 @@ impl Workspace {
                     .await;
                 let keep_running = weak
                     .update(cx, |this, cx| {
-                        let error = jykre::sql::preview_error(&sql);
+                        let error = demo::preview_error(&sql);
                         let shown = this.run.finish_statement(id, index, error);
                         if shown {
                             let data = sample_result(&sql);
@@ -1472,6 +1522,8 @@ impl Workspace {
                             .checked(*choice == current)
                             .on_click(move |_, _, cx| {
                                 let _ = workspace.update(cx, |this, cx| {
+                                    this.sql_editor
+                                        .update(cx, |editor, _| editor.set_context(chosen.clone()));
                                     this.context = chosen.clone();
                                     cx.emit(WorkspaceEvent::Changed);
                                     cx.notify();
@@ -1483,197 +1535,17 @@ impl Workspace {
             })
     }
 
-    /// Uses `names` for completion, hover and go to definition. A newer
-    /// index (or another connection's) drops the columns read for the old
-    /// one.
-    pub fn set_names(&mut self, id: ConnectionId, names: Arc<NameIndex>) {
-        if self.cache_id != Some(id) || self.names.version != names.version {
-            self.columns.clear();
-            self.columns_loading.clear();
-        }
-        self.cache_id = Some(id);
-        self.names = names;
+    /// What each dialect has built in, for the editor's language features.
+    pub fn set_catalogs(&mut self, catalogs: Arc<SqlCatalogs>, cx: &mut Context<Self>) {
+        self.sql_editor
+            .update(cx, |editor, cx| editor.set_catalogs(catalogs, cx));
+        self.update_grid_sql(cx);
     }
 
-    /// The identifier quote and the connection, for reading the cache.
-    fn cache_target(&self) -> Option<(ConnectionId, ConnectionConfig, char)> {
-        let input = self.input.as_ref()?;
-        let quote = builtin_registry()
-            .and_then(|registry| registry.get(input.config.driver))
-            .map(|driver| driver.descriptor().capabilities.identifier_quote)
-            .unwrap_or('"');
-        Some((self.cache_id?, input.config.clone(), quote))
-    }
-
-    /// The editor's suggestions at `offset`. Relations whose columns were
-    /// not read yet show as loading and are read in the background, so the
-    /// next keystroke completes them; typing never waits.
-    pub(super) fn completion_items(
-        &mut self,
-        sql: &str,
-        offset: usize,
-        text: &gpui_kit::component::Rope,
-        cx: &mut Context<Self>,
-    ) -> Vec<lsp_types::CompletionItem> {
-        use gpui_kit::component::RopeExt as _;
-        let Some((_, _, quote)) = self.cache_target() else {
-            return Vec::new();
-        };
-        let Some(request) = jykre::completion::request(sql, offset, &self.names, &self.context)
-        else {
-            return Vec::new();
-        };
-        let columns = &self.columns;
-        let (found, missing) = jykre::completion::candidates(
-            &request,
-            &self.names,
-            &self.context,
-            quote,
-            &|relation| columns.get(relation).cloned(),
-        );
-        let range = lsp_types::Range {
-            start: text.offset_to_position(request.replace.start),
-            end: text.offset_to_position(request.replace.end),
-        };
-        let mut items: Vec<_> = found
-            .into_iter()
-            .map(|candidate| lsp_types::CompletionItem {
-                label: candidate.label,
-                kind: Some(match candidate.kind {
-                    CandidateKind::Namespace => lsp_types::CompletionItemKind::MODULE,
-                    CandidateKind::Relation => lsp_types::CompletionItemKind::CLASS,
-                    CandidateKind::View => lsp_types::CompletionItemKind::INTERFACE,
-                    CandidateKind::Column => lsp_types::CompletionItemKind::FIELD,
-                    CandidateKind::Cte => lsp_types::CompletionItemKind::REFERENCE,
-                }),
-                detail: Some(candidate.detail),
-                text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
-                    range,
-                    new_text: candidate.insert,
-                })),
-                ..lsp_types::CompletionItem::default()
-            })
-            .collect();
-        if !missing.is_empty() {
-            items.push(lsp_types::CompletionItem {
-                label: tr!("Loading columns…").into(),
-                detail: Some(tr!("Type again to see them").into()),
-                // Choosing it changes nothing.
-                text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
-                    range,
-                    new_text: request.prefix.clone(),
-                })),
-                ..lsp_types::CompletionItem::default()
-            });
-            self.load_columns(missing, cx);
-        }
-        items
-    }
-
-    /// Reads the columns of `relations` from the cache, off the UI thread.
-    fn load_columns(&mut self, relations: Vec<ObjectPath>, cx: &mut Context<Self>) {
-        let Some((id, config, _)) = self.cache_target() else {
-            return;
-        };
-        let version = self.names.version;
-        for relation in relations {
-            if !self.columns_loading.insert(relation.clone()) {
-                continue;
-            }
-            let config = config.clone();
-            let dir = jykre::connection_store::data_dir();
-            cx.spawn(async move |weak, cx| {
-                let read = relation.clone();
-                let result = backend::run(async move {
-                    backend::relation_columns(&dir, id, &config, read).await
-                })
-                .await;
-                let _ = weak.update(cx, |this, _| {
-                    this.columns_loading.remove(&relation);
-                    if this.names.version != version || this.cache_id != Some(id) {
-                        return;
-                    }
-                    match result {
-                        Ok(columns) => {
-                            this.columns.insert(relation, columns);
-                        }
-                        Err(error) => {
-                            tracing::debug!(error_code = ?error.code, "columns unavailable")
-                        }
-                    }
-                });
-            })
-            .detach();
-        }
-    }
-
-    /// The relation or column under `offset`, from the names read so far.
-    /// A relation whose columns were not read is read for next time.
-    pub(super) fn symbol_at(
-        &mut self,
-        sql: &str,
-        offset: usize,
-        cx: &mut Context<Self>,
-    ) -> Option<(Symbol, std::ops::Range<usize>)> {
-        self.cache_target()?;
-        let columns = &self.columns;
-        let found =
-            jykre::completion::symbol_at(sql, offset, &self.names, &self.context, &|relation| {
-                columns.get(relation).cloned()
-            });
-        if found.is_none() {
-            // The name may be a column of a relation not read yet.
-            let request = jykre::completion::request(sql, offset, &self.names, &self.context);
-            if let Some(jykre::completion::Request {
-                wanted: jykre::completion::Wanted::Columns { relations },
-                ..
-            }) = request
-            {
-                let missing = relations
-                    .into_iter()
-                    .filter(|relation| !self.columns.contains_key(relation))
-                    .collect();
-                self.load_columns(missing, cx);
-            }
-        }
-        found
-    }
-
-    /// What the hover shows for a symbol: a column's type, nullability,
-    /// key, default and comment, or a relation's kind and name.
-    pub(super) fn describe(&self, symbol: &Symbol) -> Option<String> {
-        match symbol {
-            Symbol::Column { relation, name } => {
-                let column = self
-                    .columns
-                    .get(relation)?
-                    .iter()
-                    .find(|object| object.kind == ObjectKind::Column && object.name == *name)?;
-                let details = jykre::explorer::description(column);
-                Some(format!(
-                    "**{}**\n\n{}",
-                    column.name,
-                    details.replace('\n', "\n\n")
-                ))
-            }
-            Symbol::Relation(path) => {
-                let name: Vec<&str> = path.0.iter().map(|part| part.name.as_str()).collect();
-                let kind = path.0.last().map(|part| part.kind)?;
-                Some(format!(
-                    "**{}**\n\n{}",
-                    name.join("."),
-                    jykre::explorer::kind_name(kind)
-                ))
-            }
-        }
-    }
-
-    /// Asks the explorer to show `path` (go to definition).
-    pub(super) fn reveal(&mut self, path: ObjectPath, cx: &mut Context<Self>) {
-        cx.emit(WorkspaceEvent::Reveal {
-            connection: self.connection.to_string(),
-            path,
-        });
+    /// Uses `names` for completion, hover and go to definition.
+    pub fn set_names(&mut self, id: ConnectionId, names: Arc<NameIndex>, cx: &mut Context<Self>) {
+        self.sql_editor
+            .update(cx, |editor, _| editor.set_names(id, names));
     }
 
     /// Sets the namespaces the header offers.
@@ -1903,6 +1775,9 @@ impl Workspace {
                             .gap_2()
                             .child(icon(I::Database, self.connection_color))
                             .child(label(self.connection.clone()))
+                            .when_some(self.environment, |s, environment| {
+                                s.child(environment_badge(environment))
+                            })
                             // Only what is real: the context the session
                             // reports (or chosen for its next run). A tab
                             // without a connection has no context to show;
@@ -2033,8 +1908,14 @@ impl Workspace {
                                 |(index, tab)| {
                                     let (symbol, color, status) = result_status(tab);
                                     let running = tab.state == ResultState::Running;
+                                    let drag = ResultTabDrag {
+                                        id: tab.id,
+                                        title: tr!("Result {0}", tab.number).into(),
+                                    };
                                     row()
-                                        .id(("result-tab", index))
+                                        // Follows the tab when it moves, so
+                                        // the focus moves with it.
+                                        .id(("result-tab", tab.id.get() as usize))
                                         .role(Role::Tab)
                                         .aria_selected(index == active)
                                         .aria_label(tr!("Result {0}: {1}", tab.number, status))
@@ -2056,6 +1937,52 @@ impl Workspace {
                                             this.results.select(index);
                                             this.show_active(cx);
                                         }))
+                                        // Dragged onto another tab, it takes
+                                        // that tab's place; Ctrl Shift and an
+                                        // arrow move the focused one.
+                                        .on_drag(drag, |drag, _, _, cx| {
+                                            cx.new(|_| ResultTabPreview {
+                                                title: drag.title.clone(),
+                                            })
+                                        })
+                                        .drag_over::<ResultTabDrag>(|style, _, _, _| {
+                                            style
+                                                .bg(rgb(HOVER))
+                                                .border_l_2()
+                                                .border_color(rgb(MINT))
+                                        })
+                                        .on_drop(cx.listener(
+                                            move |this, drag: &ResultTabDrag, _, cx| {
+                                                if let Some(from) = this
+                                                    .results
+                                                    .tabs()
+                                                    .iter()
+                                                    .position(|tab| tab.id == drag.id)
+                                                {
+                                                    this.results.move_tab(from, index);
+                                                    cx.notify();
+                                                }
+                                            },
+                                        ))
+                                        .on_key_down(cx.listener(
+                                            move |this, event: &KeyDownEvent, window, cx| {
+                                                let modifiers = &event.keystroke.modifiers;
+                                                if !(modifiers.control && modifiers.shift) {
+                                                    return;
+                                                }
+                                                let to = match event.keystroke.key.as_str() {
+                                                    "left" => index.checked_sub(1),
+                                                    "right" => Some(index + 1),
+                                                    _ => None,
+                                                };
+                                                if let Some(to) = to {
+                                                    this.results.move_tab(index, to);
+                                                    window.prevent_default();
+                                                    cx.stop_propagation();
+                                                    cx.notify();
+                                                }
+                                            },
+                                        ))
                                         .map(|s| {
                                             if running {
                                                 s.child(spinning_icon(
@@ -2127,6 +2054,22 @@ impl Workspace {
                                         cx.notify();
                                     })),
                             )
+                            .child({
+                                let records = self.grid.read(cx).records();
+                                icon_button(
+                                    "records-view",
+                                    I::Rows3,
+                                    tr!("Show the selected rows as records"),
+                                )
+                                .aria_selected(records)
+                                .when(records, |s| s.bg(rgb(HOVER)))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.grid
+                                            .update(cx, |grid, cx| grid.set_records(!records, cx));
+                                    },
+                                ))
+                            })
                             .child(
                                 icon_button("filter-results", I::ListFilter, tr!("Filter results"))
                                     .aria_selected(self.filter_open)
@@ -2460,8 +2403,28 @@ impl Workspace {
                     .when(self.has_results() && !self.run.is_running(), |s| {
                         let selected = self.selected_cells;
                         s.when(selected > 1, |s| {
-                            s.child(label(tr!("{0} cells selected", selected)))
-                                .child(label("·"))
+                            s.child(label(tr!(
+                                "{0} cells selected",
+                                cell_format::count(selected)
+                            )))
+                            .when_some(self.selection_stats(), |s, (text, detail)| {
+                                s.child(label("·")).child(
+                                    div()
+                                        .id("selection-stats")
+                                        .role(Role::Status)
+                                        .aria_label(detail.clone())
+                                        .max_w(px(520.))
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(MUTED))
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(detail.clone()).build(window, cx)
+                                        })
+                                        .child(text),
+                                )
+                            })
+                            .child(label("·"))
                         })
                     })
                     .when_some(pages, |s, tab| {
@@ -2492,6 +2455,60 @@ impl Workspace {
                         ))
                     }),
             )
+    }
+
+    /// What the footer says about the numbers among the selected cells, and
+    /// the longer text of its tooltip: sum, average, median, minimum and
+    /// maximum, exact and in the number format on screen.
+    fn selection_stats(&self) -> Option<(String, String)> {
+        match &self.selection_summary {
+            Summary::None => None,
+            Summary::Computing => Some((
+                tr!("Calculating…").to_owned(),
+                tr!("Reading the selected cells to sum them…").to_owned(),
+            )),
+            Summary::Ready(summary) => {
+                let numbers = summary.numbers.as_ref()?;
+                let number = |text: Option<&str>| {
+                    text.map_or_else(
+                        || "—".to_owned(),
+                        |text| {
+                            cell_format::display(
+                                Some(text),
+                                cell_format::ValueFamily::Number,
+                                self.numbers_pt_br,
+                            )
+                        },
+                    )
+                };
+                let (sum, average, median) = (
+                    number(numbers.sum.as_deref()),
+                    number(numbers.average.as_deref()),
+                    number(numbers.median.as_deref()),
+                );
+                let (min, max) = (number(Some(&numbers.min)), number(Some(&numbers.max)));
+                Some((
+                    tr!(
+                        "Sum {0} · Average {1} · Median {2} · Min {3} · Max {4}",
+                        sum,
+                        average,
+                        median,
+                        min,
+                        max
+                    ),
+                    tr!(
+                        "{0} numbers of {1} values: sum {2}, average {3}, median {4}, minimum {5}, maximum {6}. Exact, from the numbers as the database wrote them.",
+                        cell_format::count(numbers.count),
+                        cell_format::count(summary.values),
+                        sum,
+                        average,
+                        median,
+                        min,
+                        max
+                    ),
+                ))
+            }
+        }
     }
 
     /// The result on screen is the demo's, with a chart and an analysis.
@@ -2800,127 +2817,11 @@ impl Workspace {
             .child(divider())
     }
 
-    /// Formats the SQL by the tab's dialect, off the UI thread: the
-    /// formatter's grammar takes long to build, and the work grows with the
-    /// script. With a selection only the selected SQL is formatted; without
-    /// one, the whole script, statement by statement. Only whitespace and
-    /// keyword case change, so the caret, the selection and the caret's
-    /// place on screen are kept. A result for SQL edited meanwhile is
-    /// dropped.
+    /// Formats the selection, or the whole script without one, by the tab's
+    /// dialect ([`SqlEditor::format`]); the outcome comes back as a notice.
     fn format_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.formatting {
-            return;
-        }
-        let sql = self.editor_sql.clone();
-        let dialect = self.run.dialect();
-        let selection = self.editor.read(cx).selected_range();
-        self.formatting = true;
-        self.notice = Some(Feedback::new(
-            Tone::Info,
-            if selection.is_empty() {
-                tr!("Formatting the SQL…")
-            } else {
-                tr!("Formatting the selected SQL…")
-            },
-        ));
-        cx.notify();
-        let source = sql.clone();
-        let task = cx.background_spawn(async move {
-            if selection.is_empty() {
-                jykre::sql::format(&source, dialect)
-            } else {
-                jykre::sql::format_range(&source, selection, dialect)
-                    .map(|(formatted, _)| formatted)
-            }
-        });
-        cx.spawn_in(window, async move |weak, cx| {
-            let result = task.await;
-            let _ = weak.update_in(cx, |this, window, cx| {
-                this.formatting = false;
-                this.apply_format(&sql, result, window, cx);
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Puts the formatted SQL in the editor, when the editor still holds the
-    /// SQL it was made from, and says how it went.
-    fn apply_format(
-        &mut self,
-        sql: &str,
-        result: Result<jykre::sql::Formatted, jykre::sql::FormatError>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let notice = |tone, text: &str| Some(Feedback::new(tone, text));
-        let formatted = match result {
-            _ if self.editor_sql != sql => {
-                self.notice = notice(
-                    Tone::Info,
-                    tr!("The SQL changed while it was being formatted. Format it again."),
-                );
-                return;
-            }
-            Err(jykre::sql::FormatError::Failed) => {
-                self.notice = notice(
-                    Tone::Error,
-                    tr!("The SQL could not be formatted. It was left as it was."),
-                );
-                return;
-            }
-            Ok(formatted) => formatted,
-        };
-        let partial = formatted.partial;
-        let formatted = formatted.sql;
-        if formatted == sql {
-            self.notice = if partial {
-                notice(
-                    Tone::Warning,
-                    tr!(
-                        "The SQL does not parse in this connection's dialect, so it was left as it was."
-                    ),
-                )
-            } else {
-                notice(Tone::Info, tr!("SQL is already formatted."))
-            };
-            return;
-        }
-        let (selection, reversed, scroll) = {
-            let editor = self.editor.read(cx);
-            (
-                editor.selected_range(),
-                editor.is_selection_reversed(),
-                editor.scroll_offset(),
-            )
-        };
-        let map = |offset| jykre::sql::map_offset(sql, &formatted, offset);
-        let range = map(selection.start)..map(selection.end);
-        let caret = |text: &str, range: &Range<usize>| {
-            let at = if reversed { range.start } else { range.end };
-            text.get(..at)
-                .map_or(0, |before| before.matches('\n').count())
-        };
-        let moved = caret(&formatted, &range) as f32 - caret(sql, &selection) as f32;
-        self.editor.update(cx, |editor, cx| {
-            // `replace_all` keeps the undo history, so Ctrl+Z restores the
-            // previous layout; it also moves to the start, undone here.
-            editor.replace_all(formatted.clone(), window, cx);
-            editor.set_selected_range_with_direction(range, reversed, cx);
-            if let Some(line_height) = editor.line_height() {
-                editor.set_scroll_offset(point(scroll.x, scroll.y - line_height * moved), cx);
-            }
-        });
-        self.notice = if partial {
-            notice(
-                Tone::Warning,
-                tr!(
-                    "SQL formatted, except a part that does not parse in this connection's dialect, which was left as it was. Use Ctrl+Z to undo."
-                ),
-            )
-        } else {
-            notice(Tone::Success, tr!("SQL formatted. Use Ctrl+Z to undo."))
-        };
+        self.sql_editor
+            .update(cx, |editor, cx| editor.format(window, cx));
     }
 
     fn assistant(&self, cx: &mut Context<Self>) -> Div {
@@ -2990,6 +2891,13 @@ pub enum WorkspaceEvent {
     /// A run needs the connection's password, which was not remembered.
     /// The host asks for it and calls [`Workspace::resume_pending`].
     PasswordRequired,
+    /// A run on a production connection holds statements that change every
+    /// row of a table or drop data. The host asks and, on a yes, calls
+    /// [`Workspace::confirm_risk`].
+    ConfirmRisk {
+        connection: String,
+        description: String,
+    },
     /// The user chose another connection for this tab in the toolbar.
     ConnectionRequested(String),
     /// Save the SQL in the library: as the saved query `id` when the tab
@@ -3037,9 +2945,12 @@ impl Workspace {
         } else {
             self.abandon_run();
             self.input = None;
+            self.sql_editor
+                .update(cx, |editor, _| editor.set_connection(None));
             self.results.clear();
             self.show_active(cx);
         }
+        self.update_grid_sql(cx);
         self.notice = Some(Feedback::new(
             Tone::Warning,
             tr!("The tab's connection changed. Review the SQL before running it."),
@@ -3077,17 +2988,21 @@ impl Workspace {
     }
 
     /// Restores what [`Workspace::state`] kept.
-    pub fn restore(&mut self, state: &jykre::workspace_state::TabState) {
+    pub fn restore(&mut self, state: &jykre::workspace_state::TabState, cx: &mut Context<Self>) {
         self.saved_sql = state.saved_sql.clone();
         self.saved_id = state.saved_id;
         self.object = state.object.clone();
         self.opened_sql = state.opened_sql.clone();
+        self.update_grid_sql(cx);
         self.timeout = state.timeout(self.timeout);
         // Applied to the session the next run opens.
         self.context = SessionContext {
             catalog: state.catalog.clone(),
             schema: state.schema.clone(),
         };
+        let context = self.context.clone();
+        self.sql_editor
+            .update(cx, |editor, _| editor.set_context(context));
     }
 
     /// A statement or a page read is in progress.
@@ -3129,7 +3044,7 @@ impl Workspace {
         }
         self.describe_connection(&input, cx);
         self.input = Some(input);
-        self.forget_server();
+        self.forget_server(cx);
         self.notice = Some(Feedback::new(
             Tone::Info,
             tr!(
@@ -3151,6 +3066,28 @@ impl Workspace {
         if let Some((scope, placement)) = self.pending_run.take() {
             self.execute_queries(scope, placement, cx);
         }
+    }
+
+    /// Runs what waited for the user to confirm its risky statements.
+    pub fn confirm_risk(&mut self, cx: &mut Context<Self>) {
+        if let Some((scope, placement)) = self.risky_run.take() {
+            self.risk_confirmed = true;
+            self.execute_queries(scope, placement, cx);
+            self.risk_confirmed = false;
+        }
+    }
+
+    /// The colour of the tab's connection and its environment, as the
+    /// explorer shows them.
+    pub fn set_appearance(
+        &mut self,
+        color: u32,
+        environment: Option<jykre::connection_appearance::Environment>,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_color = color;
+        self.environment = environment;
+        cx.notify();
     }
 
     /// Forgets the run that waited for a password the user did not give.
@@ -3221,7 +3158,7 @@ impl Workspace {
         self.choosing_connection = false;
         self.describe_connection(&input, cx);
         self.input = Some(input);
-        self.forget_server();
+        self.forget_server(cx);
         self.assistant_open = false;
         self.results.clear();
         self.show_active(cx);
@@ -3247,22 +3184,24 @@ impl Workspace {
             .or(input.config.options["defaultCatalog"].as_str())
             .unwrap_or("—")
             .to_owned();
+        self.sql_editor.update(cx, |editor, cx| {
+            editor.set_connection(Some(&input.config));
+            editor.set_dialect(dialect, cx);
+        });
         if dialect != self.run.dialect() {
             self.run.set_dialect(dialect);
             self.statement_lines = jykre::sql::statement_lines(&self.editor_sql, dialect).into();
-            set_highlighter(&self.editor, dialect, cx);
         }
+        self.update_grid_sql(cx);
     }
 
     /// Another server: its namespaces and the names read from its cache are
     /// not this one's.
-    fn forget_server(&mut self) {
+    fn forget_server(&mut self, cx: &mut Context<Self>) {
         self.context = SessionContext::default();
         self.context_choices.clear();
-        self.cache_id = None;
-        self.names = Arc::default();
-        self.columns.clear();
-        self.columns_loading.clear();
+        self.sql_editor
+            .update(cx, |editor, _| editor.forget_server());
     }
 
     /// Puts the keyboard in the SQL editor.
@@ -3350,16 +3289,6 @@ impl Workspace {
                 )
             })
     }
-}
-
-/// Highlights the editor by the rules of `dialect`.
-fn set_highlighter(editor: &Entity<EditorState>, dialect: Option<SqlDialect>, cx: &mut App) {
-    editor.update(cx, |editor, cx| {
-        editor.set_highlighter_factory(
-            Rc::new(move |_| Some(Box::new(super::sql::SqlHighlighter::new(dialect)))),
-            cx,
-        )
-    });
 }
 
 /// The pin of a result tab: mint while pinned, when no run replaces it.
@@ -3659,4 +3588,56 @@ impl Drop for Workspace {
             backend::close_in_background(session);
         }
     }
+}
+
+/// A result tab being dragged to another place in its bar.
+struct ResultTabDrag {
+    id: ResultId,
+    title: SharedString,
+}
+
+/// What follows the pointer while a result tab is dragged.
+struct ResultTabPreview {
+    title: SharedString,
+}
+
+impl Render for ResultTabPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        row()
+            .h(px(28.))
+            .px_3()
+            .rounded(px(5.))
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(MINT))
+            .text_size(px(12.))
+            .text_color(rgb(TEXT))
+            .child(self.title.clone())
+    }
+}
+
+/// What the confirmation before a risky run on production says: each
+/// risky statement's kind, numbered as the run orders them.
+fn risk_description(risks: &[(usize, jykre::guard::Risk)], total: usize) -> String {
+    use jykre::guard::Risk;
+    let lines: Vec<String> = risks
+        .iter()
+        .map(|(index, risk)| {
+            let what = match risk {
+                Risk::EveryRow { verb } => {
+                    tr!("{0} without WHERE changes every row of the table", verb)
+                }
+                Risk::Drops { verb } => tr!("{0} removes data or structure", verb),
+            };
+            if total > 1 {
+                tr!("Statement {0}: {1}.", index + 1, what)
+            } else {
+                format!("{what}.")
+            }
+        })
+        .collect();
+    tr!(
+        "This connection is marked as production. {0} Run it anyway?",
+        lines.join(" ")
+    )
 }

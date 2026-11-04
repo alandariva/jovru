@@ -13,13 +13,14 @@ flowchart TB
     subgraph Bin["Application binary (src/main.rs, src/app)"]
         Shell[App shell: explorer, tabs, dialogs]
         Workspace[Query workspace: editor, results, assistant]
+        SqlEditor[sql_editor: editor language features adapter]
     end
 
     subgraph Lib["jykre library (src/lib.rs)"]
         Backend[backend: operations on Tokio]
         Store[connection_store]
         Format[cell_format]
-        Sql[sql: statements, tokens, format]
+        Sql[sql: re-export of jykre-sql]
         Query[query: run state machine]
         Results[result_tabs: result tabs and pages]
         State[workspace_state: tabs, saved queries, history]
@@ -35,9 +36,16 @@ flowchart TB
         PG[jykre-driver-postgres]
         MY[jykre-driver-mysql]
         DBX[jykre-driver-databricks]
+        SqlCrate[jykre-sql: tokens, splitting]
+        Language[jykre-sql-language: completion, format]
     end
 
     Bin --> Lib
+    SqlEditor --> Language
+    Sql --> SqlCrate
+    Language --> SqlCrate
+    SqlCrate --> Core
+    Language --> Core
     Backend --> Core
     Backend --> Storage
     Store --> Storage
@@ -57,11 +65,14 @@ flowchart TB
 | Layer | Location | Does | Does not |
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), SQL text handling (`sql`), run states (`query`), value presentation rules (`cell_format`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view |
+| **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), copies as SQL, JSON or Markdown (`copy_as`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
 | **Drivers** | `crates/driver-*` | Validate configuration, connect, execute, cancel, introspect and classify errors for one database | Persist; talk to the UI; know another driver |
+| **SQL text** | `crates/sql` (`jykre-sql`) | Tokens by dialect, statement splitting, `EXPLAIN`, position mapping and qualified names: what execution and the editor share | I/O; depend on an editor engine |
+| **Language features** | `crates/sql-language` (`jykre-sql-language`) | What the editor suggests and explains (`completion`) and Format (`format`, sqruff-lib behind the `sqruff` feature) | I/O, GPUI, `lsp-types` or translations; be used by the library |
 | **Tooling** | `xtask` | Local gate, architecture check, translation catalogs | Ship in the application |
 
 ## Dependency rules
@@ -77,6 +88,14 @@ edge, including dev and build dependencies:
 4. Only the `jykre` crate composes the drivers, in
    `drivers::builtin_registry()`. Adding a database means a new crate plus one
    registration line (see [Drivers](drivers.md#adding-a-driver)).
+5. `jykre-sql` depends on no internal crate other than `jykre-core` and on no
+   editor engine (`sqruff-lib`, `tree-sitter*`); `jykre-sql-language` depends
+   only on `jykre-core` and `jykre-sql`; neither depends on `lsp-types`
+   ([ADR-0020](adr/0020-editor-language-features-in-their-own-crates.md)).
+6. No file of the `jykre` library (`src/` outside `src/app/` and
+   `src/main.rs`) uses `jykre_sql_language`, so the editor's features can be
+   removed without touching what runs queries. `jykre-sql-language` is also
+   linted and tested without its default features.
 
 Transitive dependencies and where logic lives inside the `jykre` crate are
 checked in review.
@@ -89,20 +108,24 @@ checked in review.
 ├── src/
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
-│   │                       # drivers, grouped_tabs, i18n, query, sql
-│   └── app/                # the application's GPUI views; demo/ holds the demo data
+│   │                       # drivers, grouped_tabs, i18n, query, sql (jykre-sql)
+│   └── app/                # the application's GPUI views; demo/ holds the demo data,
+│                           # sql_editor/ the editor's language features adapter
 ├── crates/
 │   ├── core/               # jykre-core
 │   ├── driver-postgres/    # jykre-driver-postgres
 │   ├── driver-mysql/       # jykre-driver-mysql
 │   ├── driver-databricks/  # jykre-driver-databricks
 │   ├── storage/            # jykre-storage
-│   └── secrets/            # jykre-secrets
+│   ├── secrets/            # jykre-secrets
+│   ├── sql/                # jykre-sql
+│   └── sql-language/       # jykre-sql-language
+├── catalog/                # SQL dialect catalogs read at run time (ADR-0021)
 ├── examples/               # runnable examples (connect, drivers, grouped_tabs)
 ├── locales/                # translation catalogs (pt-BR.json)
 ├── tests/fixtures/         # seeds for the gate's disposable databases
 ├── dev/seed/               # seeds for the local manual-testing databases
-├── xtask/                  # cargo xtask check / i18n
+├── xtask/                  # cargo xtask check / i18n / catalogs
 ├── docs/                   # this documentation and the ADRs
 └── docker-compose.*.yml    # test (gate) and dev (manual) databases
 ```
@@ -167,15 +190,27 @@ sequenceDiagram
 - Splitting and highlighting share one tokenizer whose rules follow the
   connection's `SqlDialect` (`jykre::sql`): MySQL backslash escapes, `#`
   comments, `DELIMITER` and routine bodies; PostgreSQL `E''` strings, dollar
-  quotes and `BEGIN ATOMIC`; Databricks compound statements. A tab without a
-  connection uses generic rules.
+  quotes and `BEGIN ATOMIC`; Databricks compound statements. It also tells
+  quoted names (`"x"`, `` `x` ``) from strings and finds parameters (`$1`,
+  `?`, `:name`, `@var`) by dialect. A tab without a connection uses generic
+  rules.
+- The tokenizer only knows words; whether a word is a keyword, a function or
+  a type comes from the dialect's catalog
+  (`jykre_sql_language::highlight`). The highlighter re-reads only the text
+  around each edit (`sql::relex`) and classifies only the tokens on screen,
+  so neither typing nor painting costs more in a longer script.
+- Completion runs off the UI thread: the provider takes a snapshot (the
+  text, the names, the columns read so far, the dialect's catalog) and the
+  editor drops a response for a text that changed meanwhile; columns not read
+  yet are then read from the cache (`src/app/sql_editor`).
 - **Format** parses with `sqruff-lib` in the same dialect (ANSI without a
-  connection), off the UI thread. Only whitespace and keyword case may
+  connection), off the UI thread (`jykre_sql_language::format`, run by
+  `src/app/sql_editor`). Only whitespace and keyword case may
   change: a result that changes anything else is refused, and what does not
   parse is left as it was. Each statement is formatted on its own and the
   text between statements (blank lines, comments, `DELIMITER` lines) is kept,
   so every statement keeps a line of its own; with a selection, only the
-  selection is formatted (`sql::format_range`).
+  selection is formatted (`format::format_range`).
 - **Explain** runs `EXPLAIN` followed by the statement at the cursor (or the
   one selected) into a new result tab (`sql::explain`, by the connection's
   `SqlDialect`). Only queries and data changes are explained, so the
@@ -230,6 +265,24 @@ a time; until something is chosen, nothing is introspected.
 4. After a complete read, what the choice no longer covers leaves the cache
    (`MetadataRepository::retain`).
 
+### Read the SQL catalogs
+
+What each dialect has built in (keywords and whether they are reserved,
+functions with their signatures, types) comes from `catalog/`, read at run
+time as if it came from outside ([ADR-0021](adr/0021-sql-catalogs-read-at-run-time.md),
+[specification](especificacao-catalogo-sql.md)).
+
+1. At start, `sql_editor::load_catalogs` looks in `JYKRE_SQL_CATALOG_DIR`,
+   then `catalog` next to the executable and, in a development build, the
+   repository's `catalog`. `backend::read_text_files` reads the first
+   directory that holds a catalog on the runtime, at most 32 MB per file, and
+   `jykre_sql_language::catalog::parse` keeps the entries valid for the
+   latest version each dialect tracks.
+2. `AppView` hands the result to every tab, and to those opened later;
+   Settings shows which catalogs were read.
+3. A dialect whose files are missing or invalid keeps the built-in words
+   (and is logged); no catalog never stops the application.
+
 ## Concurrency
 
 - **UI thread.** GPUI runs views on one foreground thread. Entity updates,
@@ -274,6 +327,9 @@ value, so they cannot disagree.
 - **New operation on results** (export, edit): implemented on the result data
   outside the views, then exposed by the results view.
 - **New language:** a catalog in `locales/` (see the root README).
+- **New SQL dialect for the editor:** a directory in `catalog/` (generated by
+  `cargo xtask catalogs`), its entry in `jykre_sql_language::catalog::DIALECTS`
+  and the dialect's lexical rules in `jykre-sql`.
 
 ## Known deviations
 
