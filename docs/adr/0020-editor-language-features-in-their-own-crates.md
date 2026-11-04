@@ -17,9 +17,10 @@ Format grew inside code that query execution also depends on:
   highlighter set-up and the whole Format flow.
 
 The [editor investigation](../investigacao-editor-sql.md) plans more of
-these features: dialect catalogs, structural analysis with tree-sitter and
-semantic highlighting. Several may be replaced (a formatter, a parser) or
-dropped. With the features tangled in execution code and in the workspace,
+these features: dialect catalogs, a model of each statement's queries for
+completion and semantic highlighting. Several may be replaced (a formatter,
+that model) or dropped; tree-sitter was evaluated for the model and not
+adopted (section G.4 of the investigation). With the features tangled in execution code and in the workspace,
 removing one would touch what runs queries, and every new engine would be
 compiled into the library.
 
@@ -37,8 +38,9 @@ compiled into the library.
    It depends only on `jykre-core`. The library re-exports it as
    `jykre::sql`.
 2. **`crates/sql-language` (`jykre-sql-language`)** holds the editor's
-   language features: completion and hover analysis (`completion`) and
-   Format (`format`). It is pure: no I/O, no GPUI, no `lsp-types` and no
+   language features: completion and hover analysis (`completion`, with
+   the queries and relations of each statement in `completion::scopes`)
+   and Format (`format`). It is pure: no I/O, no GPUI, no `lsp-types` and no
    translations. It depends only on `jykre-core` and `jykre-sql`. Engines are
    optional features with a fallback: `sqruff` (on by default) formats with
    sqruff-lib, and without it Format uses a built-in layout.

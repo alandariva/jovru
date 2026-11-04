@@ -72,7 +72,7 @@ flowchart TB
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
 | **Drivers** | `crates/driver-*` | Validate configuration, connect, execute, cancel, introspect and classify errors for one database | Persist; talk to the UI; know another driver |
 | **SQL text** | `crates/sql` (`jykre-sql`) | Tokens by dialect, statement splitting, `EXPLAIN`, position mapping and qualified names: what execution and the editor share | I/O; depend on an editor engine |
-| **Language features** | `crates/sql-language` (`jykre-sql-language`) | What the editor suggests and explains (`completion`) and Format (`format`, sqruff-lib behind the `sqruff` feature) | I/O, GPUI, `lsp-types` or translations; be used by the library |
+| **Language features** | `crates/sql-language` (`jykre-sql-language`) | What the editor suggests and explains (`completion`, which reads each statement's queries and the relations they bind from its tokens) and Format (`format`, sqruff-lib behind the `sqruff` feature) | I/O, GPUI, `lsp-types` or translations; be used by the library |
 | **Tooling** | `xtask` | Local gate, architecture check, translation catalogs | Ship in the application |
 
 ## Dependency rules

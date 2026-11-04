@@ -5,8 +5,11 @@
 use crate::catalog::DialectCatalog;
 use jykre_core::{MetadataObject, ObjectKind, ObjectPath, SessionContext, SqlDialect};
 use jykre_sql::names::{Name, Part, name_at, parts, stored};
+use scopes::{Binding, Scopes};
 use std::collections::HashMap;
 use std::ops::Range;
+
+mod scopes;
 
 /// A relation the cache holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,22 +120,17 @@ impl NameIndex {
     }
 }
 
-/// A relation the statement reads, as written, with its alias.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Reference {
-    name: Vec<Name>,
-    alias: Option<String>,
-}
-
 /// What the cursor asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Wanted {
     /// Relations, namespaces and the statement's CTEs, after `FROM` or
     /// `JOIN`; inside `qualifier`'s namespace when one is written.
     Relations { qualifier: Vec<Name> },
-    /// Columns of these relations (one after `alias.`, all of the
-    /// statement's otherwise). Where nothing qualifies the name it may also
-    /// be a function or a keyword.
+    /// Columns of these relations: after `alias.`, the relation it names
+    /// (a derived table's relations); otherwise those of the query around
+    /// the cursor (the statement, a subquery, a CTE body or a `UNION`
+    /// branch). Where nothing qualifies the name it may also be a function
+    /// or a keyword.
     Columns {
         relations: Vec<ObjectPath>,
         qualified: bool,
@@ -226,74 +224,26 @@ fn is_symbol(part: Option<&Part>, symbol: &str) -> bool {
     matches!(part, Some(Part::Symbol(text)) if text == symbol)
 }
 
-/// The relations a statement reads (`FROM`, `JOIN`, `UPDATE`, `INTO`) with
-/// their aliases, and the names of its CTEs.
-fn references(parts: &[Part]) -> (Vec<Reference>, Vec<String>) {
-    let mut found = Vec::new();
-    let mut ctes = Vec::new();
-    let mut at = 0;
-    while at < parts.len() {
-        let word = word_of(&parts[at]);
-        if word == Some("WITH") || (is_symbol(parts.get(at), ",") && !ctes.is_empty()) {
-            // WITH [RECURSIVE] name [(columns)] AS (
-            let mut next = at + 1;
-            if word_of(parts.get(next).unwrap_or(&Part::Other)) == Some("RECURSIVE") {
-                next += 1;
-            }
-            if let Some((name, after)) = name_at(parts, next)
-                && name.len() == 1
-                && (word_of(parts.get(after).unwrap_or(&Part::Other)) == Some("AS")
-                    || is_symbol(parts.get(after), "("))
-            {
-                ctes.push(name[0].text.clone());
-                at = after;
-                continue;
-            }
-        }
-        if word.is_some_and(|word| RELATION_SLOTS.contains(&word)) {
-            let mut next = at + 1;
-            loop {
-                while word_of(parts.get(next).unwrap_or(&Part::Other))
-                    .is_some_and(|word| matches!(word, "ONLY" | "LATERAL"))
-                {
-                    next += 1;
-                }
-                let Some((name, after)) = name_at(parts, next) else {
-                    break;
-                };
-                if word_of(parts.get(next).unwrap_or(&Part::Other))
-                    .is_some_and(|word| CLAUSES.contains(&word))
-                {
-                    break;
-                }
-                next = after;
-                if word_of(parts.get(next).unwrap_or(&Part::Other)) == Some("AS") {
-                    next += 1;
-                }
-                let alias = match parts.get(next) {
-                    Some(Part::Word(upper, text)) if !CLAUSES.contains(&upper.as_str()) => {
-                        next += 1;
-                        Some(text.clone())
-                    }
-                    Some(Part::Quoted(text)) => {
-                        next += 1;
-                        Some(text.clone())
-                    }
-                    _ => None,
-                };
-                found.push(Reference { name, alias });
-                if is_symbol(parts.get(next), ",") {
-                    next += 1;
-                } else {
-                    break;
-                }
-            }
-            at = next.max(at + 1);
+/// The cache's relations that `bindings` stand for, each once and in order.
+/// CTEs and names the cache does not hold are left out.
+fn resolved<'a>(
+    bindings: impl Iterator<Item = &'a Binding>,
+    scopes: &Scopes,
+    index: &NameIndex,
+    context: &SessionContext,
+) -> Vec<ObjectPath> {
+    let mut paths: Vec<ObjectPath> = Vec::new();
+    for name in bindings.flat_map(|binding| &binding.names) {
+        if scopes.is_cte(name) {
             continue;
         }
-        at += 1;
+        if let Some(relation) = index.resolve(name, context)
+            && !paths.contains(&relation.path)
+        {
+            paths.push(relation.path.clone());
+        }
     }
-    (found, ctes)
+    paths
 }
 
 /// The statement around `offset` and where it starts, split by the rules of
@@ -388,7 +338,8 @@ pub fn request(
         Part::Symbol(symbol) if symbol == "," => Some(","),
         _ => None,
     });
-    let (references, ctes) = references(&parts(statement, index.dialect));
+    let scopes = Scopes::new(statement, index.dialect);
+    let ctes = scopes.ctes().to_vec();
     let replace = start + prefix_start..offset;
     if qualifier.is_empty() && matches!(before.last(), Some(Part::Symbol(symbol)) if symbol == "::")
     {
@@ -409,28 +360,12 @@ pub fn request(
             ctes,
         });
     }
-    let resolve = |reference: &Reference| {
-        index
-            .resolve(&reference.name, context)
-            .map(|relation| relation.path.clone())
-    };
     let relations = match qualifier.as_slice() {
-        [] => references.iter().filter_map(resolve).collect(),
+        [] => resolved(scopes.visible(local), &scopes, index, context),
         [one] => {
             let wanted = stored(one, index.dialect()).to_lowercase();
-            let by_alias = references.iter().find(|reference| {
-                reference
-                    .alias
-                    .as_ref()
-                    .is_some_and(|alias| alias.to_lowercase() == wanted)
-                    || (reference.alias.is_none()
-                        && reference
-                            .name
-                            .last()
-                            .is_some_and(|name| name.text.to_lowercase() == wanted))
-            });
-            match by_alias {
-                Some(reference) => resolve(reference).into_iter().collect(),
+            match scopes.qualified(local, &wanted) {
+                Some(binding) => resolved(std::iter::once(binding), &scopes, index, context),
                 // `schema.` outside FROM: relations of that namespace.
                 None => {
                     return Some(Request {
@@ -809,32 +744,19 @@ pub fn symbol_at(
         // A relation, unless it is the statement's alias or column.
         return Some((Symbol::Relation(relation.path.clone()), range));
     }
-    let (references, _) = references(&all);
+    let scopes = Scopes::new(statement, index.dialect);
     let (column, qualifier) = name.split_last()?;
     let column = stored(column, index.dialect());
     let candidates: Vec<ObjectPath> = match qualifier {
-        [] => references
-            .iter()
-            .filter_map(|reference| index.resolve(&reference.name, context))
-            .map(|relation| relation.path.clone())
-            .collect(),
+        // The closest query that has the column, as a correlated subquery
+        // reads it.
+        [] => resolved(scopes.outwards(local), &scopes, index, context),
         [one] => {
-            let wanted = one.text.to_lowercase();
-            references
-                .iter()
-                .filter(|reference| {
-                    reference
-                        .alias
-                        .as_ref()
-                        .is_some_and(|alias| alias.to_lowercase() == wanted)
-                        || reference
-                            .name
-                            .last()
-                            .is_some_and(|name| name.text.to_lowercase() == wanted)
-                })
-                .filter_map(|reference| index.resolve(&reference.name, context))
-                .map(|relation| relation.path.clone())
-                .collect()
+            let wanted = stored(one, index.dialect()).to_lowercase();
+            scopes
+                .qualified(local, &wanted)
+                .map(|binding| resolved(std::iter::once(binding), &scopes, index, context))
+                .unwrap_or_default()
         }
         written => index
             .resolve(written, context)
@@ -977,7 +899,7 @@ mod tests {
         );
         assert_eq!(found[0].label, "total");
         assert_eq!(found[0].detail, "numeric(12,2)");
-        // Unqualified: the columns of every relation of the statement.
+        // Unqualified: the columns of every relation of the cursor's query.
         let sql = "SELECT  FROM orders o JOIN crm.customers c ON true";
         let asked = request(sql, 7, &index, &context()).unwrap();
         let (found, _) = candidates(

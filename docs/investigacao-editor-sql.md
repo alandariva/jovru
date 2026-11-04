@@ -2,6 +2,8 @@
 
 Data: 4 de novembro de 2026 · Branch `release/0.1.0` (`c876fc3`). Nenhum código foi alterado; este documento é uma proposta e ainda não foi aprovado pelo mantenedor.
 
+> **Atualização (4 de novembro de 2026).** A estrutura não usa tree-sitter. A PoC e dois conjuntos de casos escritos depois dela levaram a um modelo de escopos sobre os tokens do lexer, já implementado no completion. Resultados e decisão: seção G.4. O restante do documento é a investigação original.
+
 **Como ler.** Cada afirmação relevante leva uma marca:
 
 - **[V] Verificado**: conferido no código do projeto, no código-fonte da versão da dependência em `~/.cargo/registry` ou no repositório/documentação oficial do candidato (links na seção H).
@@ -17,7 +19,7 @@ Notas de 1 a 5 nas matrizes: 1 = inadequado, 2 = fraco, 3 = aceitável com ressa
 1. **Não existe** biblioteca, LSP ou motor maduro que entregue autocomplete semântico para PostgreSQL, MySQL **e** Databricks e que possa ser embutido num app Rust/GPUI. Os melhores motores são de um banco só (Postgres Language Server, Squawk) ou exigem outro runtime (sqls em Go, sql-language-server em TypeScript, dt-sql-parser em TypeScript) e não cobrem Databricks.
 2. **Arquitetura híbrida, toda em processo:**
    - **Léxico**: o tokenizer por dialeto que o projeto já tem (`jykre::sql`) continua sendo a fonte única de verdade para highlighting, divisão de instruções e checagem da formatação.
-   - **Estrutura**: [tree-sitter](https://github.com/tree-sitter/tree-sitter) com a gramática [DerekStride/tree-sitter-sql](https://github.com/DerekStride/tree-sitter-sql) (crate `tree-sitter-sequel`). Ela lê apenas a instrução sob o cursor, com literais e comentários mascarados pelo nosso lexer.
+   - **Estrutura**: [tree-sitter](https://github.com/tree-sitter/tree-sitter) com a gramática [DerekStride/tree-sitter-sql](https://github.com/DerekStride/tree-sitter-sql) (crate `tree-sitter-sequel`). Ela lê apenas a instrução sob o cursor, com literais e comentários mascarados pelo nosso lexer. **Não adotada: ver G.4.**
    - **Semântica**: uma camada própria de escopos e candidatos, alimentada pelo cache de metadados existente e por catálogos de palavras-chave e funções por dialeto.
    - **Formatação**: `sqruff-lib`, restrito a regras de layout e capitalização, atrás de uma guarda. A guarda recusa qualquer saída que mude a sequência de tokens.
 3. **Highlighting**: continua léxico com o nosso tokenizer, agora incremental e com cores do tema. Uma camada semântica (tabela, coluna, alias, CTE) entra pelo `DocumentRangeSemanticTokensProvider` que o gpui-kit 0.9 já oferece. O highlighter tree-sitter do gpui-component foi **rejeitado**: a gramática não entende escapes `\` em strings, comentários `#` nem comentários aninhados [V], e ficaria em desacordo com a divisão de instruções.
@@ -482,30 +484,36 @@ Se H1 ou H2 reprovarem, a fase 3 é substituída pela heurística evoluída (A3)
 | H6 | Os catálogos podem ser gerados de forma reproduzível a partir das fontes oficiais |
 | H7 | O `NameIndex` de 500 000 objetos cabe no orçamento de memória quando compartilhado por conexão |
 
-### G.4 Resultados da PoC (4 de novembro de 2026)
+### G.4 Resultados da PoC e decisão (4 de novembro de 2026)
 
 **Como foi feita.**
-- A PoC é um projeto Cargo descartável, fora do repositório, que usa `crates/sql` e `crates/sql-language` por `path`, com `tree-sitter` 0.26.13 e `tree-sitter-sequel` 0.3.11. Nada foi adicionado ao projeto.
+- A PoC é um projeto Cargo descartável, fora do repositório, que usa `crates/sql` e `crates/sql-language` por `path`, com `tree-sitter` 0.26.13 e `tree-sitter-sequel` 0.3.11. Nada disso foi adicionado ao projeto.
 - **Máscara:** o lexer do dialeto troca strings, comentários, parâmetros e bytes não ASCII por texto neutro do mesmo tamanho.
 - **Sentinela:** um nome é inserido no cursor quando ali não há palavra sendo digitada.
 - **Parênteses:** os que ficaram abertos antes do cursor são fechados depois dele.
 - **Extração:** relações e aliases do `statement` ou `subquery` mais próximo, CTEs dos ancestrais, tabelas de origem das tabelas derivadas, e a cláusula no cursor.
-- **Comparação:** contra a heurística atual (`completion::request`), resolvendo os nomes num `NameIndex` com todas as tabelas do corpus.
-- **Corpus:** 64 instruções escritas à mão, com o cursor marcado e um gabarito de cláusula e tabelas em escopo: 25 do PostgreSQL, 19 do MySQL e 20 do Databricks. É menos que os 50 por dialeto previstos.
-- **Ajustes de gabarito depois da primeira rodada:**
-  - o cursor dentro do `ORDER BY` de uma janela passou de `select` para `order_by`;
-  - no `LATERAL` do PostgreSQL, as tabelas da tabela derivada entraram no escopo.
-- **Correções de extração:** CTEs deixaram de contar como tabelas, e `INSERT … SELECT`, `MERGE` e `JOIN LATERAL (…)` passaram a ser tratados. São lógica do motor, não limitações da gramática. [V]
+- **Comparação:** contra a heurística de então (`completion::request`), resolvendo os nomes num `NameIndex` com todas as tabelas dos casos.
+- **Gabarito:** as tabelas cujas colunas o completion deve oferecer no cursor. Depois de `alias.`, a tabela do alias (numa tabela derivada, as tabelas que ela lê); sem qualificador, as tabelas da consulta mais interna em volta do cursor. CTE não conta como tabela.
+- **Correção do gabarito.** A primeira rodada esperava, depois de `alias.`, todas as tabelas do escopo, embora o completion use só a do alias. Isso contava como erro da heurística em 8 casos em que ela acertava. A primeira versão desta seção trazia 75%, 84% e 85% para a heurística; os números abaixo são os corrigidos. [V]
 
-**Editando no meio de uma instrução** (gabarito, com texto depois do cursor):
+**Três conjuntos de casos**, escritos à mão por quem escreveu as implementações, então os números são otimistas: [V]
+1. **Corpus da PoC:** 64 instruções (25 PostgreSQL, 19 MySQL e 20 Databricks). Uma delas pede nome de tabela, não colunas.
+2. **Primeiro conjunto novo:** 33 instruções escritas depois dos primeiros resultados, para o que o corpus não cobria: cursor sem qualificador numa consulta externa com subconsultas, CTEs e `UNION`, tabelas derivadas aninhadas, referências correlacionadas, `UPDATE … FROM`, `DELETE … USING`, `UPDATE` e `DELETE` multitabela, listas de colunas de `INSERT` e `MERGE` com subconsulta.
+3. **Segundo conjunto novo:** 24 instruções escritas antes da primeira execução do modelo de escopos, com padrões que não aparecem nos outros dois.
 
-| Dialeto | Cláusula certa (tree-sitter) | Tabelas certas (tree-sitter) | Ambas | Tabelas certas (heurística atual) | Instruções completas sem `ERROR` |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| PostgreSQL | 96% | 100% | 96% | 75% | 96% |
-| MySQL | 95% | 95% | 95% | 84% | 68% |
-| Databricks | 100% | 90% | 90% | 85% | 65% |
+**Tabelas certas no cursor** (instruções completas, com texto depois do cursor):
 
-A heurística erra onde ela achata a instrução (P7): relações de CTEs e subconsultas que vazam para o escopo externo e aliases de tabelas derivadas. [V]
+| Caminho | Corpus (63) | Primeiro novo (33) | Segundo novo (24) | Total (120) |
+| --- | ---: | ---: | ---: | ---: |
+| Heurística de então (uma lista de tabelas por instrução) | 58 | 15 | 15 | 88 (73%) |
+| tree-sitter | 62 | 22 | 20 | 104 (87%) |
+| Híbrido: tree-sitter onde a árvore está limpa, heurística no resto | 62 | 23 | 20 | 105 (88%) |
+| Modelo de escopos sobre tokens, primeira execução | 63 | 31 | 23 | 117 (98%) |
+| Modelo de escopos, como entrou no projeto | 63 | 33 | 24 | 120 (100%) |
+
+- **A heurística de então** lia a instrução como uma lista única: tabelas de subconsultas, de corpos de CTE e de ramos de `UNION` vazavam para a consulta externa, e o alias de uma tabela derivada não levava a nenhuma tabela (P7). O corpus da PoC quase não tinha cursor sem qualificador numa consulta com subconsultas, por isso ela parecia melhor do que era.
+- **O tree-sitter** errou onde a gramática falha (`STRAIGHT_JOIN`, `DELETE` com alias, `DELETE` multitabela do MySQL) e onde a extração da PoC não chegava (ramos de `UNION`, alias externo dentro de uma subconsulta, `MERGE` com subconsulta).
+- **O modelo de escopos**, na primeira execução, errou a lista de colunas de `INSERT INTO t (…)` (2 casos) e o `LEFT ANTI JOIN` do Databricks (1 caso). Os dois foram corrigidos.
 
 **Digitando no fim** (cada prefixo da instrução preenchida, cursor no fim):
 
@@ -517,20 +525,22 @@ A heurística erra onde ela achata a instrução (P7): relações de CTEs e subc
 
 "Contexto limpo" significa uma cláusula achada sem nó de erro em volta do cursor. As posições "onde se espera um nome" são as que vêm depois de `.`, `,`, `(`, de um operador ou de palavras como `SELECT`, `WHERE`, `ON`, `BY` e `SET`. [V]
 
+Não há gabarito para os prefixos. O modelo de escopos não depende de uma árvore válida e responde em todos eles. Onde a árvore estava limpa, ele concordou com o tree-sitter em 70–97% dos prefixos, conforme o conjunto e o dialeto. [V] Nas divergências examinadas por amostragem, o modelo de tokens estava certo, ou a posição era um nome de tabela, onde colunas não importam. [I]
+
 **Lacunas da gramática encontradas:**
 - PostgreSQL: `DISTINCT ON`;
-- MySQL: `STRAIGHT_JOIN`;
-- Databricks: `LATERAL VIEW`, `PIVOT` e `QUALIFY` (lido como alias ou região de erro);
-- `MERGE … UPDATE SET *` termina em erro. [V]
+- MySQL: `STRAIGHT_JOIN` e o `DELETE` multitabela;
+- Databricks: `LATERAL VIEW`, `PIVOT` e `QUALIFY` (lidos como alias ou região de erro), e `MERGE … UPDATE SET *`, que termina em erro;
+- em qualquer dialeto: `DELETE FROM t alias` termina em erro. [V]
 
 **Custo** (release, máquina do mantenedor):
 
-| Medida | Resultado |
-| --- | --- |
-| Máscara, sentinela, parse e extração | p50 19 µs, p95 102 µs, máximo 0,4 ms, em 2 486 análises de instruções até ~400 bytes |
-| Instrução de 19,6 KB | p95 4,35 ms |
-| Instrução de ~10 KB | p95 2,0 ms |
-| Peso no executável | o executável da PoC tem 2,9 MB no total, contra 69,4 MB do app em release, ou seja, ≤ +4% |
+| Medida | tree-sitter | Modelo de escopos |
+| --- | --- | --- |
+| Instruções dos casos (até ~400 bytes) | p50 19 µs, p95 0,1 ms | p95 10–25 µs |
+| Instrução de 19,6 KB | p95 4,2–6,0 ms | p95 0,8–1,1 ms |
+| Instrução de ~100 KB | — | 3,6 ms (24 ms em debug) |
+| Peso no executável | o executável da PoC tem 2,9 MB no total, contra 69,4 MB do app (≤ +4%) | nenhum |
 
 **Achado lateral (corrigido).** A heurística não respondia com o cursor depois de um espaço no fim da última instrução (`WHERE |`): `Ctrl+Space` ali não sugeria nada. `completion::statement_at` passou a considerar esse cursor parte da instrução, e um teste cobre o caso.
 
@@ -538,27 +548,33 @@ A heurística erra onde ela achata a instrução (P7): relações de CTEs e subc
 
 | ID | Resultado |
 | --- | --- |
-| H1 | **Não passou no critério combinado** (≥ 90% nos prefixos): 87%, 90% e 80% nas posições onde se espera nome, e 60–73% em todas as posições. Passou no gabarito de edição no meio (96%, 95% e 90%, contra 75%, 84% e 85% da heurística) |
-| H2 | **Não passou** em 20 KB (p95 4,35 ms, contra ≤ 2 ms). Passou nas instruções típicas (p95 0,1 ms) e em ~10 KB |
+| H1 | **Não passou.** Tabelas certas em 87% do total (100%, 95% e 100% no corpus, mas 50–86% por dialeto nos conjuntos novos); nos prefixos, contexto limpo em 87%, 90% e 80% das posições onde se espera nome |
+| H2 | **Não passou** em 20 KB (p95 4,2–6,0 ms, contra ≤ 2 ms). Passou nas instruções típicas (p95 0,1 ms) |
 | H3, H4 | Substituídas: o mantenedor aprovou e integrou o sqruff (N010) |
 | H5 | **Não passou:** `relex` custa 5,3 ms por tecla em 10 MB, contra 57 ms de retokenizar tudo. A cópia do vetor de tokens é o que sobra |
 | H6 | Passou: `cargo xtask catalogs` gera os três dialetos de forma reproduzível |
 | H7 | Não medida |
 
-**Recomendação.** Pela regra combinada no plano, a etapa 5 **não adota o tree-sitter agora** e segue pela heurística evoluída (A3): um modelo de escopos sobre os tokens que já temos, sem dependência nova.
-- **CTEs:** corpo delimitado por parênteses depois de `nome AS`.
-- **Subconsultas:** escopo próprio, delimitado por parênteses.
-- **Tabelas derivadas:** expõem as tabelas e colunas de origem.
-- **Fechamento de parênteses:** o mesmo da PoC.
+**Decisão.** O tree-sitter não foi adotado. O completion lê cada instrução com um modelo de escopos sobre os tokens do nosso lexer, em `crates/sql-language/src/completion/scopes.rs`, que substituiu a lista única da heurística:
+- **Consultas:** a instrução, cada subconsulta entre parênteses, cada corpo de CTE e cada ramo `SELECT` (depois de `UNION` e semelhantes, de `INSERT …`, de `CREATE … AS` ou da lista `WITH`) são consultas com as relações do seu próprio `FROM`, `JOIN`, `USING`, `UPDATE` e `INTO`.
+- **Tabelas derivadas:** o alias leva às relações que a subconsulta lê.
+- **Alias externo:** depois de `alias.`, o nome é procurado na consulta do cursor e depois nas que a envolvem, como numa subconsulta correlacionada. Em "ir para a definição", uma coluna sem qualificador é procurada da consulta mais interna para fora.
+- **`SEMI` e `ANTI` join (Databricks):** a relação da direita só é vista na condição do join.
+- **Texto incompleto:** um parêntese aberto mantém a consulta aberta até o fim da instrução. Não há árvore que fique inválida, então não há segundo caminho.
 
 Os motivos:
-- a vantagem do tree-sitter está justamente nos escopos aninhados, que um modelo sobre tokens pode tratar;
-- nos prefixos o tree-sitter falha em 10–40% das posições, então a heurística continuaria necessária como reserva;
-- MySQL e Databricks têm erro de gramática em cerca de um terço das instruções completas.
+- acertou mais que o tree-sitter em todos os conjuntos, inclusive onde a gramática falha;
+- custa cerca de 5 vezes menos e dispensa máscara, sentinela e fallback;
+- não acrescenta dependência nem a amarra de versão com o gpui-component (`links = "tree-sitter"`);
+- a parte trabalhosa, o modelo de escopos, teria de ser escrita também sobre a árvore: o tree-sitter não a dispensa.
 
-**Critério de aceitação da etapa 5:** com o corpus da PoC promovido a teste, o modelo de tokens precisa acertar ≥ 90% em cada dialeto (o nível do tree-sitter) e responder em 100% dos prefixos.
+**O que fica de fora** (resto de P7): depois do alias de uma tabela derivada, o completion oferece as colunas das tabelas que ela lê, não só as que ela seleciona, e não os nomes calculados (`sum(total) AS spent`); as colunas de uma CTE não são oferecidas.
 
-**Quando reabrir o tree-sitter:** se o modelo de tokens não chegar a esse nível, ou quando diagnósticos de sintaxe exigirem uma árvore completa. O código da PoC, o corpus e os resultados ficaram fora do repositório, no scratchpad da sessão. [I]
+**Regressão.** Os 121 casos dos três conjuntos estão em `crates/sql-language/tests/fixtures/scopes.txt`, verificados por `crates/sql-language/tests/scopes.rs` através de `completion::request` ([Testing](testing.md#completion-scopes)). Com o código anterior, 32 deles falham. [V]
+
+**Semantic tokens** podem reaproveitar o modelo, que monta as relações de todas as consultas da instrução. [I]
+
+**Quando reabrir o tree-sitter:** se surgir um recurso que precise de uma árvore completa da instrução e de uma gramática que aceite os três dialetos. Diagnósticos de sintaxe não são esse caso com o `tree-sitter-sequel`: cerca de um terço das instruções MySQL e Databricks válidas termina em `ERROR`, o que viraria erro falso na tela. [V] Para diagnósticos, o parser por dialeto do sqruff (que já está no build) ou a validação pelo próprio servidor devem encaixar melhor. [H]
 
 ---
 

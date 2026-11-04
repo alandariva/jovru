@@ -1,0 +1,390 @@
+# Which relations completion offers columns of at the cursor (‸), checked by
+# tests/scopes.rs through `completion::request`.
+#
+# Each case is a header line and the SQL after it:
+#   == <dialect> | <relations>
+# <relations> are comma-separated, written schema.table, or table for the
+# tab's default schema; `-` means the cursor asks for a relation name instead.
+# After `alias.`: the relation the alias names (a derived table's relations;
+# an outer alias from inside a subquery). Otherwise: every relation of the
+# innermost query around the cursor (the statement, a subquery, a CTE body or
+# a UNION branch). A CTE is not a relation of the cache. The test's index
+# holds every relation the cases read, so one read in the wrong query shows.
+#
+# History: docs/investigacao-editor-sql.md, section G.4.
+
+# Written for the tree-sitter proof of concept (64 cases).
+
+== postgres | sales.orders
+SELECT o.‸ FROM sales.orders o
+
+== postgres | crm.customers
+SELECT o.id, c.na‸ FROM sales.orders o JOIN crm.customers c ON c.id = o.customer_id
+
+== postgres | orders
+SELECT * FROM orders WHERE stat‸ = 'paid'
+
+== postgres | customers
+SELECT * FROM orders o JOIN customers c ON c.‸ = o.customer_id
+
+== postgres | sales.orders
+SELECT o.total::numeric(12,2), o.‸ FROM sales.orders AS o WHERE o.created_at >= now() - interval '7 days'
+
+== postgres | crm.customers
+WITH recent AS (SELECT customer_id FROM sales.orders WHERE created_at > now() - interval '1 day') SELECT c.‸ FROM recent r JOIN crm.customers c ON c.id = r.customer_id
+
+== postgres | sales.orders
+WITH recent AS (SELECT customer_id FROM sales.orders WHERE ‸ > now()) SELECT * FROM recent
+
+== postgres | orders
+SELECT * FROM (SELECT id, total FROM orders WHERE total > 0) big WHERE big.‸ > 10
+
+== postgres | order_lines
+SELECT o.id FROM orders o WHERE EXISTS (SELECT 1 FROM order_lines l WHERE l.‸ = o.id)
+
+== postgres | orders
+SELECT customer_id, sum(total) FROM orders GROUP BY cust‸ ORDER BY 2 DESC
+
+== postgres | orders
+SELECT customer_id, sum(total) AS spent FROM orders GROUP BY customer_id ORDER BY sp‸ DESC LIMIT 10
+
+== postgres | sales.orders
+UPDATE sales.orders AS o SET stat‸ = 'shipped' WHERE o.id = $1
+
+== postgres | orders
+DELETE FROM orders WHERE created_at < $1 AND stat‸ = 'cancelled'
+
+== postgres | orders
+SELECT DISTINCT ON (o.customer_id) o.‸ FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.customer_id, o.created_at DESC
+
+== postgres | orders
+SELECT o.id, row_number() OVER (PARTITION BY o.customer_id ORDER BY o.‸) FROM orders o
+
+== postgres | orders
+SELECT o.data->>'sku', o.‸ FROM orders o WHERE o.data ? 'sku' AND o.note ILIKE '%gift%'
+
+== postgres | customers
+SELECT c.‸ FROM customers c LEFT JOIN LATERAL (SELECT * FROM orders x WHERE x.customer_id = c.id LIMIT 1) last ON true
+
+== postgres | "Sales"."Orders"
+SELECT * FROM "Sales"."Orders" WHERE "Amo‸" > 0
+
+== postgres | orders
+SELECT o.‸ -- a comment with 'quotes' and ;
+FROM orders o /* block /* nested */ comment */ WHERE o.note = 'it''s'
+
+== postgres | events
+SELECT e.‸ FROM events e WHERE e.payload = $$ {"a": "b;c"} $$
+
+== postgres | orders
+INSERT INTO archive.orders SELECT * FROM orders WHERE created_at < $1 AND ‸
+
+== postgres | orders
+SELECT o.id, (SELECT count(*) FROM order_lines l WHERE l.order_id = o.id) AS lines, o.‸ FROM orders o
+
+== postgres | order_lines
+SELECT o.id, (SELECT count(*) FROM order_lines l WHERE l.‸ = o.id) FROM orders o
+
+== postgres | -
+SELECT * FROM sales.ord‸ o
+
+== postgres | sales.orders
+SELECT o.total, 'São Paulo' AS cidade, o.‸ FROM sales.orders o
+
+== mysql | shop.orders
+SELECT o.‸ FROM shop.orders o
+
+== mysql | customers
+SELECT o.id, c.‸ FROM `orders` o JOIN `customers` c ON c.id = o.customer_id
+
+== mysql | orders
+SELECT * FROM orders WHERE note = 'it\'s' AND stat‸ = "paid"
+
+== mysql | orders
+SELECT o.‸ FROM orders o # a hash comment
+WHERE o.id > 10
+
+== mysql | orders
+SELECT * FROM orders o WHERE o.‸ = @customer AND o.total > ?
+
+== mysql | customers
+SELECT * FROM orders o STRAIGHT_JOIN customers c ON c.‸ = o.customer_id
+
+== mysql | orders
+SELECT o.‸ FROM orders o USE INDEX (idx_created) WHERE o.created_at > '2026-01-01'
+
+== mysql | orders
+SELECT customer_id, SUM(total) AS spent FROM orders GROUP BY customer_id ORDER BY sp‸ LIMIT 10, 20
+
+== mysql | orders
+UPDATE orders o SET o.st‸ = 'shipped' WHERE o.id = 1
+
+== mysql | orders
+DELETE FROM orders WHERE created_at < NOW() - INTERVAL 30 DAY AND ‸
+
+== mysql | shop.customers
+WITH big AS (SELECT customer_id FROM shop.orders WHERE total > 100) SELECT c.‸ FROM big b JOIN shop.customers c ON c.id = b.customer_id
+
+== mysql | orders
+SELECT * FROM (SELECT id, total FROM orders) t WHERE t.‸ > 1
+
+== mysql | orders
+SELECT o.id, JSON_EXTRACT(o.data, '$.sku'), o.‸ FROM orders o
+
+== mysql | order_lines
+SELECT o.id FROM orders o WHERE o.id IN (SELECT l.order_id FROM order_lines l WHERE l.‸ > 1)
+
+== mysql | `shop`.`orders`
+SELECT `o`.‸ FROM `shop`.`orders` `o`
+
+== mysql | orders
+SELECT DATE(created_at) AS day, COUNT(*) FROM orders GROUP BY d‸ WITH ROLLUP
+
+== mysql | orders
+SELECT o.‸, @rank := @rank + 1 FROM orders o, (SELECT @rank := 0) r
+
+== mysql | orders
+SELECT * FROM orders WHERE note REGEXP 'a|b' AND ‸ <=> NULL
+
+== mysql | orders
+SELECT /*!40001 SQL_NO_CACHE */ o.‸ FROM orders o
+
+== databricks | main.sales.orders
+SELECT o.‸ FROM main.sales.orders o
+
+== databricks | crm.customers
+SELECT o.id, c.‸ FROM sales.orders o JOIN crm.customers c ON c.id = o.customer_id
+
+== databricks | orders
+SELECT * FROM orders WHERE note = "double quoted string" AND sta‸ = 'paid'
+
+== databricks | `main`.`sales`.`orders`
+SELECT o.‸ FROM `main`.`sales`.`orders` o
+
+== databricks | orders
+SELECT * FROM orders WHERE customer_id = :customer AND ‸ > 0
+
+== databricks | events
+SELECT e.payload:device.id, e.‸ FROM events e
+
+== databricks | orders
+SELECT o.‸ FROM orders o QUALIFY row_number() OVER (PARTITION BY o.customer_id ORDER BY o.created_at DESC) = 1
+
+== databricks | orders
+SELECT o.‸, item FROM orders o LATERAL VIEW explode(o.items) t AS item
+
+== databricks | crm.customers
+WITH recent AS (SELECT customer_id FROM sales.orders WHERE created_at > current_date() - 1) SELECT c.‸ FROM recent r JOIN crm.customers c ON c.id = r.customer_id
+
+== databricks | orders
+SELECT * FROM (SELECT id, total FROM orders) t WHERE t.‸ > 1
+
+== databricks | orders
+SELECT customer_id, count(*) FROM orders GROUP BY ALL‸
+
+== databricks | orders
+SELECT customer_id, sum(total) AS spent FROM orders GROUP BY customer_id ORDER BY sp‸ DESC
+
+== databricks | sales.orders
+SELECT o.id, CAST(o.total AS DECIMAL(12, 2)), o.‸ FROM sales.orders o
+
+== databricks | orders
+SELECT o.‸ FROM orders o PIVOT (sum(total) FOR status IN ('paid', 'open'))
+
+== databricks | sales.orders
+UPDATE sales.orders SET st‸ = 'shipped' WHERE id = 1
+
+== databricks | orders
+DELETE FROM orders WHERE created_at < current_date() - 30 AND ‸
+
+== databricks | sales.orders
+MERGE INTO sales.orders t USING updates s ON t.‸ = s.id WHEN MATCHED THEN UPDATE SET *
+
+== databricks | orders
+SELECT o.‸ FROM orders o TABLESAMPLE (10 PERCENT)
+
+== databricks | orders
+SELECT o.‸, array_contains(o.tags, 'gift'), o.amount::int FROM orders o
+
+== databricks | order_lines
+SELECT o.id FROM orders o WHERE EXISTS (SELECT 1 FROM order_lines l WHERE l.‸ = o.id)
+
+# Written after its first results, for what those cases left out: an outer
+# query over subqueries, CTEs and UNION branches, nested derived tables,
+# correlated references, UPDATE … FROM, DELETE … USING, multi-table UPDATE
+# and DELETE, INSERT column lists, MERGE with a subquery source (33 cases).
+
+== postgres | orders
+SELECT ‸ FROM orders o WHERE EXISTS (SELECT 1 FROM order_lines l WHERE l.order_id = o.id)
+
+== postgres | crm.customers
+WITH r AS (SELECT customer_id FROM sales.orders) SELECT ‸ FROM r JOIN crm.customers c ON c.id = r.customer_id
+
+== postgres | sales.orders
+WITH r AS (SELECT customer_id FROM sales.orders WHERE ‸) SELECT * FROM r JOIN crm.customers c ON c.id = r.customer_id
+
+== postgres | archive.orders
+SELECT id FROM orders UNION ALL SELECT ‸ FROM archive.orders
+
+== postgres | orders
+SELECT ‸ FROM orders UNION ALL SELECT id FROM archive.orders
+
+== postgres | orders
+SELECT t.‸ FROM (SELECT * FROM (SELECT id FROM orders) a) t
+
+== postgres | customers
+SELECT * FROM customers c WHERE EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.‸)
+
+== postgres | staging.orders
+UPDATE orders o SET total = s.total FROM staging.orders s WHERE o.id = s.‸
+
+== postgres | customers
+DELETE FROM orders o USING customers c WHERE o.customer_id = c.‸
+
+== postgres | sales.orders
+INSERT INTO sales.orders (id, ‸) VALUES (1, 2)
+
+== postgres | orders,customers
+SELECT ‸ FROM orders JOIN customers USING (customer_id)
+
+== postgres | customers
+SELECT c.‸ FROM orders o, customers c WHERE o.customer_id = c.id
+
+== postgres | orders
+SELECT o.id, (SELECT max(l.qty) FROM order_lines l WHERE l.order_id = o.id) AS top FROM orders o WHERE ‸
+
+== postgres | customers
+WITH a AS (SELECT * FROM orders), b AS (SELECT * FROM a JOIN customers c ON c.id = a.customer_id WHERE c.‸) SELECT * FROM b
+
+== postgres | orders
+SELECT "O".‸ FROM orders "O"
+
+== postgres | sales.orders
+SELECT orders.‸ FROM sales.orders
+
+== postgres | orders
+SELECT * FROM customers;
+SELECT ‸ FROM orders
+
+== mysql | customers
+UPDATE orders o JOIN customers c ON c.id = o.customer_id SET o.status = 'x' WHERE c.‸ = 1
+
+== mysql | orders
+SELECT ‸ FROM orders WHERE customer_id IN (SELECT id FROM customers WHERE vip = 1)
+
+== mysql | order_lines
+SELECT x.‸ FROM orders o JOIN (SELECT customer_id, COUNT(*) AS n FROM order_lines GROUP BY customer_id) x ON x.customer_id = o.customer_id
+
+== mysql | orders,customers
+INSERT INTO archive_orders SELECT ‸ FROM orders o JOIN customers c ON c.id = o.customer_id
+
+== mysql | customers
+SELECT id FROM orders UNION SELECT ‸ FROM customers
+
+== mysql | orders
+SELECT `my o`.‸ FROM orders `my o`
+
+== mysql | customers
+DELETE o FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.‸ = 1
+
+== mysql | orders
+SELECT * FROM orders o WHERE o.total > (SELECT AVG(total) FROM orders x WHERE x.customer_id = o.customer_id) AND ‸
+
+== databricks | crm.customers
+WITH recent AS (SELECT * FROM sales.orders WHERE day = current_date()) SELECT ‸ FROM recent r JOIN crm.customers c ON c.id = r.customer_id
+
+== databricks | sales.orders
+SELECT s.‸ FROM (SELECT customer_id, sum(total) AS spent FROM sales.orders GROUP BY customer_id) s WHERE s.spent > 100
+
+== databricks | main.sales.orders
+SELECT ‸ FROM main.sales.orders WHERE customer_id IN (SELECT id FROM main.crm.customers)
+
+== databricks | sales.orders
+SELECT ‸ FROM sales.orders UNION ALL SELECT * FROM archive.orders
+
+== databricks | staging.orders
+MERGE INTO sales.orders t USING (SELECT * FROM staging.orders) s ON t.id = s.‸ WHEN MATCHED THEN DELETE
+
+== databricks | crm.customers
+SELECT * FROM crm.customers c WHERE EXISTS (SELECT 1 FROM sales.orders o WHERE o.customer_id = c.‸)
+
+== databricks | `main`.`sales`.`orders`
+SELECT ‸ FROM `main`.`sales`.`orders` AS o
+
+== databricks | sales.orders
+SELECT * FROM sales.orders o LEFT ANTI JOIN crm.customers c ON c.id = o.customer_id WHERE ‸
+
+# Written before the scope model was first run, with patterns used in
+# neither set above (24 cases).
+
+== postgres | orders,order_lines
+SELECT ‸ FROM orders o LEFT JOIN LATERAL (SELECT * FROM order_lines l WHERE l.order_id = o.id LIMIT 3) x ON true
+
+== postgres | categories
+WITH RECURSIVE tree AS (SELECT id, parent_id FROM categories WHERE parent_id IS NULL UNION ALL SELECT c.id, c.parent_id FROM categories c JOIN tree t ON c.‸ = t.id) SELECT * FROM tree
+
+== postgres | orders,customers
+SELECT ‸ FROM (SELECT o.id, c.name FROM orders o JOIN customers c ON c.id = o.customer_id) AS t
+
+== postgres | order_lines
+SELECT * FROM orders WHERE id = ANY (SELECT order_id FROM order_lines WHERE ‸)
+
+== postgres | orders
+UPDATE customers SET vip = true WHERE id IN (SELECT customer_id FROM orders GROUP BY customer_id HAVING sum(‸) > 1000)
+
+== postgres | sales.orders
+SELECT a.‸ FROM sales.orders a NATURAL JOIN sales.order_lines b
+
+== postgres | orders
+INSERT INTO audit (order_id, total) SELECT o.‸ FROM orders o WHERE o.total > 100 RETURNING id
+
+== postgres | orders
+SELECT count(*) FILTER (WHERE ‸) FROM orders
+
+== postgres | order_lines
+DELETE FROM order_lines WHERE order_id IN (SELECT id FROM orders WHERE status = 'void') AND ‸
+
+== postgres | hr.employees
+SELECT e.‸ FROM hr.employees e JOIN hr.employees m ON m.id = e.manager_id
+
+== postgres | orders
+SELECT ‸ FROM orders EXCEPT SELECT id FROM refunds
+
+== mysql | orders,customers
+SELECT ‸ FROM orders o LEFT JOIN customers c USING (customer_id) WHERE o.total > (SELECT AVG(total) FROM orders)
+
+== mysql | orders
+REPLACE INTO order_totals SELECT customer_id, SUM(‸) FROM orders GROUP BY customer_id
+
+== mysql | orders
+SELECT t.‸ FROM (SELECT customer_id, MAX(created_at) AS last_order FROM orders GROUP BY customer_id) AS t JOIN customers c ON c.id = t.customer_id
+
+== mysql | orders
+UPDATE orders SET status = 'late' WHERE id IN (SELECT id FROM (SELECT id FROM orders WHERE ‸) AS x)
+
+== mysql | customers
+SELECT c.name, (SELECT COUNT(*) FROM orders o WHERE o.customer_id = c.id) AS n FROM customers c WHERE c.‸
+
+== mysql | orders
+INSERT INTO orders (customer_id, total) VALUES (1, 2) ON DUPLICATE KEY UPDATE total = ‸
+
+== databricks | sales.orders,crm.customers
+SELECT ‸ FROM main.sales.orders o JOIN main.crm.customers c ON c.id = o.customer_id WHERE o.day >= date_sub(current_date(), 7)
+
+== databricks | sales.orders,archive.orders
+SELECT x.‸ FROM (SELECT * FROM sales.orders UNION ALL SELECT * FROM archive.orders) x
+
+== databricks | crm.customers
+SELECT c.‸ FROM crm.customers c LEFT SEMI JOIN sales.orders o ON o.customer_id = c.id
+
+== databricks | sales.orders
+INSERT OVERWRITE sales.daily SELECT day, sum(‸) FROM sales.orders GROUP BY day
+
+== databricks | sales.orders
+SELECT ‸ FROM sales.orders WHERE customer_id NOT IN (SELECT id FROM crm.blocked) AND day = current_date()
+
+== databricks | sales.keep
+DELETE FROM sales.orders WHERE day < (SELECT min(day) FROM sales.keep WHERE ‸)
+
+== databricks | sales.returns
+UPDATE sales.orders SET status = 'x' WHERE id IN (SELECT order_id FROM sales.returns r WHERE r.‸ > 0)

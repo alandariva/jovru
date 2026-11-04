@@ -135,6 +135,15 @@ cargo xtask catalogs databricks v4.0.1 [--keywords sql_keywords.csv] [--function
 Downloads are kept in `target/catalog-sources/`, so a second run works
 offline. Each generation checks the dialect it wrote.
 
+## Completion scopes
+
+`crates/sql-language/tests/fixtures/scopes.txt` holds 121 statements in the
+three dialects, each with the cursor marked and the relations whose columns
+completion offers there; `tests/scopes.rs` checks them through
+`completion::request`, with an index that holds every relation the cases
+read, so one read in the wrong query fails. New behaviour adds cases; a
+change that alters a case's answer updates it and says why in the report.
+
 ## Concurrent runs
 
 Gates (basic or full) can run at the same time from separate worktrees. Each
