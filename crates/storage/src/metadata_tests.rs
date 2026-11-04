@@ -1038,3 +1038,33 @@ async fn a_step_that_breaks_a_reference_leaves_the_file_as_it_was() {
     pool.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn removing_a_deleted_connections_cache_leaves_the_others() {
+    let dir = dir();
+    let (gone, kept) = (ConnectionId::new(), ConnectionId::new());
+    for id in [gone, kept] {
+        let repository = MetadataRepository::open(&dir, id, &config()).await.unwrap();
+        seed(&repository).await;
+        repository.close().await;
+    }
+    MetadataRepository::remove(&dir, gone).await.unwrap();
+    let names: Vec<String> = std::fs::read_dir(dir.join("metadata"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.starts_with(&gone.to_string()))
+    );
+    assert!(names.contains(&format!("{kept}.db")));
+    // Nothing left to remove is fine.
+    MetadataRepository::remove(&dir, gone).await.unwrap();
+    let reopened = MetadataRepository::open(&dir, kept, &config())
+        .await
+        .unwrap();
+    assert!(!reopened.all().await.unwrap().is_empty());
+    reopened.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}

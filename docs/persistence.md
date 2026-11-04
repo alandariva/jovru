@@ -17,6 +17,8 @@ isolated folder for tests and manual checks).
 | `metadata/<connection-id>.db` | Metadata cache of one connection, refresh runs and per-scope status | Rebuildable from the server |
 | `metadata/<connection-id>.lock` | Writer lock: one refresh per cache at a time, across processes | Recreated as needed |
 | `metadata/<connection-id>.db.corrupt-<stamp>` | A cache set aside after confirmed corruption | Kept for diagnosis; safe to delete |
+| `backups/config-v<version>-<millis>.db` | Copies of `config.db`: one each start whose configuration opened and was read, unless it equals the newest copy; the five most recent are kept | Rotated automatically; restored from when `config.db` cannot be opened |
+| `config.db.broken-<millis>` | A configuration set aside when a backup was restored in its place | Kept for diagnosis; safe to delete |
 | `logs/jykre.<date>.log` | JSON log lines, one file per day; the last 7 are kept ([Reliability](reliability.md#logs)) | Rotated automatically; safe to delete |
 | `connections.json` (legacy) | Profiles from earlier builds | Imported once into `config.db` in a single transaction, deleted only after the import is verified |
 
@@ -201,8 +203,18 @@ The standard for schema changes:
   renamed to `*.corrupt-<stamp>`, an empty cache is created and the UI tells
   the user to refresh. Permission and I/O errors never trigger this, so a
   valid cache is not set aside by mistake.
+- **Deleting a connection** removes its profile and every
+  `connection.<connection-id>.*` setting in one transaction
+  (`ConfigRepository::delete`, refused when the profile changed since it
+  was read), then its vault entry and its metadata files
+  (`MetadataRepository::remove`). What could not be cleaned up after the
+  profile is gone is reported; the connection is never half deleted.
 - **`config.db`:** never recreated automatically. The application reports the
-  error; with backups in place it offers to restore the latest one.
+  error; with backups in place it offers to restore the latest one
+  (**Restore the backup** in the explorer, after a confirmation). The file
+  that could not be opened is renamed to `config.db.broken-<millis>` (with
+  its `-wal`/`-shm` files), the copy takes its place once it opens, and the
+  connections are loaded again.
 
 ## Rules
 
@@ -220,4 +232,4 @@ The standard for schema changes:
 | Standard | Current code |
 | --- | --- |
 | Numbered forward-only migration steps | `config.db` has no step yet; the metadata files have their mechanism and step 2 |
-| `config.db` backup before migrating, restore offered on failure | Not implemented; a broken `config.db` produces an error only |
+| `config.db` backup before migrating, restore offered on failure | The restore is offered, from the copies taken at each start (`backups/config-v<version>-<millis>.db`). The only migration so far (creating version 1) still copies to `backups/config-before-v1-<id>.db`, a name the restore does not list |

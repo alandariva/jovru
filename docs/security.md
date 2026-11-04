@@ -129,4 +129,3 @@ and a review date in `deny.toml`.
 | Standard | Current code |
 | --- | --- |
 | The UI shows whether the connection is encrypted and warns on fallback to plain text | Not shown; the TLS mode is only visible in the connection form |
-| Deleting a connection removes its vault entry | There is no delete action yet; turning off **Remember password** already removes the entry |

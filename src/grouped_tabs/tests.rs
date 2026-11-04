@@ -110,3 +110,24 @@ fn foreign_instances_are_rejected_even_when_tab_ids_match() {
     assert!(drag.belongs_to(owner));
     assert!(!drag.belongs_to(other));
 }
+
+#[test]
+fn a_tab_status_follows_the_tab_and_reports_only_changes() {
+    use super::TabStatus;
+    let mut model: Model<()> = Model::default();
+    let first = model.add_group("First".into(), rgb(0x477de6).into());
+    let other = model.add_group("Other".into(), rgb(0x35876d).into());
+    let tab = model.add_tab(first, "A".into(), ()).unwrap();
+    assert_eq!(model.tab(tab).unwrap().status, TabStatus::Idle);
+    assert_eq!(model.set_status(tab, TabStatus::Running), Ok(true));
+    // The same status again asks for no redraw.
+    assert_eq!(model.set_status(tab, TabStatus::Running), Ok(false));
+    model.move_tab(tab, other, 0).unwrap();
+    assert_eq!(model.tab(tab).unwrap().status, TabStatus::Running);
+    assert_eq!(model.set_status(tab, TabStatus::Failed), Ok(true));
+    model.close(tab).unwrap();
+    assert_eq!(
+        model.set_status(tab, TabStatus::Idle),
+        Err(super::TabsError::TabNotFound)
+    );
+}

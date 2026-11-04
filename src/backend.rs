@@ -100,6 +100,16 @@ fn forget_cache(dir: &Path, id: ConnectionId) {
     caches().remove(&(dir.to_path_buf(), id));
 }
 
+/// Closes the connection's cache, if one is kept open, and removes its
+/// files: what deleting the connection leaves behind.
+pub async fn remove_cache(dir: &Path, id: ConnectionId) -> DriverResult<()> {
+    let kept = caches().remove(&(dir.to_path_buf(), id));
+    if let Some(repository) = kept {
+        repository.close().await;
+    }
+    MetadataRepository::remove(dir, id).await
+}
+
 /// Closes every cache kept open under `dir`, so its files can be removed.
 pub async fn release_caches(dir: &Path) {
     let released: Vec<_> = {

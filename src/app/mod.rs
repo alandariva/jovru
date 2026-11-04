@@ -155,6 +155,10 @@ enum Section {
 }
 
 struct Connection {
+    /// Identifies the connection for as long as the application runs, so
+    /// work that comes back later finds it even after another connection
+    /// was deleted and the list shifted ([`AppView::connection_index`]).
+    key: u64,
     name: String,
     profile: Option<ConnectionProfile>,
     metadata_statuses: Vec<RefreshStatus>,
@@ -235,6 +239,8 @@ struct AppView {
     library_shown: Vec<usize>,
     library_scroll: UniformListScrollHandle,
     connections: Vec<Connection>,
+    /// The key of the last connection added.
+    next_connection_key: u64,
     section: Section,
     next_query: usize,
     /// Bumped by every font size change, so only the last of a burst is
@@ -288,6 +294,9 @@ struct AppView {
     /// Application-level problem (loading connections, saving preferences,
     /// searching) shown in the explorer until dismissed.
     app_notice: Option<Feedback>,
+    /// The newest copy of `config.db` and when it was taken, offered when
+    /// the configuration could not be opened at start.
+    config_backup: Option<(std::path::PathBuf, std::time::SystemTime)>,
     command_searching: bool,
     remember_password: bool,
     connection_saving: bool,
@@ -478,6 +487,7 @@ impl AppView {
             library_scroll: UniformListScrollHandle::new(),
             font_revision: 0,
             connections: Vec::new(),
+            next_connection_key: 0,
             section: Section::Explorer,
             next_query: 1,
             sidebar_open: true,
@@ -522,6 +532,7 @@ impl AppView {
             connection_scope: cx.new(|cx| scope_picker::ScopePicker::new(window, cx)),
             connection_status: None,
             app_notice: None,
+            config_backup: None,
             command_searching: false,
             remember_password: false,
             connection_saving: false,
@@ -624,7 +635,9 @@ impl AppView {
                 let group = app
                     .tabs
                     .update(cx, |tabs, cx| tabs.add_group(name, rgb(color).into(), cx));
+                app.next_connection_key += 1;
                 app.connections.push(Connection {
+                    key: app.next_connection_key,
                     name: name.into(),
                     profile: None,
                     metadata_statuses: Vec::new(),
@@ -965,6 +978,17 @@ impl AppView {
             },
         );
         self._subscriptions.push(subscription);
+        // The tab shows the run in progress and how the last one ended. The
+        // tab bar redraws only when that changes, not on every keystroke.
+        let status = cx.observe(&panel, |this, panel, cx| {
+            let status = panel.read(cx).tab_status();
+            if let Some(tab) = this.tab_of(&panel) {
+                let _ = this
+                    .tabs
+                    .update(cx, |tabs, cx| tabs.set_tab_status(tab, status, cx));
+            }
+        });
+        self._subscriptions.push(status);
         // The group exists: it was recreated above when it had been closed.
         let Ok(tab) = self.tabs.update(cx, |tabs, cx| {
             tabs.add_tab(group, title.to_string(), panel.clone(), cx)
@@ -1453,6 +1477,43 @@ impl AppView {
                             ),
                     )
                 })
+                .when_some(self.config_backup.as_ref(), |s, (_, taken)| {
+                    let age = jykre::explorer::format_age(
+                        std::time::SystemTime::now()
+                            .duration_since(*taken)
+                            .unwrap_or_default(),
+                    );
+                    s.child(
+                        column()
+                            .id("config-backup")
+                            .role(Role::Status)
+                            .mx_3()
+                            .mb_2()
+                            .p_2()
+                            .gap_2()
+                            .rounded(px(6.))
+                            .bg(rgb(SURFACE))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child(tr!(
+                                        "A copy of the configuration, taken {0}, is available. Restoring it keeps the damaged file next to it.",
+                                        age
+                                    )),
+                            )
+                            .child(
+                                button(
+                                    "restore-config-backup",
+                                    I::ArchiveRestore,
+                                    tr!("Restore the backup"),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.restore_config_backup(window, cx)
+                                })),
+                            ),
+                    )
+                })
                 .child(
                     column()
                         .id("connection-tree")
@@ -1522,7 +1583,7 @@ impl AppView {
             .child(row().id(("connection", index)).role(Role::Button).aria_label(connection.name.clone()).aria_expanded(expanded).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(38.)).px_3().gap_2().cursor_pointer().hover(|s| s.bg(rgb(SURFACE)))
                 .on_click(cx.listener(move |this, _, _, cx| { this.connections[index].expanded = !this.connections[index].expanded; cx.notify(); }))
                 .child(icon(if expanded { I::ChevronDown } else { I::ChevronRight }, FAINT))
-                .child(icon(I::Database, connection.color))
+                .child(icon(I::Server, connection.color))
                 .child(div().text_size(px(14.)).flex_1().truncate().child(connection.name.clone()))
                 .child(dot(connection.color)))
             .when(expanded, |s| s
@@ -1837,6 +1898,10 @@ impl AppView {
                 (tr!("Assistant"), "Ctrl Shift B"), (tr!("Next or previous tab"), "Ctrl Tab / Ctrl Shift Tab"),
                 (tr!("SQL font"), "Ctrl + / −"), (tr!("Reset font"), "Ctrl 0"),
             ].into_iter().map(|(title, key)| row().justify_between().child(label(title)).child(shortcut(key))))
+            .child(div().mt_3().child(label(tr!("Diagnostics"))))
+            .child(label(tr!("The log keeps the last 7 days, without passwords, SQL or values.")))
+            .child(button("open-log-folder", I::FolderOpen, tr!("Open log folder"))
+                .on_click(cx.listener(|this, _, _, cx| this.open_log_folder(cx))))
             .child(div().mt_3().child(label(tr!("Preferences saved on this computer."))))
     }
 

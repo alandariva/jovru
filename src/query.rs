@@ -84,6 +84,19 @@ impl RunState {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Running { .. } | Self::Cancelling)
     }
+
+    /// What the query tab shows before its title: a spinner while the run
+    /// is active (stopping included), then how the last run ended.
+    pub fn tab_status(&self) -> crate::grouped_tabs::TabStatus {
+        use crate::grouped_tabs::TabStatus;
+        match self {
+            Self::Idle => TabStatus::Idle,
+            Self::Running { .. } | Self::Cancelling => TabStatus::Running,
+            Self::Done => TabStatus::Succeeded,
+            Self::Failed { .. } => TabStatus::Failed,
+            Self::Cancelled => TabStatus::Cancelled,
+        }
+    }
 }
 
 /// Identity of one run.
@@ -591,6 +604,41 @@ mod tests {
         assert_eq!(run.state(), &RunState::Idle);
         assert_eq!(run.statuses(), [Ready, Ready]);
         assert!(!run.is_active());
+    }
+
+    #[test]
+    fn the_query_tab_shows_the_run_while_active_and_then_how_it_ended() {
+        use crate::grouped_tabs::TabStatus;
+        assert_eq!(QueryRun::new(TWO).state().tab_status(), TabStatus::Idle);
+
+        let (mut run, plan) = started(TWO);
+        assert_eq!(run.state().tab_status(), TabStatus::Running);
+        assert!(run.finish(
+            plan.id,
+            Outcome::Batch {
+                completed: 2,
+                error: None
+            }
+        ));
+        assert_eq!(run.state().tab_status(), TabStatus::Succeeded);
+
+        let (mut run, plan) = started(TWO);
+        assert!(run.finish(
+            plan.id,
+            Outcome::Batch {
+                completed: 1,
+                error: Some(DriverError::validation("boom")),
+            }
+        ));
+        assert_eq!(run.state().tab_status(), TabStatus::Failed);
+
+        let (mut run, plan) = started(TWO);
+        assert!(run.cancel());
+        // Stopping is still work in progress.
+        assert_eq!(run.state().tab_status(), TabStatus::Running);
+        // What arrives after the request is not shown; the run ends cancelled.
+        assert!(!run.finish(plan.id, Outcome::Failed(DriverError::cancelled())));
+        assert_eq!(run.state().tab_status(), TabStatus::Cancelled);
     }
 
     #[test]

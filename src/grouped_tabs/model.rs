@@ -1,10 +1,11 @@
 use gpui_kit::{Hsla, SharedString};
 
-use super::{TabGroupId, TabId, TabsError};
+use super::{TabGroupId, TabId, TabStatus, TabsError};
 
 pub(super) struct Tab<C> {
     pub id: TabId,
     pub title: SharedString,
+    pub status: TabStatus,
     pub content: C,
 }
 
@@ -84,9 +85,26 @@ impl<C> Model<C> {
             .ok_or(TabsError::GroupNotFound)?;
         self.next_tab += 1;
         let id = TabId(self.next_tab);
-        group.tabs.push(Tab { id, title, content });
+        group.tabs.push(Tab {
+            id,
+            title,
+            status: TabStatus::Idle,
+            content,
+        });
         self.select(id)?;
         Ok(id)
+    }
+
+    /// Sets what a tab shows about its work; `false` when it already showed
+    /// it, so the host redraws nothing.
+    pub fn set_status(&mut self, id: TabId, status: TabStatus) -> Result<bool, TabsError> {
+        let (group, tab) = self.location(id).ok_or(TabsError::TabNotFound)?;
+        let tab = &mut self.groups[group].tabs[tab];
+        if tab.status == status {
+            return Ok(false);
+        }
+        tab.status = status;
+        Ok(true)
     }
 
     pub fn select(&mut self, id: TabId) -> Result<(), TabsError> {

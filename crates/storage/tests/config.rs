@@ -179,3 +179,127 @@ async fn an_unreadable_profile_does_not_hide_the_others() {
     reopened.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+fn synthetic_profile(name: &str) -> ConnectionProfile {
+    ConnectionProfile {
+        id: ConnectionId::new(),
+        name: name.into(),
+        config: ConnectionConfig {
+            driver: DriverKind::Postgres,
+            options: serde_json::json!({"host":"localhost","database":"fixture","user":"fixture","sslMode":"disable"}),
+        },
+        remember_password: false,
+        revision: 0,
+    }
+}
+
+#[tokio::test]
+async fn deleting_a_connection_removes_its_settings_and_only_its_own() {
+    let dir = std::env::temp_dir().join(format!("jykre-config-delete-{}", ConnectionId::new()));
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    let gone = synthetic_profile("Deleted fixture");
+    let kept = synthetic_profile("Kept fixture");
+    let gone = repository
+        .save_with_settings(
+            &gone,
+            &[(jykre_storage::row_limit_key(gone.id), serde_json::json!(10))],
+        )
+        .await
+        .unwrap();
+    let kept = repository
+        .save_with_settings(
+            &kept,
+            &[(jykre_storage::row_limit_key(kept.id), serde_json::json!(20))],
+        )
+        .await
+        .unwrap();
+    repository
+        .set_explorer_state(gone.id, &serde_json::json!({"expanded": []}))
+        .await
+        .unwrap();
+    repository
+        .set_setting("editor.font_size", &serde_json::json!(16))
+        .await
+        .unwrap();
+
+    // A profile changed since it was read is not deleted unseen.
+    assert!(repository.delete(gone.id, gone.revision - 1).await.is_err());
+    assert_eq!(repository.list().await.unwrap().len(), 2);
+
+    repository.delete(gone.id, gone.revision).await.unwrap();
+    assert_eq!(repository.list().await.unwrap(), vec![kept.clone()]);
+    assert_eq!(repository.row_limit(gone.id).await.unwrap(), None);
+    assert_eq!(repository.explorer_state(gone.id).await.unwrap(), None);
+    assert_eq!(repository.row_limit(kept.id).await.unwrap(), Some(20));
+    assert_eq!(
+        repository.setting("editor.font_size").await.unwrap(),
+        Some(serde_json::json!(16))
+    );
+    // Deleting it again finds nothing.
+    assert!(repository.delete(gone.id, gone.revision).await.is_err());
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
+    let dir = std::env::temp_dir().join(format!("jykre-config-backup-{}", ConnectionId::new()));
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    assert!(jykre_storage::config_backups(&dir).await.is_empty());
+
+    let first = repository.back_up(&dir).await.unwrap();
+    // Nothing changed: the newest copy already holds it.
+    assert_eq!(repository.back_up(&dir).await.unwrap(), first);
+    assert_eq!(
+        jykre_storage::config_backups(&dir).await,
+        vec![first.clone()]
+    );
+
+    let saved = repository
+        .save(&synthetic_profile("Backed up"))
+        .await
+        .unwrap();
+    let mut newest = first.clone();
+    for limit in 0..jykre_storage::CONFIG_BACKUPS_KEPT + 2 {
+        repository
+            .set_row_limit(saved.id, 100 + limit as u32)
+            .await
+            .unwrap();
+        newest = repository.back_up(&dir).await.unwrap();
+    }
+    let backups = jykre_storage::config_backups(&dir).await;
+    assert_eq!(backups.len(), jykre_storage::CONFIG_BACKUPS_KEPT);
+    assert_eq!(backups[0], newest);
+    assert!(!backups.contains(&first));
+    assert!(jykre_storage::config_backup_time(&newest) > std::time::UNIX_EPOCH);
+    repository.close().await;
+
+    // A broken configuration is set aside, never deleted, and the copy
+    // takes its place.
+    std::fs::write(dir.join("config.db"), b"synthetic corrupt configuration").unwrap();
+    assert!(ConfigRepository::open(&dir).await.is_err());
+    let aside = jykre_storage::restore_config_backup(&dir, &newest)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&aside).unwrap(),
+        b"synthetic corrupt configuration"
+    );
+    let restored = ConfigRepository::open(&dir).await.unwrap();
+    assert_eq!(restored.list().await.unwrap(), vec![saved.clone()]);
+    assert_eq!(
+        restored.row_limit(saved.id).await.unwrap(),
+        Some(100 + jykre_storage::CONFIG_BACKUPS_KEPT as u32 + 1)
+    );
+    restored.close().await;
+
+    // Only a copy from the backup folder is restored.
+    let elsewhere = dir.join("config-v1-1.db");
+    std::fs::copy(&newest, &elsewhere).unwrap();
+    assert!(
+        jykre_storage::restore_config_backup(&dir, &elsewhere)
+            .await
+            .is_err()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

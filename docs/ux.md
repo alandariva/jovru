@@ -26,7 +26,8 @@ is visible, and the keyboard reaches everything.
 ```
 
 Dividers are adjustable with the mouse and the arrow keys. The assistant panel (simulated today)
-opens to the right of the query area.
+opens to the right of the query area, and says at its top that it is pending
+implementation and its answers are simulated.
 
 ## Always-visible states
 
@@ -87,6 +88,8 @@ Each state has one consistent representation.
 | Explorer expansion | The explorer | The nodes left expanded come back after a restart, read from the local cache; "Load more" after a node reads its next page only |
 | What a node is | Explorer node | Icon by kind (table, view, materialized view, column, key column, foreign key, partition), the column's type or what a key references after the name, and a tooltip with nullability, primary key position, default and comment |
 | Demo versus server data | Footer badge | `MOCK` or `SQL`; a tab without a connection outside the demo shows "No connection" and runs nothing |
+| Run of a query tab | Before the tab's title in the tab bar | A spinner while a run is active (stopping included), then how the last run ended: a check (succeeded), a red cross (failed) or a ban sign (cancelled). Nothing before the first run (`RunState::tab_status`) |
+| The tab's session | Editor header, at the right | **Connected** while the tab holds a session; a click (or Enter) disconnects: the session closes, results stay, and the next run opens a new one. With an open transaction it asks first, since closing rolls it back. While a run or a page read has the session out it shows **Connected** without the action, and **Disconnected** when there is no session. A tab without a connection shows "No connection" (or "Demo") |
 | Transaction of the tab's session | Editor toolbar, for drivers with transactions | **Auto-commit**, **Transaction open** (or **Manual commit** after MySQL's `SET autocommit = 0`), **Uncommitted changes** (amber) or **Transaction failed** (red, PostgreSQL), with **Commit** and **Rollback** while one is open. Reported by the driver after each run, inferred from the statements the tab ran when it cannot tell (`jykre::transaction`) |
 | Pinned result | Result tab | Its pin icon is mint; no run replaces it |
 | Selection statistics | Footer, after the selected count | Sum, average, median, minimum and maximum of the numbers selected, exact; "Calculating…" while a large selection is read |
@@ -150,6 +153,11 @@ Rules:
 - A saved query or history entry whose connection no longer exists opens
   without a connection, never on another one, and says so. Running a tab
   without a connection offers the connections in the results area.
+- Deleting a connection (**Delete connection…** in its menu, or `Delete` on
+  it) asks first and says what goes with it: its remembered password and
+  its metadata cache. Its open tabs keep their SQL and results in their
+  group, now without a connection, and say so; a query running in them is
+  cancelled and an open transaction rolled back, which the question names.
 - Removing a saved query (its button in the library list) asks first; a tab
   that has it open keeps its SQL, which closing then asks about. The
   editor's save button only saves or updates.
@@ -178,6 +186,7 @@ Rules:
 | SQL font size: larger, smaller, reset | `Ctrl +`, `Ctrl -`, `Ctrl 0` |
 | Close the search or the connection dialog | `Esc` |
 | Refresh the focused explorer node | `F5` |
+| Delete the focused connection (asks first) | `Delete` |
 | Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
 | Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
 | Explorer: new query for the table, `SELECT * … LIMIT` the row limit, not run; a tab already opened for the table is shown instead (**New query for table in another tab** in its menu opens another). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` |

@@ -11,7 +11,7 @@ mod picker;
 use std::fmt;
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Sizable,
+    ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
     popover::Popover,
     scroll::ScrollableMask,
@@ -34,6 +34,36 @@ pub struct TabGroupId(u64);
 /// Stable tab identity within one [`GroupedTabs`] instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TabId(u64);
+
+/// What a tab's content is doing, shown before its title. The host decides
+/// what each state means for its content.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TabStatus {
+    /// Nothing to show.
+    #[default]
+    Idle,
+    /// Work in progress: a spinner.
+    Running,
+    /// The last work succeeded.
+    Succeeded,
+    /// The last work failed.
+    Failed,
+    /// The last work was stopped before it ended.
+    Cancelled,
+}
+
+impl TabStatus {
+    /// Its name for assistive technologies; empty when idle.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "",
+            Self::Running => tr!("running"),
+            Self::Succeeded => tr!("succeeded"),
+            Self::Failed => tr!("failed"),
+            Self::Cancelled => tr!("cancelled"),
+        }
+    }
+}
 
 /// Invalid IDs leave the component unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +149,26 @@ impl Render for DragPreview {
             .shadow_md()
             .child(div().truncate().child(self.title.clone()))
     }
+}
+
+/// The icon before a tab's title for its status; none while idle.
+fn status_icon(status: TabStatus, tab: TabId, cx: &App) -> Option<AnyElement> {
+    let theme = cx.theme();
+    let icon =
+        |name: IconName, color: Hsla| Icon::new(name).size(px(14.)).flex_none().text_color(color);
+    Some(match status {
+        TabStatus::Idle => return None,
+        TabStatus::Running => icon(IconName::LoaderCircle, theme.foreground)
+            .with_animation(
+                ("tab-status-running", tab.0),
+                Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+            )
+            .into_any_element(),
+        TabStatus::Succeeded => icon(IconName::CircleCheck, theme.success).into_any_element(),
+        TabStatus::Failed => icon(IconName::CircleX, theme.danger).into_any_element(),
+        TabStatus::Cancelled => icon(IconName::Ban, theme.muted_foreground).into_any_element(),
+    })
 }
 
 /// A slot is a boundary in the destination's current, pre-removal tab list.
@@ -285,6 +335,25 @@ impl GroupedTabs {
         )?;
         self.finish_selection(previous, cx);
         Ok(id)
+    }
+
+    /// Shows what the tab's content is doing before its title. Redraws only
+    /// when the status changed.
+    pub fn set_tab_status(
+        &mut self,
+        tab: TabId,
+        status: TabStatus,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        if self.model.set_status(tab, status)? {
+            cx.notify();
+        }
+        Ok(())
+    }
+
+    /// What the tab shows about its content's work.
+    pub fn tab_status(&self, tab: TabId) -> Option<TabStatus> {
+        self.model.tab(tab).map(|tab| tab.status)
     }
 
     pub fn select_tab(&mut self, tab: TabId, cx: &mut Context<Self>) -> Result<(), TabsError> {
@@ -661,7 +730,6 @@ impl GroupedTabs {
                             window.prevent_default();
                         }
                     }))
-                    .child(div().size(px(7.)).flex_none().rounded_full().bg(color))
                     .child(
                         div()
                             .min_w_0()
@@ -732,7 +800,10 @@ impl GroupedTabs {
                 .child(
                     BaseTab::new((tr!("tab"), tab_id.0))
                         .selected(selected)
-                        .accessibility_label(format!("{}, {}", tab.title, group.name))
+                        .accessibility_label(match tab.status {
+                            TabStatus::Idle => format!("{}, {}", tab.title, group.name),
+                            status => format!("{}, {}, {}", tab.title, status.label(), group.name),
+                        })
                         .track_focus(&handle)
                         .tab_index(if selected { 0 } else { -1 })
                         .tab_stop(selected)
@@ -775,6 +846,10 @@ impl GroupedTabs {
                                 title: drag.title.clone(),
                                 color: drag.color,
                             })
+                        })
+                        .gap_1p5()
+                        .when_some(status_icon(tab.status, tab_id, cx), |this, icon| {
+                            this.child(icon)
                         })
                         .child(div().min_w_0().truncate().child(tab.title.clone())),
                 )

@@ -1416,7 +1416,7 @@ impl Workspace {
         Button::new("tab-connection")
             .ghost()
             .small()
-            .icon(I::Database)
+            .icon(I::Server)
             .label(current.clone())
             .dropdown_caret(true)
             .accessibility_label(tr!("Connection: {0}", current))
@@ -1760,6 +1760,119 @@ impl Workspace {
         .flex_none()
     }
 
+    /// Whether the tab holds a session on its connection, after the
+    /// context in the editor header. A click on **Connected** disconnects.
+    fn session_status(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.input.is_none() {
+            return row()
+                .child(dot(if self.demo { MINT } else { AMBER }))
+                .child(label(if self.demo {
+                    tr!("Demo")
+                } else {
+                    tr!("No connection")
+                }))
+                .into_any_element();
+        }
+        let status = |id: &'static str, color: u32, text: &'static str, tip: &'static str| {
+            row()
+                .id(id)
+                .role(Role::Status)
+                .aria_label(text)
+                .px_2()
+                .h(px(26.))
+                .rounded(px(5.))
+                .child(dot(color))
+                .child(label(text))
+                .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+        };
+        match SessionIndicator::of(self.session.is_some(), self.is_busy()) {
+            SessionIndicator::InUse => status(
+                "session-in-use",
+                MINT,
+                tr!("Connected"),
+                tr!("A query is using the session. Stop it to disconnect."),
+            )
+            .into_any_element(),
+            SessionIndicator::Disconnected => status(
+                "session-closed",
+                FAINT,
+                tr!("Disconnected"),
+                tr!("The next run opens a session."),
+            )
+            .into_any_element(),
+            SessionIndicator::Connected => status(
+                "disconnect-session",
+                MINT,
+                tr!("Connected"),
+                tr!("Disconnect: close this tab's session"),
+            )
+            .role(Role::Button)
+            .aria_label(tr!("Connected. Disconnect"))
+            .focusable()
+            .tab_index(0)
+            .border_1()
+            .border_color(transparent_black())
+            .focus_visible(|s| s.border_color(rgb(MINT)))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(HOVER)))
+            .child(icon(I::Unplug, FAINT).size(px(14.)))
+            .on_click(cx.listener(|this, _, window, cx| this.disconnect(false, window, cx)))
+            .into_any_element(),
+        }
+    }
+
+    /// Closes the tab's session, as a click on **Connected** does. Results
+    /// stay on screen; the next run opens a new session, where the tab's
+    /// context is applied again. An open transaction is rolled back, so that
+    /// asks first (unless `confirmed`).
+    fn disconnect(&mut self, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_busy() {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!("A query is using the session. Stop it before disconnecting."),
+            ));
+            cx.notify();
+            return;
+        }
+        if self.session.is_none() {
+            return;
+        }
+        if !confirmed && self.transaction.is_open() {
+            let workspace = cx.entity().downgrade();
+            super::confirm(
+                window,
+                cx,
+                super::Confirmation {
+                    title: tr!("Disconnect and roll back?").to_owned(),
+                    description: tr!(
+                        "This tab has an open transaction. Disconnecting closes the session, which rolls it back."
+                    )
+                    .to_owned(),
+                    ok: tr!("Disconnect"),
+                    cancel: tr!("Cancel"),
+                    focus: super::ConfirmFocus::Dialog,
+                },
+                move |window, cx| {
+                    let _ = workspace.update(cx, |this, cx| this.disconnect(true, window, cx));
+                },
+            );
+            return;
+        }
+        self.stale_session = false;
+        // Closing the session rolls back its transaction.
+        self.transaction = Transaction::AutoCommit;
+        if let Some(session) = self.session.take() {
+            backend::close_in_background(session);
+        }
+        self.notice = Some(Feedback::new(
+            Tone::Info,
+            tr!(
+                "Disconnected. The next run opens a new session, and session settings such as the current schema start over."
+            ),
+        ));
+        cx.notify();
+    }
+
     fn editor_panel(&self, cx: &mut Context<Self>) -> Div {
         column()
             .size_full()
@@ -1773,7 +1886,7 @@ impl Workspace {
                     .child(
                         row()
                             .gap_2()
-                            .child(icon(I::Database, self.connection_color))
+                            .child(icon(I::Server, self.connection_color))
                             .child(label(self.connection.clone()))
                             .when_some(self.environment, |s, environment| {
                                 s.child(environment_badge(environment))
@@ -1795,21 +1908,7 @@ impl Workspace {
                                 }
                             }),
                     )
-                    .child(
-                        row()
-                            .child(dot(if self.input.is_some() || self.demo {
-                                MINT
-                            } else {
-                                AMBER
-                            }))
-                            .child(label(if self.input.is_some() {
-                                tr!("Real connection")
-                            } else if self.demo {
-                                tr!("Demo")
-                            } else {
-                                tr!("No connection")
-                            })),
-                    ),
+                    .child(self.session_status(cx)),
             )
             .child(
                 div()
@@ -2662,7 +2761,7 @@ impl Workspace {
             .justify_center()
             .gap_3()
             .p_4()
-            .child(icon(I::Database, AMBER))
+            .child(icon(I::Server, AMBER))
             .child(
                 div()
                     .text_size(px(14.))
@@ -2697,7 +2796,7 @@ impl Workspace {
                                     .text_size(px(14.))
                                     .text_color(rgb(MUTED))
                                     .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                                    .child(icon(I::Database, MUTED))
+                                    .child(icon(I::Server, MUTED))
                                     .child(name.clone())
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(WorkspaceEvent::ConnectionRequested(
@@ -2834,6 +2933,12 @@ impl Workspace {
                         .on_click(cx.listener(|this, _, _, cx| { this.messages.clear(); cx.notify(); })))
                     .child(icon_button("close-ai", I::PanelRightClose, tr!("Collapse assistant"))
                         .on_click(cx.listener(|this, _, _, cx| { this.assistant_open = false; cx.notify(); })))))
+            // Said as soon as the panel opens, before anything is asked.
+            .child(div().id("assistant-pending").role(Role::Status).flex_none().mx_3().mt_3().p_2().rounded(px(6.))
+                .bg(rgb(Tone::Warning.background()))
+                .child(feedback_line(&Feedback::new(Tone::Warning, tr!(
+                    "Pending implementation: the assistant is not connected to an AI model yet, so its answers are simulated."
+                ))).text_size(px(12.))))
             .child(row().px_4().h(px(37.)).flex_none().gap_2().border_b_1().border_color(rgb(BORDER))
                 .child(icon(I::Layers, FAINT)).child(label(tr!("Context")))
                 .child(badge(tr!("Current SQL"), MUTED)).child(badge(if self.sales() { tr!("3 tables") } else { tr!("1 query") }, MUTED)))
@@ -2882,6 +2987,29 @@ impl Workspace {
                         .child(icon_button("send-ai", I::ArrowUp, tr!("Send message")).bg(rgb(0x304a40))
                             .on_click(cx.listener(|this, _, window, cx| this.submit_prompt(window, cx))))))
                 .child(div().text_center().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Simulated AI · Always review the suggestions."))))
+    }
+}
+
+/// What the editor header says about the tab's session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SessionIndicator {
+    /// A session is open and idle: a click disconnects.
+    Connected,
+    /// A run or a page read has the session out (or is opening one).
+    InUse,
+    /// No session: the next run opens one.
+    Disconnected,
+}
+
+impl SessionIndicator {
+    fn of(session: bool, busy: bool) -> Self {
+        if busy {
+            Self::InUse
+        } else if session {
+            Self::Connected
+        } else {
+            Self::Disconnected
+        }
     }
 }
 
@@ -3005,6 +3133,12 @@ impl Workspace {
             .update(cx, |editor, _| editor.set_context(context));
     }
 
+    /// What the query tab shows before its title: the run in progress, or
+    /// how the last one ended.
+    pub fn tab_status(&self) -> jykre::grouped_tabs::TabStatus {
+        self.run.state().tab_status()
+    }
+
     /// A statement or a page read is in progress.
     pub fn is_busy(&self) -> bool {
         self.run.is_active() || self.fetching
@@ -3087,6 +3221,26 @@ impl Workspace {
     ) {
         self.connection_color = color;
         self.environment = environment;
+        cx.notify();
+    }
+
+    /// The tab's connection was deleted. A run in progress stops and the
+    /// session closes (rolling back an open transaction, which the host
+    /// confirmed with the user); the SQL and the results stay, and nothing
+    /// runs until another connection is chosen.
+    pub fn connection_deleted(&mut self, cx: &mut Context<Self>) {
+        self.abandon_run();
+        self.input = None;
+        self.transactions = false;
+        self.pending_run = None;
+        self.risky_run = None;
+        self.notice = Some(Feedback::new(
+            Tone::Warning,
+            tr!(
+                "The connection {0} was deleted. Choose another before running this SQL.",
+                self.connection
+            ),
+        ));
         cx.notify();
     }
 
@@ -3640,4 +3794,24 @@ fn risk_description(risks: &[(usize, jykre::guard::Risk)], total: usize) -> Stri
         "This connection is marked as production. {0} Run it anyway?",
         lines.join(" ")
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionIndicator;
+
+    #[test]
+    fn the_header_offers_to_disconnect_only_an_idle_open_session() {
+        assert_eq!(
+            SessionIndicator::of(true, false),
+            SessionIndicator::Connected
+        );
+        // A run has the session out, or is opening one.
+        assert_eq!(SessionIndicator::of(false, true), SessionIndicator::InUse);
+        assert_eq!(SessionIndicator::of(true, true), SessionIndicator::InUse);
+        assert_eq!(
+            SessionIndicator::of(false, false),
+            SessionIndicator::Disconnected
+        );
+    }
 }

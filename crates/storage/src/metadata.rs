@@ -758,6 +758,33 @@ impl MetadataRepository {
         })
     }
 
+    /// Removes the cache files of a deleted connection: the database, its
+    /// `-wal` and `-shm` files and its lock files. Close every repository
+    /// open on it first. Files already gone are fine; one that cannot be
+    /// removed (still open elsewhere) is an error, and the others are
+    /// removed regardless.
+    pub async fn remove(dir: &Path, id: ConnectionId) -> DriverResult<()> {
+        let dir = dir.join("metadata");
+        let mut failed = false;
+        for name in [
+            format!("{id}.db"),
+            format!("{id}.db-wal"),
+            format!("{id}.db-shm"),
+            format!("{id}.lock"),
+            format!("{id}.run.lock"),
+        ] {
+            match tokio::fs::remove_file(dir.join(name)).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => failed = true,
+            }
+        }
+        if failed {
+            return Err(error("Could not remove the metadata cache."));
+        }
+        Ok(())
+    }
+
     /// Moves a cache from the identity `from` to `to` without emptying it,
     /// when it still holds `from`: what a new way of computing the identity
     /// needs, since the catalog the cache describes is the same. Does

@@ -140,7 +140,8 @@ parameters, and SQL above `trace`. See [Security](security.md#logs-and-diagnosti
 - Error messages in the UI offer **Copy details**: code, technical message,
   time, application version and run identifier, so a report needs no
   screenshot.
-- A menu entry opens the log folder.
+- **Open log folder**, under Diagnostics in Preferences, opens the log
+  folder in the system's file manager.
 
 ## Known deviations
 
@@ -148,4 +149,3 @@ parameters, and SQL above `trace`. See [Security](security.md#logs-and-diagnosti
 | --- | --- |
 | Retries with backoff for idempotent reads | No automatic retries |
 | Clean shutdown with a deadline | Dropping a workspace cancels its run; there is no explicit shutdown sequence |
-| A menu entry opens the log folder | Logs are written, but the folder is opened by hand |

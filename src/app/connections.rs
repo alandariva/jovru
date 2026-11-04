@@ -44,6 +44,180 @@ impl ExplorerEntry {
 }
 
 impl AppView {
+    /// Where the connection with `key` is in the list now; `None` once it
+    /// was deleted. Work that comes back after an `await` finds its
+    /// connection this way, never by an index taken before it.
+    pub(super) fn connection_index(&self, key: u64) -> Option<usize> {
+        self.connections
+            .iter()
+            .position(|connection| connection.key == key)
+    }
+
+    /// **Delete connection**: asks first, saying what goes with it (its
+    /// remembered password and metadata cache) and what happens to its open
+    /// tabs, which keep their SQL without a connection.
+    pub(super) fn delete_connection(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.connections.get(index) else {
+            return;
+        };
+        // The demo's sample connections are not saved anywhere.
+        if connection.profile.is_none() {
+            return;
+        }
+        let key = connection.key;
+        let name = connection.name.clone();
+        let tabs: Vec<_> = self
+            .panels
+            .values()
+            .filter(|panel| panel.read(cx).connection_name() == name)
+            .collect();
+        let interrupts = tabs.iter().any(|panel| {
+            let panel = panel.read(cx);
+            panel.is_busy() || panel.has_open_transaction()
+        });
+        let mut description = match tabs.len() {
+            0 => tr!("Its remembered password and its metadata cache are removed too.").to_owned(),
+            1 => tr!(
+                "Its remembered password and its metadata cache are removed too. Its open tab keeps its SQL, without a connection."
+            )
+            .to_owned(),
+            count => tr!(
+                "Its remembered password and its metadata cache are removed too. Its {0} open tabs keep their SQL, without a connection.",
+                count
+            ),
+        };
+        if interrupts {
+            description.push(' ');
+            description.push_str(tr!(
+                "A query running in them is cancelled, and an open transaction is rolled back."
+            ));
+        }
+        let weak = cx.entity().downgrade();
+        super::confirm(
+            window,
+            cx,
+            super::Confirmation {
+                title: tr!("Delete the connection {0}?", name),
+                description,
+                ok: tr!("Delete"),
+                cancel: tr!("Cancel"),
+                focus: super::ConfirmFocus::Dialog,
+            },
+            move |_, cx| {
+                let _ = weak.update(cx, |this, cx| this.delete_connection_confirmed(key, cx));
+            },
+        );
+    }
+
+    /// Deletes the connection the user confirmed: its profile and settings,
+    /// then its vault entry and cache ([`connection_store::delete`]). The
+    /// explorer forgets it only once the profile is gone.
+    fn delete_connection_confirmed(&mut self, key: u64, cx: &mut Context<Self>) {
+        let Some(index) = self.connection_index(key) else {
+            return;
+        };
+        let connection = &mut self.connections[index];
+        let Some(profile) = connection.profile.clone() else {
+            return;
+        };
+        // A refresh still reading would keep the cache open.
+        connection.stop_refreshes();
+        connection.refresh_queue = RefreshQueue::default();
+        connection.progress = None;
+        connection.status = Feedback::new(Tone::Info, tr!("Deleting the connection…"));
+        let name = connection.name.clone();
+        let dir = connection_store::data_dir();
+        cx.spawn(async move |weak, cx| {
+            let result = backend::run(async move {
+                connection_store::delete(&dir, &profile, &SystemSecretStore).await
+            })
+            .await;
+            let _ = weak.update(cx, |this, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
+                match result {
+                    Ok(warning) => {
+                        this.forget_connection(index, cx);
+                        this.app_notice = Some(match warning {
+                            Some(warning) => Feedback::new(Tone::Warning, warning),
+                            None => Feedback::new(
+                                Tone::Success,
+                                tr!("The connection {0} was deleted.", name),
+                            ),
+                        });
+                    }
+                    Err(error) => {
+                        this.connections[index].status = Feedback::new(
+                            Tone::Error,
+                            tr!("Could not delete the connection: {0}", error),
+                        );
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Takes a deleted connection out of the explorer. Its tabs stay in
+    /// their group, now without a connection, as tabs whose connection was
+    /// missing at start do; whatever pointed at a connection by its place in
+    /// the list is moved along or dropped.
+    fn forget_connection(&mut self, index: usize, cx: &mut Context<Self>) {
+        let connection = self.connections.remove(index);
+        let group = connection.group;
+        if self.tabs.read(cx).group_ids().any(|id| id == group) {
+            let _ = self.tabs.update(cx, |tabs, cx| {
+                tabs.set_group_color(group, rgb(FAINT).into(), cx)
+            });
+            self.orphan_groups.push((connection.name.clone(), group));
+        }
+        for panel in self.panels.values() {
+            panel.update(cx, |panel, cx| {
+                if panel.connection_name() == connection.name {
+                    panel.connection_deleted(cx);
+                }
+            });
+        }
+        let shift = |at: &mut usize| -> bool {
+            if *at == index {
+                return false;
+            }
+            if *at > index {
+                *at -= 1;
+            }
+            true
+        };
+        self.explorer_selected = self
+            .explorer_selected
+            .take()
+            .and_then(|(mut at, path)| shift(&mut at).then_some((at, path)));
+        self.pending_reveal = self
+            .pending_reveal
+            .take()
+            .and_then(|(mut at, path)| shift(&mut at).then_some((at, path)));
+        self.editing_connection = self
+            .editing_connection
+            .and_then(|mut at| shift(&mut at).then_some(at));
+        self.node_focus.borrow_mut().clear();
+        self.inspection = None;
+        // Searches in flight, and their matches, named connections by place.
+        self.command_matches.clear();
+        self.command_revision += 1;
+        self.search_revision += 1;
+        self.explorer_signature.clear();
+        self.refresh_connection_choices(cx);
+        self.save_state_soon(cx);
+        drop(connection);
+    }
+
     pub(super) fn invalidate_connection_test(&mut self) {
         self.connection_revision += 1;
         if let Some(cancel) = self.connection_testing.take() {
@@ -452,6 +626,12 @@ impl AppView {
         cx.spawn_in(window, async move |weak, cx| {
             let result = backend::run(async move {
                 let connections = connection_store::load(&dir, &SystemSecretStore).await;
+                // A configuration that cannot be opened is never recreated;
+                // the newest copy is offered instead.
+                let backup = match &connections {
+                    Err(_) => connection_store::latest_backup(&dir).await,
+                    Ok(_) => None,
+                };
                 let (font_size, state) = match ConfigRepository::open(&dir).await {
                     Ok(repository) => {
                         let font_size = repository.setting("editor.font_size").await;
@@ -461,15 +641,16 @@ impl AppView {
                     }
                     Err(error) => (Err(error.clone()), Err(error)),
                 };
-                Ok((connections, font_size, state))
+                Ok((connections, font_size, state, backup))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connections_loading = false;
-                let (connections, font_size, state) = match result {
+                let (connections, font_size, state, backup) = match result {
                     Ok(parts) => parts,
-                    Err(error) => (Err(error.clone()), Err(error.clone()), Err(error)),
+                    Err(error) => (Err(error.clone()), Err(error.clone()), Err(error), None),
                 };
+                this.config_backup = backup;
                 let mut problems = Vec::new();
                 match font_size {
                     Ok(font_size) => {
@@ -515,6 +696,99 @@ impl AppView {
                 // an empty state with the way forward; nothing pops up.
                 if !restored && !this.connections.is_empty() && this.panels.is_empty() {
                     this.new_query(this.connections[0].group, window, cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// **Restore the backup**: after a confirmation, puts the newest copy of
+    /// the configuration in place of the one that could not be opened (kept
+    /// next to it) and loads the connections again.
+    pub(super) fn restore_config_backup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((backup, _)) = self.config_backup.clone() else {
+            return;
+        };
+        let weak = cx.entity().downgrade();
+        super::confirm(
+            window,
+            cx,
+            super::Confirmation {
+                title: tr!("Restore the configuration backup?").to_owned(),
+                description: tr!(
+                    "The connections and preferences go back to the copy. Changes made after it are lost; the damaged file is kept next to it."
+                )
+                .to_owned(),
+                ok: tr!("Restore"),
+                cancel: tr!("Cancel"),
+                focus: super::ConfirmFocus::Dialog,
+            },
+            move |window, cx| {
+                let backup = backup.clone();
+                let _ = weak.update(cx, |this, cx| {
+                    this.config_backup = None;
+                    this.connections_loading = true;
+                    cx.notify();
+                    let dir = connection_store::data_dir();
+                    cx.spawn_in(window, async move |weak, cx| {
+                        let result = backend::run(async move {
+                            connection_store::restore_backup(&dir, &backup).await
+                        })
+                        .await;
+                        let _ = weak.update_in(cx, |this, window, cx| {
+                            match result {
+                                Ok(aside) => {
+                                    this.app_notice = Some(Feedback::new(
+                                        Tone::Success,
+                                        tr!(
+                                            "Configuration restored from the backup. The damaged file was kept next to it as {0}.",
+                                            aside.file_name().map_or_else(
+                                                || aside.display().to_string(),
+                                                |name| name.to_string_lossy().into_owned()
+                                            )
+                                        ),
+                                    ));
+                                    this.load_connections(window, cx);
+                                }
+                                Err(error) => {
+                                    this.connections_loading = false;
+                                    this.app_notice = Some(Feedback::new(
+                                        Tone::Error,
+                                        tr!("Could not restore the backup: {0}", error),
+                                    ));
+                                }
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                });
+            },
+        );
+    }
+
+    /// **Open log folder**: shows the folder of the application's logs in
+    /// the system's file manager, creating it first if nothing was logged.
+    pub(super) fn open_log_folder(&mut self, cx: &mut Context<Self>) {
+        let folder = jykre::logging::log_dir(&connection_store::data_dir());
+        cx.spawn(async move |weak, cx| {
+            let created = folder.clone();
+            let result = backend::run(async move {
+                tokio::fs::create_dir_all(&created).await.map_err(|_| {
+                    DriverError::new(ErrorCode::Internal, "Could not create the log folder.")
+                })
+            })
+            .await;
+            let _ = weak.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => cx.open_with_system(&folder),
+                    Err(error) => {
+                        this.app_notice = Some(Feedback::new(
+                            Tone::Error,
+                            tr!("Could not open the log folder: {0}", error),
+                        ))
+                    }
                 }
                 cx.notify();
             });
@@ -598,7 +872,9 @@ impl AppView {
             tabs.add_group(profile.name.clone(), rgb(color).into(), cx)
         });
         let detail = connection_detail(&input.config);
+        self.next_connection_key += 1;
         let mut connection = Connection {
+            key: self.next_connection_key,
             name: profile.name.clone(),
             profile: Some(profile),
             input: Some(input),
@@ -691,6 +967,9 @@ impl AppView {
             }
         };
         let editing = self.editing_connection;
+        // Found again by its key once saved: another connection may have
+        // been deleted meanwhile.
+        let editing_key = editing.and_then(|index| self.connections.get(index).map(|c| c.key));
         if !confirmed && let Some(index) = editing {
             let connection = &self.connections[index];
             let changed = connection
@@ -827,6 +1106,7 @@ impl AppView {
                             selection.added_since(&previous_scope)
                         };
                         let apply = !read.is_pending() || selection != previous_scope;
+                        let editing = editing_key.and_then(|key| this.connection_index(key));
                         let index = if let Some(index) = editing {
                             let connection = &mut this.connections[index];
                             connection.stop_refreshes();
@@ -928,6 +1208,7 @@ impl AppView {
         };
         let id = profile.id;
         let revision = profile.revision;
+        let key = connection.key;
         let cancel = CancellationToken::new();
         connection.refresh_generation += 1;
         let generation = connection.refresh_generation;
@@ -948,13 +1229,20 @@ impl AppView {
             ))
             .await;
             let pages = weak
-                .update(cx, |this, _| this.connections[index].tree.loaded())
+                .update(cx, |this, _| {
+                    this.connection_index(key)
+                        .map(|index| this.connections[index].tree.loaded())
+                        .unwrap_or_default()
+                })
                 .unwrap_or_default();
             let snapshot = backend::run(async move {
                 backend::cached_metadata_pages(&dir, id, &input.config, false, pages).await
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
                 let connection = &mut this.connections[index];
                 if connection.refresh_generation != generation
                     || connection
@@ -1040,9 +1328,14 @@ impl AppView {
                 .as_ref()
                 .is_some_and(connection_store::needs_password)
             {
+                let key = connection.key;
                 self.ask_password(
                     index,
-                    Box::new(move |this, _, cx| this.start_refresh(index, job, cx)),
+                    Box::new(move |this, _, cx| {
+                        if let Some(index) = this.connection_index(key) {
+                            this.start_refresh(index, job, cx);
+                        }
+                    }),
                     Box::new(|_, _| {}),
                     cx,
                 );
@@ -1104,6 +1397,7 @@ impl AppView {
         };
         let id = profile.id;
         let revision = profile.revision;
+        let key = connection.key;
         let selection = connection.scope.clone();
         let removal_only = read.is_pending();
         let cancel = CancellationToken::new();
@@ -1116,6 +1410,9 @@ impl AppView {
         cx.spawn(async move |weak, cx| {
             while let Some(update) = updates.recv().await {
                 let alive = weak.update(cx, |this, cx| {
+                    let Some(index) = this.connection_index(key) else {
+                        return;
+                    };
                     let connection = &mut this.connections[index];
                     if connection.refresh_generation == generation
                         && connection.refreshing.is_some()
@@ -1143,13 +1440,20 @@ impl AppView {
             ))
             .await;
             let pages = weak
-                .update(cx, |this, _| this.connections[index].tree.loaded())
+                .update(cx, |this, _| {
+                    this.connection_index(key)
+                        .map(|index| this.connections[index].tree.loaded())
+                        .unwrap_or_default()
+                })
                 .unwrap_or_default();
             let snapshot = backend::run(async move {
                 backend::cached_metadata_pages(&dir, id, &input.config, false, pages).await
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
                 let connection = &mut this.connections[index];
                 if connection.refresh_generation != generation
                     || connection
@@ -1284,6 +1588,7 @@ impl AppView {
         };
         connection.tree.set_loading(&parent, true);
         let generation = connection.refresh_generation;
+        let key = connection.key;
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
             let read = parent.clone();
@@ -1292,6 +1597,9 @@ impl AppView {
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
                 let connection = &mut this.connections[index];
                 if connection.refresh_generation != generation {
                     connection.tree.set_loading(&parent, false);
@@ -1322,6 +1630,7 @@ impl AppView {
         };
         let pages = connection.tree.loaded();
         let generation = connection.refresh_generation;
+        let key = connection.key;
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
             let result = backend::run(async move {
@@ -1330,6 +1639,9 @@ impl AppView {
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
                 let connection = &mut this.connections[index];
                 if connection.refresh_generation != generation {
                     return;
@@ -1387,11 +1699,15 @@ impl AppView {
             return;
         }
         let generation = connection.refresh_generation;
+        let key = connection.key;
         cx.spawn(async move |weak, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(300))
                 .await;
             let _ = weak.update(cx, |this, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
                 if this.connections[index].refresh_generation < generation {
                     return;
                 }
@@ -1421,6 +1737,7 @@ impl AppView {
         let Some(profile) = self.connections[index].profile.clone() else {
             return;
         };
+        let key = self.connections[index].key;
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
             let names_dir = dir.clone();
@@ -1431,6 +1748,9 @@ impl AppView {
             .await;
             let current = weak
                 .update(cx, |this, cx| {
+                    let Some(index) = this.connection_index(key) else {
+                        return true;
+                    };
                     match result {
                         Ok(namespaces) => {
                             this.connections[index].namespaces = namespaces;
@@ -1454,12 +1774,19 @@ impl AppView {
             let names =
                 super::sql_editor::name_index(names_dir, names_profile.id, names_profile.config)
                     .await;
-            let _ = weak.update(cx, |this, cx| match names {
-                Ok(names) => {
-                    this.connections[index].names = Some(std::sync::Arc::new(names));
-                    this.push_context_choices(index, cx);
+            let _ = weak.update(cx, |this, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
+                match names {
+                    Ok(names) => {
+                        this.connections[index].names = Some(std::sync::Arc::new(names));
+                        this.push_context_choices(index, cx);
+                    }
+                    Err(error) => {
+                        tracing::debug!(error_code = ?error.code, "editor names unavailable")
+                    }
                 }
-                Err(error) => tracing::debug!(error_code = ?error.code, "editor names unavailable"),
             });
         })
         .detach();
@@ -1512,6 +1839,7 @@ impl AppView {
             return;
         };
         let group = connection.group;
+        let key = connection.key;
         let name = path
             .0
             .last()
@@ -1522,6 +1850,9 @@ impl AppView {
         cx.spawn_in(window, async move |weak, cx| {
             let result = backend::run(backend::object_definition(input, path, cancel)).await;
             let _ = weak.update_in(cx, |this, window, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
                 match result {
                     Ok(sql) => {
                         this.connections[index].status = Feedback::new(Tone::Info, "");
@@ -1705,6 +2036,7 @@ impl AppView {
             connection.tree.set_loading(path, true);
         }
         let generation = connection.refresh_generation;
+        let key = connection.key;
         let pages: Vec<_> = missing
             .iter()
             .map(|path| (path.clone(), backend::CHILD_PAGE))
@@ -1717,6 +2049,9 @@ impl AppView {
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
+                let Some(index) = this.connection_index(key) else {
+                    return;
+                };
                 let connection = &mut this.connections[index];
                 for path in &missing {
                     connection.tree.set_loading(path, false);
@@ -1752,13 +2087,14 @@ impl AppView {
         };
         connection.expanded_revision += 1;
         let revision = connection.expanded_revision;
+        let key = connection.key;
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(500))
                 .await;
             let Ok(Some(expanded)) = weak.update(cx, |this, _| {
-                let connection = &this.connections[index];
+                let connection = &this.connections[this.connection_index(key)?];
                 (connection.expanded_revision == revision).then(|| connection.tree.expanded())
             }) else {
                 return;
@@ -2018,6 +2354,11 @@ impl AppView {
         let queued_all = connection.refresh_queue.waits_for_selection();
         column()
             .flex_none()
+            // A neutral line between connections, so where one's tree ends
+            // and the next begins is plain.
+            .when(index > 0, |s| {
+                s.child(div().mx_2().h(px(1.)).flex_none().bg(rgb(BORDER)))
+            })
             .child(
                 row()
                     .id(("live-connection-row", index))
@@ -2047,7 +2388,7 @@ impl AppView {
                         })),
                     )
                     .child(
-                        button(("live-connection", index), I::Database, "")
+                        button(("live-connection", index), I::Server, "")
                             .aria_label(match connection.appearance.environment {
                                 Some(environment) => SharedString::from(format!(
                                     "{}, {}",
@@ -2068,6 +2409,10 @@ impl AppView {
                                     match event.keystroke.key.as_str() {
                                         "f5" => {
                                             this.toggle_refresh(index, ObjectPath::default(), cx)
+                                        }
+                                        // Asks before deleting anything.
+                                        "delete" if !modified => {
+                                            this.delete_connection(index, window, cx)
                                         }
                                         "right" if !modified => {
                                             this.connections[index].expanded = true;
@@ -2174,15 +2519,27 @@ impl AppView {
                                         this.open_connection(Some(index), window, cx)
                                     })),
                             )
+                            .separator()
+                            .item(
+                                PopupMenuItem::new(tr!("Delete connection…"))
+                                    .icon(I::Trash)
+                                    .on_click(run(|this, index, window, cx| {
+                                        this.delete_connection(index, window, cx)
+                                    })),
+                            )
                         }
                     }),
             )
             .when(expanded, |s| {
                 s.child(
                     column()
-                        .px_3()
+                        // Under the connection's name: it describes the
+                        // connection, it is not a node of its tree.
+                        .pl(px(CONNECTION_TEXT_INDENT))
+                        .pr_3()
                         .gap_1()
-                        .pb_2()
+                        .pb_1()
+                        .mt(px(-6.))
                         .child(
                             div()
                                 .text_size(px(12.))
@@ -2234,18 +2591,6 @@ impl AppView {
                                     )),
                                 )
                             },
-                        )
-                        .child(
-                            button(
-                                ("live-new-query", index),
-                                I::SquareTerminal,
-                                tr!("New query"),
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.new_query(this.connections[index].group, window, cx)
-                                },
-                            )),
                         ),
                 )
             })
@@ -2356,8 +2701,12 @@ impl AppView {
             TreeRow::Node { object, .. } => object.clone(),
             TreeRow::More { parent, id } => {
                 let parent = parent.clone();
+                // Its icon lines up with the icons of the children it loads.
                 return div()
-                    .pl(px(12. + parent.0.len() as f32 * 14.))
+                    .pl(px(tree_indent(parent.0.len() + 1)
+                        + TREE_CHEVRON
+                        + TREE_GAP
+                        - 10.))
                     .py_1()
                     .child(
                         button(("metadata-more", *id), I::Plus, tr!("Load more objects"))
@@ -2414,9 +2763,14 @@ impl AppView {
         let focus = self.node_handle(index, &path, cx);
         row()
             .id(("node-row", id))
-            .pl(px(12. + (path.0.len() - 1) as f32 * 14.))
+            .pl(px(tree_indent(path.0.len())))
             .pr_1()
             .h(px(32.))
+            // A leaf keeps the chevron's place, so a column's icon sits
+            // inside its table's, not to the left of it.
+            .when(!expandable, |s| {
+                s.child(div().w(px(TREE_CHEVRON)).flex_none())
+            })
             // Every node with children has its chevron; a click on the
             // name only selects, the same rule for every kind of node.
             .when(expandable, |s| {
@@ -2435,7 +2789,8 @@ impl AppView {
                             tr!("Expand or collapse")
                         },
                     )
-                    .size(px(20.))
+                    .size(px(TREE_CHEVRON))
+                    .flex_none()
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.toggle_node(index, &path, cx)),
                     ),
@@ -3320,6 +3675,22 @@ impl Connection {
 }
 
 /// Marks a node, or the connection, whose refresh waits in the queue.
+/// Width of a tree node's chevron; a leaf leaves the same space empty.
+const TREE_CHEVRON: f32 = 20.;
+/// Space between the chevron and the node's icon (`gap_2`).
+const TREE_GAP: f32 = 8.;
+/// How far each level of the tree is indented.
+const TREE_STEP: f32 = 18.;
+/// Where the text under a connection's name starts, lined up with the name.
+const CONNECTION_TEXT_INDENT: f32 = 75.;
+
+/// Left padding of a tree node at `depth` (1 for a database or catalog):
+/// a database starts under its connection's icon, and each level's chevron
+/// sits under its parent's icon.
+fn tree_indent(depth: usize) -> f32 {
+    12. + depth as f32 * TREE_STEP
+}
+
 fn queued_label() -> Div {
     div()
         .flex_none()

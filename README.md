@@ -57,6 +57,9 @@ Demo connections and results are labelled as such and never reach a server.
   (Windows Credential Manager, macOS Keychain, Linux Secret Service). Without
   it, the password lives only in the session. If the vault fails, the UI says
   so; there is no fallback to a password file.
+- **Delete connection…** in a connection's context menu (or `Delete` on it)
+  removes it, with its remembered password and metadata cache, after a
+  confirmation. Its open tabs keep their SQL, without a connection.
 - `↻` on a connection refreshes everything; **Refresh** in the context menu
   (right click, or `F5` on a focused node) of a database, catalog, schema,
   table, view or column refreshes only that node and its descendants. While a
@@ -119,6 +122,7 @@ the demo data are not translatable yet.
 | --- | --- |
 | Connections, preferences | `config.db` in the data folder |
 | Metadata cache | `metadata/<connection-id>.db` in the data folder |
+| Copies of `config.db` (the five most recent, one per start) | `backups/` in the data folder; offered for restore when `config.db` cannot be opened |
 | Passwords (only with **Remember password**) | OS vault, service `JykreStudio` |
 
 The data folder follows each platform's convention:
@@ -134,7 +138,8 @@ folder). Only when no home directory can be found does the app fall back to
 `.jykre/` in the working directory.
 
 Logs are written to `logs/` inside the data folder as JSON lines, one file per
-day, keeping the last seven. `JYKRE_LOG` changes the level (for example
+day, keeping the last seven; **Open log folder** in Preferences shows them.
+`JYKRE_LOG` changes the level (for example
 `JYKRE_LOG=jykre=debug`); SQL text is logged only at `trace` and passwords
 never. `JYKRE_PROBE=1` adds frame-time measurements to the log.
 
