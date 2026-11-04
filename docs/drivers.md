@@ -196,6 +196,17 @@ Catalog REST without opening a SQL session or starting compute. Jobs clusters,
 non-warehouse serverless compute and OAuth implemented inside the app remain
 out of scope. A stopped classic cluster reports an actionable error.
 
+A request the REST API rejects (any endpoint: statements, metadata,
+compute, contexts) keeps Databricks' whole `message`, verbatim, as the
+error's message, and `HTTP <status> · <error_code>` as the server's code,
+with the SQLSTATE when the message carries one. The code still follows the
+status: 401 `Authentication`, 403 `PermissionDenied`, 404 `NotFound`, 429
+`Connection`, anything else `Database`. Only the first 64 KiB of the body is
+read; a body that is not a Databricks error (a proxy's page, nothing at all)
+is never shown, and the error says only that the request was rejected, with
+its status. A rejected request is not repeated, except a 401 once with a
+fresh token.
+
 ## Contract flow
 
 - `Driver::test` validates and tests a connection; `open_session` creates a
