@@ -1156,6 +1156,48 @@ fn qualified_name(text: &str) -> Option<Vec<String>> {
     }
     rest.trim().is_empty().then_some(parts)
 }
+/// The Statement Execution API's typed parameters (ADR-0023). The server
+/// reads `:name` markers itself, so the SQL goes unchanged; a NULL omits
+/// `value`.
+fn statement_parameters(parameters: &[QueryParameter]) -> DriverResult<Vec<Value>> {
+    parameters
+        .iter()
+        .map(|parameter| {
+            let kind = match (parameter.kind, &parameter.value) {
+                (ParameterKind::Text, _) => "STRING".to_owned(),
+                (ParameterKind::Boolean, _) => "BOOLEAN".to_owned(),
+                (ParameterKind::Date, _) => "DATE".to_owned(),
+                (ParameterKind::Timestamp, _) => "TIMESTAMP".to_owned(),
+                (ParameterKind::Number, None) => "DECIMAL(38,18)".to_owned(),
+                (ParameterKind::Number, Some(value)) => decimal_type(value).ok_or_else(|| {
+                    DriverError::validation(format!(
+                        "Parameter {} has more than 38 digits",
+                        parameter.name
+                    ))
+                })?,
+            };
+            let mut item = json!({"name": parameter.name, "type": kind});
+            if let Some(value) = &parameter.value {
+                item["value"] = json!(value);
+            }
+            Ok(item)
+        })
+        .collect()
+}
+
+/// The exact type of a number's text: `DECIMAL(p,s)` with its digits, or
+/// `DOUBLE` for a number with an exponent; `None` past Databricks' 38 digits.
+fn decimal_type(value: &str) -> Option<String> {
+    if value.contains(['e', 'E']) {
+        return Some("DOUBLE".to_owned());
+    }
+    let unsigned = value.trim_start_matches(['+', '-']);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let scale = fraction.len();
+    let precision = (whole.trim_start_matches('0').len() + scale).max(1);
+    (precision <= 38).then(|| format!("DECIMAL({precision},{scale})"))
+}
+
 #[async_trait]
 impl Session for DatabricksSession {
     async fn execute(
@@ -1177,6 +1219,9 @@ impl Session for DatabricksSession {
             .saturating_mul(SERVER_PAGES)
             .min(100_000);
         let mut body = json!({"warehouse_id":self.client.config.warehouse_id,"statement":request.sql,"wait_timeout":FIRST_WAIT,"on_wait_timeout":"CONTINUE","format":"JSON_ARRAY","disposition":"INLINE","row_limit":row_limit});
+        if !request.parameters.is_empty() {
+            body["parameters"] = Value::Array(statement_parameters(&request.parameters)?);
+        }
         let context = &request.options.context;
         if *context != self.requested {
             if let Some(catalog) = &context.catalog {
@@ -1766,6 +1811,86 @@ mod tests {
         assert_eq!(body["wait_timeout"], FIRST_WAIT);
         assert!(requests[1].starts_with("GET /api/2.0/sql/statements/abc/result/chunks/1 "));
         assert!(requests[2].starts_with("GET /api/2.0/sql/statements/abc/result/chunks/1 "));
+    }
+
+    #[test]
+    fn parameters_travel_typed_beside_the_unchanged_sql() {
+        let parameter = |name: &str, kind, value: Option<&str>| QueryParameter {
+            name: name.into(),
+            kind,
+            value: value.map(Into::into),
+            markers: Vec::new(),
+        };
+        let items = statement_parameters(&[
+            parameter("who", ParameterKind::Text, Some("x'; DROP TABLE t; --")),
+            parameter("amount", ParameterKind::Number, Some("-0012.340")),
+            parameter("small", ParameterKind::Number, Some(".5")),
+            parameter("big", ParameterKind::Number, Some("1e30")),
+            parameter("on", ParameterKind::Boolean, Some("true")),
+            parameter("day", ParameterKind::Date, Some("2024-02-29")),
+            parameter("at", ParameterKind::Timestamp, Some("2024-02-29 10:00")),
+            parameter("none", ParameterKind::Number, None),
+        ])
+        .unwrap();
+        assert_eq!(
+            Value::Array(items),
+            json!([
+                {"name":"who","type":"STRING","value":"x'; DROP TABLE t; --"},
+                {"name":"amount","type":"DECIMAL(5,3)","value":"-0012.340"},
+                {"name":"small","type":"DECIMAL(1,1)","value":".5"},
+                {"name":"big","type":"DOUBLE","value":"1e30"},
+                {"name":"on","type":"BOOLEAN","value":"true"},
+                {"name":"day","type":"DATE","value":"2024-02-29"},
+                {"name":"at","type":"TIMESTAMP","value":"2024-02-29 10:00"},
+                {"name":"none","type":"DECIMAL(38,18)"}
+            ])
+        );
+        let long = "1".repeat(39);
+        assert!(
+            statement_parameters(&[parameter("n", ParameterKind::Number, Some(&long))]).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parameterized_statement_is_sent_as_written_with_its_parameters() {
+        let (client, task) = fixture(vec![(
+            200,
+            json!({"statement_id":"abc","status":{"state":"SUCCEEDED"},"manifest":{"schema":{"columns":[{"name":"who","type_text":"STRING"}]}},"result":{"data_array":[["x"]]}}),
+        )])
+        .await;
+        struct Rows;
+        impl RowSink for Rows {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                SinkControl::Continue
+            }
+            fn row(&mut self, _: Row) -> SinkControl {
+                SinkControl::Continue
+            }
+        }
+        let mut session = DatabricksSession::new(client);
+        let sql = "SELECT :who";
+        let request = QueryRequest {
+            parameters: vec![QueryParameter {
+                name: "who".into(),
+                kind: ParameterKind::Text,
+                value: Some("x".into()),
+                markers: std::iter::once(7..11).collect(),
+            }],
+            ..QueryRequest::new(sql, ExecutionOptions::default())
+        };
+        session
+            .execute(&request, &mut Rows, CancellationToken::new())
+            .await
+            .unwrap();
+        let requests = task.await.unwrap();
+        let body: Value =
+            serde_json::from_str(&requests[0][requests[0].find("\r\n\r\n").unwrap() + 4..])
+                .unwrap();
+        assert_eq!(body["statement"], sql);
+        assert_eq!(
+            body["parameters"],
+            json!([{"name":"who","type":"STRING","value":"x"}])
+        );
     }
 
     #[test]

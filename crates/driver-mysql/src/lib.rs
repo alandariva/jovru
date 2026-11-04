@@ -33,7 +33,7 @@ impl Driver for MySqlDriver {
             dialect: SqlDialect::MySql,
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
-                named_parameters: false,
+                named_parameters: true,
                 sql: true,
                 metadata: true,
                 transactions: true,

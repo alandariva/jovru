@@ -895,3 +895,120 @@ async fn live_levels_partitions_inspection_permissions_and_databases() {
     .await
     .expect("live metadata extensions took too long");
 }
+
+/// A parameter with a marker at every `:name` in `sql`.
+fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
+    QueryParameter {
+        name: name.into(),
+        kind,
+        value: value.map(Into::into),
+        markers: sql
+            .match_indices(&format!(":{name}"))
+            .map(|(start, found)| start..start + found.len())
+            .collect(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_named_parameters_are_bound_and_never_interpolated() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let cancel = CancellationToken::new();
+        let mut session = driver.open_session(&input(), cancel.clone()).await.unwrap();
+        let sql = "SELECT :who AS who, :n + 1 AS next, :d AS day, :b AS flag, :ts AS at, \
+                   :missing AS missing, length(:who) AS len";
+        for text in [
+            "O'Brien",
+            "x'); DROP TABLE t; --",
+            "back\\slash ''",
+            "$$ dollar $$",
+            "/* c */ -- d",
+            ":who",
+            "",
+        ] {
+            let request = QueryRequest {
+                parameters: vec![
+                    marked(sql, "who", ParameterKind::Text, Some(text)),
+                    marked(sql, "n", ParameterKind::Number, Some("41.50")),
+                    marked(sql, "d", ParameterKind::Date, Some("2024-02-29")),
+                    marked(sql, "b", ParameterKind::Boolean, Some("true")),
+                    marked(
+                        sql,
+                        "ts",
+                        ParameterKind::Timestamp,
+                        Some("2024-02-29T23:59:59.5"),
+                    ),
+                    marked(sql, "missing", ParameterKind::Text, None),
+                ],
+                ..QueryRequest::new(sql, ExecutionOptions::default())
+            };
+            let mut sink = Sink::default();
+            session
+                .execute(&request, &mut sink, cancel.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                sink.rows,
+                vec![vec![
+                    Cell::Text(text.into()),
+                    Cell::Text("42.50".into()),
+                    Cell::Text("2024-02-29".into()),
+                    Cell::Text("t".into()),
+                    Cell::Text("2024-02-29 23:59:59.5".into()),
+                    Cell::Null,
+                    Cell::Text(text.chars().count().to_string()),
+                ]],
+                "{text:?}"
+            );
+        }
+        // Paging keeps reading the result the bound values chose.
+        let sql = "SELECT g FROM generate_series(1, :last) AS g WHERE g > :first";
+        let options = ExecutionOptions {
+            max_rows: 2,
+            ..ExecutionOptions::default()
+        };
+        let request = QueryRequest {
+            parameters: vec![
+                marked(sql, "last", ParameterKind::Number, Some("5")),
+                marked(sql, "first", ParameterKind::Number, Some("1")),
+            ],
+            ..QueryRequest::new(sql, options.clone())
+        };
+        let mut first = Sink::default();
+        let outcome = session
+            .execute(&request, &mut first, cancel.clone())
+            .await
+            .unwrap();
+        assert!(outcome.has_more);
+        let mut next = Sink::default();
+        session
+            .fetch(&options, &mut next, cancel.clone())
+            .await
+            .unwrap();
+        let read: Vec<_> = first.rows.into_iter().chain(next.rows).collect();
+        assert_eq!(
+            read,
+            ["2", "3", "4", "5"].map(|g| vec![Cell::Text(g.into())])
+        );
+        // A later run reads its own values: a NULL never reads what an
+        // earlier run bound.
+        let sql = "SELECT :who";
+        for value in [Some("second"), None] {
+            let request = QueryRequest {
+                parameters: vec![marked(sql, "who", ParameterKind::Text, value)],
+                ..QueryRequest::new(sql, ExecutionOptions::default())
+            };
+            let mut sink = Sink::default();
+            session
+                .execute(&request, &mut sink, cancel.clone())
+                .await
+                .unwrap();
+            let expected = value.map_or(Cell::Null, |value| Cell::Text(value.into()));
+            assert_eq!(sink.rows, vec![vec![expected]]);
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live named parameters took too long");
+}

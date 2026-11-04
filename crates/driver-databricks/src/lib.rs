@@ -41,7 +41,7 @@ impl Driver for DatabricksDriver {
             dialect: SqlDialect::DatabricksSql,
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
-                named_parameters: false,
+                named_parameters: true,
                 sql: true,
                 metadata: true,
                 transactions: false,

@@ -538,10 +538,33 @@ impl Server {
             }
             self.database = apply;
         }
+        let sql = request.with_references(parameter_reference);
+        if let Some(set) = bind_statement(&request.parameters) {
+            let bound = self
+                .step(&Limit::new(&cancel, options.timeout), async {
+                    let mut query = sqlx::query(sqlx::AssertSqlSafe(set));
+                    for parameter in &request.parameters {
+                        query = match (&parameter.value, parameter.kind) {
+                            (None, _) => continue,
+                            (Some(value), ParameterKind::Boolean) => query.bind(value == "true"),
+                            (Some(value), _) => query.bind(value.clone()),
+                        };
+                    }
+                    query
+                        .execute(&mut *connection)
+                        .await
+                        .map_err(map_error)
+                        .map(|_| ())
+                })
+                .await;
+            if let Err(stopped) = bound {
+                return self.fail(connection, stopped, &events).await;
+            }
+        }
         let columns = self
             .step(&Limit::new(&cancel, options.timeout), async {
                 let description = connection
-                    .prepare(sqlx::AssertSqlSafe(request.sql.as_str()).into_sql_str())
+                    .prepare(sqlx::AssertSqlSafe(sql.as_str()).into_sql_str())
                     .await
                     .map_err(map_error)?;
                 Ok(description
@@ -577,7 +600,7 @@ impl Server {
             return self.recover(connection, Unfinished::Cut).await;
         }
         let mut stream =
-            sqlx::raw_sql(sqlx::AssertSqlSafe(request.sql.as_str())).fetch_many(&mut *connection);
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str())).fetch_many(&mut *connection);
         let mut reading = Reading {
             ahead: None,
             affected: None,
@@ -1287,3 +1310,119 @@ const FOREIGN_KEYS_SQL: &str = r#"SELECT k.table_schema AS db, k.table_name AS r
 FROM information_schema.key_column_usage k
 WHERE k.referenced_table_name IS NOT NULL AND k.table_schema NOT IN ('mysql','information_schema','performance_schema','sys') AND (? IS NULL OR k.table_schema = ?) AND (? IS NULL OR k.table_name = ?)
 ORDER BY k.table_schema, k.table_name, k.constraint_name, k.ordinal_position"#;
+
+/// The session variable that holds parameter `index` for a run.
+fn parameter_variable(index: usize) -> String {
+    format!("@jykre_p_{index}")
+}
+
+/// The scale an exact number keeps: its fraction digits, at most MySQL's 30;
+/// 30 for a number with an exponent.
+fn decimal_scale(value: &str) -> usize {
+    if value.contains(['e', 'E']) {
+        return 30;
+    }
+    value
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len())
+        .min(30)
+}
+
+/// What a parameter's marker becomes (ADR-0023): a read of the variable
+/// bound before the statement, cast to the parameter's type, or a typed
+/// NULL. Neither holds the value. Text is read as it is, so it keeps the
+/// connection's collation.
+fn parameter_reference(index: usize, parameter: &QueryParameter) -> String {
+    let variable = parameter_variable(index);
+    match (parameter.kind, &parameter.value) {
+        (ParameterKind::Text | ParameterKind::Boolean, Some(_)) => variable,
+        (ParameterKind::Number, Some(value)) => {
+            format!("CAST({variable} AS DECIMAL(65,{}))", decimal_scale(value))
+        }
+        (ParameterKind::Date, Some(_)) => format!("CAST({variable} AS DATE)"),
+        (ParameterKind::Timestamp, Some(_)) => format!("CAST({variable} AS DATETIME(6))"),
+        (ParameterKind::Text, None) => "CAST(NULL AS CHAR)".into(),
+        (ParameterKind::Number, None) => "CAST(NULL AS DECIMAL(65,30))".into(),
+        (ParameterKind::Boolean, None) => "CAST(NULL AS SIGNED)".into(),
+        (ParameterKind::Date, None) => "CAST(NULL AS DATE)".into(),
+        (ParameterKind::Timestamp, None) => "CAST(NULL AS DATETIME(6))".into(),
+    }
+}
+
+/// The prepared `SET` that binds every parameter that is not NULL, in the
+/// order of `parameters`; `None` when there is none. The values travel with
+/// the binary protocol as bound parameters; the user's SQL then reads the
+/// variables with the text protocol. They stay in this session until the
+/// next run sets them again: a result can stay open for paging, and nothing
+/// else can run until it ends.
+fn bind_statement(parameters: &[QueryParameter]) -> Option<String> {
+    let assignments: Vec<String> = parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| parameter.value.is_some())
+        .map(|(index, _)| format!("{} = ?", parameter_variable(index)))
+        .collect();
+    (!assignments.is_empty()).then(|| format!("SET {}", assignments.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bind_statement, parameter_reference};
+    use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+
+    fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
+        QueryParameter {
+            name: name.into(),
+            kind,
+            value: value.map(Into::into),
+            markers: sql
+                .match_indices(&format!(":{name}"))
+                .map(|(start, found)| start..start + found.len())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn markers_become_reads_of_bound_variables_and_values_stay_out_of_the_sql() {
+        let sql = "SELECT :who, :amount, :e, :flag, :day, :at, :none";
+        let request = QueryRequest {
+            parameters: vec![
+                marked(
+                    sql,
+                    "who",
+                    ParameterKind::Text,
+                    Some("x'; DROP TABLE t; --"),
+                ),
+                marked(sql, "amount", ParameterKind::Number, Some("-12.345")),
+                marked(sql, "e", ParameterKind::Number, Some("1e3")),
+                marked(sql, "flag", ParameterKind::Boolean, Some("false")),
+                marked(sql, "day", ParameterKind::Date, Some("2024-02-29")),
+                marked(
+                    sql,
+                    "at",
+                    ParameterKind::Timestamp,
+                    Some("2024-02-29 10:00"),
+                ),
+                marked(sql, "none", ParameterKind::Number, None),
+            ],
+            ..QueryRequest::new(sql, ExecutionOptions::default())
+        };
+        assert_eq!(request.validate(), Ok(()));
+        let bound = request.with_references(parameter_reference);
+        assert_eq!(
+            bound,
+            "SELECT @jykre_p_0, CAST(@jykre_p_1 AS DECIMAL(65,3)), \
+             CAST(@jykre_p_2 AS DECIMAL(65,30)), @jykre_p_3, CAST(@jykre_p_4 AS DATE), \
+             CAST(@jykre_p_5 AS DATETIME(6)), CAST(NULL AS DECIMAL(65,30))"
+        );
+        assert!(!bound.contains("DROP"));
+        assert_eq!(
+            bind_statement(&request.parameters).as_deref(),
+            Some(
+                "SET @jykre_p_0 = ?, @jykre_p_1 = ?, @jykre_p_2 = ?, @jykre_p_3 = ?, \
+                 @jykre_p_4 = ?, @jykre_p_5 = ?"
+            )
+        );
+        assert_eq!(bind_statement(&[]), None);
+    }
+}

@@ -558,6 +558,12 @@ impl Session for ClusterSession {
         cancel: CancellationToken,
     ) -> DriverResult<DriverOutcome> {
         request.validate()?;
+        if !request.parameters.is_empty() {
+            // The command API has no bound values (ADR-0023).
+            return Err(DriverError::validation(
+                "Parameters need a SQL warehouse: a classic cluster runs SQL as written",
+            ));
+        }
         self.pending = None;
         if !self.open {
             return Err(error(
@@ -780,6 +786,30 @@ mod tests {
             "bad"
         );
     }
+    #[tokio::test]
+    async fn parameters_are_refused_before_anything_is_sent() {
+        let (client, task) = client(vec![
+            (200, json!({"id":"context-1"})),
+            (200, json!({"status":"Running"})),
+        ])
+        .await;
+        let mut session = open(client, &CancellationToken::new()).await.unwrap();
+        let mut request = query("SELECT :who", 10);
+        request.parameters.push(QueryParameter {
+            name: "who".into(),
+            kind: ParameterKind::Text,
+            value: Some("x".into()),
+            markers: std::iter::once(7..11).collect(),
+        });
+        let refused = session
+            .execute(&request, &mut Rows::default(), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Validation);
+        drop(session);
+        assert_eq!(task.await.unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn classic_context_is_reused_pages_are_local_and_close_destroys_context() {
         let (client, task) = client(vec![
