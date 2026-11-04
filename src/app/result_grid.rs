@@ -8,7 +8,7 @@
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
@@ -68,6 +68,8 @@ pub struct ResultGrid {
     reported: usize,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
+    /// The horizontal pan of the columns; the rows scroll with `scroll`.
+    columns_scroll: ScrollHandle,
 }
 
 impl EventEmitter<ResultGridEvent> for ResultGrid {}
@@ -115,6 +117,7 @@ impl ResultGrid {
             reported: 0,
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
+            columns_scroll: ScrollHandle::new(),
         }
     }
 
@@ -374,13 +377,19 @@ impl ResultGrid {
         let grid = self.view();
         let widths = &grid.widths;
         let grid_width = widths.iter().sum::<f32>() + 35.;
+        let has_rows = !grid.rows.is_empty();
         let weak = cx.weak_entity();
+        // Not `overflow_x_scrollbar`: its wheel mask pans the columns with a
+        // plain wheel until their end, and only then scrolls the rows. Here
+        // the wheel scrolls the rows and only a horizontal delta (Shift +
+        // wheel, a tilt wheel or a sideways swipe) pans the columns.
         let table = div()
             .id("result-table-scroll")
             .size_full()
-            .bg(rgb(GRID_BG))
-            .text_color(rgb(VALUE_TEXT))
-            .overflow_x_scrollbar()
+            .overflow_x_scroll()
+            .overflow_y_hidden()
+            .restrict_scroll_to_axis()
+            .track_scroll(&self.columns_scroll)
             .child(
                 column()
                     .w(px(grid_width))
@@ -506,9 +515,14 @@ impl ResultGrid {
                                     }),
                                 )
                                 .size_full()
+                                .map(|mut list| {
+                                    // A horizontal delta pans the columns
+                                    // above, not the rows too.
+                                    list.style().restrict_scroll_to_axis = Some(true);
+                                    list
+                                })
                                 .track_scroll(&self.scroll),
                             )
-                            .vertical_scrollbar(&self.scroll)
                             .into_any_element()
                     }),
             );
@@ -517,7 +531,37 @@ impl ResultGrid {
             .size_full()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            .relative()
+            .bg(rgb(GRID_BG))
+            .text_color(rgb(VALUE_TEXT))
             .child(table)
+            .child(
+                div().absolute().inset_0().child(
+                    Scrollbar::new(&self.columns_scroll)
+                        .id("result-table-columns-bar")
+                        .axis(ScrollbarAxis::Horizontal)
+                        .viewport_from_layout(),
+                ),
+            )
+            // Outside the columns' pan, so the rows' bar stays on the visible
+            // right edge instead of the right end of the widest column; below
+            // the 34 px header, which does not scroll with the rows.
+            .when(has_rows, |grid| {
+                grid.child(
+                    div()
+                        .absolute()
+                        .top(px(34.))
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .child(
+                            Scrollbar::new(&self.scroll)
+                                .id("result-table-rows-bar")
+                                .axis(ScrollbarAxis::Vertical)
+                                .viewport_from_layout(),
+                        ),
+                )
+            })
             .context_menu(move |menu, _, cx| {
                 let has_selection = weak
                     .upgrade()
