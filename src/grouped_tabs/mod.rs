@@ -422,6 +422,21 @@ impl GroupedTabs {
         }
     }
 
+    /// The user closes a tab (its close button or a middle click): the host
+    /// is asked first when it confirms changes, otherwise the tab closes
+    /// and the keyboard stays in the bar.
+    fn close_from_user(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_changes {
+            cx.emit(GroupedTabsEvent::CloseRequested(tab_id));
+            return;
+        }
+        let focused = self.bar_focus.contains_focused(window, cx);
+        let _ = self.close_tab(tab_id, cx);
+        if focused && let Some(next) = self.model.active {
+            self.focus_tab(next, window, cx);
+        }
+    }
+
     fn navigate(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.picker_open
             || event.keystroke.modifiers.control
@@ -682,6 +697,15 @@ impl GroupedTabs {
             div()
                 .id(("tab-container", tab_id.0))
                 .group(hover_group.clone())
+                // A middle click closes the tab, as in browsers and IDEs,
+                // with the same confirmations as its close button.
+                .on_mouse_up(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_from_user(tab_id, window, cx);
+                    }),
+                )
                 .relative()
                 .w(px(TAB_WIDTH))
                 .h(px(TAB_HEIGHT))
@@ -769,15 +793,7 @@ impl GroupedTabs {
                                 .tooltip(tr!("Close {0}", tab.title))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    if this.confirm_changes {
-                                        cx.emit(GroupedTabsEvent::CloseRequested(tab_id));
-                                        return;
-                                    }
-                                    let focused = this.bar_focus.contains_focused(window, cx);
-                                    let _ = this.close_tab(tab_id, cx);
-                                    if focused && let Some(next) = this.model.active {
-                                        this.focus_tab(next, window, cx);
-                                    }
+                                    this.close_from_user(tab_id, window, cx);
                                 })),
                         ),
                 )

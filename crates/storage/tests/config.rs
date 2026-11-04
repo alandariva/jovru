@@ -46,6 +46,77 @@ async fn configuration_settings_and_identity_survive_restart_and_reject_stale_wr
 }
 
 #[tokio::test]
+async fn a_profile_and_its_settings_are_saved_together_or_not_at_all() {
+    let dir = std::env::temp_dir().join(format!("jykre-config-atomic-{}", ConnectionId::new()));
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    let profile = ConnectionProfile {
+        id: ConnectionId::new(),
+        name: "Synthetic atomic".into(),
+        config: ConnectionConfig {
+            driver: DriverKind::Postgres,
+            options: serde_json::json!({"host":"localhost","database":"fixture","user":"fixture","sslMode":"disable"}),
+        },
+        remember_password: false,
+        revision: 0,
+    };
+    let limit = jykre_storage::row_limit_key(profile.id);
+    let scope = jykre_storage::metadata_scope_key(profile.id);
+    let saved = repository
+        .save_with_settings(
+            &profile,
+            &[
+                (limit.clone(), serde_json::json!(500)),
+                (scope.clone(), serde_json::json!({"all": true})),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(repository.row_limit(profile.id).await.unwrap(), Some(500));
+    assert_eq!(
+        repository.metadata_scope(profile.id).await.unwrap(),
+        Some(serde_json::json!({"all": true}))
+    );
+    // A stale save writes neither the profile nor its settings.
+    let mut stale = profile.clone();
+    stale.revision = 7;
+    stale.name = "Stale".into();
+    assert!(
+        repository
+            .save_with_settings(&stale, &[(limit.clone(), serde_json::json!(9))])
+            .await
+            .is_err()
+    );
+    assert_eq!(repository.row_limit(profile.id).await.unwrap(), Some(500));
+    assert_eq!(repository.list().await.unwrap(), vec![saved.clone()]);
+    // A name taken by another connection fails the same way.
+    let other = ConnectionProfile {
+        id: ConnectionId::new(),
+        name: "Synthetic atomic".into(),
+        ..profile.clone()
+    };
+    let other_limit = jykre_storage::row_limit_key(other.id);
+    assert!(
+        repository
+            .save_with_settings(&other, &[(other_limit, serde_json::json!(9))])
+            .await
+            .is_err()
+    );
+    assert_eq!(repository.row_limit(other.id).await.unwrap(), None);
+    // The retry of the first profile still has the right revision.
+    let mut edited = saved.clone();
+    edited.name = "Synthetic edited".into();
+    let edited = repository
+        .save_with_settings(&edited, &[(limit, serde_json::json!(750))])
+        .await
+        .unwrap();
+    assert_eq!(edited.revision, 2);
+    assert_eq!(repository.row_limit(profile.id).await.unwrap(), Some(750));
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn row_limits_are_kept_per_connection_and_survive_restart() {
     let dir = std::env::temp_dir().join(format!("jykre-row-limit-{}", ConnectionId::new()));
     let (first, second) = (ConnectionId::new(), ConnectionId::new());

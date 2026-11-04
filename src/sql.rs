@@ -461,13 +461,98 @@ pub fn statement_lines(sql: &str, dialect: Option<SqlDialect>) -> Vec<usize> {
         .collect()
 }
 
-/// Executable statements with runs of whitespace collapsed, so layout-only
-/// edits (new lines, indentation) do not count as a different statement.
+/// Executable statements with the whitespace between tokens collapsed to one
+/// space, so layout-only edits (new lines, indentation) do not count as a
+/// different statement. Whitespace inside a token (a literal, a quoted
+/// identifier, a comment) is kept: `'a b'` and `'a  b'` are different
+/// statements.
 pub fn normalized_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
     statements(sql, dialect)
         .into_iter()
-        .map(|range| sql[range].split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|range| {
+            let text = &sql[range];
+            let mut normalized = String::with_capacity(text.len());
+            let mut end = 0;
+            for (token, _) in tokens(text, dialect) {
+                if token.start > end && !normalized.is_empty() {
+                    normalized.push(' ');
+                }
+                normalized.push_str(&text[token.clone()]);
+                end = token.end;
+            }
+            normalized
+        })
         .collect()
+}
+
+/// Why [`explain`] gives no statement to explain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplainRefused {
+    /// The tab has no connection, so there is no dialect to explain in.
+    NoDialect,
+    /// The cursor is on no statement, or the selection holds none.
+    NoStatement,
+    /// The selection holds more than one statement.
+    Several,
+    /// The statement is not a query or a data change whose plan `EXPLAIN`
+    /// shows without running it (or it already is an `EXPLAIN`).
+    NotExplainable,
+}
+
+/// The `EXPLAIN` of the statement at the cursor, or of the selection when it
+/// holds one statement, in `dialect`.
+///
+/// PostgreSQL, MySQL and Databricks all show the plan of `EXPLAIN
+/// <statement>` without running the statement (unlike `EXPLAIN ANALYZE`).
+/// Only queries and data changes are explained, so the words after
+/// `EXPLAIN` can never be read as one of its options.
+pub fn explain(
+    sql: &str,
+    selection: Range<usize>,
+    dialect: Option<SqlDialect>,
+) -> Result<String, ExplainRefused> {
+    if dialect.is_none() {
+        return Err(ExplainRefused::NoDialect);
+    }
+    let statement = if selection.is_empty() {
+        let index =
+            statement_at(sql, selection.start, dialect).ok_or(ExplainRefused::NoStatement)?;
+        let range = statements(sql, dialect)
+            .into_iter()
+            .nth(index)
+            .ok_or(ExplainRefused::NoStatement)?;
+        &sql[range]
+    } else {
+        let text = sql
+            .get(selection.clone())
+            .ok_or(ExplainRefused::NoStatement)?;
+        let ranges = statements(text, dialect);
+        match ranges.as_slice() {
+            [] => return Err(ExplainRefused::NoStatement),
+            [range] => &text[range.clone()],
+            _ => return Err(ExplainRefused::Several),
+        }
+    };
+    let rules = Rules { dialect };
+    let first = next_code(statement, 0, rules)
+        .and_then(|token| word(statement, &token))
+        .ok_or(ExplainRefused::NotExplainable)?;
+    if !matches!(
+        first.as_str(),
+        "SELECT"
+            | "WITH"
+            | "VALUES"
+            | "TABLE"
+            | "INSERT"
+            | "UPDATE"
+            | "DELETE"
+            | "MERGE"
+            | "REPLACE"
+    ) {
+        return Err(ExplainRefused::NotExplainable);
+    }
+    let body = statement.trim_end().trim_end_matches(';').trim_end();
+    Ok(format!("EXPLAIN {body}"))
 }
 
 /// Why the demo would refuse to run `sql`, or `None` when it accepts it. The
@@ -562,30 +647,91 @@ fn same_text(before: &str, after: &str) -> bool {
     text(before) == text(after)
 }
 
+/// One statement laid out by sqruff, without the whitespace around it, or
+/// `None` when the formatter failed or changed more than layout and keyword
+/// case. The flag tells that part of it does not parse in the dialect.
+fn format_statement(statement: &str, dialect: Option<SqlDialect>) -> Option<(String, bool)> {
+    // A failure of the formatter on some input must not take the
+    // application down: the statement is left as it was.
+    let run = std::panic::AssertUnwindSafe(|| {
+        let linted = formatter(dialect)?
+            .lint_string(statement, None, true)
+            .ok()?;
+        let partial = linted.has_parse_or_templating_errors();
+        Some((linted.fix_string().trim().to_owned(), partial))
+    });
+    match std::panic::catch_unwind(run) {
+        Ok(Some((formatted, partial))) if same_text(statement, &formatted) => {
+            Some((formatted, partial))
+        }
+        _ => None,
+    }
+}
+
 /// Lays out `sql` by the rules of `dialect` with sqruff: spacing,
-/// indentation, line breaks and upper-case keywords. Only whitespace and the
-/// case of keywords change, so literals, comments and identifiers keep their
-/// meaning and [`map_offset`] finds any position again; a result that would
-/// change anything else is refused. What does not parse in the dialect is
-/// left as it was (`partial`).
+/// indentation, line breaks and upper-case keywords. Each statement (as
+/// [`statements`] splits them) is formatted on its own, and the text between
+/// statements (blank lines, comments, MySQL `DELIMITER` lines) is kept as it
+/// was, so the script keeps its separation and every statement keeps its own
+/// first line. Only whitespace and the case of keywords change, so literals,
+/// comments and identifiers keep their meaning and [`map_offset`] finds any
+/// position again; a result that would change anything else is refused. A
+/// statement that does not parse in the dialect is left as it was
+/// (`partial`).
 ///
 /// It is CPU work that grows with the SQL, and the first call per dialect
 /// builds its grammar: callers run it off the UI thread.
 pub fn format(sql: &str, dialect: Option<SqlDialect>) -> Result<Formatted, FormatError> {
-    // A failure of the formatter on some input must not take the
-    // application down: it is reported as such and the SQL stays.
-    let run = std::panic::AssertUnwindSafe(|| {
-        let linted = formatter(dialect)?.lint_string(sql, None, true).ok()?;
-        let partial = linted.has_parse_or_templating_errors();
-        Some(Formatted {
-            sql: linted.fix_string(),
+    let mut formatted = String::with_capacity(sql.len() + sql.len() / 8);
+    let mut partial = false;
+    let mut end = 0;
+    for range in statements(sql, dialect) {
+        formatted.push_str(&sql[end..range.start]);
+        match format_statement(&sql[range.clone()], dialect) {
+            Some((statement, unparsed)) => {
+                formatted.push_str(&statement);
+                partial |= unparsed;
+            }
+            None => {
+                formatted.push_str(&sql[range.clone()]);
+                partial = true;
+            }
+        }
+        end = range.end;
+    }
+    formatted.push_str(&sql[end..]);
+    if same_text(sql, &formatted) {
+        Ok(Formatted {
+            sql: formatted,
             partial,
         })
-    });
-    match std::panic::catch_unwind(run) {
-        Ok(Some(formatted)) if same_text(sql, &formatted.sql) => Ok(formatted),
-        _ => Err(FormatError::Failed),
+    } else {
+        Err(FormatError::Failed)
     }
+}
+
+/// [`format`] applied to `range` of `sql` only, as the Format button does
+/// with a selection: the text outside it is kept as it was. Returns the
+/// whole text and the range the formatted part now takes.
+pub fn format_range(
+    sql: &str,
+    range: Range<usize>,
+    dialect: Option<SqlDialect>,
+) -> Result<(Formatted, Range<usize>), FormatError> {
+    let part = sql.get(range.clone()).ok_or(FormatError::Failed)?;
+    let Formatted {
+        sql: formatted,
+        partial,
+    } = format(part, dialect)?;
+    let whole = format!("{}{formatted}{}", &sql[..range.start], &sql[range.end..]);
+    let end = range.start + formatted.len();
+    Ok((
+        Formatted {
+            sql: whole,
+            partial,
+        },
+        range.start..end,
+    ))
 }
 
 /// Where byte `offset` of `before` is in `after`, when the two differ only
@@ -732,6 +878,112 @@ mod tests {
         assert_eq!(
             normalized_statements("SELECT\n    1;\n\n  SELECT  2;\n", None),
             ["SELECT 1;", "SELECT 2;"]
+        );
+        // Spaces inside a literal are part of the statement: the gutter
+        // status of `SELECT 'a b'` does not carry to `SELECT 'a  b'`.
+        assert_ne!(
+            normalized_statements("SELECT 'a b';", None),
+            normalized_statements("SELECT 'a  b';", None)
+        );
+        assert_ne!(
+            normalized_statements("SELECT \"a b\" FROM t;", POSTGRES),
+            normalized_statements("SELECT \"a  b\" FROM t;", POSTGRES)
+        );
+        assert_eq!(
+            normalized_statements("SELECT 'a  b'\n  FROM t;", None),
+            normalized_statements("SELECT 'a  b' FROM    t;", None)
+        );
+    }
+
+    #[test]
+    fn format_keeps_blank_lines_comments_and_each_statement_on_its_own_line() {
+        let sql = "insert into t values (1); -- first\n\n\n-- the second\ndelete from t where a = 1;\nupdate t set a = 2;";
+        let formatted = formatted(sql, POSTGRES);
+        assert!(
+            formatted.starts_with(
+                "INSERT INTO t VALUES (1); -- first\n\n\n-- the second\nDELETE FROM t"
+            ),
+            "{formatted:?}"
+        );
+        assert!(formatted.contains("= 1;\nUPDATE t"), "{formatted:?}");
+        // Every statement still starts a line of its own, never sharing one
+        // with the statement before it.
+        assert_eq!(split(&formatted, POSTGRES).len(), 3);
+        for range in statements(&formatted, POSTGRES).into_iter().skip(1) {
+            assert!(formatted[..range.start].ends_with('\n'), "{formatted:?}");
+        }
+    }
+
+    #[test]
+    fn format_range_changes_only_the_selection() {
+        let sql = "select a from t;\nselect b   from u;\nselect c from v;";
+        let start = sql.find("select b").unwrap();
+        let end = sql.find("u;").unwrap() + 2;
+        let (result, range) = super::format_range(sql, start..end, POSTGRES).unwrap();
+        assert!(!result.partial);
+        assert_eq!(
+            result.sql,
+            "select a from t;\nSELECT b FROM u;\nselect c from v;"
+        );
+        assert_eq!(&result.sql[range], "SELECT b FROM u;");
+        assert!(super::format_range(sql, 0..sql.len() + 1, POSTGRES).is_err());
+    }
+
+    #[test]
+    fn explain_wraps_one_query_or_data_change_in_the_dialect() {
+        use super::{ExplainRefused, explain};
+        let sql = "SELECT 1;\n\nDELETE FROM t WHERE a = 1;\nCREATE TABLE x (a int);";
+        let cursor = |marker: &str| {
+            let at = sql.find(marker).unwrap();
+            at..at
+        };
+        assert_eq!(
+            explain(sql, cursor("SELECT"), POSTGRES).as_deref(),
+            Ok("EXPLAIN SELECT 1")
+        );
+        assert_eq!(
+            explain(sql, cursor("DELETE"), MYSQL).as_deref(),
+            Ok("EXPLAIN DELETE FROM t WHERE a = 1")
+        );
+        assert_eq!(
+            explain(sql, cursor("CREATE"), POSTGRES),
+            Err(ExplainRefused::NotExplainable)
+        );
+        let blank = sql.find("\n\n").unwrap() + 1;
+        assert_eq!(
+            explain(sql, blank..blank, POSTGRES),
+            Err(ExplainRefused::NoStatement)
+        );
+        assert_eq!(
+            explain(sql, 0..sql.len(), POSTGRES),
+            Err(ExplainRefused::Several)
+        );
+        let select = sql.find("DELETE").unwrap()..sql.find("CREATE").unwrap();
+        assert_eq!(
+            explain(sql, select, DATABRICKS).as_deref(),
+            Ok("EXPLAIN DELETE FROM t WHERE a = 1")
+        );
+        // Without a connection, and for statements that already explain or
+        // analyse, nothing is sent.
+        assert_eq!(
+            explain(sql, cursor("SELECT"), None),
+            Err(ExplainRefused::NoDialect)
+        );
+        for statement in ["EXPLAIN ANALYZE DELETE FROM t;", "ANALYZE t;", "VACUUM t;"] {
+            assert_eq!(
+                explain(statement, 0..0, POSTGRES),
+                Err(ExplainRefused::NotExplainable),
+                "{statement}"
+            );
+        }
+        assert_eq!(
+            explain(
+                "-- why\nWITH a AS (SELECT 1) SELECT * FROM a;",
+                8..8,
+                POSTGRES
+            )
+            .as_deref(),
+            Ok("EXPLAIN WITH a AS (SELECT 1) SELECT * FROM a")
         );
     }
 

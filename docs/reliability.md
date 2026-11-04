@@ -56,6 +56,7 @@
 | Databricks: test, warehouse open or initial classic authentication/compute check | 90 s |
 | Databricks introspection | 300 s |
 | Inspection or definition of an object (all drivers) | 60 s |
+| Reading, writing or removing a password in the OS vault | 10 s; past it the vault counts as unavailable, so the password is used for the session only and the connection dialog never stays stuck saving |
 | Databricks HTTP request | 30 s |
 | Databricks: first wait for a statement, inside its submit request | 5 s, then status polls from 200 ms up to every 2 s |
 | Databricks compute discovery | 90 s, cancellable without starting compute |

@@ -105,22 +105,44 @@ impl ConfigRepository {
 
     /// Compare-and-swap prevents an obsolete editor from overwriting a newer profile.
     pub async fn save(&self, profile: &ConnectionProfile) -> DriverResult<ConnectionProfile> {
+        self.save_with_settings(profile, &[]).await
+    }
+
+    /// Saves a profile and settings that belong to it (its row limit, what
+    /// to introspect) in one transaction: either all of them are written,
+    /// or none is and the profile keeps its revision, so a retry is not
+    /// refused as a change made in another window.
+    pub async fn save_with_settings(
+        &self,
+        profile: &ConnectionProfile,
+        settings: &[(String, serde_json::Value)],
+    ) -> DriverResult<ConnectionProfile> {
         if profile.name.trim().is_empty() || profile.name.chars().any(char::is_control) {
             return Err(DriverError::validation("Invalid connection name."));
         }
         let json = serde_json::to_string(&profile.config).map_err(json_error)?;
+        let values = settings
+            .iter()
+            .map(|(key, value)| Ok((key, serde_json::to_string(value).map_err(json_error)?)))
+            .collect::<DriverResult<Vec<_>>>()?;
+        let mut tx = self.pool.begin().await.map_err(sql_error)?;
         let result = if profile.revision == 0 {
             sqlx::query("INSERT INTO connections(id,name,config_json,remember_password,revision) VALUES(?,?,?,?,1)")
-                .bind(profile.id.to_string()).bind(&profile.name).bind(json).bind(profile.remember_password).execute(&self.pool).await
+                .bind(profile.id.to_string()).bind(&profile.name).bind(json).bind(profile.remember_password).execute(&mut *tx).await
         } else {
             sqlx::query("UPDATE connections SET name=?,config_json=?,remember_password=?,revision=revision+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND revision=?")
-                .bind(&profile.name).bind(json).bind(profile.remember_password).bind(profile.id.to_string()).bind(profile.revision).execute(&self.pool).await
+                .bind(&profile.name).bind(json).bind(profile.remember_password).bind(profile.id.to_string()).bind(profile.revision).execute(&mut *tx).await
         }.map_err(|error| if error.as_database_error().is_some_and(|db| db.is_unique_violation()) { DriverError::validation("A connection with this name already exists.") } else { sql_error(error) })?;
         if result.rows_affected() != 1 {
             return Err(DriverError::validation(
                 "The connection was changed in another window. Reopen the configuration.",
             ));
         }
+        for (key, value) in values {
+            sqlx::query("INSERT INTO settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json")
+                .bind(key).bind(value).execute(&mut *tx).await.map_err(sql_error)?;
+        }
+        tx.commit().await.map_err(sql_error)?;
         let mut saved = profile.clone();
         saved.revision += 1;
         Ok(saved)
@@ -234,11 +256,13 @@ impl ConfigRepository {
     }
 }
 
-fn row_limit_key(id: ConnectionId) -> String {
+/// The settings key of a connection's row limit.
+pub fn row_limit_key(id: ConnectionId) -> String {
     format!("connection.{id}.row_limit")
 }
 
-fn metadata_scope_key(id: ConnectionId) -> String {
+/// The settings key of what a connection introspects.
+pub fn metadata_scope_key(id: ConnectionId) -> String {
     format!("connection.{id}.metadata_scope")
 }
 

@@ -66,10 +66,10 @@ Each state has one consistent representation.
 
 | State | Where | Representation |
 | --- | --- | --- |
-| Query running | Footer, results area, Run button | Spinner, "Running…", the Run button turns into Cancel |
+| Query running | Footer, results area, Run button | Spinner, "Running…" and, after 2 s, how long it has run ("Running… 12.4 s", its tooltip names the statement timeout); the Run button turns into Stop |
 | Statement status | Editor gutter | Waiting, running, success, error or cancelled per statement; only the statement on the server shows as running |
 | Row limit reached | Footer | Amber warning with the limit in its tooltip |
-| Run cancelling | Footer | Spinner and "Cancelling…" until the driver stops; the previous result stays and a new run may start |
+| Run cancelling | Footer | Spinner and "Cancelling…" until the driver stops; after 5 s "Still cancelling…" with the time waited, and its tooltip says the driver gives up and closes the session. The previous result stays and a new run may start once it ends |
 | Run cancelled / failed | Footer (and the results area for errors) | Cancel or error icon with a short text |
 | Metadata refreshing | The node being refreshed | Its `↻` spins; clicking it cancels |
 | Metadata refresh waiting | The node (or the connection) whose refresh was asked for while another runs | "queued" after its name; it starts when the running one ends, in order. Asking again (F5, the menu or the connection's `↻`) takes it out of the queue |
@@ -90,6 +90,13 @@ Each state has one consistent representation.
 | Transaction of the tab's session | Editor toolbar, for drivers with transactions | **Auto-commit**, **Transaction open** (or **Manual commit** after MySQL's `SET autocommit = 0`), **Uncommitted changes** (amber) or **Transaction failed** (red, PostgreSQL), with **Commit** and **Rollback** while one is open. Reported by the driver after each run, inferred from the statements the tab ran when it cannot tell (`jykre::transaction`) |
 | Pinned result | Result tab | Its pin icon is mint; no run replaces it |
 | What ran in the tab | Messages | A log of every statement that ended, independent of the result tabs |
+| Run duration | Footer, Messages, history | In the scale that reads best: `850 ms`, `12.4 s`, `3 min 3 s`, `1 h 2 min` |
+| Filtered rows | Footer | While the filter is open, the rows it shows of the page: "3 of 1,000 rows" |
+| Sorted column | Grid header | An arrow after the name; a click on a header sorts the page's rows by that column's values, ascending, then descending, then in the server's order. NULLs come last and numbers compare exactly |
+| Saved query | Editor toolbar, library | The bookmark is filled while the tab holds the saved version. It saves or updates, never removes; a saved query opens linked to its tab (an open one is shown again), and is removed from the library list, after a confirmation |
+| History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
+| Connection test | Connection dialog footer | **Test connection** turns into **Cancel test** while it runs and shows the elapsed time after 2 s |
+| Plan of a statement | **Explain** in the editor toolbar | The dialect's `EXPLAIN` of the statement at the cursor (or of the one selected) runs into a new result tab; the statement itself does not run. Only queries and data changes are explained |
 
 Rules:
 
@@ -139,6 +146,10 @@ Rules:
 - A saved query or history entry whose connection no longer exists opens
   without a connection, never on another one, and says so. Running a tab
   without a connection offers the connections in the results area.
+- Removing a saved query (its button in the library list) asks first; a tab
+  that has it open keeps its SQL, which closing then asks about. The
+  editor's save button only saves or updates.
+- Copying a selection or a page estimated above 50 MiB asks first.
 
 ## Keyboard shortcuts
 
@@ -150,7 +161,8 @@ Rules:
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |
 | New query on the active connection | `Ctrl N` |
-| Close the query tab (asks when it runs or has unsaved SQL) | `Ctrl W`, `Ctrl F4` |
+| Close the query tab (asks when it runs or has unsaved SQL) | `Ctrl W`, `Ctrl F4`, or a middle click on the tab |
+| Next or previous query tab, from anywhere in the window | `Ctrl Tab`, `Ctrl Shift Tab` (or `Ctrl Page Down`, `Ctrl Page Up`) |
 | Show or hide the explorer | `Ctrl B` |
 | Show or hide the assistant | `Ctrl Shift B` |
 | SQL font size: larger, smaller, reset | `Ctrl +`, `Ctrl -`, `Ctrl 0` |
@@ -158,8 +170,9 @@ Rules:
 | Refresh the focused explorer node | `F5` |
 | Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
 | Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
-| Explorer: new query for the table, `SELECT * … LIMIT` the row limit, not run (a click only selects it; a double click does the same) | `Enter` |
+| Explorer: new query for the table, `SELECT * … LIMIT` the row limit, not run; a tab already opened for the table is shown instead (**New query for table in another tab** in its menu opens another). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` |
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
+| Grid: first or last cell of the row, first or last cell of the page, a screen up or down (`Shift` extends) | `Home`, `End`, `Ctrl Home`, `Ctrl End`, `Page Up`, `Page Down` |
 | Grid: select all, clear | `Ctrl A`, `Esc` |
 | Grid: copy, copy with headers | `Ctrl C`, `Ctrl Shift C` |
 | Tab bar: move between tabs | Arrows, `Home`, `End` |
@@ -214,7 +227,6 @@ interactive elements expose a role, a label and their state. Details are in
 
 | Standard | Current code |
 | --- | --- |
-| Elapsed time and cancel for runs over 2 s | The Run button cancels, but the footer shows "Running…" without the elapsed time |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Elapsed time and cancel for work over 2 s | **Format** runs off the UI thread and the editor stays usable, but the first format per dialect (building its grammar) or a long script can take seconds, and it cannot be cancelled; a result for SQL edited meanwhile is dropped |
-| Shortcuts as actions in one keymap | Only the three run shortcuts are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab and moving to the next or previous tab are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |

@@ -108,6 +108,34 @@ pub fn count(value: usize) -> String {
     grouped
 }
 
+/// How long something took, in the scale that reads best: milliseconds
+/// below a second, seconds with one decimal (in the UI language's decimal
+/// separator) below a minute, then minutes and seconds, then hours and
+/// minutes. Truncated, never rounded up, so a run is never shown as longer
+/// than it was.
+pub fn duration(ms: u64) -> String {
+    if ms < 1_000 {
+        return crate::tr!("{0} ms", ms);
+    }
+    let seconds = ms / 1_000;
+    if seconds < 60 {
+        let separator = if crate::i18n::locale().starts_with("pt") {
+            ','
+        } else {
+            '.'
+        };
+        return crate::tr!(
+            "{0} s",
+            format!("{seconds}{separator}{}", (ms % 1_000) / 100)
+        );
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return crate::tr!("{0} min {1} s", minutes, seconds % 60);
+    }
+    crate::tr!("{0} h {1} min", minutes / 60, minutes % 60)
+}
+
 pub fn number_pt_br(value: &str) -> String {
     let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
     let mut parts = unsigned.split('.');
@@ -201,6 +229,18 @@ pub fn copy_cells(headers: Option<&[&str]>, rows: &[Vec<Option<&str>>]) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durations_read_in_their_own_scale() {
+        assert_eq!(duration(0), "0 ms");
+        assert_eq!(duration(999), "999 ms");
+        assert_eq!(duration(1_000), "1.0 s");
+        assert_eq!(duration(59_999), "59.9 s");
+        assert_eq!(duration(183_421), "3 min 3 s");
+        assert_eq!(duration(3_599_999), "59 min 59 s");
+        assert_eq!(duration(3_600_000), "1 h 0 min");
+        assert_eq!(duration(7_380_000), "2 h 3 min");
+    }
 
     #[test]
     fn copies_cells_as_spreadsheet_text() {

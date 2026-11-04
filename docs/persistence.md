@@ -48,8 +48,15 @@ missing or out-of-range value reads as the default, 1,000).
 
 `workspace.state` keeps the workspace between sessions
 (`jykre::workspace_state`): the open query tabs in order (title, connection
-name, SQL, the SQL last saved to the library and the statement timeout), the
-tab on screen, the saved queries and the last 200 history entries. It is
+name, SQL, the SQL last saved to the library and the identity of that saved
+query, the table or view the tab was opened for, its context and the
+statement timeout), the tab on screen, the saved queries, each with a stable
+numeric `id` (its title is only a label; `next_id` is the next one), and the
+last 200 history entries, each with when it ended, how (`succeeded`,
+`failed`, `cancelled`), its outcome and how long it took. Values written by
+an earlier version still read: saved queries without an `id` get one, a tab
+is linked to the saved query with its title, connection and SQL, and old
+history entries have no time or status. It is
 written half a second after changes settle and when the application quits,
 and read once the connections are loaded. A tab whose connection no longer
 exists reopens in a group of its own, without a connection. A value that
@@ -64,7 +71,14 @@ snapshot; a value that cannot be read starts collapsed.
 `config_json` holds the driver's non-sensitive options; drivers reject
 password and token fields there. `revision` provides optimistic concurrency:
 a save names the revision it edited, so a change made in another window is
-rejected instead of silently overwritten.
+rejected instead of silently overwritten. Saving a connection writes its
+profile, row limit, metadata choice and revalidation hours in one
+transaction (`ConfigRepository::save_with_settings`): a failure writes none
+of them and the profile keeps its revision, so a retry is not refused.
+
+`editor.font_size` is written once a burst of size changes settles, and a
+write superseded by a newer size is skipped, so the size saved is the last
+one shown.
 
 ## Schema: `metadata/<connection-id>.db`
 

@@ -409,6 +409,18 @@ pub fn format_age(elapsed: Duration) -> String {
     }
 }
 
+/// The title of a tab opened for the object at `path`: its name after the
+/// namespace that holds it (`sales.orders`), so objects of the same name in
+/// other schemas give tabs that tell apart. A partition keeps its table.
+pub fn qualified_title(path: &ObjectPath) -> String {
+    let start = path.0.len().saturating_sub(2);
+    path.0[start..]
+        .iter()
+        .map(|part| part.name.as_str())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 /// A node that has children to show or hide: namespaces and relations,
 /// not columns, keys or partitions.
 pub fn expandable(object: &MetadataObject) -> bool {
@@ -684,6 +696,18 @@ mod tests {
         rows.iter()
             .filter_map(|row| row.object().map(|object| object.name.clone()))
             .collect()
+    }
+
+    #[test]
+    fn a_tab_title_names_the_schema_of_its_object() {
+        use ObjectKind::*;
+        let orders = object(&[(Database, "shop"), (Schema, "sales"), (Table, "orders")]);
+        assert_eq!(qualified_title(&orders.path), "sales.orders");
+        let other = object(&[(Database, "shop"), (Schema, "archive"), (Table, "orders")]);
+        assert_ne!(qualified_title(&other.path), qualified_title(&orders.path));
+        let mysql = object(&[(Database, "shop"), (Table, "orders")]);
+        assert_eq!(qualified_title(&mysql.path), "shop.orders");
+        assert_eq!(qualified_title(&ObjectPath::default()), "");
     }
 
     #[test]

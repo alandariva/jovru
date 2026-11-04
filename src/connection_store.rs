@@ -191,7 +191,7 @@ async fn load_from(
         let credentials = if profile.remember_password
             && profile.config.driver != DriverKind::Databricks
         {
-            match secrets.get(profile.id).await {
+            match vault(secrets.get(profile.id)).await {
                 Ok(value) => {
                     if value.password.is_none() {
                         add_warning(
@@ -348,7 +348,7 @@ async fn save_to(
     let mut stored = false;
     if profile.config.driver != DriverKind::Databricks && profile.remember_password {
         match credentials.password.clone() {
-            Some(password) => match secrets.set(profile.id, password).await {
+            Some(password) => match vault(secrets.set(profile.id, password)).await {
                 Ok(()) => stored = true,
                 Err(error) => {
                     profile.remember_password = false;
@@ -364,8 +364,7 @@ async fn save_to(
             // Nothing new to store: the vault may still hold the password,
             // only for the same server and user.
             None if remembered_before
-                && secrets
-                    .get(profile.id)
+                && vault(secrets.get(profile.id))
                     .await
                     .is_ok_and(|stored| stored.password.is_some()) => {}
             None => {
@@ -381,33 +380,39 @@ async fn save_to(
     } else {
         profile.remember_password = false;
     }
-    let profile = match repository.save(&profile).await {
+    // The profile and its preferences are written in one transaction, so a
+    // failure leaves neither half saved and a retry keeps its revision.
+    let settings = [
+        (
+            jykre_storage::row_limit_key(profile.id),
+            serde_json::json!(row_limit),
+        ),
+        (
+            jykre_storage::metadata_scope_key(profile.id),
+            scope.to_value(),
+        ),
+        (
+            revalidate_key(profile.id),
+            serde_json::json!(revalidate_hours),
+        ),
+    ];
+    let profile = match repository.save_with_settings(&profile, &settings).await {
         Ok(profile) => profile,
         Err(error) => {
             // A new connection that was not saved must not leave its
             // password behind.
             if stored && previous.is_none() {
-                let _ = secrets.delete(profile.id).await;
+                let _ = vault(secrets.delete(profile.id)).await;
             }
             return Err(error);
         }
     };
-    repository.set_row_limit(profile.id, row_limit).await?;
-    repository
-        .set_metadata_scope(profile.id, &scope.to_value())
-        .await?;
-    repository
-        .set_setting(
-            &revalidate_key(profile.id),
-            &serde_json::json!(revalidate_hours),
-        )
-        .await?;
     let had_entry = previous
         .as_ref()
         .is_some_and(|previous| previous.remember_password);
     // Remember turned off (by the user or above): the old entry goes, so a
     // password for another server or user is never read back.
-    if had_entry && !profile.remember_password && secrets.delete(profile.id).await.is_err() {
+    if had_entry && !profile.remember_password && vault(secrets.delete(profile.id)).await.is_err() {
         add_warning(
             &mut warning,
             tr!(
@@ -441,6 +446,101 @@ async fn save_to(
         revalidate_hours,
         warning,
     })
+}
+
+/// Writes of one preference where the last one asked for wins: a write that
+/// a newer one superseded is skipped, and writes never run at the same
+/// time, so an older value can never land after a newer one.
+pub struct LatestWrite {
+    asked: std::sync::atomic::AtomicU64,
+    running: tokio::sync::Mutex<()>,
+}
+
+impl LatestWrite {
+    pub const fn new() -> Self {
+        Self {
+            asked: std::sync::atomic::AtomicU64::new(0),
+            running: tokio::sync::Mutex::const_new(()),
+        }
+    }
+
+    /// Asks for a write, superseding the ones asked before; returns its
+    /// ticket for [`LatestWrite::run`].
+    pub fn ask(&self) -> u64 {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    /// Runs the write of `ticket` unless a newer one was asked for, after
+    /// any write in progress ends. `None` when it was skipped.
+    pub async fn run<T>(
+        &self,
+        ticket: u64,
+        write: impl Future<Output = DriverResult<T>>,
+    ) -> Option<DriverResult<T>> {
+        let _running = self.running.lock().await;
+        if self.asked.load(std::sync::atomic::Ordering::SeqCst) != ticket {
+            return None;
+        }
+        Some(write.await)
+    }
+}
+
+impl Default for LatestWrite {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The writes of the SQL font size (`editor.font_size`).
+pub static FONT_SIZE_WRITES: LatestWrite = LatestWrite::new();
+
+/// Saves the SQL font size for the write `ticket` of [`FONT_SIZE_WRITES`];
+/// a size superseded by a newer one is not written.
+pub async fn save_font_size(dir: &Path, size: f32, ticket: u64) -> DriverResult<()> {
+    FONT_SIZE_WRITES
+        .run(ticket, async {
+            let repository = ConfigRepository::open(dir).await?;
+            let result = repository
+                .set_setting("editor.font_size", &serde_json::json!(size))
+                .await;
+            repository.close().await;
+            result
+        })
+        .await
+        .unwrap_or(Ok(()))
+}
+
+/// How long a read, write or removal in the operating system vault may take
+/// ([Reliability](../docs/reliability.md#timeouts)). A vault that does not
+/// answer (a locked keyring waiting for an unlock nobody sees) is reported
+/// as unavailable, so the connection dialog is never stuck saving.
+pub const VAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Runs a vault operation within [`VAULT_TIMEOUT`].
+async fn vault<T>(operation: impl Future<Output = DriverResult<T>>) -> DriverResult<T> {
+    vault_within(VAULT_TIMEOUT, operation).await
+}
+
+/// Runs a vault operation within `limit`; past it the vault counts as
+/// unavailable, as when it refuses.
+async fn vault_within<T>(
+    limit: std::time::Duration,
+    operation: impl Future<Output = DriverResult<T>>,
+) -> DriverResult<T> {
+    tokio::time::timeout(limit, operation)
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                elapsed_ms = limit.as_millis() as u64,
+                "the system vault did not answer in time"
+            );
+            Err(DriverError::new(
+                ErrorCode::Timeout,
+                tr!(
+                    "The system vault did not answer in time. The password will be used only in this session."
+                ),
+            ))
+        })
 }
 
 /// Adds `text` to the warnings already collected, so a later one does not

@@ -172,7 +172,15 @@ sequenceDiagram
 - **Format** parses with `sqruff-lib` in the same dialect (ANSI without a
   connection), off the UI thread. Only whitespace and keyword case may
   change: a result that changes anything else is refused, and what does not
-  parse is left as it was.
+  parse is left as it was. Each statement is formatted on its own and the
+  text between statements (blank lines, comments, `DELIMITER` lines) is kept,
+  so every statement keeps a line of its own; with a selection, only the
+  selection is formatted (`sql::format_range`).
+- **Explain** runs `EXPLAIN` followed by the statement at the cursor (or the
+  one selected) into a new result tab (`sql::explain`, by the connection's
+  `SqlDialect`). Only queries and data changes are explained, so the
+  statement itself never runs and its words are never read as `EXPLAIN`
+  options such as `ANALYZE`.
 - Each tab keeps one session between runs ([ADR-0014](adr/0014-a-session-per-tab.md)).
   Databricks warehouses keep logical catalog/schema state; classic clusters keep
   a server SQL context. CLI authentication and HTTP pools are shared across

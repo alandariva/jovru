@@ -53,8 +53,170 @@ pub struct GridKey {
     pub result: u64,
     /// Lowercase text of the open filter; empty when the bar is closed.
     pub filter: String,
-    pub descending: bool,
+    /// The column the rows are sorted by; `None` keeps the server's order.
+    pub sort: Option<ColumnSort>,
     pub numbers_pt_br: bool,
+}
+
+/// Rows sorted by the values of one column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColumnSort {
+    pub column: usize,
+    pub descending: bool,
+}
+
+impl ColumnSort {
+    /// The sort after a click on the header of `column`: ascending first,
+    /// then descending, then the server's order again. Another column
+    /// starts ascending.
+    pub fn next(current: Option<Self>, column: usize) -> Option<Self> {
+        match current {
+            Some(sort) if sort.column == column && !sort.descending => Some(Self {
+                column,
+                descending: true,
+            }),
+            Some(sort) if sort.column == column => None,
+            _ => Some(Self {
+                column,
+                descending: false,
+            }),
+        }
+    }
+}
+
+/// A number as the database wrote it (`-12.50`, `1.5e-05`), read without
+/// floating point: `0.<digits> × 10^exponent`, where the digits are those
+/// of `integer` then `fraction` after their leading zeros.
+struct Decimal<'a> {
+    negative: bool,
+    integer: &'a str,
+    fraction: &'a str,
+    /// Where the decimal point falls before the first significant digit.
+    exponent: i64,
+}
+
+impl<'a> Decimal<'a> {
+    /// `None` for anything that is not a decimal, with or without an
+    /// exponent (`NaN`, `Infinity`, text).
+    fn parse(text: &'a str) -> Option<Self> {
+        let text = text.trim();
+        let (negative, rest) = match text.as_bytes().first()? {
+            b'-' => (true, &text[1..]),
+            b'+' => (false, &text[1..]),
+            _ => (false, text),
+        };
+        let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
+            Some((mantissa, exponent)) => {
+                let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
+                if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                (mantissa, exponent.parse::<i64>().ok()?)
+            }
+            None => (rest, 0),
+        };
+        let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        if integer.is_empty() && fraction.is_empty()
+            || !integer
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let integer = integer.trim_start_matches('0');
+        let point = if integer.is_empty() {
+            -((fraction.len() - fraction.trim_start_matches('0').len()) as i64)
+        } else {
+            integer.len() as i64
+        };
+        Some(Self {
+            negative,
+            integer,
+            fraction,
+            exponent: point.checked_add(exponent)?,
+        })
+    }
+
+    fn digits(&self) -> impl Iterator<Item = u8> + '_ {
+        self.integer
+            .bytes()
+            .chain(self.fraction.bytes())
+            .skip_while(|digit| *digit == b'0')
+    }
+
+    fn is_zero(&self) -> bool {
+        self.digits().next().is_none()
+    }
+
+    /// Orders the absolute values of two nonzero numbers.
+    fn magnitude(&self, other: &Self) -> std::cmp::Ordering {
+        self.exponent.cmp(&other.exponent).then_with(|| {
+            // Missing digits are zeros, so `1.50` and `1.5` are equal.
+            let (mut left, mut right) = (self.digits(), other.digits());
+            loop {
+                match (left.next(), right.next()) {
+                    (None, None) => return std::cmp::Ordering::Equal,
+                    (left, right) => {
+                        let order = left.unwrap_or(b'0').cmp(&right.unwrap_or(b'0'));
+                        if order.is_ne() {
+                            return order;
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// Orders two numbers exactly, as the database wrote them: decimals (also
+/// in exponent form, as `float8` prints `1.5e-05`) are compared digit by
+/// digit, never through floating point. Values that are not decimals
+/// (`NaN`, `Infinity`) sort after them, by their text.
+fn compare_numbers(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    // Negative, zero (with or without a sign), positive.
+    let class = |number: &Decimal| match (number.is_zero(), number.negative) {
+        (true, _) => 1,
+        (false, true) => 0,
+        (false, false) => 2,
+    };
+    match (Decimal::parse(left), Decimal::parse(right)) {
+        (Some(left), Some(right)) => match (class(&left), class(&right)) {
+            (1, 1) => Ordering::Equal,
+            (0, 0) => left.magnitude(&right).reverse(),
+            (2, 2) => left.magnitude(&right),
+            (left, right) => left.cmp(&right),
+        },
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
+}
+
+/// Orders two values of a column by its family. NULLs always come last,
+/// whichever the direction, as in the databases' default `NULLS LAST` for
+/// ascending order.
+fn compare_values(
+    left: Option<&str>,
+    right: Option<&str>,
+    family: ValueFamily,
+    descending: bool,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Greater,
+        (Some(_), None) => Ordering::Less,
+        (Some(left), Some(right)) => {
+            let order = if family == ValueFamily::Number {
+                compare_numbers(left, right)
+            } else {
+                left.cmp(right)
+            };
+            if descending { order.reverse() } else { order }
+        }
+    }
 }
 
 impl GridView {
@@ -70,14 +232,24 @@ impl GridView {
                     })
             })
             .collect();
-        if !key.descending {
-            rows.reverse();
-        }
         let families: Vec<_> = result
             .columns()
             .iter()
             .map(|column| cell_format::family(&column.data_type))
             .collect();
+        // A stable sort: equal values keep the server's order.
+        if let Some(sort) = key.sort
+            && let Some(family) = families.get(sort.column).copied()
+        {
+            rows.sort_by(|left, right| {
+                compare_values(
+                    result.value(*left, sort.column),
+                    result.value(*right, sort.column),
+                    family,
+                    sort.descending,
+                )
+            });
+        }
         // Widths follow the first rows only, so a long result sizes as fast
         // as a short one.
         let widths = result
@@ -197,6 +369,93 @@ impl CellSelection {
         let row = *visible.get(position)?;
         Some((Self::click(current, row, col, extend), position))
     }
+
+    /// Navigation by more than one cell: `Home` and `End` along the row,
+    /// `Ctrl Home` and `Ctrl End` to the first and last cell of the grid,
+    /// `Page Up` and `Page Down` by a screen of rows. With `extend` the
+    /// block grows from the anchor, as with the arrows.
+    pub fn jumped(
+        current: Option<Self>,
+        visible: &[usize],
+        columns: usize,
+        jump: Jump,
+        extend: bool,
+    ) -> Option<(Self, usize)> {
+        let rows = visible.len() as isize;
+        let cols = columns as isize;
+        let (down, right) = match jump {
+            Jump::RowStart => (0, -cols),
+            Jump::RowEnd => (0, cols),
+            Jump::First => (-rows, -cols),
+            Jump::Last => (rows, cols),
+            Jump::Rows(delta) => (delta, 0),
+        };
+        Self::moved(current, visible, columns, down, right, extend)
+    }
+}
+
+/// A move of [`CellSelection::jumped`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Jump {
+    /// The first column of the row (`Home`).
+    RowStart,
+    /// The last column of the row (`End`).
+    RowEnd,
+    /// The first cell of the grid (`Ctrl Home`).
+    First,
+    /// The last cell of the grid (`Ctrl End`).
+    Last,
+    /// This many rows down, or up when negative (`Page Down`, `Page Up`).
+    Rows(isize),
+}
+
+/// Copies above this size ask for confirmation first
+/// ([Results](../docs/results.md#copying)).
+pub const COPY_CONFIRM_BYTES: usize = 50 * 1024 * 1024;
+
+/// About how many bytes [`copy_selection`] would produce: the text of the
+/// selected cells plus a separator after each, and the headers. Quotes
+/// added around special values are not counted. It reads only cell lengths,
+/// so it costs far less than the copy itself.
+pub fn selection_bytes(
+    result: &ResultData,
+    visible: &[usize],
+    selection: Option<CellSelection>,
+    headers: bool,
+) -> usize {
+    let Some((rows, cols)) = selection.and_then(|selection| selection_block(selection, visible))
+    else {
+        return 0;
+    };
+    let names = if headers {
+        cols.clone()
+            .filter_map(|col| result.columns().get(col))
+            .map(|column| column.name.len() + 1)
+            .sum()
+    } else {
+        0
+    };
+    names
+        + rows
+            .filter_map(|position| visible.get(position))
+            .map(|row| {
+                cols.clone()
+                    .map(|col| result.value(*row, col).map_or(0, str::len) + 1)
+                    .sum::<usize>()
+            })
+            .sum::<usize>()
+}
+
+/// About how many bytes [`cell_format::result_csv`] would produce for a
+/// page: the headers and every value quoted, with a separator after each.
+pub fn csv_bytes(result: &ResultData) -> usize {
+    let cells = result.row_count() * result.column_count();
+    let headers: usize = result
+        .columns()
+        .iter()
+        .map(|column| column.name.len() + 3)
+        .sum();
+    headers + result.text_bytes() + cells * 3 + result.row_count()
 }
 
 /// Number of cells in the visible part of a selection.
@@ -256,13 +515,13 @@ mod tests {
             anchor: (3, 1),
             focus: (7, 1),
         });
-        let all = GridView::new(&result, key(0, "", true));
+        let all = GridView::new(&result, key(0, "", None));
         assert_eq!(selected_cells(selection, &all.rows), 5);
-        let errors = GridView::new(&result, key(0, "error", true));
+        let errors = GridView::new(&result, key(0, "error", None));
         assert_eq!(errors.rows, [3, 7, 11]);
         assert_eq!(selected_cells(selection, &errors.rows), 2);
         // Hiding an end hides the block, which comes back with the rows.
-        let info = GridView::new(&result, key(0, "info", true));
+        let info = GridView::new(&result, key(0, "info", None));
         assert_eq!(selected_cells(selection, &info.rows), 0);
         assert_eq!(selected_cells(selection, &all.rows), 5);
     }
@@ -276,7 +535,7 @@ mod tests {
                 .into_iter()
                 .map(std::iter::once),
         );
-        let rows = |filter: &str| GridView::new(&result, key(0, filter, true)).rows;
+        let rows = |filter: &str| GridView::new(&result, key(0, filter, None)).rows;
         // The text 'NULL' and 'nullable' match; the real NULL does not.
         assert_eq!(rows("null"), [0, 2]);
         assert_eq!(rows("ull"), [0, 2]);
@@ -320,11 +579,11 @@ mod tests {
         table(&event_log_rows(rows))
     }
 
-    fn key(result: u64, filter: &str, descending: bool) -> GridKey {
+    fn key(result: u64, filter: &str, sort: Option<(usize, bool)>) -> GridKey {
         GridKey {
             result,
             filter: filter.into(),
-            descending,
+            sort: sort.map(|(column, descending)| ColumnSort { column, descending }),
             numbers_pt_br: false,
         }
     }
@@ -334,7 +593,7 @@ mod tests {
         let mut rows = event_log_rows(300);
         rows[1][1] = "ERROR".into();
         let result = table(&rows);
-        let grid = GridView::new(&result, key(0, "", true));
+        let grid = GridView::new(&result, key(0, "", None));
         assert_eq!(grid.rows, (0..300).collect::<Vec<_>>());
         assert_eq!(
             grid.families,
@@ -346,37 +605,38 @@ mod tests {
                 ValueFamily::Text,
             ]
         );
-        // The filter ignores case; ascending order reverses the rows.
-        let grid = GridView::new(&result, key(0, "error", false));
+        // The filter ignores case; sorting by the id column descending
+        // reverses the rows.
+        let grid = GridView::new(&result, key(0, "error", Some((0, true))));
         assert_eq!(grid.rows.len(), 76);
         assert_eq!(grid.rows.first(), Some(&299));
         assert_eq!(grid.rows.last(), Some(&1));
         // Only the first 200 rows size a column, so the cost does not grow
         // with the result.
-        let width = GridView::new(&result, key(0, "", true)).widths[2];
+        let width = GridView::new(&result, key(0, "", None)).widths[2];
         rows[250][2] = "x".repeat(80);
         assert_eq!(
-            GridView::new(&table(&rows), key(0, "", true)).widths[2],
+            GridView::new(&table(&rows), key(0, "", None)).widths[2],
             width
         );
         rows[10][2] = "x".repeat(80);
-        assert!(GridView::new(&table(&rows), key(0, "", true)).widths[2] > width);
+        assert!(GridView::new(&table(&rows), key(0, "", None)).widths[2] > width);
     }
 
     #[test]
     fn grid_view_is_rebuilt_only_when_its_inputs_change() {
         let result = event_log(10);
         let cache = GridCache::default();
-        let first = cache.get(&result, key(1, "", true));
+        let first = cache.get(&result, key(1, "", None));
         // Hover, scroll and selection frames change none of the inputs.
-        assert!(Rc::ptr_eq(&first, &cache.get(&result, key(1, "", true))));
+        assert!(Rc::ptr_eq(&first, &cache.get(&result, key(1, "", None))));
         for changed in [
-            key(2, "", true),
-            key(1, "info", true),
-            key(1, "", false),
+            key(2, "", None),
+            key(1, "info", None),
+            key(1, "", Some((0, true))),
             GridKey {
                 numbers_pt_br: true,
-                ..key(1, "", true)
+                ..key(1, "", None)
             },
         ] {
             let rebuilt = cache.get(&result, changed.clone());
@@ -387,15 +647,120 @@ mod tests {
 
     #[test]
     fn a_large_result_builds_its_grid_view_within_budget() {
-        // A hundred times the default row limit, filtered and reversed: the
+        // A hundred times the default row limit, filtered and sorted by text: the
         // slowest build, paid once per change rather than once per frame.
         let result = event_log(100_000);
         let cache = GridCache::default();
         let start = Instant::now();
-        let grid = cache.get(&result, key(1, "error", false));
+        let grid = cache.get(&result, key(1, "error", Some((2, true))));
         let elapsed = start.elapsed();
         assert_eq!(grid.rows.len(), 25_000);
         assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+    }
+
+    #[test]
+    fn a_header_sorts_by_the_values_of_its_column() {
+        let result = ResultData::from_rows(
+            vec![
+                ResultColumn::new("amount", "numeric"),
+                ResultColumn::new("name", "text"),
+            ],
+            [
+                [Some("10.5"), Some("b")],
+                [None, Some("a")],
+                [Some("-2"), Some("c")],
+                [Some("9.75"), None],
+                [Some("100"), Some("a")],
+                [Some("-0.0"), Some("d")],
+                [Some("12345678901234567890.1"), Some("e")],
+            ],
+        );
+        let rows = |sort| GridView::new(&result, key(0, "", sort)).rows;
+        // Exact numbers, not text order ("100" before "9.75") nor floats;
+        // NULL last in both directions.
+        assert_eq!(rows(Some((0, false))), [2, 5, 3, 0, 4, 6, 1]);
+        assert_eq!(rows(Some((0, true))), [6, 4, 0, 3, 5, 2, 1]);
+        // Text by its value; equal values keep the server's order.
+        assert_eq!(rows(Some((1, false))), [1, 4, 0, 2, 5, 6, 3]);
+        assert_eq!(rows(None), [0, 1, 2, 3, 4, 5, 6]);
+        // A click sorts ascending, then descending, then not at all.
+        let ascending = ColumnSort::next(None, 1);
+        assert_eq!(
+            ascending,
+            Some(ColumnSort {
+                column: 1,
+                descending: false
+            })
+        );
+        let descending = ColumnSort::next(ascending, 1);
+        assert_eq!(descending.map(|sort| sort.descending), Some(true));
+        assert_eq!(ColumnSort::next(descending, 1), None);
+        assert_eq!(
+            ColumnSort::next(descending, 0).map(|sort| sort.column),
+            Some(0)
+        );
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        assert_eq!(compare_numbers("0", "-0"), Equal);
+        assert_eq!(compare_numbers("1e5", "2"), Greater);
+        // Exponent forms, as float8 prints very small and large values, sort
+        // by value among the plain decimals, still without floating point.
+        assert_eq!(compare_numbers("1.5e-05", "0.0001"), Less);
+        assert_eq!(compare_numbers("1.5e-05", "0.000015"), Equal);
+        assert_eq!(compare_numbers("1e+20", "99999999999999999999"), Greater);
+        assert_eq!(compare_numbers("10", "1E1"), Equal);
+        assert_eq!(compare_numbers("1.50", "1.5"), Equal);
+        assert_eq!(compare_numbers("-1e-3", "-0.01"), Greater);
+        assert_eq!(compare_numbers("-1e-3", "0"), Less);
+        assert_eq!(compare_numbers("0.05", "0.5"), Less);
+        // What is not a decimal comes after every number.
+        assert_eq!(compare_numbers("NaN", "1e300"), Greater);
+        assert_eq!(compare_numbers("1e", "1"), Greater);
+    }
+
+    #[test]
+    fn sorting_a_large_result_stays_within_budget() {
+        let result = event_log(100_000);
+        let start = Instant::now();
+        let grid = GridView::new(&result, key(1, "", Some((0, true))));
+        let elapsed = start.elapsed();
+        assert_eq!(grid.rows.first(), Some(&99_999));
+        assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+    }
+
+    #[test]
+    fn home_end_and_pages_move_along_the_displayed_rows() {
+        let visible = [4, 3, 2, 1, 0];
+        let start = Some(CellSelection::cell(3, 1));
+        let jump =
+            |jump, extend| CellSelection::jumped(start, &visible, 3, jump, extend).expect("a cell");
+        assert_eq!(jump(Jump::RowStart, false), (CellSelection::cell(3, 0), 1));
+        assert_eq!(jump(Jump::RowEnd, false), (CellSelection::cell(3, 2), 1));
+        assert_eq!(jump(Jump::First, false), (CellSelection::cell(4, 0), 0));
+        assert_eq!(jump(Jump::Last, false), (CellSelection::cell(0, 2), 4));
+        assert_eq!(jump(Jump::Rows(2), false), (CellSelection::cell(1, 1), 3));
+        assert_eq!(jump(Jump::Rows(-20), false), (CellSelection::cell(4, 1), 0));
+        // Shift extends the block from the anchor.
+        let (block, _) = jump(Jump::Last, true);
+        assert_eq!((block.anchor, block.focus), ((3, 1), (0, 2)));
+        assert_eq!(CellSelection::jumped(None, &[], 3, Jump::Last, false), None);
+    }
+
+    #[test]
+    fn copy_sizes_are_estimated_from_the_cell_lengths() {
+        let result = ResultData::from_rows(
+            vec![
+                ResultColumn::new("id", "int8"),
+                ResultColumn::new("note", "text"),
+            ],
+            [vec![Some("1"), Some("abc")], vec![Some("22"), None]],
+        );
+        let all = CellSelection::all(&[0, 1], 2);
+        // "1\tabc\n22\t" is 9 bytes; the estimate counts a separator per cell.
+        assert_eq!(selection_bytes(&result, &[0, 1], all, false), 10);
+        assert_eq!(selection_bytes(&result, &[0, 1], all, true), 18);
+        assert_eq!(selection_bytes(&result, &[0, 1], None, true), 0);
+        let csv = cell_format::result_csv(&result).len();
+        assert!(csv_bytes(&result) >= csv, "{csv}");
     }
 
     #[test]

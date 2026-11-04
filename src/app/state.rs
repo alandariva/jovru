@@ -1,29 +1,11 @@
 //! Saving and restoring the workspace between sessions: open query tabs,
 //! saved queries and history ([`jykre::workspace_state`]).
 use super::*;
-use jykre::workspace_state::{QueryEntry, SETTINGS_KEY, WorkspaceState};
+use jykre::workspace_state::{SETTINGS_KEY, WorkspaceState};
 
 /// Changes are written once they settle, so typing does not write on every
 /// keystroke.
 const SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
-
-impl QuerySnapshot {
-    fn entry(&self) -> QueryEntry {
-        QueryEntry {
-            title: self.title.clone(),
-            connection: self.connection.clone(),
-            sql: self.sql.clone(),
-        }
-    }
-
-    fn from_entry(entry: QueryEntry) -> Self {
-        Self {
-            title: entry.title,
-            connection: entry.connection,
-            sql: entry.sql,
-        }
-    }
-}
 
 impl AppView {
     /// The state to keep: tabs in the order they are shown.
@@ -31,13 +13,10 @@ impl AppView {
         let tabs = self.tabs.read(cx);
         let active = tabs.active_tab();
         let mut state = WorkspaceState {
-            saved_queries: self
-                .saved_queries
-                .iter()
-                .map(QuerySnapshot::entry)
-                .collect(),
-            history: self.history.iter().map(QuerySnapshot::entry).collect(),
+            saved_queries: self.saved_queries.clone(),
+            history: self.history.clone(),
             next_query: self.next_query,
+            next_id: self.next_saved_id,
             ..WorkspaceState::default()
         };
         for tab in tabs.tab_ids() {
@@ -100,17 +79,11 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.saved_queries = state
-            .saved_queries
-            .into_iter()
-            .map(QuerySnapshot::from_entry)
-            .collect();
-        self.history = state
-            .history
-            .into_iter()
-            .map(QuerySnapshot::from_entry)
-            .collect();
+        self.saved_queries = state.saved_queries;
+        self.history = state.history;
         self.next_query = state.next_query;
+        self.next_saved_id = state.next_id;
+        self.filter_library(cx);
         let mut opened = Vec::new();
         for tab in &state.tabs {
             let group = self.group_for(&tab.connection, cx);
@@ -170,14 +143,4 @@ pub(super) async fn read_state(repository: &ConfigRepository) -> DriverResult<Wo
     Ok(WorkspaceState::from_value(
         repository.setting(SETTINGS_KEY).await?,
     ))
-}
-
-/// The history entry of a run.
-pub(super) fn record(history: &mut Vec<QuerySnapshot>, snapshot: QuerySnapshot) {
-    let mut entries: Vec<QueryEntry> = std::mem::take(history)
-        .iter()
-        .map(QuerySnapshot::entry)
-        .collect();
-    WorkspaceState::record(&mut entries, snapshot.entry());
-    *history = entries.into_iter().map(QuerySnapshot::from_entry).collect();
 }

@@ -484,10 +484,60 @@ impl ResultTabs {
     }
 }
 
+/// The rows of a page as the footer counts them: `count` rows, the first
+/// being row `first_row` (zero based) of the whole result, as a range when
+/// the result has other pages (`paged`). While the filter is open,
+/// `filtered` is how many of them it shows, and the footer counts the same
+/// rows as the grid: "3 of 1,000 rows".
+pub fn rows_label(count: usize, first_row: usize, paged: bool, filtered: Option<usize>) -> String {
+    use crate::{cell_format, tr};
+    let rows = if paged && count == 1 {
+        tr!("Row {0}", cell_format::count(first_row + 1))
+    } else if paged && count > 0 {
+        tr!(
+            "Rows {0}–{1}",
+            cell_format::count(first_row + 1),
+            cell_format::count(first_row + count)
+        )
+    } else {
+        match count {
+            1 => tr!("1 row").to_string(),
+            count => tr!("{0} rows", cell_format::count(count)),
+        }
+    };
+    match filtered {
+        Some(shown) if paged && count > 0 => tr!(
+            "{0} of rows {1}–{2}",
+            cell_format::count(shown),
+            cell_format::count(first_row + 1),
+            cell_format::count(first_row + count)
+        ),
+        Some(shown) => tr!(
+            "{0} of {1} rows",
+            cell_format::count(shown),
+            cell_format::count(count)
+        ),
+        None => rows,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::result::ResultColumn;
+
+    #[test]
+    fn the_footer_counts_the_rows_the_filter_shows() {
+        assert_eq!(rows_label(1_000, 0, false, None), "1,000 rows");
+        assert_eq!(rows_label(1, 0, false, None), "1 row");
+        assert_eq!(rows_label(1_000, 0, false, Some(3)), "3 of 1,000 rows");
+        assert_eq!(rows_label(1_000, 0, false, Some(0)), "0 of 1,000 rows");
+        assert_eq!(rows_label(1_000, 1_000, true, None), "Rows 1,001–2,000");
+        assert_eq!(
+            rows_label(1_000, 1_000, true, Some(12)),
+            "12 of rows 1,001–2,000"
+        );
+    }
 
     fn rows(count: usize) -> ResultData {
         let values: Vec<String> = (0..count).map(|n| n.to_string()).collect();

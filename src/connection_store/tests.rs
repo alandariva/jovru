@@ -638,3 +638,69 @@ fn a_session_without_a_remembered_password_asks_for_one() {
     // Databricks signs in through the CLI.
     assert!(!needs_password(&input(DriverKind::Databricks, None)));
 }
+
+#[tokio::test]
+async fn a_vault_that_does_not_answer_counts_as_unavailable() {
+    let limit = std::time::Duration::from_millis(20);
+    let started = std::time::Instant::now();
+    let stuck = vault_within(limit, std::future::pending::<DriverResult<()>>()).await;
+    assert_eq!(stuck.map_err(|error| error.code), Err(ErrorCode::Timeout));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    // An answer within the limit passes through, success or failure.
+    assert!(vault_within(limit, async { Ok(()) }).await.is_ok());
+    let refused = vault_within(limit, async {
+        Err::<(), _>(DriverError::new(ErrorCode::Authentication, "refused"))
+    })
+    .await;
+    assert_eq!(
+        refused.map_err(|error| error.code),
+        Err(ErrorCode::Authentication)
+    );
+}
+
+#[tokio::test]
+async fn a_superseded_preference_write_never_lands_after_the_newer_one() {
+    let writes = LatestWrite::new();
+    let older = writes.ask();
+    let newer = writes.ask();
+    // The newer write runs; the older one, even if it runs later, is skipped.
+    assert_eq!(
+        writes.run(newer, async { Ok(18) }).await.map(Result::ok),
+        Some(Some(18))
+    );
+    assert_eq!(
+        writes.run(older, async { Ok(16) }).await.map(Result::ok),
+        None
+    );
+    // A write in progress finishes before the next one starts.
+    let order = std::sync::Mutex::new(Vec::new());
+    let first = writes.ask();
+    let slow = writes.run(first, async {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        order.lock().unwrap().push(first);
+        Ok(())
+    });
+    let (done, _) = tokio::join!(slow, async {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        writes.ask()
+    });
+    // A write asked for while one runs does not cut it short.
+    assert!(done.is_some_and(|done| done.is_ok()));
+    assert_eq!(order.lock().unwrap().as_slice(), [first]);
+}
+
+#[tokio::test]
+async fn the_font_size_is_written_by_its_latest_ticket() {
+    let dir = std::env::temp_dir().join(format!("jykre-font-{}", ConnectionId::new()));
+    let older = FONT_SIZE_WRITES.ask();
+    let newer = FONT_SIZE_WRITES.ask();
+    save_font_size(&dir, 18.0, newer).await.unwrap();
+    save_font_size(&dir, 16.0, older).await.unwrap();
+    let repository = ConfigRepository::open(&dir).await.unwrap();
+    assert_eq!(
+        repository.setting("editor.font_size").await.unwrap(),
+        Some(serde_json::json!(18.0))
+    );
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}

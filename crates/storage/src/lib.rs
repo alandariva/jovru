@@ -2,7 +2,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 mod config;
 mod metadata;
-pub use config::{ConfigRepository, UnreadableProfile};
+pub use config::{ConfigRepository, UnreadableProfile, metadata_scope_key, row_limit_key};
 pub use metadata::{
     ChildPage, MetadataRepository, PageCursor, PageRequest, PendingRefresh, RefreshState,
     RefreshStatus,

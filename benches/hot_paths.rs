@@ -15,7 +15,7 @@ use jykre::drivers::{
     CancellationToken, Cell, ColumnInfo, ConnectionConfig, ConnectionId, DriverKind,
     IntrospectionReport, MetadataObject, ObjectKind, ObjectPath, RowSink,
 };
-use jykre::grid::{GridKey, GridView};
+use jykre::grid::{ColumnSort, GridKey, GridView};
 use jykre::result::{
     DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT, ResultBuilder, ResultColumn, ResultData,
 };
@@ -56,13 +56,30 @@ fn grid_view(c: &mut Criterion) {
     group.bench_function("unfiltered", |b| {
         b.iter(|| GridView::new(black_box(&result), GridKey::default()))
     });
-    group.bench_function("filtered and reversed", |b| {
+    group.bench_function("filtered", |b| {
         let key = GridKey {
             filter: "error".into(),
             ..GridKey::default()
         };
         b.iter(|| GridView::new(black_box(&result), key.clone()))
     });
+    // A header click: exact decimal comparison for numbers, text order for
+    // the rest.
+    for (name, column) in [
+        ("sorted by a number, descending", 0),
+        ("sorted by text, descending", 2),
+    ] {
+        group.bench_function(name, |b| {
+            let key = GridKey {
+                sort: Some(ColumnSort {
+                    column,
+                    descending: true,
+                }),
+                ..GridKey::default()
+            };
+            b.iter(|| GridView::new(black_box(&result), key.clone()))
+        });
+    }
     group.finish();
 }
 

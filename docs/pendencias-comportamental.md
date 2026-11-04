@@ -26,7 +26,7 @@ As divergências que pesam ficam nas bordas desse núcleo:
 4. **Fluxos de conexão sem diálogo.** Senha não lembrada nunca é pedida (A e B pedem ao conectar). Salvar o perfil derruba os runs abertos sem avisar.
 5. **Abrir tabela não mostra dados.** Nas três ferramentas, abrir uma tabela leva aos dados (ou ao editor do objeto) com paginação. No Jykre, cria uma aba com `SELECT … LIMIT 100` que não é executada.
 
-São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, sem nenhuma crítica. Dessas, 15 são reconfirmações do backlog anterior. **16 estão aprovadas** (N001–N016) e **implementadas** (`f18136c`, de 3 de novembro de 2026, com `8208602` para N008 e `66f262b` para N010, de 4 de novembro); as outras 31 aguardam aprovação.
+São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, sem nenhuma crítica. Dessas, 15 são reconfirmações do backlog anterior. **46 estão aprovadas**. N001–N016 foram aprovadas em 3 de novembro de 2026 e estão **implementadas** (`f18136c`, de 3 de novembro, com `8208602` para N008 e `66f262b` para N010, de 4 de novembro). N017–N047, exceto N043, foram aprovadas em 4 de novembro de 2026: 29 estão **implementadas** (alterações locais não commitadas de 4 de novembro; N040 e N044 já eram atendidas pelo código atual e foram só conferidas) e N031 está **parcial** (a confirmação acima de 50 MiB foi feita; gerar a cópia fora da thread da UI depende de uma decisão sobre o ADR-0012). N043 foi **reprovada**.
 
 ---
 
@@ -281,7 +281,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N017 — O caminho acima do editor não mostra o contexto real da sessão
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). O seletor de contexto do cabeçalho, que mostra o schema/banco/catálogo informado pela sessão após cada run, já vinha de `ed9173a`; esta alteração retira os segmentos que não eram reais: sem conexão, o cabeçalho mostra só o nome da aba de conexão (sem “— / SQL”), e o rodapé do editor mostra “SQL” sem dialeto quando ele não é conhecido. O demo mantém o banco de exemplo.
 - **Funcionalidade:** Contexto de conexão
 - **Comportamento atual:** O cabeçalho do editor mostra “conexão / banco / SQL”. O banco vem do perfil (`options.database`/`defaultCatalog`, ou “—”). Até haver conexão, vem da heurística do demo pelo nome (`commerce`…). O terceiro segmento é o texto fixo “SQL”. Depois de `USE`, `SET search_path` ou `USE CATALOG`, nada muda, embora a sessão por aba preserve esse estado.
 - **Comportamento de referência:**
@@ -296,7 +297,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N018 — Format reformata o script inteiro mesmo havendo seleção
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Com seleção, Format formata só o trecho selecionado (`sql::format_range`); sem seleção, o script inteiro. O tooltip do botão diz isso.
 - **Funcionalidade:** Formatação
 - **Comportamento atual:** O botão Format sempre usa `editor.text()` inteiro e ignora `selected_range`.
 - **Comportamento de referência:**
@@ -311,7 +313,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N019 — Format apaga linhas em branco e junta instruções DML na mesma linha
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). `sql::format` formata cada instrução isoladamente (pelos limites de `sql::statements`) e mantém como estava o texto entre elas: linhas em branco, comentários (inclusive o de fim de linha após o `;`) e linhas `DELIMITER`. Toda instrução continua começando numa linha própria; uma instrução que o sqruff quebra em várias linhas ainda empurra as seguintes para baixo. Uma instrução que não formata fica como estava (aviso de formatação parcial).
 - **Funcionalidade:** Formatação
 - **Comportamento atual:** `format` reconstrói o texto a partir dos tokens e só quebra linha antes de `SELECT`, `FROM`, `WHERE` etc. A separação original some: `INSERT …;\n\nDELETE …;` vira `INSERT …; DELETE …` numa linha só. Comentários de fim de linha passam para a linha seguinte.
 - **Comportamento de referência:** Em A, o formatador tem uma opção que controla se as quebras de linha originais são mantidas. Nas outras duas, não documentado.
@@ -323,7 +326,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N020 — Uma consulta salva reaberta fica desligada da biblioteca
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Abrir uma consulta salva cria a aba já ligada a ela (`saved_id` e `saved_sql`); se uma aba já a edita, ela é mostrada em vez de outra cópia. O vínculo é guardado no `workspace.state` e sobrevive ao reinício.
 - **Funcionalidade:** Biblioteca
 - **Comportamento atual:** Clicar numa consulta salva chama `add_query`, que cria uma aba com `saved_sql = None`. O ícone mostra “Save query” (não salva). Editar e fechar avisa “The SQL is not in the saved queries”.
 - **Comportamento de referência:** Princípio: a aba sabe de onde veio e mostra corretamente se está salva. Em A, scripts são arquivos, e editar altera o próprio script (Provável).
@@ -335,7 +339,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N021 — O botão de salvar consulta remove a consulta quando clicado de novo
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). O botão só salva ou atualiza (“This query is already saved.” quando nada mudou); remover fica num botão de cada item da lista da biblioteca, com confirmação. A aba que tinha a consulta aberta volta a ser rascunho, e fechá-la pergunta antes. A mensagem passou a ser “Query saved in the library.”.
 - **Funcionalidade:** Biblioteca
 - **Comportamento atual:** O ícone de marcador alterna: com o SQL igual ao salvo, o clique **remove** da biblioteca (“Query removed from saved queries”), sem confirmação e sem desfazer. A mensagem do primeiro save diz “Query saved in this session.”, embora a biblioteca já seja persistida em `workspace.state`.
 - **Comportamento de referência:** Princípio: salvar é idempotente e excluir é uma ação separada.
@@ -347,7 +352,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N022 — Consultas salvas colidem pelo título (Backlog: N018)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Cada consulta salva tem um `id` numérico estável no `workspace.state` (`next_id` guarda o próximo); o título é só rótulo. Estados antigos continuam legíveis: consultas sem `id` ganham um, e a aba é ligada à consulta pelo título, conexão e SQL, como antes. É um formato JSON em `settings`, não uma mudança do schema SQLite.
 - **Funcionalidade:** Biblioteca
 - **Comportamento atual:** A identidade é `(title, connection)`, e `retain` apaga a homônima. O título é o da aba (“Query 3”, nome da tabela), então duas abas `orders` da mesma conexão se sobrescrevem ao salvar.
 - **Comportamento de referência:** Princípio: identidade estável, independente do nome exibido.
@@ -359,7 +365,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N023 — O histórico mostra o título da aba, não o SQL, sem horário nem status
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Cada entrada mostra o início do SQL, o status (ícone), a conexão, há quanto tempo, a duração e o desfecho, com busca por SQL, título ou conexão. A lista da biblioteca e do histórico passou a ser virtualizada. Desvio: o horário é relativo (“5 min ago”), como em Messages, porque o horário local exige uma biblioteca de datas (decisão de dependência).
 - **Funcionalidade:** Histórico
 - **Comportamento atual:** Cada entrada mostra o título da aba de origem e a conexão. Todas as instruções executadas na “Query 2” aparecem como linhas idênticas “Query 2”. Não há horário, duração, status nem busca.
 - **Comportamento de referência:** As três mostram a instrução executada:
@@ -374,7 +381,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N024 — O histórico ignora execuções que falharam (Backlog: N035)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Toda instrução que termina entra no histórico, com status (sucesso, falha ou cancelada), desfecho e duração, pelo mesmo ponto que alimenta Messages. COMMIT e ROLLBACK dos botões da toolbar ficam só em Messages.
 - **Funcionalidade:** Histórico
 - **Comportamento atual:** Só `WorkspaceEvent::Executed`, emitido por instrução concluída, entra no histórico. A instrução que falhou nunca é registrada.
 - **Comportamento de referência:**
@@ -389,7 +397,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N025 — A palette e os títulos de aba não mostram o schema
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). A palette mostra o caminho do objeto esmaecido após o nome, e a aba aberta para uma tabela se chama `schema.tabela` (`explorer::qualified_title`; no MySQL, `banco.tabela`).
 - **Funcionalidade:** Navegação
 - **Comportamento atual:** Cada resultado da palette mostra o nome do objeto e o nome da conexão; o título da aba aberta é só o nome da tabela. Duas `orders` em schemas diferentes aparecem iguais.
 - **Comportamento de referência:** Princípio: objetos homônimos precisam ser distinguíveis onde são escolhidos.
@@ -401,7 +410,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N026 — O botão Explain não executa EXPLAIN (Backlog: N024)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Escolhida a alternativa real: Explain executa `EXPLAIN <instrução>` da instrução no cursor (ou da selecionada) num novo result tab, pelo `SqlDialect` da conexão (`sql::explain`), sem mudar drivers nem contratos. Desvio: só consultas e alterações de dados (`SELECT`, `WITH`, `VALUES`, `TABLE`, `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `REPLACE`) são explicadas, nunca com `ANALYZE`, para que a instrução não rode; sem conexão, o botão explica que precisa de um servidor. O assistente simulado não é mais usado pelo botão. `docs/security.md` passou a citar essa ação explícita como SQL gerado pela aplicação; vale a revisão do mantenedor.
 - **Funcionalidade:** Explain
 - **Comportamento atual:** Chama `ask("Explain this query")` do assistente simulado, que devolve texto fixo do exemplo de vendas, inclusive em conexões reais.
 - **Comportamento de referência:** Princípio: a ação mostra o plano real do banco. A e B têm plano de execução real (Provável; não conferido nesta auditoria).
@@ -413,7 +423,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N027 — “Insert into editor” substitui todo o SQL (Backlog: N025)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). “Insert at the cursor” insere a sugestão no cursor ou no lugar da seleção, e Ctrl+Z desfaz; o resto do SQL fica.
 - **Funcionalidade:** Assistente
 - **Comportamento atual:** Usa `replace_all`, sem confirmação.
 - **Comportamento de referência:** Princípio: “inserir” acrescenta no cursor ou na seleção; não substitui.
@@ -425,7 +436,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N028 — O teste de conexão não pode ser cancelado pelo próprio botão (Backlog: N029)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Durante o teste o botão vira **Cancel test**, cancela o teste e mostra o tempo decorrido depois de 2 s.
 - **Funcionalidade:** Diálogo de conexão
 - **Comportamento atual:** O botão vira “Testing…” e fica inerte, sem tempo decorrido. Só cancela editando um campo ou fechando o diálogo. No Databricks, o teste pode durar até 90 s.
 - **Comportamento de referência:** Em A, é possível cancelar inclusive a abertura da conexão. A regra do próprio Jykre (`docs/ux.md`) pede tempo e cancelamento para o que passa de 2 s.
@@ -437,7 +449,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N029 — Salvar a conexão grava perfil e preferências em escritas separadas (Backlog: N030)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Perfil, limite de linhas, escolha de metadados e horas de revalidação são gravados numa só transação (`ConfigRepository::save_with_settings`, nova API do `jykre-storage`, sem mudança de schema). Desvio: a senha continua sendo gravada no cofre antes da transação (o cofre não participa dela); se a transação falha, a senha de uma conexão nova é removida, como antes.
 - **Funcionalidade:** Persistência
 - **Comportamento atual:** `repository.save` (incrementa a revisão), depois `set_row_limit`, depois `set_metadata_scope`. Se uma escrita posterior falhar, a UI mostra erro com o perfil já alterado, e uma nova tentativa usa a revisão antiga.
 - **Comportamento de referência:** Princípio: uma configuração é gravada de forma atômica.
@@ -449,7 +462,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N030 — O status do gutter sobrevive a mudanças de espaço dentro de literais (Backlog: N032)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). `normalized_statements` colapsa só o espaço entre tokens; literais, identificadores entre aspas e comentários ficam como estão.
 - **Funcionalidade:** Gutter
 - **Comportamento atual:** `normalized_statements` aplica `split_whitespace` ao texto inteiro, então `SELECT 'a b'` e `SELECT 'a  b'` contam como a mesma instrução.
 - **Comportamento de referência:** Princípio: o indicador é invalidado quando o texto executável muda.
@@ -461,7 +475,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N031 — Cópias grandes rodam na thread da UI, sem confirmação (Backlog: N033)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Parcial (4 de novembro de 2026; alterações locais não commitadas). O tamanho é estimado pelo comprimento das células antes de gerar o texto (`grid::selection_bytes`, `grid::csv_bytes`), e acima de 50 MiB a cópia da seleção (`Ctrl C`, menu) e “Copy this page as CSV” pedem confirmação. Bloqueado: gerar o texto fora da thread da UI. O resultado é compartilhado como `Rc<ResultData>`, como registra o [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md), e não pode ir para outra thread; a mudança proposta é compartilhá-lo como `Arc<ResultData>` (ou gerar a cópia no runtime a partir de um `Arc`), o que pede um novo ADR ou a aprovação do mantenedor. O desvio de `docs/results.md` foi atualizado.
 - **Funcionalidade:** Clipboard
 - **Comportamento atual:** “Copy this page as CSV” e `Ctrl+C` materializam o texto no thread da UI e escrevem direto no clipboard. É um desvio registrado em `docs/results.md`.
 - **Comportamento de referência:** Princípio, e a regra do próprio Jykre: confirmar acima de 50 MiB e copiar fora da thread da UI.
@@ -473,7 +488,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N032 — A execução longa não mostra tempo decorrido (Backlog: N036)
 - **Prioridade:** Média
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). O rodapé mostra “Running… 12.4 s” depois de 2 s (o tooltip cita o timeout da instrução) e, quando o cancelamento passa de 5 s, “Still cancelling…” com o tempo de espera e o que acontece em seguida. O tempo vem de `QueryRun::running_for` e `cancelling_for`; o rodapé é redesenhado a cada segundo só enquanto há run ativo, e a região de status anuncia o estado, não o relógio.
 - **Funcionalidade:** Progresso
 - **Comportamento atual:** O rodapé mostra “Running…” ou “Cancelling…”. `RunState::Running { started_at }` existe, mas não é exibido. O timeout é escolhido por aba (até 1 h).
 - **Comportamento de referência:** A mostra o progresso da execução e avisa quando um cancelamento fica parado. A regra do próprio Jykre pede tempo decorrido acima de 2 s.
@@ -485,7 +501,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N033 — A palette mostra resultados antigos enquanto a nova busca corre (Backlog: N034)
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Com resultados antigos na lista, a palette mostra “Searching…” com spinner no cabeçalho e esmaece os itens até a busca nova chegar.
 - **Funcionalidade:** Busca
 - **Comportamento atual:** “Searching…” só aparece com a lista vazia; com matches antigos, nada indica que a busca está pendente.
 - **Comportamento de referência:** Princípio: um estado pendente é visível.
@@ -497,7 +514,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N034 — Abrir o mesmo objeto de novo cria uma aba duplicada
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). A aba guarda o objeto para o qual foi aberta (também no `workspace.state`); abrir de novo a mesma tabela da mesma conexão (explorer ou palette) mostra essa aba. O menu do nó ganhou **New query for table in another tab** para abrir outra.
 - **Funcionalidade:** Abas / navegação
 - **Comportamento atual:** Cada duplo clique numa tabela ou entrada da palette cria uma aba nova com o mesmo título.
 - **Comportamento de referência:**
@@ -512,7 +530,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N035 — O rodapé conta as linhas da página ignorando o filtro
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Com o filtro aberto o rodapé diz “3 of 1,000 rows” (ou “3 of rows 1,001–2,000” numa página que não é a única), pelo número que a grade informa (`ResultGridEvent::RowsShown`, `result_tabs::rows_label`).
 - **Funcionalidade:** Grade / rodapé
 - **Comportamento atual:** Com o filtro ativo, o rodapé continua “1.000 rows” enquanto a grade mostra 3.
 - **Comportamento de referência:** Princípio: rodapé e grade contam a mesma coisa.
@@ -524,7 +543,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N036 — A grade não aceita Home, End, PageUp, PageDown nem Ctrl+Home/End
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Home/End (linha), Ctrl+Home/End (página) e PageUp/PageDown (uma tela de linhas), com Shift estendendo a seleção (`CellSelection::jumped`). Desvio: as teclas continuam tratadas no `on_key_down` da grade, como as setas, e não como ações do keymap (desvio já registrado em `docs/ui-guidelines.md`).
 - **Funcionalidade:** Grade / teclado
 - **Comportamento atual:** `key_down` trata apenas setas, Shift+setas, `Ctrl+A`, `Ctrl+C` e Esc.
 - **Comportamento de referência:** Convenção de grades e planilhas: navegar por página e ir aos extremos. Não conferido na documentação das três ferramentas.
@@ -536,7 +556,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N037 — Alternar abas pelo teclado exige foco na barra de abas
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Ações `NextTab` e `PreviousTab` no keymap: `Ctrl+Tab`/`Ctrl+Shift+Tab` e `Ctrl+PageDown`/`Ctrl+PageUp`, de qualquer lugar da janela (inclusive o editor); o teclado vai para o editor da aba escolhida.
 - **Funcionalidade:** Abas / teclado
 - **Comportamento atual:** As setas, Home e End trocam de aba apenas com o foco na barra. Não há atalho global de próxima ou anterior aba a partir do editor.
 - **Comportamento de referência:** Convenção de editores com abas: atalho global de próxima e anterior aba. Não conferido na documentação das três ferramentas.
@@ -548,7 +569,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N038 — O clique do meio não fecha a aba
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). O clique do meio numa aba segue o mesmo caminho do X (`CloseRequested`, com as mesmas confirmações).
 - **Funcionalidade:** Abas
 - **Comportamento atual:** Só o X ou `Ctrl+W`/`Ctrl+F4` fecham a aba.
 - **Comportamento de referência:** Convenção de aplicações com abas (IDEs e navegadores). Não conferido na documentação das três ferramentas.
@@ -560,7 +582,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N039 — Nova consulta já vem com `SELECT 1;`
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Nova consulta começa vazia, com o placeholder “Write SQL here. Ctrl+Enter runs the statement at the cursor.”, com ou sem conexão.
 - **Funcionalidade:** Abas
 - **Comportamento atual:** `new_query` preenche `SELECT 1;` (ou `SELECT * FROM orders LIMIT 100;` sem conexão).
 - **Comportamento de referência:** Um editor novo começa vazio (Provável; não conferido na documentação).
@@ -572,7 +595,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N040 — “Load more objects” aparece no fim da conexão, longe do nó que estende
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (já atendida pelo código atual; conferido em 4 de novembro de 2026, sem mudança). Desde `aca08bc` o explorer é uma lista em que “Load more objects” é a última linha dos filhos do próprio nó (`Tree::push_children`), recuada como eles, e não um bloco no fim da conexão.
 - **Funcionalidade:** Explorer
 - **Comportamento atual:** Os botões de mais páginas de todos os nós aparecem juntos no fim da árvore da conexão, identificados só pelo nome do pai.
 - **Comportamento de referência:** Princípio: o controle de continuação fica junto da lista que estende.
@@ -584,7 +608,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N041 — O clique simples age diferente conforme o tipo de nó
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Uma regra só: o clique seleciona; duplo clique ou Enter abre a tabela, ou expande/recolhe os demais nós; todo nó com filhos (inclusive bancos, schemas e a própria conexão) tem chevron; →/← expandem e recolhem também na conexão.
 - **Funcionalidade:** Explorer
 - **Comportamento atual:** Em banco ou schema, o clique simples seleciona **e** expande ou recolhe. Em tabela, só seleciona (as colunas abrem pela seta à esquerda). Na conexão, o clique expande ou recolhe sem selecionar.
 - **Comportamento de referência:** Consistência interna. As ferramentas variam: em B, o efeito do duplo clique (abrir ou expandir) é configurável. Nenhuma documenta três regras diferentes na mesma árvore.
@@ -596,7 +621,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N042 — Tempo de execução sempre exibido em ms
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). `cell_format::duration` mostra ms abaixo de 1 s, segundos com uma casa (separador decimal do idioma), min e s, h e min; usado no rodapé, em Messages, no histórico e no teste de conexão.
 - **Funcionalidade:** Rodapé
 - **Comportamento atual:** `format!("{} ms", elapsed_ms)`, então um run de 3 minutos aparece como “183421 ms”.
 - **Comportamento de referência:** Princípio de legibilidade: a duração é exibida na escala adequada.
@@ -608,7 +634,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N043 — O grupo de abas some ao fechar a última aba e volta no fim da barra (Backlog: N037)
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Reprovada (4 de novembro de 2026)
+- **Status:** Descartada. O grupo deve sumir ao perder a última aba, e reaparecer no fim da barra ao abrir uma nova aba da conexão é o comportamento esperado. Sem mudança de código.
 - **Funcionalidade:** Grupos de abas
 - **Comportamento atual:** `model.close` remove o grupo vazio e `ensure_group` o recria no fim da barra.
 - **Comportamento de referência:** Princípio: a posição dos elementos da interface é estável.
@@ -620,7 +647,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N044 — O explorer constrói todos os nós visíveis a cada render (Backlog: N038)
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (já atendida pelo código atual; conferido em 4 de novembro de 2026, sem mudança). Desde `aca08bc` a árvore é uma lista achatada e virtualizada (`ListState` com `explorer_entries`, reconstruída só quando a árvore, a expansão ou a busca mudam), e `docs/performance.md` não lista mais o desvio. Não foi medida nesta alteração.
 - **Funcionalidade:** Explorer / desempenho
 - **Comportamento atual:** `.children(objects…)` sobre a coleção visível, com IDs montados por `format!` em cada nó. É um desvio registrado em `docs/performance.md`.
 - **Comportamento de referência:** A regra do próprio Jykre: coleções longas são virtualizadas.
@@ -632,7 +660,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N045 — O tamanho da fonte pode ser gravado fora de ordem (Backlog: N039)
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Debounce de 300 ms mais geração: cada gravação recebe um ticket (`connection_store::FONT_SIZE_WRITES`), as gravações não correm ao mesmo tempo, e uma superada por outra mais nova é descartada.
 - **Funcionalidade:** Preferências
 - **Comportamento atual:** Cada `Ctrl +/−` dispara uma escrita sem geração; erros aparecem no aviso do Explorer.
 - **Comportamento de referência:** Princípio: a última alteração vence.
@@ -644,7 +673,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N046 — A seta de ordenação do demo só inverte a ordem (Backlog: N040)
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Escolhida a ordenação de verdade, em todos os resultados (não só no demo): clicar no cabeçalho ordena as linhas da página pelos valores da coluna, crescente, decrescente e de volta à ordem do servidor (`grid::ColumnSort`). Números são comparados exatamente como texto decimal, inclusive na forma com expoente (`1.5e-05`, como o `float8` imprime), nunca em ponto flutuante; NULLs ficam no fim; valores iguais mantêm a ordem do servidor. Desvio: como o filtro, ordena só a página em memória, e a ordenação roda na thread da UI ao reconstruir a `GridView` (benchmark em release: cerca de 5 ms para 100.000 linhas já em ordem, dentro do orçamento de 50 ms de `docs/performance.md`; não medida no aplicativo).
 - **Funcionalidade:** Grade (demo)
 - **Comportamento atual:** Na terceira coluna do resultado demo, o clique só alterna `descending` (`reverse`); em resultados reais o cabeçalho não ordena.
 - **Comportamento de referência:** Princípio: uma seta no cabeçalho ordena pelos valores da coluna.
@@ -656,7 +686,8 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 
 ### N047 — A gravação no cofre não tem timeout e pode prender o diálogo (Backlog: N041)
 - **Prioridade:** Baixa
-- **Aprovação:** Pendente
+- **Aprovação:** Aprovada (4 de novembro de 2026)
+- **Status:** Implementada (4 de novembro de 2026; alterações locais não commitadas). Toda leitura, gravação e remoção no cofre feita por `connection_store` tem timeout de 10 s (`VAULT_TIMEOUT`); passado ele, o cofre conta como indisponível: a senha vale só para a sessão, “Remember password” é salvo desligado com aviso, e o diálogo sai do estado “Saving”. Registrado na tabela de timeouts de `docs/reliability.md`.
 - **Funcionalidade:** Cofre / diálogo
 - **Comportamento atual:** O diálogo não fecha durante `connection_saving`, e `secrets.set` não tem timeout.
 - **Comportamento de referência:** Princípio, e a regra do próprio Jykre: toda operação externa tem timeout.
@@ -690,37 +721,37 @@ Na coluna **Referência**, as letras indicam as ferramentas cuja documentação 
 | N014 | Grade | Filtro só na página | “Nada encontrado” falso | B~, A~ | Média | Aprovada · Implementada |
 | N015 | Grade | Seleção e scroll não são por tab | Comparação difícil | B | Média | Aprovada · Implementada |
 | N016 | Mensagens | Sem log de execução | Desfecho de DML some | B, A~ | Média | Aprovada · Implementada |
-| N017 | Contexto | Caminho estático ou inventado | Rótulo errado | A, B | Média | Pendente |
-| N018 | Formatação | Ignora seleção | Script inteiro alterado | A, B | Média | Pendente |
-| N019 | Formatação | Junta instruções | Script ilegível | A | Média | Pendente |
-| N020 | Biblioteca | Reabertura desligada | Estado de salvo falso | P | Média | Pendente |
-| N021 | Biblioteca | Salvar remove no segundo clique | Exclusão acidental | P | Média | Pendente |
-| N022 | Biblioteca | Colisão por título | Sobrescrita silenciosa | P | Média | Pendente |
-| N023 | Histórico | Título em vez de SQL | Difícil encontrar | A, B, C | Média | Pendente |
-| N024 | Histórico | Falhas não entram | SQL a corrigir some | A, B | Média | Pendente |
-| N025 | Navegação | Sem schema | Tabela errada | P | Média | Pendente |
-| N026 | Explain | Simulado | Promessa falsa | P, A~, B~ | Média | Pendente |
-| N027 | Assistente | Inserir substitui | SQL sobrescrito | P | Média | Pendente |
-| N028 | Conexão | Teste sem cancelamento | Usuário preso | A, P | Média | Pendente |
-| N029 | Persistência | Save não atômico | Estado pela metade | P | Média | Pendente |
-| N030 | Gutter | Whitespace em literal | ✓ falso | P | Média | Pendente |
-| N031 | Clipboard | Cópia grande na UI | Congelamento | P | Média | Pendente |
-| N032 | Progresso | Sem tempo decorrido | Timeout invisível | A, P | Média | Pendente |
-| N033 | Busca | Pendente invisível | Abre match velho | P | Baixa | Pendente |
-| N034 | Abas | Abas duplicadas | Barra poluída | C, A~ | Baixa | Pendente |
-| N035 | Rodapé | Contagem ignora filtro | Números discordantes | P | Baixa | Pendente |
-| N036 | Grade | Sem Home/End/PgUp/PgDn | Navegação lenta | ~ | Baixa | Pendente |
-| N037 | Abas | Troca só com foco na barra | Teclado lento | ~ | Baixa | Pendente |
-| N038 | Abas | Sem clique do meio | Fechar exige mira | ~ | Baixa | Pendente |
-| N039 | Abas | Nova consulta pré-preenchida | Atrito | ~ | Baixa | Pendente |
-| N040 | Explorer | “Load more” longe do nó | Lista incompleta passa despercebida | P | Baixa | Pendente |
-| N041 | Explorer | Clique simples inconsistente | Recolhe sem querer | P | Baixa | Pendente |
-| N042 | Rodapé | Duração só em ms | Leitura ruim | P | Baixa | Pendente |
-| N043 | Grupos | Grupo some e volta no fim | Ordem instável | P | Baixa | Pendente |
-| N044 | Explorer | Árvore não virtualizada | Lentidão em escala | P | Baixa | Pendente |
-| N045 | Preferências | Fonte gravada fora de ordem | Valor errado ao reiniciar | P | Baixa | Pendente |
-| N046 | Demo | Seta inverte em vez de ordenar | Gesto falso | P | Baixa | Pendente |
-| N047 | Cofre | Sem timeout | Modal preso | P | Baixa | Pendente |
+| N017 | Contexto | Caminho estático ou inventado | Rótulo errado | A, B | Média | Aprovada · Implementada |
+| N018 | Formatação | Ignora seleção | Script inteiro alterado | A, B | Média | Aprovada · Implementada |
+| N019 | Formatação | Junta instruções | Script ilegível | A | Média | Aprovada · Implementada |
+| N020 | Biblioteca | Reabertura desligada | Estado de salvo falso | P | Média | Aprovada · Implementada |
+| N021 | Biblioteca | Salvar remove no segundo clique | Exclusão acidental | P | Média | Aprovada · Implementada |
+| N022 | Biblioteca | Colisão por título | Sobrescrita silenciosa | P | Média | Aprovada · Implementada |
+| N023 | Histórico | Título em vez de SQL | Difícil encontrar | A, B, C | Média | Aprovada · Implementada |
+| N024 | Histórico | Falhas não entram | SQL a corrigir some | A, B | Média | Aprovada · Implementada |
+| N025 | Navegação | Sem schema | Tabela errada | P | Média | Aprovada · Implementada |
+| N026 | Explain | Simulado | Promessa falsa | P, A~, B~ | Média | Aprovada · Implementada |
+| N027 | Assistente | Inserir substitui | SQL sobrescrito | P | Média | Aprovada · Implementada |
+| N028 | Conexão | Teste sem cancelamento | Usuário preso | A, P | Média | Aprovada · Implementada |
+| N029 | Persistência | Save não atômico | Estado pela metade | P | Média | Aprovada · Implementada |
+| N030 | Gutter | Whitespace em literal | ✓ falso | P | Média | Aprovada · Implementada |
+| N031 | Clipboard | Cópia grande na UI | Congelamento | P | Média | Aprovada · Parcial |
+| N032 | Progresso | Sem tempo decorrido | Timeout invisível | A, P | Média | Aprovada · Implementada |
+| N033 | Busca | Pendente invisível | Abre match velho | P | Baixa | Aprovada · Implementada |
+| N034 | Abas | Abas duplicadas | Barra poluída | C, A~ | Baixa | Aprovada · Implementada |
+| N035 | Rodapé | Contagem ignora filtro | Números discordantes | P | Baixa | Aprovada · Implementada |
+| N036 | Grade | Sem Home/End/PgUp/PgDn | Navegação lenta | ~ | Baixa | Aprovada · Implementada |
+| N037 | Abas | Troca só com foco na barra | Teclado lento | ~ | Baixa | Aprovada · Implementada |
+| N038 | Abas | Sem clique do meio | Fechar exige mira | ~ | Baixa | Aprovada · Implementada |
+| N039 | Abas | Nova consulta pré-preenchida | Atrito | ~ | Baixa | Aprovada · Implementada |
+| N040 | Explorer | “Load more” longe do nó | Lista incompleta passa despercebida | P | Baixa | Aprovada · Implementada |
+| N041 | Explorer | Clique simples inconsistente | Recolhe sem querer | P | Baixa | Aprovada · Implementada |
+| N042 | Rodapé | Duração só em ms | Leitura ruim | P | Baixa | Aprovada · Implementada |
+| N043 | Grupos | Grupo some e volta no fim | Ordem instável | P | Baixa | Reprovada |
+| N044 | Explorer | Árvore não virtualizada | Lentidão em escala | P | Baixa | Aprovada · Implementada |
+| N045 | Preferências | Fonte gravada fora de ordem | Valor errado ao reiniciar | P | Baixa | Aprovada · Implementada |
+| N046 | Demo | Seta inverte em vez de ordenar | Gesto falso | P | Baixa | Aprovada · Implementada |
+| N047 | Cofre | Sem timeout | Modal preso | P | Baixa | Aprovada · Implementada |
 
 ---
 

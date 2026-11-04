@@ -105,7 +105,10 @@ alignment only; the value itself is never converted.
   statement again. Running anything else in the tab closes that result, and
   its tab then says that more rows were not read.
 - The footer shows the rows of the page ("Rows 1,001–2,000") and says when
-  the memory limit stopped reading, with the limit in its tooltip.
+  the memory limit stopped reading, with the limit in its tooltip. While the
+  filter is open it counts the rows the grid shows: "3 of 1,000 rows". The
+  elapsed time reads in its own scale (`850 ms`, `12.4 s`, `3 min 3 s`),
+  and a run in progress shows its time after 2 s.
 
 ## Statements and results
 
@@ -145,7 +148,16 @@ alignment only; the value itself is never converted.
 - Selection: click a cell; Shift+click or Shift+arrows extend a rectangular
   block; click a row number to select the row, Shift+click another row number
   to extend; `Ctrl A` selects everything visible; `Esc` clears. Arrows move the
-  focused cell and scroll it into view.
+  focused cell and scroll it into view. `Home` and `End` go to the first and
+  last cell of the row, `Ctrl Home` and `Ctrl End` to the first and last cell
+  of the page, `Page Up` and `Page Down` a screen of rows; `Shift` extends the
+  block from its anchor.
+- A click on a column header sorts the rows of the page by that column's
+  values: ascending, then descending, then the server's order again, with an
+  arrow on the header. Numbers compare exactly, as decimal text, also in exponent form (never as
+  floats); other values by their text; NULLs come last either way and equal
+  values keep the server's order. Like the filter, it sorts only the rows
+  held for the page; another result tab starts unsorted.
 - The footer shows the number of selected cells when more than one is
   selected.
 - Right-clicking outside the selection selects the cell under the pointer
@@ -171,7 +183,8 @@ alignment only; the value itself is never converted.
 - **Copy this page as CSV** copies the page on screen with headers, `;` as the
   separator and every value quoted, using the original values regardless of
   presentation; NULL becomes an empty field.
-- Copies above 50 MiB ask for confirmation, and copying runs off the UI thread
+- Copies estimated above 50 MiB (from the length of the cells, before they
+  are built) ask for confirmation, and copying runs off the UI thread
   when it would exceed a frame.
 
 ## Footer
@@ -197,4 +210,4 @@ format ([User experience](ux.md#feedback)).
 
 | Standard | Current code |
 | --- | --- |
-| Copy confirmation above 50 MiB, off the UI thread when large | Copies always run on the UI thread, without confirmation (about 85 ms for 500,000 cells) |
+| Copy off the UI thread when large | Copies above 50 MiB ask first, but the text is still built on the UI thread (about 85 ms for 500,000 cells): the result is shared as `Rc<ResultData>` ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)), which cannot move to another thread without changing how the result is shared |

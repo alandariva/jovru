@@ -12,7 +12,9 @@ use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
-use jykre::grid::{self, CellSelection, GridCache, GridKey, GridView, selection_block};
+use jykre::grid::{
+    self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, selection_block,
+};
 use jykre::result::ResultData;
 use jykre::result_tabs::ResultId;
 use jykre::tr;
@@ -23,6 +25,8 @@ use std::{ops::Range, rc::Rc};
 pub enum ResultGridEvent {
     /// The number of selected visible cells changed.
     SelectionChanged { cells: usize },
+    /// How many rows the open filter shows, or `None` without a filter.
+    RowsShown { rows: Option<usize> },
     /// Feedback for the notice bar, such as the outcome of a copy.
     Notice(Feedback),
 }
@@ -34,6 +38,9 @@ struct Place {
     scroll: Point<Pixels>,
 }
 
+/// Height of a data row, in pixels.
+const ROW_HEIGHT: f32 = 34.;
+
 pub struct ResultGrid {
     result: Rc<ResultData>,
     /// The result tab and page on screen, when it is a result tab's.
@@ -43,11 +50,14 @@ pub struct ResultGrid {
     places: HashMap<ResultId, Place>,
     /// Bumped with every new result, so the cached view is rebuilt.
     version: u64,
-    /// The demo result has fixed column proportions and a sortable column.
+    /// The demo result has fixed column proportions.
     sales: bool,
     /// Lowercase text of the open filter; empty when the bar is closed.
     filter: String,
-    descending: bool,
+    /// The column the rows are sorted by, chosen in the header.
+    sort: Option<ColumnSort>,
+    /// The visible row count last reported while filtering.
+    reported_rows: Option<usize>,
     numbers_pt_br: bool,
     /// Position in the whole result of this page's first row, for the row
     /// numbers.
@@ -97,7 +107,8 @@ impl ResultGrid {
             sales,
             first_row: 0,
             filter: String::new(),
-            descending: true,
+            sort: None,
+            reported_rows: None,
             numbers_pt_br: false,
             cache: GridCache::default(),
             selection: None,
@@ -145,6 +156,11 @@ impl ResultGrid {
         }
         let place =
             shown.and_then(|(id, page)| self.places.remove(&id).filter(|place| place.page == page));
+        // A sort chosen for one result tab does not carry to another; the
+        // pages of the same tab keep it.
+        if self.shown.map(|(id, _)| id) != shown.map(|(id, _)| id) {
+            self.sort = None;
+        }
         self.result = result;
         self.sales = sales;
         self.first_row = first_row;
@@ -188,7 +204,7 @@ impl ResultGrid {
         let key = GridKey {
             result: self.version,
             filter: self.filter.clone(),
-            descending: self.descending,
+            sort: self.sort,
             numbers_pt_br: self.numbers_pt_br,
         };
         self.cache.get(&self.result, key)
@@ -198,10 +214,17 @@ impl ResultGrid {
     /// selected count to the workspace.
     fn select(&mut self, selection: Option<CellSelection>, cx: &mut Context<Self>) {
         self.selection = selection;
-        let cells = grid::selected_cells(selection, &self.view().rows);
+        let view = self.view();
+        let cells = grid::selected_cells(selection, &view.rows);
         if cells != self.reported {
             self.reported = cells;
             cx.emit(ResultGridEvent::SelectionChanged { cells });
+        }
+        // The footer counts the rows the filter shows, as the grid does.
+        let rows = (!self.filter.is_empty()).then_some(view.rows.len());
+        if rows != self.reported_rows {
+            self.reported_rows = rows;
+            cx.emit(ResultGridEvent::RowsShown { rows });
         }
         cx.notify();
     }
@@ -226,11 +249,60 @@ impl ResultGrid {
         }
     }
 
-    /// Copies the selected block as tab-separated text (a single cell as its
-    /// exact value), optionally with the column names first.
-    fn copy_selection(&mut self, headers: bool, cx: &mut Context<Self>) {
-        let _timer = jykre::logging::UiTimer::start("copy selection");
+    /// Home, End, Page Up, Page Down and Ctrl Home or End; with Shift the
+    /// block grows from the anchor.
+    fn jump_selection(&mut self, jump: Jump, extend: bool, cx: &mut Context<Self>) {
         let view = self.view();
+        let columns = self.result.column_count();
+        if let Some((selection, position)) =
+            CellSelection::jumped(self.selection, &view.rows, columns, jump, extend)
+        {
+            self.select(Some(selection), cx);
+            self.scroll
+                .scroll_to_item(position, ScrollStrategy::Nearest);
+        }
+    }
+
+    /// The rows one screen of the grid shows, for Page Up and Page Down.
+    fn page_rows(&self) -> isize {
+        let height = f32::from(self.scroll.0.borrow().base_handle.bounds().size.height);
+        ((height / ROW_HEIGHT).floor() as isize - 1).max(1)
+    }
+
+    /// Copies the selected block as tab-separated text (a single cell as its
+    /// exact value), optionally with the column names first. A copy
+    /// estimated above 50 MiB asks first, unless `confirmed`.
+    fn copy_selection(
+        &mut self,
+        headers: bool,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let view = self.view();
+        let bytes = grid::selection_bytes(&self.result, &view.rows, self.selection, headers);
+        if !confirmed && bytes > grid::COPY_CONFIRM_BYTES {
+            let grid = cx.entity().downgrade();
+            super::confirm(
+                window,
+                cx,
+                super::Confirmation {
+                    title: tr!("Copy about {0} MB?", bytes / (1024 * 1024)),
+                    description: tr!(
+                        "The selection is large: copying it can take a moment and holds all of it in the clipboard."
+                    )
+                    .to_string(),
+                    ok: tr!("Copy"),
+                    cancel: tr!("Cancel"),
+                    focus: super::ConfirmFocus::Dialog,
+                },
+                move |window, cx| {
+                    let _ = grid.update(cx, |this, cx| this.copy_selection(headers, true, window, cx));
+                },
+            );
+            return;
+        }
+        let _timer = jykre::logging::UiTimer::start("copy selection");
         let notice = match grid::copy_selection(&self.result, &view.rows, self.selection, headers) {
             None => Feedback::new(Tone::Info, tr!("Select cells to copy.")),
             Some((text, count)) => {
@@ -254,11 +326,19 @@ impl ResultGrid {
         let handled = if keystroke.modifiers.control || keystroke.modifiers.platform {
             match keystroke.key.as_str() {
                 "c" => {
-                    self.copy_selection(shift, cx);
+                    self.copy_selection(shift, false, window, cx);
                     true
                 }
                 "a" => {
                     self.select_all(cx);
+                    true
+                }
+                "home" => {
+                    self.jump_selection(Jump::First, shift, cx);
+                    true
+                }
+                "end" => {
+                    self.jump_selection(Jump::Last, shift, cx);
                     true
                 }
                 _ => false,
@@ -269,6 +349,16 @@ impl ResultGrid {
                 "down" => self.move_selection(1, 0, shift, cx),
                 "left" => self.move_selection(0, -1, shift, cx),
                 "right" => self.move_selection(0, 1, shift, cx),
+                "home" => self.jump_selection(Jump::RowStart, shift, cx),
+                "end" => self.jump_selection(Jump::RowEnd, shift, cx),
+                "pageup" => {
+                    let rows = self.page_rows();
+                    self.jump_selection(Jump::Rows(-rows), shift, cx)
+                }
+                "pagedown" => {
+                    let rows = self.page_rows();
+                    self.jump_selection(Jump::Rows(rows), shift, cx)
+                }
                 "escape" if self.selection.is_some() => self.select(None, cx),
                 _ => return,
             }
@@ -309,9 +399,23 @@ impl ResultGrid {
                                 |(index, column)| {
                                     let name = &column.name;
                                     let kind = column.data_type.to_lowercase();
-                                    let tooltip = format!("{name} : {kind}");
+                                    let tooltip = tr!(
+                                        "{0} : {1} · Click to sort this page by it",
+                                        name,
+                                        kind
+                                    );
+                                    let sorted = self
+                                        .sort
+                                        .filter(|sort| sort.column == index)
+                                        .map(|sort| sort.descending);
                                     row()
                                         .id(("result-header", index))
+                                        .role(Role::ColumnHeader)
+                                        .aria_label(match sorted {
+                                            Some(false) => tr!("{0}, sorted ascending", name),
+                                            Some(true) => tr!("{0}, sorted descending", name),
+                                            None => tr!("{0}, not sorted", name),
+                                        })
                                         .w(px(widths[index]))
                                         .flex_none()
                                         .h_full()
@@ -324,6 +428,11 @@ impl ResultGrid {
                                         .border_color(rgb(GRID_LINE))
                                         .text_size(px(14.))
                                         .text_color(rgb(GRID_HEADER_TEXT))
+                                        .cursor_pointer()
+                                        .focusable()
+                                        .tab_index(0)
+                                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                                        .hover(|s| s.bg(rgb(GRID_HOVER)))
                                         .tooltip(move |window, cx| {
                                             Tooltip::new(tooltip.clone()).build(window, cx)
                                         })
@@ -343,15 +452,9 @@ impl ResultGrid {
                                                 .text_color(rgb(GRID_TYPE_TEXT))
                                                 .child(format!(": {kind}")),
                                         )
-                                        .when(index == 2 && self.sales, |s| {
-                                            s.cursor_pointer()
-                                                .focusable()
-                                                .tab_index(0)
-                                                .focus_visible(|s| s.bg(rgb(HOVER)))
-                                        })
-                                        .when(index == 2 && self.sales, |s| {
+                                        .when_some(sorted, |s, descending| {
                                             s.child(icon(
-                                                if self.descending {
+                                                if descending {
                                                     I::ArrowDown
                                                 } else {
                                                     I::ArrowUp
@@ -359,11 +462,12 @@ impl ResultGrid {
                                                 MINT,
                                             ))
                                         })
+                                        // Ascending, descending, then the
+                                        // server's order again; the rows of
+                                        // this page are sorted by value.
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            if index == 2 && this.sales {
-                                                this.descending = !this.descending;
-                                                cx.notify();
-                                            }
+                                            this.sort = ColumnSort::next(this.sort, index);
+                                            this.select(this.selection, cx);
                                         }))
                                 },
                             )),
@@ -420,10 +524,10 @@ impl ResultGrid {
                     .is_some_and(|this| this.read(cx).selection.is_some());
                 let action =
                     |weak: WeakEntity<ResultGrid>,
-                     run: fn(&mut ResultGrid, &mut Context<ResultGrid>)| {
-                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                     run: fn(&mut ResultGrid, &mut Window, &mut Context<ResultGrid>)| {
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let _ = weak.update(cx, |this, cx| {
-                                run(this, cx);
+                                run(this, window, cx);
                                 cx.notify();
                             });
                         }
@@ -431,21 +535,21 @@ impl ResultGrid {
                 menu.item(
                     PopupMenuItem::new(tr!("Copy"))
                         .disabled(!has_selection)
-                        .on_click(action(weak.clone(), |this, cx| {
-                            this.copy_selection(false, cx)
+                        .on_click(action(weak.clone(), |this, window, cx| {
+                            this.copy_selection(false, false, window, cx)
                         })),
                 )
                 .item(
                     PopupMenuItem::new(tr!("Copy with headers"))
                         .disabled(!has_selection)
-                        .on_click(action(weak.clone(), |this, cx| {
-                            this.copy_selection(true, cx)
+                        .on_click(action(weak.clone(), |this, window, cx| {
+                            this.copy_selection(true, false, window, cx)
                         })),
                 )
                 .separator()
                 .item(
                     PopupMenuItem::new(tr!("Select all"))
-                        .on_click(action(weak.clone(), |this, cx| this.select_all(cx))),
+                        .on_click(action(weak.clone(), |this, _, cx| this.select_all(cx))),
                 )
             })
             .into_any_element()

@@ -161,6 +161,12 @@ impl ResultData {
         self.rows += 1;
     }
 
+    /// Bytes of cell text, NULLs counting none: what a copy of every cell
+    /// holds before separators and quotes.
+    pub fn text_bytes(&self) -> usize {
+        self.text.len()
+    }
+
     /// Bytes this result holds on the heap: cell text, offsets, the NULL
     /// bitmap and the column names and types.
     pub fn memory_bytes(&self) -> usize {

@@ -357,8 +357,18 @@ impl AppView {
         Ok(limit)
     }
 
+    /// **Test connection**, or **Cancel test** while one runs: the same
+    /// button stops it, as Run turns into Stop.
     fn test_connection(&mut self, cx: &mut Context<Self>) {
-        if self.connection_testing.is_some() || self.connection_saving {
+        if self.connection_saving {
+            return;
+        }
+        if self.connection_testing.is_some() {
+            // A late answer of the cancelled test is ignored by revision.
+            self.invalidate_connection_test();
+            self.connection_status =
+                Some(Feedback::new(Tone::Info, tr!("Connection test cancelled.")));
+            cx.notify();
             return;
         }
         let (_, input) = match self.form_connection(cx) {
@@ -371,8 +381,32 @@ impl AppView {
         };
         let cancel = CancellationToken::new();
         self.connection_testing = Some(cancel.clone());
+        self.connection_test_started = Some(std::time::Instant::now());
         self.connection_status = Some(Feedback::new(Tone::Info, tr!("Testing connection…")));
         let revision = self.connection_revision;
+        // The button shows the elapsed time, redrawn every second while
+        // this test runs.
+        cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(1))
+                    .await;
+                let running = weak
+                    .update(cx, |this, cx| {
+                        let running = this.connection_testing.is_some()
+                            && this.connection_revision == revision;
+                        if running {
+                            cx.notify();
+                        }
+                        running
+                    })
+                    .unwrap_or(false);
+                if !running {
+                    break;
+                }
+            }
+        })
+        .detach();
         cx.spawn(async move |weak, cx| {
             let result = backend::run(async move {
                 builtin_registry()?
@@ -485,18 +519,31 @@ impl AppView {
         .detach();
     }
 
-    pub(super) fn persist_font_size(&self, size: f32, cx: &mut Context<Self>) {
+    /// Saves the SQL font size once a burst of `Ctrl +` / `Ctrl −` settles.
+    /// Only the last size of the burst is written, after the writes before
+    /// it ended, so the size saved is always the one on screen.
+    pub(super) fn persist_font_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        self.font_revision += 1;
+        let revision = self.font_revision;
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
-            let result = backend::run(async move {
-                let repository = ConfigRepository::open(&dir).await?;
-                let result = repository
-                    .set_setting("editor.font_size", &serde_json::json!(size))
-                    .await;
-                repository.close().await;
-                result
-            })
-            .await;
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+            let latest = weak
+                .update(cx, |this, _| this.font_revision == revision)
+                .unwrap_or(false);
+            if !latest {
+                return;
+            }
+            // The write is ticketed when it is asked for, so one superseded
+            // meanwhile is skipped even if it reached the runtime first.
+            let ticket = connection_store::FONT_SIZE_WRITES.ask();
+            let result =
+                backend::run(
+                    async move { connection_store::save_font_size(&dir, size, ticket).await },
+                )
+                .await;
             if let Err(error) = result {
                 let _ = weak.update(cx, |this, cx| {
                     this.app_notice = Some(Feedback::new(
@@ -1715,29 +1762,57 @@ impl AppView {
         .detach();
     }
 
-    fn open_relation(
+    /// **New query for table**: a tab with `SELECT * … LIMIT` the row limit
+    /// for the relation at `path` (read where it is stored, `stored_at`),
+    /// titled with its schema so objects of the same name tell apart. A tab
+    /// already opened for the same object is shown instead of a copy,
+    /// unless `another` asks for a new one.
+    pub(super) fn open_relation(
         &mut self,
         index: usize,
         path: &ObjectPath,
+        stored_at: &ObjectPath,
+        another: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let connection = &self.connections[index];
+        let Some(connection) = self.connections.get(index) else {
+            return;
+        };
         let Some(input) = connection.input.as_ref() else {
             return;
         };
+        let name = connection.name.clone();
+        if !another {
+            let open = self
+                .panels
+                .iter()
+                .find(|(_, panel)| {
+                    let panel = panel.read(cx);
+                    panel.connection_name() == name && panel.object() == Some(path)
+                })
+                .map(|(tab, _)| *tab);
+            if let Some(tab) = open {
+                self.show_tab(tab, window, cx);
+                return;
+            }
+        }
         let Ok(driver) = builtin_registry().and_then(|registry| registry.get(input.config.driver))
         else {
             return;
         };
-        let sql = backend::preview_sql(&*driver, path, connection.row_limit);
-        let title = path
-            .0
-            .last()
-            .map(|part| part.name.clone())
-            .unwrap_or_default();
+        let sql = backend::preview_sql(&*driver, stored_at, connection.row_limit);
+        let title = jykre::explorer::qualified_title(path);
         let group = connection.group;
-        self.add_query(group, &title, &sql, window, cx);
+        if let Some(tab) = self.add_query(group, &title, &sql, window, cx)
+            && let Some(panel) = self.panels.get(&tab)
+        {
+            let object = path.clone();
+            panel.update(cx, |panel, cx| {
+                panel.set_object(Some(object));
+                panel.focus_editor(window, cx);
+            });
+        }
     }
 
     pub(super) fn search_cache(&mut self, palette: bool, cx: &mut Context<Self>) {
@@ -1772,7 +1847,6 @@ impl AppView {
                 connection.profile.clone().map(|profile| (index, profile))
             })
             .collect();
-        let row_limits: Vec<u32> = self.connections.iter().map(|c| c.row_limit).collect();
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
             cx.background_executor()
@@ -1858,7 +1932,7 @@ impl AppView {
                 match result {
                     Ok(found) => {
                         for (index, found) in found {
-                            let (driver, objects) = match found {
+                            let (_, objects) = match found {
                                 Ok(found) => found,
                                 Err(error) => {
                                     let name = names
@@ -1875,17 +1949,14 @@ impl AppView {
                                     .into_iter()
                                     .filter(|object| object.kind.is_relation())
                                 {
-                                    let row_limit =
-                                        row_limits.get(index).copied().unwrap_or(DEFAULT_ROW_LIMIT);
-                                    this.command_matches.push((
-                                        index,
-                                        object.name.clone(),
-                                        backend::preview_sql(
-                                            &*driver,
-                                            object.stored_at.as_ref().unwrap_or(&object.path),
-                                            row_limit,
-                                        ),
-                                    ));
+                                    this.command_matches.push(super::PaletteMatch {
+                                        connection: index,
+                                        stored_at: object
+                                            .stored_at
+                                            .clone()
+                                            .unwrap_or_else(|| object.path.clone()),
+                                        path: object.path,
+                                    });
                                 }
                             } else {
                                 // The search is limited, so its rows are built
@@ -1939,23 +2010,58 @@ impl AppView {
                     .id(("live-connection-row", index))
                     .px_2()
                     .h(px(38.))
+                    // As every node: the chevron expands or collapses, and
+                    // so do a double click, Enter and the arrows; a single
+                    // click only takes the focus.
+                    .child(
+                        icon_button(
+                            ("expand-connection", index),
+                            if expanded {
+                                I::ChevronDown
+                            } else {
+                                I::ChevronRight
+                            },
+                            tr!("Expand or collapse"),
+                        )
+                        .size(px(20.))
+                        .aria_expanded(expanded)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.connections[index].expanded = !expanded;
+                            cx.notify();
+                        })),
+                    )
                     .child(
                         button(("live-connection", index), I::Database, "")
                             .aria_label(connection.name.clone())
+                            .aria_expanded(expanded)
                             .flex_1()
                             .child(div().truncate().child(connection.name.clone()))
                             .on_key_down(cx.listener(
                                 move |this, event: &KeyDownEvent, window, cx| {
-                                    if event.keystroke.key == "f5" {
-                                        this.toggle_refresh(index, ObjectPath::default(), cx);
-                                        window.prevent_default();
-                                        cx.stop_propagation();
+                                    let modified = event.keystroke.modifiers.modified();
+                                    match event.keystroke.key.as_str() {
+                                        "f5" => {
+                                            this.toggle_refresh(index, ObjectPath::default(), cx)
+                                        }
+                                        "right" if !modified => {
+                                            this.connections[index].expanded = true;
+                                            cx.notify();
+                                        }
+                                        "left" if !modified => {
+                                            this.connections[index].expanded = false;
+                                            cx.notify();
+                                        }
+                                        _ => return,
                                     }
+                                    window.prevent_default();
+                                    cx.stop_propagation();
                                 },
                             ))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.connections[index].expanded = !expanded;
-                                cx.notify();
+                            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                                if event.is_keyboard() || event.click_count() >= 2 {
+                                    this.connections[index].expanded = !expanded;
+                                    cx.notify();
+                                }
                             })),
                     )
                     .child(
@@ -2285,7 +2391,9 @@ impl AppView {
             .pl(px(12. + (path.0.len() - 1) as f32 * 14.))
             .pr_1()
             .h(px(32.))
-            .when(relation, |s| {
+            // Every node with children has its chevron; a click on the
+            // name only selects, the same rule for every kind of node.
+            .when(expandable, |s| {
                 let path = path.clone();
                 s.child(
                     icon_button(
@@ -2295,7 +2403,11 @@ impl AppView {
                         } else {
                             I::ChevronDown
                         },
-                        tr!("Expand or collapse columns"),
+                        if relation {
+                            tr!("Expand or collapse columns")
+                        } else {
+                            tr!("Expand or collapse")
+                        },
                     )
                     .size(px(20.))
                     .on_click(
@@ -2342,8 +2454,8 @@ impl AppView {
                             ObjectKind::Column => I::Columns3,
                             ObjectKind::ForeignKey => I::Link,
                             ObjectKind::Partition => I::Layers,
-                            _ if collapsed => I::ChevronRight,
-                            _ => I::ChevronDown,
+                            ObjectKind::Schema => I::Folder,
+                            _ => I::Database,
                         },
                         if object.primary_key.is_some() {
                             AMBER
@@ -2391,14 +2503,24 @@ impl AppView {
                         window.prevent_default();
                         cx.stop_propagation();
                     }))
-                    // A click selects; a double click or Enter opens a
-                    // table, so a stray click never opens a tab.
+                    // One rule for every node: a click selects; a double
+                    // click or Enter opens a table, or expands or collapses
+                    // any other node (as its chevron and the arrows do), so a
+                    // stray click neither opens a tab nor hides a schema.
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.select_node(index, &click_path, window, cx);
+                        if !(event.is_keyboard() || event.click_count() >= 2) {
+                            return;
+                        }
                         if opens {
-                            if event.is_keyboard() || event.click_count() >= 2 {
-                                this.open_relation(index, &click_preview, window, cx);
-                            }
+                            this.open_relation(
+                                index,
+                                &click_path,
+                                &click_preview,
+                                false,
+                                window,
+                                cx,
+                            );
                         } else if expandable {
                             this.toggle_node(index, &click_path, cx);
                         }
@@ -2466,11 +2588,21 @@ impl AppView {
                             .map(|connection| connection.node_freshness(&path))
                     })
                     .unwrap_or_default();
+                let another_path = path.clone();
+                let another_preview = preview.clone();
+                let relation_path = path.clone();
                 menu.item(if opens {
                     PopupMenuItem::new(tr!("New query for table"))
                         .icon(I::SquareTerminal)
                         .on_click(run(Box::new(move |this, window, cx| {
-                            this.open_relation(index, &open_preview, window, cx)
+                            this.open_relation(
+                                index,
+                                &relation_path,
+                                &open_preview,
+                                false,
+                                window,
+                                cx,
+                            )
                         })))
                 } else {
                     PopupMenuItem::new(if collapsed {
@@ -2486,6 +2618,24 @@ impl AppView {
                     .on_click(run(Box::new(move |this, _, cx| {
                         this.toggle_node(index, &open_path, cx)
                     })))
+                })
+                // Opening a table again shows its tab; a second one is asked
+                // for explicitly.
+                .when(opens, |menu| {
+                    menu.item(
+                        PopupMenuItem::new(tr!("New query for table in another tab"))
+                            .icon(I::Plus)
+                            .on_click(run(Box::new(move |this, window, cx| {
+                                this.open_relation(
+                                    index,
+                                    &another_path,
+                                    &another_preview,
+                                    true,
+                                    window,
+                                    cx,
+                                )
+                            }))),
+                    )
                 })
                 .item(
                     PopupMenuItem::new(if refreshing_this {
@@ -2706,16 +2856,30 @@ impl AppView {
                                             "test-connection",
                                             I::PlugZap,
                                             if self.connection_testing.is_some() {
-                                                tr!("Testing…")
+                                                tr!("Cancel test")
                                             } else {
                                                 tr!("Test connection")
                                             },
                                         )
-                                        .when(
-                                            self.connection_testing.is_some()
-                                                || self.connection_saving,
-                                            |s| s.opacity(0.6).cursor_default(),
+                                        // Past two seconds the test shows how long it
+                                        // has taken; the same button cancels it.
+                                        .when_some(
+                                            self.connection_test_started
+                                                .map(|started| started.elapsed())
+                                                .filter(|elapsed| {
+                                                    self.connection_testing.is_some()
+                                                        && *elapsed
+                                                            >= std::time::Duration::from_secs(2)
+                                                }),
+                                            |s, elapsed| {
+                                                s.child(label(cell_format::duration(
+                                                    elapsed.as_millis() as u64,
+                                                )))
+                                            },
                                         )
+                                        .when(self.connection_saving, |s| {
+                                            s.opacity(0.6).cursor_default()
+                                        })
                                         .on_click(
                                             cx.listener(|this, _, _, cx| this.test_connection(cx)),
                                         ),

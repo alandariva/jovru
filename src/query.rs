@@ -136,6 +136,8 @@ pub struct QueryRun {
     current: RunId,
     planned: Vec<usize>,
     executions: usize,
+    /// When cancellation was requested, while the run is `Cancelling`.
+    cancel_requested: Option<Instant>,
 }
 
 impl QueryRun {
@@ -150,6 +152,7 @@ impl QueryRun {
             current: RunId(0),
             planned: Vec::new(),
             executions: 0,
+            cancel_requested: None,
         }
     }
 
@@ -200,6 +203,23 @@ impl QueryRun {
 
     pub fn is_running(&self) -> bool {
         matches!(self.state, RunState::Running { .. })
+    }
+
+    /// How long the run has been running, while it is `Running`.
+    pub fn running_for(&self) -> Option<std::time::Duration> {
+        match self.state {
+            RunState::Running { started_at } => Some(started_at.elapsed()),
+            _ => None,
+        }
+    }
+
+    /// How long ago cancellation was asked for, while the driver is still
+    /// stopping the run.
+    pub fn cancelling_for(&self) -> Option<std::time::Duration> {
+        match self.state {
+            RunState::Cancelling => self.cancel_requested.map(|at| at.elapsed()),
+            _ => None,
+        }
     }
 
     /// Status of the statement at `index` in the editor.
@@ -347,6 +367,7 @@ impl QueryRun {
             return false;
         }
         self.state = RunState::Cancelling;
+        self.cancel_requested = Some(Instant::now());
         for status in &mut self.statuses {
             if matches!(*status, StatementStatus::Running | StatementStatus::Pending) {
                 *status = StatementStatus::Cancelled;
@@ -714,9 +735,14 @@ mod tests {
     #[test]
     fn cancelling_waits_for_the_driver_and_discards_its_results() {
         let (mut run, plan) = started(TWO);
+        assert!(run.running_for().is_some());
+        assert_eq!(run.cancelling_for(), None);
         assert!(run.cancel());
         assert_eq!(run.state(), &RunState::Cancelling);
         assert!(run.is_active() && !run.is_running());
+        // The footer tells how long the driver has taken to stop.
+        assert_eq!(run.running_for(), None);
+        assert!(run.cancelling_for().is_some());
         assert_eq!(run.statuses(), [Cancelled, Cancelled]);
         // Cancelling twice changes nothing.
         assert!(!run.cancel());
@@ -728,6 +754,7 @@ mod tests {
         assert!(!run.finish(plan.id, outcome));
         assert_eq!(run.state(), &RunState::Cancelled);
         assert_eq!(run.statuses(), [Cancelled, Cancelled]);
+        assert_eq!(run.cancelling_for(), None);
     }
 
     #[test]
