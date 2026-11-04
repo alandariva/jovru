@@ -31,7 +31,10 @@ the mechanism for it as well.
    `user_version`. A file newer than the application is refused, as today. A
    failed step leaves the file at its previous version. The cache is not
    backed up: it can be rebuilt. Every step has a test that migrates a file
-   of the previous version.
+   of the previous version. Steps run on a connection of their own with
+   foreign keys off, as SQLite advises for schema changes, and a step fails
+   when `PRAGMA foreign_key_check` finds a broken reference (added with step
+   3, [ADR-0019](0019-compact-metadata-cache-keys.md)).
 2. **Step 2** adds `search_name TEXT` to `objects` and to `staging_objects`.
    - The value is the object's name lower-cased by Rust's Unicode case
      mapping, written by the application whenever an object is staged, and

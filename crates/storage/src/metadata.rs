@@ -38,7 +38,7 @@ CREATE TABLE scope_status (
 /// The metadata file's schema version: version 1 is [`SCHEMA`]; each later
 /// version is one step of [`STEPS`], applied in order. A released step is
 /// never edited ([ADR-0018](../../../docs/adr/0018-metadata-cache-migrations.md)).
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 
 /// Step 2: Unicode search names (filled by [`migrate`]) and the time of the
 /// last publication, complete or partial.
@@ -48,7 +48,82 @@ const STEP_2: &str = "ALTER TABLE objects ADD COLUMN search_name TEXT; ALTER TAB
 /// of the names, kept in step with `objects` by triggers.
 const STEP_2_INDEX: &str = "INSERT INTO objects_fts(objects_fts) VALUES('rebuild'); CREATE TRIGGER objects_fts_insert AFTER INSERT ON objects BEGIN INSERT INTO objects_fts(rowid,search_name) VALUES(new.rowid,new.search_name); END; CREATE TRIGGER objects_fts_delete AFTER DELETE ON objects BEGIN INSERT INTO objects_fts(objects_fts,rowid,search_name) VALUES('delete',old.rowid,old.search_name); END; CREATE TRIGGER objects_fts_update AFTER UPDATE OF search_name ON objects BEGIN INSERT INTO objects_fts(objects_fts,rowid,search_name) VALUES('delete',old.rowid,old.search_name); INSERT INTO objects_fts(rowid,search_name) VALUES(new.rowid,new.search_name); END;";
 
-const STEPS: [&str; 1] = [STEP_2];
+/// Step 3: compact keys and one copy of each path
+/// ([ADR-0019](../../../docs/adr/0019-compact-metadata-cache-keys.md)).
+/// Refreshes left behind by a closed application are dropped, as
+/// [`MetadataRepository::recover_interrupted`] would (foreign keys are off
+/// during a step, so nothing cascades), and the secondary indexes go while
+/// [`compact_keys`] rewrites every key and stored object; [`STEP_3_END`]
+/// drops the paths and builds the indexes again.
+const STEP_3: &str = "UPDATE scope_status SET state='interrupted',message='Refresh interrupted; previous cache preserved.' WHERE state='running'; DELETE FROM protected_scopes; DELETE FROM staging_objects; DELETE FROM refresh_runs; DROP INDEX objects_parent; DROP INDEX objects_search;";
+
+/// The end of step 3, once every key is rewritten from `path_json`.
+const STEP_3_END: &str = "ALTER TABLE objects DROP COLUMN path_json; ALTER TABLE staging_objects DROP COLUMN path_json; CREATE INDEX objects_parent ON objects(parent_key,kind,ordinal,name,path_key); CREATE INDEX objects_search ON objects(search_name,kind,name,path_key);";
+
+const STEPS: [&str; 2] = [STEP_2, STEP_3];
+
+/// How many objects step 3 rewrites per read, so a large cache is not held
+/// in memory at once.
+const COMPACT_CHUNK: i64 = 10_000;
+
+/// Rewrites the hex keys of objects and statuses as [`key`] builds them, and
+/// stores each object without its path. Old keys start with `7b` (the hex of
+/// `{`) and new ones with `{`, so no new key meets an old one. Returns
+/// whether there was any object to rewrite.
+async fn compact_keys(tx: &mut SqliteConnection) -> DriverResult<bool> {
+    let mut after = 0_i64;
+    loop {
+        let rows: Vec<(i64, String, String)> = sqlx::query_as(
+            "SELECT rowid,path_json,object_json FROM objects WHERE rowid>? ORDER BY rowid LIMIT ?",
+        )
+        .bind(after)
+        .bind(COMPACT_CHUNK)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(sql_error)?;
+        let Some(&(last, _, _)) = rows.last() else {
+            break;
+        };
+        // The chunk is written by one statement: one per row costs more than
+        // the rewrite itself.
+        let mut rewritten = Vec::with_capacity(rows.len());
+        for (rowid, path, object) in rows {
+            let path: ObjectPath = serde_json::from_str(&path).map_err(json_error)?;
+            let object: MetadataObject = serde_json::from_str(&object).map_err(json_error)?;
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.0.is_empty())
+                .map(|parent| key(&parent))
+                .transpose()?;
+            rewritten.push((rowid, key(&path)?, parent, stored(object)?));
+        }
+        sqlx::query("UPDATE objects SET path_key=r.value->>1,parent_key=r.value->>2,object_json=r.value->>3 FROM json_each(?) r WHERE objects.rowid=r.value->>0")
+            .bind(serde_json::to_string(&rewritten).map_err(json_error)?)
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        after = last;
+    }
+    let statuses: Vec<(String, String)> =
+        sqlx::query_as("SELECT scope_key,scope_json FROM scope_status")
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+    for (old, scope) in statuses {
+        let scope: ObjectPath = serde_json::from_str(&scope).map_err(json_error)?;
+        sqlx::query("UPDATE scope_status SET scope_key=? WHERE scope_key=?")
+            .bind(key(&scope)?)
+            .bind(old)
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+    }
+    sqlx::raw_sql(STEP_3_END)
+        .execute(&mut *tx)
+        .await
+        .map_err(sql_error)?;
+    Ok(after > 0)
+}
 
 /// How the search compares names: lower case by Unicode rules, so `ação`
 /// finds `AÇÃO`.
@@ -59,6 +134,10 @@ pub(crate) fn search_name(name: &str) -> String {
 /// Brings the file to [`VERSION`]: a new file gets version 1 and then every
 /// step; an older one only the steps it lacks, each in one transaction that
 /// ends by setting `user_version`. A file from a newer version is refused.
+///
+/// Steps run on a connection of their own with foreign keys off, as SQLite
+/// advises for schema changes, and check the keys before committing. The
+/// connection is closed afterwards, so the pool never hands it out.
 async fn migrate(pool: &SqlitePool) -> DriverResult<()> {
     let mut version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
@@ -73,12 +152,21 @@ async fn migrate(pool: &SqlitePool) -> DriverResult<()> {
         schema(pool, SCHEMA).await?;
         version = 1;
     }
+    if version == VERSION {
+        return Ok(());
+    }
+    let mut connection = pool.acquire().await.map_err(sql_error)?.detach();
+    sqlx::raw_sql("PRAGMA foreign_keys=OFF")
+        .execute(&mut connection)
+        .await
+        .map_err(sql_error)?;
+    let mut compacted = false;
     while version < VERSION {
         let step = usize::try_from(version - 1)
             .ok()
             .and_then(|index| STEPS.get(index))
             .ok_or_else(|| error("Unknown metadata cache version."))?;
-        let mut tx = pool.begin().await.map_err(sql_error)?;
+        let mut tx = connection.begin().await.map_err(sql_error)?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(*step))
             .execute(&mut *tx)
             .await
@@ -102,6 +190,16 @@ async fn migrate(pool: &SqlitePool) -> DriverResult<()> {
                 .await
                 .map_err(sql_error)?;
         }
+        if version + 1 == 3 {
+            compacted = compact_keys(&mut tx).await?;
+        }
+        let broken = sqlx::query("PRAGMA foreign_key_check")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        if broken.is_some() {
+            return Err(error("The metadata cache holds a broken reference."));
+        }
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "PRAGMA user_version={}",
             version + 1
@@ -112,6 +210,15 @@ async fn migrate(pool: &SqlitePool) -> DriverResult<()> {
         tx.commit().await.map_err(sql_error)?;
         version += 1;
     }
+    connection.close().await.map_err(sql_error)?;
+    // The rewrite leaves much of the file free; giving it back takes one pass
+    // over the file, once.
+    if compacted {
+        sqlx::raw_sql("VACUUM")
+            .execute(pool)
+            .await
+            .map_err(sql_error)?;
+    }
     Ok(())
 }
 
@@ -121,23 +228,48 @@ async fn migrate(pool: &SqlitePool) -> DriverResult<()> {
 const RETAIN_OBJECTS: &str = "DELETE FROM objects WHERE NOT EXISTS(SELECT 1 FROM json_each(?1) s WHERE objects.path_key=s.value OR (objects.path_key>=s.value||'/' AND objects.path_key<s.value||'0') OR (s.value>=objects.path_key||'/' AND s.value<objects.path_key||'0')) AND NOT EXISTS(SELECT 1 FROM json_each(?2) n WHERE objects.path_key=n.value OR (n.value>=objects.path_key||'/' AND n.value<objects.path_key||'0'))";
 const RETAIN_STATUSES: &str = "DELETE FROM scope_status WHERE scope_key<>'' AND NOT EXISTS(SELECT 1 FROM json_each(?1) s WHERE scope_status.scope_key=s.value OR (scope_status.scope_key>=s.value||'/' AND scope_status.scope_key<s.value||'0') OR (s.value>=scope_status.scope_key||'/' AND s.value<scope_status.scope_key||'0')) AND NOT EXISTS(SELECT 1 FROM json_each(?2) n WHERE scope_status.scope_key=n.value OR (n.value>=scope_status.scope_key||'/' AND n.value<scope_status.scope_key||'0'))";
 
-/// Hex-encoded structural segments make prefix ranges unambiguous and indexable.
-/// Neither dots, slashes, LIKE wildcards nor case folding can change node identity.
+/// A key is the path's segments, each as its JSON with `%` and `/` escaped
+/// (`%25`, `%2F`), joined by `/`. No segment holds the separator, so the
+/// descendants of a node are exactly the keys from `key/` up to `key0` ('0'
+/// follows '/'), and neither dots, LIKE wildcards nor case folding can change
+/// node identity ([ADR-0019](../../../docs/adr/0019-compact-metadata-cache-keys.md)).
 fn key(path: &ObjectPath) -> DriverResult<String> {
     path.0
         .iter()
         .map(|part| {
-            serde_json::to_vec(part)
-                .map(|bytes| {
-                    bytes
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>()
-                })
+            serde_json::to_string(part)
+                .map(|json| json.replace('%', "%25").replace('/', "%2F"))
                 .map_err(json_error)
         })
         .collect::<DriverResult<Vec<_>>>()
         .map(|parts| parts.join("/"))
+}
+
+/// The path a [`key`] was built from. Every `%` of a key starts an escape,
+/// so `%2F` is undone before `%25`.
+fn path_of(key: &str) -> DriverResult<ObjectPath> {
+    if key.is_empty() {
+        return Ok(ObjectPath::default());
+    }
+    key.split('/')
+        .map(|part| {
+            serde_json::from_str(&part.replace("%2F", "/").replace("%25", "%")).map_err(json_error)
+        })
+        .collect::<DriverResult<_>>()
+        .map(ObjectPath)
+}
+
+/// An object as the cache stores it: without its path, which its key holds.
+fn stored(mut object: MetadataObject) -> DriverResult<String> {
+    object.path = ObjectPath::default();
+    serde_json::to_string(&object).map_err(json_error)
+}
+
+/// An object read back from its stored JSON and its key.
+fn object_of(json: &str, key: &str) -> DriverResult<MetadataObject> {
+    let mut object: MetadataObject = serde_json::from_str(json).map_err(json_error)?;
+    object.path = path_of(key)?;
+    Ok(object)
 }
 
 /// The order a node's children are listed in, by kind: tables before views
@@ -297,7 +429,7 @@ async fn read_children(
     };
     let objects = rows
         .into_iter()
-        .map(|(value, _)| serde_json::from_str(&value).map_err(json_error))
+        .map(|(value, cursor)| object_of(&value, &cursor.path_key))
         .collect::<DriverResult<_>>()?;
     Ok(ChildPage { objects, next })
 }
@@ -323,14 +455,15 @@ async fn ensure_nodes(
         } else {
             Some(key(&parent)?)
         };
-        sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name) VALUES(?,?,?,?,?,NULL,?,?) ON CONFLICT(path_key) DO NOTHING")
+        let kind = serde_json::to_string(&object.kind).map_err(json_error)?;
+        let (name, search) = (object.name.clone(), search_name(&object.name));
+        sqlx::query("INSERT INTO objects(path_key,parent_key,kind,name,ordinal,object_json,search_name) VALUES(?,?,?,?,NULL,?,?) ON CONFLICT(path_key) DO NOTHING")
             .bind(key(&node)?)
             .bind(parent_key)
-            .bind(serde_json::to_string(&node).map_err(json_error)?)
-            .bind(serde_json::to_string(&object.kind).map_err(json_error)?)
-            .bind(&object.name)
-            .bind(serde_json::to_string(&object).map_err(json_error)?)
-            .bind(search_name(&object.name))
+            .bind(kind)
+            .bind(name)
+            .bind(stored(object)?)
+            .bind(search)
             .execute(&mut *tx)
             .await
             .map_err(sql_error)?;
@@ -690,14 +823,14 @@ impl MetadataRepository {
     /// Every cached object, for assertions; the application reads pages.
     #[cfg(test)]
     async fn all(&self) -> DriverResult<Vec<MetadataObject>> {
-        let values: Vec<String> =
-            sqlx::query_scalar("SELECT object_json FROM objects ORDER BY path_key")
+        let values: Vec<(String, String)> =
+            sqlx::query_as("SELECT object_json,path_key FROM objects ORDER BY path_key")
                 .fetch_all(&self.pool)
                 .await
                 .map_err(sql_error)?;
         values
             .into_iter()
-            .map(|value| serde_json::from_str(&value).map_err(json_error))
+            .map(|(value, key)| object_of(&value, &key))
             .collect()
     }
     /// Up to `limit` (1 to 200) objects whose name contains `query`, compared
@@ -728,17 +861,17 @@ impl MetadataRepository {
         // Three characters or more: through the trigram index. Fewer, which a
         // trigram cannot match: a scan of the name index, which holds only
         // the short folded names.
-        let values: Vec<String> = if folded.chars().count() >= 3 {
+        let values: Vec<(String, String)> = if folded.chars().count() >= 3 {
             let phrase = format!("\"{}\"", folded.replace('"', "\"\""));
-            sqlx::query_scalar("SELECT object_json FROM objects WHERE rowid IN (SELECT rowid FROM objects_fts WHERE objects_fts MATCH ?1) AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2))) ORDER BY name,path_key LIMIT ?3")
+            sqlx::query_as("SELECT object_json,path_key FROM objects WHERE rowid IN (SELECT rowid FROM objects_fts WHERE objects_fts MATCH ?1) AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2))) ORDER BY name,path_key LIMIT ?3")
                 .bind(phrase).bind(kinds).bind(limit).fetch_all(&self.pool).await.map_err(sql_error)?
         } else {
-            sqlx::query_scalar("SELECT object_json FROM objects WHERE path_key IN (SELECT path_key FROM objects INDEXED BY objects_search WHERE instr(search_name,?1)>0 AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2))) ORDER BY name,path_key LIMIT ?3) ORDER BY name,path_key")
+            sqlx::query_as("SELECT object_json,path_key FROM objects WHERE path_key IN (SELECT path_key FROM objects INDEXED BY objects_search WHERE instr(search_name,?1)>0 AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2))) ORDER BY name,path_key LIMIT ?3) ORDER BY name,path_key")
                 .bind(folded).bind(kinds).bind(limit).fetch_all(&self.pool).await.map_err(sql_error)?
         };
         let mut found = std::collections::HashMap::new();
-        for value in values {
-            let object: MetadataObject = serde_json::from_str(&value).map_err(json_error)?;
+        for (value, key) in values {
+            let object = object_of(&value, &key)?;
             found.insert(object.path.clone(), object);
         }
         // Every ancestor not found, read in one query.
@@ -754,15 +887,15 @@ impl MetadataRepository {
         }
         if !ancestors.is_empty() {
             let keys = serde_json::to_string(&ancestors).map_err(json_error)?;
-            let values: Vec<String> = sqlx::query_scalar(
-                "SELECT object_json FROM objects WHERE path_key IN (SELECT value FROM json_each(?))",
+            let values: Vec<(String, String)> = sqlx::query_as(
+                "SELECT object_json,path_key FROM objects WHERE path_key IN (SELECT value FROM json_each(?))",
             )
             .bind(keys)
             .fetch_all(&self.pool)
             .await
             .map_err(sql_error)?;
-            for value in values {
-                let object: MetadataObject = serde_json::from_str(&value).map_err(json_error)?;
+            for (value, key) in values {
+                let object = object_of(&value, &key)?;
                 found.insert(object.path.clone(), object);
             }
         }
@@ -864,7 +997,7 @@ impl MetadataRepository {
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(sql_error)?;
-        let rows = sqlx::query("SELECT path_json,kind FROM objects WHERE kind IN (SELECT value FROM json_each(?)) ORDER BY path_key")
+        let rows = sqlx::query("SELECT path_key,kind FROM objects WHERE kind IN (SELECT value FROM json_each(?)) ORDER BY path_key")
             .bind(kinds)
             .fetch_all(&mut *tx)
             .await
@@ -873,10 +1006,7 @@ impl MetadataRepository {
         let relations = rows
             .into_iter()
             .map(|row| {
-                let path: ObjectPath = serde_json::from_str(
-                    &row.try_get::<String, _>("path_json").map_err(sql_error)?,
-                )
-                .map_err(json_error)?;
+                let path = path_of(&row.try_get::<String, _>("path_key").map_err(sql_error)?)?;
                 let kind: ObjectKind =
                     serde_json::from_str(&row.try_get::<String, _>("kind").map_err(sql_error)?)
                         .map_err(json_error)?;
@@ -889,15 +1019,12 @@ impl MetadataRepository {
     /// The paths of every cached object of `kind`, in key order.
     pub async fn paths(&self, kind: ObjectKind) -> DriverResult<Vec<ObjectPath>> {
         let values: Vec<String> =
-            sqlx::query_scalar("SELECT path_json FROM objects WHERE kind=? ORDER BY path_key")
+            sqlx::query_scalar("SELECT path_key FROM objects WHERE kind=? ORDER BY path_key")
                 .bind(serde_json::to_string(&kind).map_err(json_error)?)
                 .fetch_all(&self.pool)
                 .await
                 .map_err(sql_error)?;
-        values
-            .into_iter()
-            .map(|value| serde_json::from_str(&value).map_err(json_error))
-            .collect()
+        values.iter().map(|value| path_of(value)).collect()
     }
 
     /// Keeps only what the user chose to introspect: the objects inside
@@ -1015,9 +1142,16 @@ impl PendingRefresh {
                 .filter(|parent| !parent.0.is_empty())
                 .map(|parent| key(&parent))
                 .transpose()?;
-            sqlx::query("INSERT INTO staging_objects(run_id,path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,path_key) DO UPDATE SET parent_key=excluded.parent_key,ordinal=excluded.ordinal,object_json=excluded.object_json,search_name=excluded.search_name")
-                .bind(self.id).bind(key(&object.path)?).bind(parent).bind(serde_json::to_string(&object.path).map_err(json_error)?)
-                .bind(serde_json::to_string(&object.kind).map_err(json_error)?).bind(&object.name).bind(object.ordinal).bind(serde_json::to_string(&object).map_err(json_error)?).bind(search_name(&object.name))
+            let path_key = key(&object.path)?;
+            let kind = serde_json::to_string(&object.kind).map_err(json_error)?;
+            let (name, ordinal, search) = (
+                object.name.clone(),
+                object.ordinal,
+                search_name(&object.name),
+            );
+            sqlx::query("INSERT INTO staging_objects(run_id,path_key,parent_key,kind,name,ordinal,object_json,search_name) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(run_id,path_key) DO UPDATE SET parent_key=excluded.parent_key,ordinal=excluded.ordinal,object_json=excluded.object_json,search_name=excluded.search_name")
+                .bind(self.id).bind(path_key).bind(parent)
+                .bind(kind).bind(name).bind(ordinal).bind(stored(object)?).bind(search)
                 .execute(&mut *tx).await.map_err(sql_error)?;
         }
         tx.commit().await.map_err(sql_error)
@@ -1061,7 +1195,7 @@ impl PendingRefresh {
         }
         sqlx::query("DELETE FROM objects WHERE (?='' OR path_key=? OR (path_key>=? AND path_key<?)) AND NOT EXISTS(SELECT 1 FROM protected_scopes p WHERE p.run_id=? AND (p.path_key='' OR objects.path_key=p.path_key OR (objects.path_key>=p.path_key||'/' AND objects.path_key<p.path_key||'0')))")
             .bind(&scope_key).bind(&scope_key).bind(lower).bind(upper).bind(self.id).execute(&mut *tx).await.map_err(sql_error)?;
-        let published = sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name) SELECT path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name FROM staging_objects WHERE run_id=? ON CONFLICT(path_key) DO UPDATE SET parent_key=excluded.parent_key,path_json=excluded.path_json,kind=excluded.kind,name=excluded.name,ordinal=excluded.ordinal,object_json=excluded.object_json,search_name=excluded.search_name")
+        let published = sqlx::query("INSERT INTO objects(path_key,parent_key,kind,name,ordinal,object_json,search_name) SELECT path_key,parent_key,kind,name,ordinal,object_json,search_name FROM staging_objects WHERE run_id=? ON CONFLICT(path_key) DO UPDATE SET parent_key=excluded.parent_key,kind=excluded.kind,name=excluded.name,ordinal=excluded.ordinal,object_json=excluded.object_json,search_name=excluded.search_name")
             .bind(self.id).execute(&mut *tx).await.map_err(sql_error)?.rows_affected();
         // The scope's own ancestors are outside it, so the driver does not
         // emit them; a scope that exists on the server still needs them.

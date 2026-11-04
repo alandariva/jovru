@@ -71,7 +71,7 @@ rejected instead of silently overwritten.
 | Table | Purpose |
 | --- | --- |
 | `metadata_info` | Single row: identity of the connection configuration the cache belongs to, and the cache version |
-| `objects` | Published objects. `path_key` encodes the structural path (hex segments, so dots, slashes, wildcards and case cannot collide); `parent_key` plus the `objects_parent` index serve paged child reads |
+| `objects` | Published objects. `path_key` is the only copy of the structural path: each segment's JSON with `%` and `/` escaped, joined by `/`, so dots, slashes, wildcards and case cannot collide and a node's descendants are one key range ([ADR-0019](adr/0019-compact-metadata-cache-keys.md)). `object_json` holds the object without its path, which reads rebuild from the key. `parent_key` plus the `objects_parent` index serve paged child reads |
 | `refresh_runs` | Refresh attempts; a partial unique index allows only one `running` run |
 | `staging_objects` | Objects of a run in progress |
 | `protected_scopes` | Subtrees the run could not read (permission warnings) and must keep |
@@ -149,7 +149,7 @@ again instead of mixing two reads.
 ## Migrations
 
 Each file's schema version is `PRAGMA user_version`. `config.db` is at
-version 1. The metadata files are at version 2
+version 1. The metadata files are at version 3
 ([ADR-0018](adr/0018-metadata-cache-migrations.md)): a new file is created at
 version 1 and then migrated, and an older one gets only the steps it lacks.
 A file with a higher version is refused ("created by a newer version of the
@@ -160,6 +160,7 @@ Metadata steps (`jykre-storage`, `metadata.rs`):
 | Step | Change |
 | --- | --- |
 | 2 | `objects.search_name` and `staging_objects.search_name`: the name in Unicode lower case, written with every object and filled for existing rows by the step; the index `objects_search` and the FTS5 trigram table `objects_fts`, kept in step with `objects` by triggers; `scope_status.last_published_at`: when a refresh last published the scope, complete or partial |
+| 3 | Compact keys ([ADR-0019](adr/0019-compact-metadata-cache-keys.md)): every `path_key`, `parent_key` and `scope_key` rewritten from hex to escaped JSON, `object_json` stored without the path, `path_json` dropped from `objects` and `staging_objects`; refreshes left running are dropped and their scopes marked interrupted. The step runs with foreign keys off, checks them before committing and vacuums the file afterwards. A cache of 500,000 objects goes from 892 MB to 461 MB (1.5 GB to 753 MB as a refresh leaves it) in about 20 s, once |
 
 The standard for schema changes:
 

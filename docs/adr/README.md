@@ -41,4 +41,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0016](0016-keys-defaults-and-relation-kinds.md) | Keys, defaults and relation kinds in the metadata model | Proposed |
 | [0017](0017-driver-metadata-contract-batch.md) | Cache identity, reading levels and on-demand inspection in the driver contract | Proposed |
 | [0018](0018-metadata-cache-migrations.md) | Numbered migrations for the metadata cache, starting with search names and publication times | Proposed |
-| [0019](0019-compact-metadata-cache-keys.md) | Compact keys and a single copy of each path in the metadata cache | Proposed |
+| [0019](0019-compact-metadata-cache-keys.md) | Compact keys and a single copy of each path in the metadata cache | Accepted |

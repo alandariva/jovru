@@ -11,9 +11,8 @@ Os números `MET-xxx` são os da auditoria original, para rastreio.
 
 | Situação | Quantidade | IDs |
 | --- | ---: | --- |
-| Fechados | 21 | MET-001 a MET-021 |
-| Parcial (proposta aguardando aprovação) | 1 | MET-022 |
-| **Pendências neste arquivo** | **1** | MET-022, mais as validações abaixo |
+| Fechados | 22 | MET-001 a MET-022 |
+| **Pendências neste arquivo** | **0** | Só as validações abaixo |
 
 **O que foi entregue**
 
@@ -89,24 +88,20 @@ Os números `MET-xxx` são os da auditoria original, para rastreio.
   - Databricks: erros de permissão por catálogo ou schema.
 - **MET-020 e MET-021.** Caminhos de publicação sem uso removidos; nós
   expandidos guardados por conexão.
+- **MET-022.** Chaves compactas ([ADR-0019](adr/0019-compact-metadata-cache-keys.md),
+  passo 3 da migração):
+  - a chave é o JSON de cada segmento com `%` e `/` escapados, no lugar do
+    hexadecimal;
+  - `path_json` saiu, e o `object_json` é gravado sem o caminho, que a
+    leitura reconstrói pela chave;
+  - o passo roda com chaves estrangeiras desligadas, confere as referências
+    antes do commit e compacta o arquivo uma vez.
+
+  Um cache de 500 mil objetos caiu de 892 MB para 461 MB (de 1,5 GB para
+  753 MB como um refresh o deixa). A migração leva cerca de 20 s nesse
+  tamanho, uma vez, fora da thread de UI.
 - **Diálogo de conexão.** Uma escolha nova não pode ser salva com a lista de
   outro servidor: é preciso carregá-la de novo.
-
-## Pendente
-
-### MET-022 (parcial): o cache guarda o caminho várias vezes
-
-- **Medido:** um cache sintético de 500 mil tabelas ocupa 775 MB, e cerca de
-  três quartos disso é o caminho repetido. Ele aparece em:
-  - `path_key` em hexadecimal (111 MB);
-  - `parent_key` (73,5 MB);
-  - `path_json` (57 MB);
-  - dentro do `object_json`;
-  - nos índices.
-- **Proposta:** a [ADR-0019](adr/0019-compact-metadata-cache-keys.md)
-  (*Proposed*) prevê chaves compactas e uma só cópia do caminho, com ganho
-  estimado de 40 a 50%. A mudança reescreve todas as chaves de todo cache e
-  aguarda aprovação.
 
 ## Validações pendentes
 
@@ -116,6 +111,6 @@ Os números `MET-xxx` são os da auditoria original, para rastreio.
 | Frame do explorer com 5 mil nós expandidos (critério do MET-013) | Não medido |
 | Databricks com CLI autenticado e workspace de teste: leitura em paralelo, `omit_columns`, funções, `view_definition`, defaults em `type_json`, `include_browse` | Não feita (só mock HTTP) |
 | Tempo da consulta `pg_catalog` em um catálogo grande | Medido em 3/11/2026, PostgreSQL 18 em Docker local, catálogo sintético de 100 schemas × 500 tabelas × 10 colunas, com PK e FK (50 mil tabelas, 500 mil colunas), consultas do driver executadas por `psql`. Um schema completo: 116 a 141 ms. Um schema só com nomes: 60 a 66 ms. Uma tabela: 54 a 63 ms. Foreign keys de um schema: 14 ms. Banco inteiro completo: 5,2 a 6,1 s (timeout de 300 s). Banco inteiro só com nomes: 0,57 s. Foreign keys do banco inteiro: 0,7 a 0,9 s. A leitura de uma tabela custa quase o mesmo que a de um schema, porque o filtro por raiz de partição (`OR rt.name = $2`) não usa índice. Não há orçamento para leituras remotas |
-| Busca de 1 ou 2 caracteres com 500 mil objetos | 114 ms, acima do orçamento de 50 ms; registrada como desvio em [Performance](performance.md) |
-| Abertura a frio do cache com 500 mil objetos | Cerca de 700 ms, uma vez por conexão no startup, fora da thread de UI |
-| ADR-0015 a ADR-0019 | *Proposed*; aguardam aceitação do mantenedor |
+| Busca de 1 ou 2 caracteres com 500 mil objetos | 93 ms depois das chaves compactas, acima do orçamento de 50 ms; registrada como desvio em [Performance](performance.md) |
+| Abertura a frio do cache com 500 mil objetos | Cerca de 680 ms, uma vez por conexão no startup, fora da thread de UI |
+| ADR-0015 a ADR-0018 | *Proposed*; aguardam aceitação do mantenedor. A ADR-0019 foi aceita em 3/11/2026 |
