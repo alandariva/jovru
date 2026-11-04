@@ -928,9 +928,14 @@ pub fn release<T: Send + 'static>(value: T) {
     }
 }
 
-/// A preview of the relation at `path`, quoted by the driver's rules.
-pub fn preview_sql(driver: &dyn Driver, path: &ObjectPath) -> String {
-    format!("SELECT * FROM {} LIMIT 100;", driver.relation_name(path))
+/// A query for the relation at `path`, quoted by the driver's rules, that
+/// reads at most `row_limit` rows: the connection's row limit, so the first
+/// page holds what the limit allows and the next pages follow it.
+pub fn preview_sql(driver: &dyn Driver, path: &ObjectPath, row_limit: u32) -> String {
+    format!(
+        "SELECT * FROM {} LIMIT {row_limit};",
+        driver.relation_name(path)
+    )
 }
 
 #[cfg(test)]
@@ -1023,24 +1028,25 @@ mod tests {
             .child(ObjectKind::Schema, "a.b")
             .child(ObjectKind::Table, "t\"x");
         assert_eq!(
-            preview_sql(&PostgresDriver, &path),
+            preview_sql(&PostgresDriver, &path, 100),
             "SELECT * FROM \"a.b\".\"t\"\"x\" LIMIT 100;"
         );
         let path = ObjectPath::default()
             .child(ObjectKind::Database, "d`b")
             .child(ObjectKind::Table, "orders")
             .child(ObjectKind::Column, "id");
+        // The connection's row limit, not a fixed 100.
         assert_eq!(
-            preview_sql(&MySqlDriver, &path),
-            "SELECT * FROM `d``b`.`orders` LIMIT 100;"
+            preview_sql(&MySqlDriver, &path, 1_000),
+            "SELECT * FROM `d``b`.`orders` LIMIT 1000;"
         );
         let path = ObjectPath::default()
             .child(ObjectKind::Catalog, "cat")
             .child(ObjectKind::Schema, "sch")
             .child(ObjectKind::Table, "a`b");
         assert_eq!(
-            preview_sql(&DatabricksDriver, &path),
-            "SELECT * FROM `cat`.`sch`.`a``b` LIMIT 100;"
+            preview_sql(&DatabricksDriver, &path, 50_000),
+            "SELECT * FROM `cat`.`sch`.`a``b` LIMIT 50000;"
         );
     }
 

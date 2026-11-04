@@ -397,7 +397,7 @@ impl AppView {
                 }
                 // The demo keeps its fixed tabs and saves nothing.
                 let restored = match state {
-                    _ if std::env::var_os("JYKRE_DEMO").is_some() => false,
+                    _ if super::demo::enabled() => false,
                     Ok(state) => this.restore_state(state, window, cx),
                     Err(error) => {
                         problems.push(tr!(
@@ -527,6 +527,20 @@ impl AppView {
     }
 
     pub(super) fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.save_connection_confirmed(false, window, cx);
+    }
+
+    /// Saves the form. When the settings change for a connection whose tabs
+    /// run a query or hold an open transaction, it asks first (unless
+    /// `confirmed`): applying them cancels the query and closes the session,
+    /// which rolls the transaction back. Otherwise the tabs keep their
+    /// results and session until their next run.
+    fn save_connection_confirmed(
+        &mut self,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.connection_saving {
             return;
         }
@@ -549,6 +563,55 @@ impl AppView {
             }
         };
         let editing = self.editing_connection;
+        if !confirmed && let Some(index) = editing {
+            let connection = &self.connections[index];
+            let changed = connection
+                .input
+                .as_ref()
+                .is_some_and(|current| current.config != input.config);
+            let (busy, transaction) = self
+                .panels
+                .values()
+                .map(|panel| panel.read(cx))
+                .filter(|panel| panel.connection_name() == connection.name)
+                .fold((false, false), |(busy, transaction), panel| {
+                    (
+                        busy || panel.is_busy(),
+                        transaction || panel.has_open_transaction(),
+                    )
+                });
+            if changed && (busy || transaction) {
+                let description = match (busy, transaction) {
+                    (true, true) => tr!(
+                        "A query is running and a transaction is open in tabs of this connection. Saving cancels the query and closes their sessions, which rolls the transaction back."
+                    ),
+                    (true, false) => tr!(
+                        "A query is running in a tab of this connection. Saving cancels it and closes its session."
+                    ),
+                    _ => tr!(
+                        "A transaction is open in a tab of this connection. Saving closes its session, which rolls the transaction back."
+                    ),
+                };
+                let view = cx.entity().downgrade();
+                super::confirm(
+                    window,
+                    cx,
+                    super::Confirmation {
+                        title: tr!("Apply the new settings now?").to_string(),
+                        description: description.to_string(),
+                        ok: tr!("Save and apply"),
+                        cancel: tr!("Keep editing"),
+                        focus: super::ConfirmFocus::Dialog,
+                    },
+                    move |window, cx| {
+                        let _ = view.update(cx, |this, cx| {
+                            this.save_connection_confirmed(true, window, cx)
+                        });
+                    },
+                );
+                return;
+            }
+        }
         let mut profile = editing
             .and_then(|index| self.connections[index].profile.clone())
             .unwrap_or_else(|| ConnectionProfile {
@@ -814,6 +877,19 @@ impl AppView {
             RefreshJob::Node(scope.clone())
         };
         if connection.refreshing.is_none() {
+            if connection
+                .input
+                .as_ref()
+                .is_some_and(connection_store::needs_password)
+            {
+                self.ask_password(
+                    index,
+                    Box::new(move |this, _, cx| this.start_refresh(index, job, cx)),
+                    Box::new(|_, _| {}),
+                    cx,
+                );
+                return;
+            }
             self.start_refresh(index, job, cx);
             return;
         }
@@ -1210,7 +1286,7 @@ impl AppView {
         else {
             return;
         };
-        let sql = backend::preview_sql(&*driver, path);
+        let sql = backend::preview_sql(&*driver, path, connection.row_limit);
         let title = path
             .0
             .last()
@@ -1252,6 +1328,7 @@ impl AppView {
                 connection.profile.clone().map(|profile| (index, profile))
             })
             .collect();
+        let row_limits: Vec<u32> = self.connections.iter().map(|c| c.row_limit).collect();
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
             cx.background_executor()
@@ -1308,10 +1385,12 @@ impl AppView {
                                     .into_iter()
                                     .filter(|object| object.kind.is_relation())
                                 {
+                                    let row_limit =
+                                        row_limits.get(index).copied().unwrap_or(DEFAULT_ROW_LIMIT);
                                     this.command_matches.push((
                                         index,
                                         object.name.clone(),
-                                        backend::preview_sql(&*driver, &object.path),
+                                        backend::preview_sql(&*driver, &object.path, row_limit),
                                     ));
                                 }
                             } else {
@@ -1854,7 +1933,7 @@ impl AppView {
                     })
                     .unwrap_or_default();
                 menu.item(if opens {
-                    PopupMenuItem::new(tr!("Open preview"))
+                    PopupMenuItem::new(tr!("New query for table"))
                         .icon(I::SquareTerminal)
                         .on_click(run(Box::new(move |this, window, cx| {
                             this.open_relation(index, &open_path, window, cx)

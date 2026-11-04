@@ -22,7 +22,7 @@ impl PerformanceView {
             for rows in [1000, 100_000] {
                 let data = cx.background_executor().spawn(async move { metrics::fixture(rows) }).await;
                 if weak.update(cx, |view, cx| {
-                    view.grid.update(cx, |grid, cx| grid.set_page(Rc::new(data), false, 0, cx));
+                    view.grid.update(cx, |grid, cx| grid.set_page(Rc::new(data), false, 0, None, cx));
                     cx.notify();
                 }).is_err() { return; }
                 cx.background_executor().timer(Duration::from_secs(2)).await;

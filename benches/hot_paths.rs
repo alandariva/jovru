@@ -122,7 +122,7 @@ fn statement_splitting(c: &mut Criterion) {
         })
         .collect();
     c.bench_function("split a 10,000-statement script", |b| {
-        b.iter(|| jykre::sql::statements(black_box(&script)))
+        b.iter(|| jykre::sql::statements(black_box(&script), None))
     });
 }
 

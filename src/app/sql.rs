@@ -4,12 +4,25 @@ use gpui_kit::component::input::{
     EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter, Rope,
 };
 use gpui_kit::*;
+use jykre::drivers::SqlDialect;
 use jykre::sql::{TokenKind, tokens};
 use std::ops::Range;
 
+/// Highlights by the rules of the tab's dialect, so colours, statement
+/// splitting and formatting agree on where literals and comments end.
 #[derive(Default)]
 pub struct SqlHighlighter {
+    dialect: Option<SqlDialect>,
     tokens: Vec<(Range<usize>, u32)>,
+}
+
+impl SqlHighlighter {
+    pub fn new(dialect: Option<SqlDialect>) -> Self {
+        Self {
+            dialect,
+            tokens: Vec::new(),
+        }
+    }
 }
 
 impl InputHighlighter for SqlHighlighter {
@@ -25,11 +38,11 @@ impl InputHighlighter for SqlHighlighter {
         _: &mut Window,
         _: &mut Context<EditorState>,
     ) {
-        self.tokens = tokens(&text.to_string())
+        self.tokens = tokens(&text.to_string(), self.dialect)
             .into_iter()
             .filter_map(|(range, kind)| {
                 let color = match kind {
-                    TokenKind::Comment => FAINT,
+                    TokenKind::Comment | TokenKind::Executable => FAINT,
                     TokenKind::String => MINT,
                     TokenKind::Number => 0xd9b584,
                     TokenKind::Word => return None,

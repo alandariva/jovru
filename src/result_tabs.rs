@@ -1,10 +1,11 @@
 //! The result tabs of a query tab, independent of the view that shows them.
 //!
 //! Each statement a run executes gets a result tab. Where the tabs go depends
-//! on how the run started ([`Placement`]): Ctrl+Enter replaces the last tab
-//! created, Ctrl+Shift+Enter opens new ones and running everything replaces
-//! them all. A tab holds its result page by page: the first page arrives with
-//! the run, the next ones are read from the result the session keeps open.
+//! on how the run started ([`Placement`]): Ctrl+Enter replaces the tab on
+//! screen, Ctrl+Shift+Enter opens new ones and running everything replaces
+//! them all. A pinned tab is never replaced by a new run. A tab holds its
+//! result page by page: the first page arrives with the run, the next ones
+//! are read from the result the session keeps open.
 use crate::error_report::ErrorReport;
 use crate::result::{ResultColumn, ResultData, ResultLimit};
 use std::rc::Rc;
@@ -12,13 +13,20 @@ use std::rc::Rc;
 /// Where the results of a run go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
-    /// The first result replaces the last tab created; any others open new
-    /// tabs (Ctrl+Enter).
-    ReplaceLast,
+    /// The first result replaces the tab on screen or, when that one is
+    /// pinned, the last unpinned tab created; any others open new tabs
+    /// (Ctrl+Enter).
+    ReplaceActive,
     /// Every result opens a new tab (Ctrl+Shift+Enter).
     New,
-    /// The run's results replace every tab (Ctrl+Alt+Enter).
+    /// The run's results replace every unpinned tab (Ctrl+Alt+Enter).
     ReplaceAll,
+    /// The result replaces this tab, pinned or not: its own statement run
+    /// again. A tab that is gone gives way to a new one.
+    Replace(ResultId),
+    /// No tab: the outcome is only logged (session commands such as
+    /// `COMMIT`).
+    Hidden,
 }
 
 /// Identity of a result tab, stable while the tab is open.
@@ -59,6 +67,8 @@ pub struct ResultTab {
     pub limit: Option<ResultLimit>,
     /// The demo's result has a chart.
     pub sales: bool,
+    /// No run replaces a pinned tab; only closing it removes it.
+    pub pinned: bool,
     pages: Vec<Page>,
     /// Pages released from the start to stay under the memory ceiling.
     released: usize,
@@ -83,6 +93,7 @@ impl ResultTab {
             elapsed_ms: 0,
             limit: None,
             sales: false,
+            pinned: false,
             pages: Vec::new(),
             released: 0,
             page: 0,
@@ -222,6 +233,13 @@ impl ResultTabs {
         }
     }
 
+    /// Pins or unpins the tab at `index`.
+    pub fn toggle_pin(&mut self, index: usize) {
+        if let Some(tab) = self.tabs.get_mut(index) {
+            tab.pinned = !tab.pinned;
+        }
+    }
+
     /// Closes the tab at `index`; the one before it becomes active.
     pub fn close(&mut self, index: usize) {
         if index >= self.tabs.len() {
@@ -242,27 +260,48 @@ impl ResultTabs {
         for tab in &mut self.tabs {
             tab.close_rest();
         }
+        if placement == Placement::Hidden {
+            return statements
+                .iter()
+                .map(|_| {
+                    self.next_id += 1;
+                    ResultId(self.next_id - 1)
+                })
+                .collect();
+        }
         if placement == Placement::ReplaceAll {
-            let pages = self.tabs.drain(..).flat_map(|tab| tab.pages).collect();
-            self.drop_pages(pages);
-            // A fresh set of results counts from one again.
-            self.next_number = 1;
+            let active = self.active().map(|tab| tab.id);
+            let (pinned, replaced) = std::mem::take(&mut self.tabs)
+                .into_iter()
+                .partition::<Vec<_>, _>(|tab| tab.pinned);
+            self.tabs = pinned;
+            self.drop_pages(replaced.into_iter().flat_map(|tab| tab.pages).collect());
+            self.active = active
+                .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+                .unwrap_or_default();
+            // A fresh set of results counts from one again, after the pinned
+            // ones.
+            self.next_number = self.tabs.iter().map(|tab| tab.number).max().unwrap_or(0) + 1;
         }
         let mut ids = Vec::with_capacity(statements.len());
         let mut first = None;
         for (position, sql) in statements.iter().enumerate() {
             let id = ResultId(self.next_id);
             self.next_id += 1;
-            let reuse = (position == 0 && placement == Placement::ReplaceLast)
-                .then(|| self.last_created())
-                .flatten();
+            let reuse = match placement {
+                Placement::ReplaceActive if position == 0 => self.replace_target(),
+                Placement::Replace(old) if position == 0 => {
+                    self.tabs.iter().position(|tab| tab.id == old)
+                }
+                _ => None,
+            };
             let index = match reuse {
                 Some(index) => {
                     let number = self.tabs[index].number;
-                    let old = std::mem::replace(
-                        &mut self.tabs[index],
-                        ResultTab::new(id, number, sql.clone()),
-                    );
+                    let mut tab = ResultTab::new(id, number, sql.clone());
+                    // Running a pinned tab's own statement again keeps it pinned.
+                    tab.pinned = self.tabs[index].pinned;
+                    let old = std::mem::replace(&mut self.tabs[index], tab);
                     self.drop_pages(old.pages);
                     index
                 }
@@ -282,11 +321,16 @@ impl ResultTabs {
         ids
     }
 
-    /// The tab created last, which Ctrl+Enter replaces.
-    fn last_created(&self) -> Option<usize> {
+    /// The tab Ctrl+Enter replaces: the one on screen, or the last unpinned
+    /// tab created when that one is pinned.
+    fn replace_target(&self) -> Option<usize> {
+        if self.active().is_some_and(|tab| !tab.pinned) {
+            return Some(self.active);
+        }
         self.tabs
             .iter()
             .enumerate()
+            .filter(|(_, tab)| !tab.pinned)
             .max_by_key(|(_, tab)| tab.number)
             .map(|(index, _)| index)
     }
@@ -465,23 +509,71 @@ mod tests {
     }
 
     #[test]
-    fn placements_replace_the_last_tab_open_new_ones_or_replace_all() {
+    fn placements_replace_the_tab_on_screen_open_new_ones_or_replace_all() {
         let mut tabs = ResultTabs::new(usize::MAX);
-        tabs.begin(&sql(&["a"]), Placement::ReplaceLast);
-        tabs.begin(&sql(&["b"]), Placement::ReplaceLast);
+        tabs.begin(&sql(&["a"]), Placement::ReplaceActive);
+        tabs.begin(&sql(&["b"]), Placement::ReplaceActive);
         assert_eq!(numbers(&tabs), [(1, "b".to_owned())]);
         tabs.begin(&sql(&["c"]), Placement::New);
         tabs.select(0);
-        // Ctrl+Enter replaces the tab created last, not the one on screen.
-        tabs.begin(&sql(&["d", "e"]), Placement::ReplaceLast);
+        // Ctrl+Enter replaces the tab on screen, not the one created last.
+        tabs.begin(&sql(&["d", "e"]), Placement::ReplaceActive);
         assert_eq!(
             numbers(&tabs),
-            [(1, "b".into()), (2, "d".into()), (3, "e".into())]
+            [(1, "d".into()), (2, "c".into()), (3, "e".into())]
         );
-        assert_eq!(tabs.active_index(), 1);
+        assert_eq!(tabs.active_index(), 0);
         tabs.begin(&sql(&["x", "y"]), Placement::ReplaceAll);
         assert_eq!(numbers(&tabs), [(1, "x".into()), (2, "y".into())]);
         assert_eq!(tabs.active_index(), 0);
+    }
+
+    #[test]
+    fn a_pinned_tab_survives_every_new_run() {
+        let mut tabs = ResultTabs::new(usize::MAX);
+        tabs.begin(&sql(&["kept"]), Placement::New);
+        tabs.toggle_pin(0);
+        // With the pinned tab on screen and no other, a new tab opens.
+        tabs.begin(&sql(&["a"]), Placement::ReplaceActive);
+        tabs.begin(&sql(&["b"]), Placement::New);
+        tabs.select(0);
+        // With it on screen, Ctrl+Enter replaces the last unpinned tab.
+        tabs.begin(&sql(&["c"]), Placement::ReplaceActive);
+        assert_eq!(
+            numbers(&tabs),
+            [(1, "kept".into()), (2, "a".into()), (3, "c".into())]
+        );
+        assert_eq!(tabs.active_index(), 2);
+        // Running everything keeps it and numbers the new tabs after it.
+        tabs.begin(&sql(&["x", "y"]), Placement::ReplaceAll);
+        assert_eq!(
+            numbers(&tabs),
+            [(1, "kept".into()), (2, "x".into()), (3, "y".into())]
+        );
+        assert!(tabs.tabs()[0].pinned);
+        // Running its own statement again replaces it and keeps it pinned.
+        let id = tabs.tabs()[0].id;
+        tabs.begin(&sql(&["kept"]), Placement::Replace(id));
+        assert!(tabs.tabs()[0].pinned && tabs.tabs()[0].id != id);
+        assert_eq!(tabs.active_index(), 0);
+        // A tab that is gone gives way to a new one.
+        tabs.begin(&sql(&["z"]), Placement::Replace(id));
+        assert_eq!(tabs.tabs().len(), 4);
+        tabs.toggle_pin(0);
+        assert!(!tabs.tabs()[0].pinned);
+    }
+
+    #[test]
+    fn hidden_runs_open_no_tab() {
+        let mut tabs = ResultTabs::new(usize::MAX);
+        tabs.begin(&sql(&["a"]), Placement::New);
+        let ids = tabs.begin(&sql(&["COMMIT"]), Placement::Hidden);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(numbers(&tabs), [(1, "a".to_owned())]);
+        // Its outcome changes no tab.
+        tabs.complete(ids[0], Completed::default());
+        tabs.fail(ids[0], ErrorReport::database("x"));
+        assert_eq!(tabs.tabs()[0].state, ResultState::Running);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! from it, so they cannot disagree. Every transition takes the [`RunId`] that
 //! [`QueryRun::start`] returned, so the outcome of a superseded run is
 //! discarded instead of overwriting a newer one.
-use crate::drivers::{DriverError, ErrorCode};
+use crate::drivers::{DriverError, ErrorCode, SqlDialect};
 use crate::{sql, tr};
 use std::ops::Range;
 use std::time::Instant;
@@ -23,6 +23,29 @@ pub enum Scope {
     /// Exactly the selected text, split into statements; a fragment that is
     /// not a whole statement runs as written (Ctrl+Enter with a selection).
     Selection(Range<usize>),
+    /// One statement exactly as it ran before, to run a result again. It is
+    /// not split, and the editor's cursor and selection play no part. The
+    /// gutter shows the outcome on the editor statement that starts at
+    /// `origin` when it still holds the same text.
+    Again { sql: String, origin: Option<usize> },
+}
+
+/// The editor index of a planned statement that is not in the editor (a
+/// result run again after its statement changed). The gutter shows nothing
+/// for it.
+pub const DETACHED: usize = usize::MAX;
+
+/// What a run shortcut (Ctrl+Enter and the like) does now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortcutAction {
+    /// Nothing is running: start the run.
+    Run,
+    /// A run is active: ask whether to cancel it. A run shortcut never
+    /// cancels by itself, so pressing it again cannot stop a long `UPDATE`
+    /// by accident.
+    ConfirmCancel,
+    /// The previous run is still stopping: nothing starts until it ends.
+    WaitStopping,
 }
 
 /// What the gutter shows next to one statement.
@@ -107,6 +130,9 @@ pub struct QueryRun {
     status_sql: Vec<String>,
     /// The editor's text as last seen.
     sql: String,
+    /// How the editor's text splits into statements; `None` for a tab
+    /// without a connection.
+    dialect: Option<SqlDialect>,
     current: RunId,
     planned: Vec<usize>,
     executions: usize,
@@ -114,12 +140,13 @@ pub struct QueryRun {
 
 impl QueryRun {
     pub fn new(sql: &str) -> Self {
-        let status_sql = sql::normalized_statements(sql);
+        let status_sql = sql::normalized_statements(sql, None);
         Self {
             state: RunState::Idle,
             statuses: vec![StatementStatus::Ready; status_sql.len()],
             status_sql,
             sql: sql.to_owned(),
+            dialect: None,
             current: RunId(0),
             planned: Vec::new(),
             executions: 0,
@@ -128,6 +155,38 @@ impl QueryRun {
 
     pub fn state(&self) -> &RunState {
         &self.state
+    }
+
+    /// Splits the editor's text by the rules of `dialect` from now on.
+    /// Statements whose boundaries change go back to `Ready`.
+    pub fn set_dialect(&mut self, dialect: Option<SqlDialect>) {
+        if self.dialect != dialect {
+            self.dialect = dialect;
+            if !self.is_active() {
+                self.sync();
+            }
+        }
+    }
+
+    pub fn dialect(&self) -> Option<SqlDialect> {
+        self.dialect
+    }
+
+    /// What a run shortcut does in the current state.
+    pub fn shortcut(&self) -> ShortcutAction {
+        match self.state {
+            RunState::Running { .. } => ShortcutAction::ConfirmCancel,
+            RunState::Cancelling => ShortcutAction::WaitStopping,
+            _ => ShortcutAction::Run,
+        }
+    }
+
+    /// The cursor is on no statement of `sql` although there are some: the
+    /// user is told to put it on the statement to run, rather than running a
+    /// neighbour.
+    pub fn off_statement(&self, sql: &str, scope: &Scope) -> bool {
+        matches!(scope, Scope::Cursor(cursor) if sql::statement_at(sql, *cursor, self.dialect).is_none())
+            && !sql::statements(sql, self.dialect).is_empty()
     }
 
     /// The identity of the last run started.
@@ -177,7 +236,8 @@ impl QueryRun {
         if self.is_active() {
             return None;
         }
-        let ranges = sql::statements(sql);
+        let dialect = self.dialect;
+        let ranges = sql::statements(sql, dialect);
         let whole = |index: usize| -> Option<(usize, String)> {
             Some((index, sql.get(ranges.get(index)?.clone())?.to_owned()))
         };
@@ -187,13 +247,13 @@ impl QueryRun {
         let (statements, starts): (Vec<_>, Vec<_>) = match scope {
             Scope::All => (0..ranges.len()).filter_map(whole_at).unzip(),
             Scope::Statement(index) => whole_at(index).into_iter().unzip(),
-            Scope::Cursor(cursor) => sql::statement_at(sql, cursor)
+            Scope::Cursor(cursor) => sql::statement_at(sql, cursor, dialect)
                 .and_then(whole_at)
                 .into_iter()
                 .unzip(),
             Scope::Selection(selection) => {
                 let text = sql.get(selection.clone()).unwrap_or_default();
-                sql::statements(text)
+                sql::statements(text, dialect)
                     .into_iter()
                     .map(|range| {
                         // The gutter shows the outcome on the editor statement
@@ -206,6 +266,21 @@ impl QueryRun {
                         ((index, text[range].to_owned()), start)
                     })
                     .unzip()
+            }
+            Scope::Again { sql: text, origin } => {
+                if text.trim().is_empty() {
+                    (Vec::new(), Vec::new())
+                } else {
+                    let index = origin
+                        .and_then(|origin| {
+                            ranges.iter().position(|range| {
+                                range.start == origin
+                                    && sql.get(range.clone()) == Some(text.as_str())
+                            })
+                        })
+                        .unwrap_or(DETACHED);
+                    (vec![(index, text)], vec![origin.unwrap_or_default()])
+                }
             }
         };
         if statements.is_empty() {
@@ -310,7 +385,11 @@ impl QueryRun {
                     }
                 }
                 self.state = RunState::Failed {
-                    error: tr!("Error in query {0}: {1}", index + 1, error),
+                    error: if index == DETACHED {
+                        error.to_owned()
+                    } else {
+                        tr!("Error in query {0}: {1}", index + 1, error)
+                    },
                 };
                 self.sync();
                 false
@@ -350,9 +429,12 @@ impl QueryRun {
                     Some(error) if completed == 0 => RunState::Failed {
                         error: error.to_string(),
                     },
+                    // Whether the completed statements are committed depends
+                    // on the session's transaction, which the workspace shows
+                    // on its own; nothing is claimed here.
                     Some(error) => RunState::Failed {
                         error: tr!(
-                            "{0} statement(s) completed before the failure: {1}. Previous statements were not rolled back automatically.",
+                            "{0} statement(s) completed before the failure: {1}",
                             completed,
                             error
                         ),
@@ -424,7 +506,7 @@ impl QueryRun {
     }
 
     fn sync(&mut self) {
-        let statements = sql::normalized_statements(&self.sql);
+        let statements = sql::normalized_statements(&self.sql, self.dialect);
         self.statuses = carry_statuses(&self.status_sql, &self.statuses, &statements);
         self.status_sql = statements;
     }
@@ -496,10 +578,12 @@ mod tests {
             planned(cursor("SELECT 1;")),
             Some(vec![(1, "SELECT 1;".to_owned())])
         );
-        assert_eq!(
-            planned(Scope::Cursor(sql.find("\n\n").unwrap() + 1)),
-            Some(vec![(2, "SELECT * FROM teste".to_owned())])
-        );
+        // On a blank line between statements, nothing runs.
+        assert_eq!(planned(Scope::Cursor(sql.find("\n\n").unwrap() + 1)), None);
+        let run = QueryRun::new(sql);
+        assert!(run.off_statement(sql, &Scope::Cursor(sql.find("\n\n").unwrap() + 1)));
+        assert!(!run.off_statement(sql, &cursor("users")));
+        assert!(!run.off_statement("", &Scope::Cursor(0)));
         let select = |text: &str| {
             let start = sql.find(text).unwrap();
             Scope::Selection(start..start + text.len())
@@ -589,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_after_completed_statements_says_they_were_not_rolled_back() {
+    fn a_failure_after_completed_statements_claims_nothing_about_rollback() {
         let (mut run, plan) = started("SELECT 1; SELECT x; SELECT 3;");
         let outcome = Outcome::Batch {
             completed: 1,
@@ -602,7 +686,8 @@ mod tests {
             _ => "",
         };
         assert!(error.contains("1 statement(s) completed"), "{error}");
-        assert!(error.contains("not rolled back"), "{error}");
+        // Inside a transaction they may not be committed at all.
+        assert!(!error.contains("rolled back"), "{error}");
     }
 
     #[test]
@@ -752,5 +837,67 @@ mod tests {
         };
         run.finish(plan.id, outcome);
         assert_eq!(run.statuses(), [Success, Ready]);
+    }
+
+    #[test]
+    fn a_shortcut_during_a_run_asks_before_cancelling() {
+        let (mut run, plan) = started(TWO);
+        assert_eq!(run.shortcut(), ShortcutAction::ConfirmCancel);
+        run.cancel();
+        assert_eq!(run.shortcut(), ShortcutAction::WaitStopping);
+        run.finish(plan.id, Outcome::Failed(DriverError::cancelled()));
+        assert_eq!(run.shortcut(), ShortcutAction::Run);
+        assert_eq!(QueryRun::new(TWO).shortcut(), ShortcutAction::Run);
+    }
+
+    #[test]
+    fn running_a_result_again_sends_its_statement_as_it_ran() {
+        let sql = "SELECT 1;\nDELETE FROM t;";
+        let mut run = QueryRun::new(sql);
+        // The cursor is on the DELETE, but the result's SELECT runs.
+        let again = Scope::Again {
+            sql: "SELECT 1;".to_owned(),
+            origin: Some(0),
+        };
+        let plan = run.start(sql, again).expect("the statement");
+        assert_eq!(plan.statements, [(0, "SELECT 1;".to_owned())]);
+        assert_eq!(plan.starts, [0]);
+        let done = Outcome::Batch {
+            completed: 1,
+            error: None,
+        };
+        run.finish(plan.id, done);
+        // A statement no longer in the editor runs too; the gutter shows
+        // nothing for it.
+        let gone = Scope::Again {
+            sql: "SELECT 9;".to_owned(),
+            origin: Some(0),
+        };
+        let plan = run.start(sql, gone).expect("the statement");
+        assert_eq!(plan.statements, [(DETACHED, "SELECT 9;".to_owned())]);
+        assert!(run.queue_all(plan.id));
+        assert_eq!(run.statuses(), [Success, Ready]);
+        let failed = Outcome::Batch {
+            completed: 0,
+            error: Some(DriverError::new(ErrorCode::Database, "boom")),
+        };
+        assert!(run.finish(plan.id, failed));
+        assert_eq!(run.statuses(), [Success, Ready]);
+        let blank = Scope::Again {
+            sql: " ".to_owned(),
+            origin: None,
+        };
+        assert_eq!(run.start(sql, blank), None);
+    }
+
+    #[test]
+    fn the_dialect_decides_where_statements_end() {
+        let sql = "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END;";
+        let mut run = QueryRun::new(sql);
+        assert_eq!(run.statuses().len(), 3);
+        run.set_dialect(Some(SqlDialect::MySql));
+        assert_eq!(run.statuses().len(), 1);
+        let plan = run.start(sql, Scope::Cursor(10)).expect("the procedure");
+        assert_eq!(plan.statements, [(0, sql.to_owned())]);
     }
 }

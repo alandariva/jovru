@@ -91,7 +91,7 @@ alignment only; the value itself is never converted.
 
 | Limit | Value |
 | --- | --- |
-| Rows per page | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`). The driver reads one row ahead, so a result with exactly the limit has no further page |
+| Rows per page | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`). The driver reads one row ahead, so a result with exactly the limit has no further page. **New query for table** writes the same limit into its `LIMIT` (`backend::preview_sql`) |
 | Memory per page | 256 MB (`DEFAULT_MEMORY_CEILING`); `ResultBuilder` stops reading even below the row limit, and the rest of the result is not read |
 | Memory per result tab | 256 MB of pages; the oldest pages are released first and can no longer be shown |
 | Statement timeout | Chosen per tab in the editor toolbar: 30 s, 1 min, 5 min (default), 15 min, 1 h or none (`ExecutionOptions.timeout`) |
@@ -110,16 +110,32 @@ alignment only; the value itself is never converted.
 ## Statements and results
 
 - Each statement a run executes gets a result tab, `Result 1`, `Result 2`,
-  ...; **Messages** lists every result tab with its status, rows and error.
-  `Ctrl Enter` puts its result in the tab created last, `Ctrl Shift Enter`
+  ... `Ctrl Enter` puts its result in the tab on screen, `Ctrl Shift Enter`
   opens a new tab and `Ctrl Alt Enter` replaces every tab with one per
-  statement. Result tabs can be closed.
+  statement. A **pinned** tab (its pin icon) is never replaced by a run:
+  `Ctrl Enter` with a pinned tab on screen replaces the last unpinned tab
+  created, or opens one, and `Ctrl Alt Enter` keeps pinned tabs and numbers
+  the new ones after them. Result tabs can be closed.
+- **Run this result's statement again** (`↻`) runs the statement stored in
+  the tab on screen, as it ran, into that same tab; the editor's cursor plays
+  no part.
+- **Messages** is the tab's log (`jykre::run_log`): every statement that
+  ended, newest first, with how long ago, its outcome (rows, rows affected,
+  error or cancellation) and how long it took. It is independent of the
+  result tabs, so replacing a tab does not lose an `UPDATE`'s outcome. The
+  log keeps the last 500 entries; times are relative ("5 min ago") because
+  showing the local clock time needs a date library, which is a dependency
+  decision.
+- `COMMIT` and `ROLLBACK` from the toolbar's transaction controls open no
+  result tab; they appear only in Messages, and an error goes to the notice
+  bar.
 - A statement that fails shows its error in its own tab; the tabs of the
   statements before it keep their results, and the statements after it do
   not run.
 - A statement without rows shows the rows it affected.
 - Statements run in order and stop at the first failure. The message says how
-  many completed and that they were not rolled back automatically.
+  many completed; whether they are committed depends on the session's
+  transaction, which the toolbar shows ([User experience](ux.md#always-visible-states)).
 - The editor gutter shows each statement's status (running, success, error,
   cancelled); a status resets when its statement's text changes.
 
@@ -137,6 +153,13 @@ alignment only; the value itself is never converted.
 - The filter bar matches text in any column, ignoring case, and stops hiding
   rows when it is closed. It matches values, not how they are drawn: a NULL
   never matches, even a filter for "null", while the text 'NULL' does.
+- The filter searches only the rows held for the page on screen. Below the
+  field it says so ("Filters this page only (1,000 rows)…") whenever the
+  result has other pages or stopped at a limit, and an empty match reads "No
+  rows on this page match the filter", never "no results".
+- Each result tab keeps its own selection and scroll: switching tabs and
+  coming back to the same page restores them (`ResultGrid` keeps them by
+  `ResultId`); another page starts at the top with nothing selected.
 
 ## Copying
 

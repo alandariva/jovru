@@ -75,7 +75,10 @@ Each state has one consistent representation.
 | Age of a chosen namespace | After the namespace's name in the explorer | How long ago it was last read in full ("3 days ago"), as of the moment it is drawn |
 | Explorer expansion | The explorer | The nodes left expanded come back after a restart, read from the local cache; "Load more" after a node reads its next page only |
 | What a node is | Explorer node | Icon by kind (table, view, materialized view, column, key column, foreign key, partition), the column's type or what a key references after the name, and a tooltip with nullability, primary key position, default and comment |
-| Demo versus server data | Footer badge | `MOCK` or `SQL` |
+| Demo versus server data | Footer badge | `MOCK` or `SQL`; a tab without a connection outside the demo shows "No connection" and runs nothing |
+| Transaction of the tab's session | Editor toolbar, for drivers with transactions | **Auto-commit**, **Transaction open** (or **Manual commit** after MySQL's `SET autocommit = 0`), **Uncommitted changes** (amber) or **Transaction failed** (red, PostgreSQL), with **Commit** and **Rollback** while one is open. Inferred from the statements the tab ran (`jykre::transaction`) |
+| Pinned result | Result tab | Its pin icon is mint; no run replaces it |
+| What ran in the tab | Messages | A log of every statement that ended, independent of the result tabs |
 
 Rules:
 
@@ -84,7 +87,19 @@ Rules:
 - No action leaves the UI without an answer: a click gives immediate visual
   feedback even when the result takes longer.
 - Dangerous actions ask for confirmation: deleting a connection, closing a tab
-  with a running query, copying more than 50 MiB.
+  with a running query or an open transaction, copying more than 50 MiB.
+- A run shortcut never cancels by itself. Pressing `Ctrl Enter`,
+  `Ctrl Shift Enter` or `Ctrl Alt Enter` while a run is active asks "Cancel
+  the running query?" (for `Ctrl Alt Enter`, "Stop the whole run?") with
+  **Yes, cancel** focused, so Enter confirms. The Run button, which shows
+  **Stop** meanwhile, cancels on click.
+- With the cursor on no statement (a blank or comment line, before the first
+  or after the last), `Ctrl Enter` runs nothing and says to put the cursor on
+  the statement or select it. On a statement's first line before its text,
+  or its last line after its `;`, it runs that statement.
+- A connection whose password is not remembered asks for it in a prompt when
+  a run or a refresh opens a session. The password stays in memory until the
+  application closes, or goes to the vault with **Remember password**.
 
 ## Feedback
 
@@ -99,16 +114,26 @@ Rules:
 ## Confirmations
 
 - Closing a tab with a running query asks first: closing cancels the query.
+  Closing one with an open transaction asks too: closing rolls it back.
   Closing one whose SQL is not in the saved queries asks too: closing loses it.
 - Moving a tab to another connection (dragging it to another group, or
   choosing a connection in the editor toolbar) asks first: its results and
-  session belong to the previous connection.
+  session belong to the previous connection, and an open transaction is
+  rolled back.
+- Saving changed connection settings asks first when a tab of that
+  connection runs a query or holds an open transaction: applying them cancels
+  the query and closes the session. Otherwise tabs keep their results and
+  session, say that the settings changed, and the next run opens a session
+  with the new settings.
+- A saved query or history entry whose connection no longer exists opens
+  without a connection, never on another one, and says so. Running a tab
+  without a connection offers the connections in the results area.
 
 ## Keyboard shortcuts
 
 | Action | Shortcut |
 | --- | --- |
-| Run the selection, or the statement at the cursor, in place of the last result tab created | `Ctrl Enter` |
+| Run the selection, or the statement at the cursor, in place of the result tab on screen (asks before cancelling while a run is active) | `Ctrl Enter` |
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Search tables in the local cache | `Ctrl Shift P` |
@@ -122,7 +147,7 @@ Rules:
 | Refresh the focused explorer node | `F5` |
 | Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
 | Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
-| Explorer: open the table (a click only selects it; a double click opens) | `Enter` |
+| Explorer: new query for the table, `SELECT * … LIMIT` the row limit, not run (a click only selects it; a double click does the same) | `Enter` |
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
 | Grid: select all, clear | `Ctrl A`, `Esc` |
 | Grid: copy, copy with headers | `Ctrl C`, `Ctrl Shift C` |
@@ -179,5 +204,6 @@ interactive elements expose a role, a label and their state. Details are in
 | Standard | Current code |
 | --- | --- |
 | Elapsed time and cancel for runs over 2 s | The Run button cancels, but the footer shows "Running…" without the elapsed time |
+| Shortcuts as actions in one keymap | There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Shortcuts as actions in one keymap | Only the three run shortcuts are actions ([UI guidelines](ui-guidelines.md#known-deviations)) |

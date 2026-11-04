@@ -66,11 +66,12 @@ Demo connections and results are labelled as such and never reach a server.
   timestamp.
 - The metadata cache is stored locally, read page by page and browsable offline
   after a restart. Search also queries the local cache.
-- Click a table or view to open a SQL preview with escaped identifiers.
+- Double-click a table or view (or press Enter) for a new query on it, with
+  escaped identifiers and the connection's row limit; run it when ready.
   `Ctrl Shift P` searches real tables and `Ctrl N` opens a query on the active
   connection. `Ctrl Enter` runs the selection, or the statement at the cursor
-  when nothing is selected, in place of the last result tab; `Ctrl Shift
-  Enter` does the same in a new result tab and `Ctrl Alt Enter` runs every
+  when nothing is selected, in place of the result tab on screen (pin a
+  result tab to keep it); `Ctrl Shift Enter` does the same in a new result tab and `Ctrl Alt Enter` runs every
   statement, one result tab each. Results are read page by page, and the
   statement timeout is chosen in the editor toolbar. Open tabs, saved queries
   and history are kept between sessions.

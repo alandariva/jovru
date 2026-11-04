@@ -21,5 +21,7 @@ pub mod query;
 pub mod refresh_queue;
 pub mod result;
 pub mod result_tabs;
+pub mod run_log;
 pub mod sql;
+pub mod transaction;
 pub mod workspace_state;

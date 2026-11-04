@@ -103,6 +103,12 @@ pub const ORDER_COLUMNS: [(&str, &str, bool); 7] = [
     ("updated_at", "timestamp", false),
 ];
 
+/// The application runs the demo (`JYKRE_DEMO` is set). Only then does a
+/// tab without a connection run on sample data.
+pub fn enabled() -> bool {
+    std::env::var_os("JYKRE_DEMO").is_some()
+}
+
 /// The SQL dialect a demo connection pretends to speak, from its name.
 pub fn dialect(connection: &str) -> &'static str {
     if connection.contains("Databricks") {

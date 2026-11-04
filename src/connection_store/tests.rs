@@ -612,3 +612,23 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
     backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn a_session_without_a_remembered_password_asks_for_one() {
+    let input = |driver, password: Option<&str>| ResolvedConnection {
+        config: ConnectionConfig {
+            driver,
+            options: serde_json::json!({}),
+        },
+        credentials: Credentials {
+            password: password.map(SecretString::from),
+        },
+    };
+    assert!(needs_password(&input(DriverKind::Postgres, None)));
+    assert!(needs_password(&input(DriverKind::MySql, None)));
+    // An empty password typed in the prompt is an answer too.
+    assert!(!needs_password(&input(DriverKind::Postgres, Some(""))));
+    assert!(!needs_password(&input(DriverKind::MySql, Some("secret"))));
+    // Databricks signs in through the CLI.
+    assert!(!needs_password(&input(DriverKind::Databricks, None)));
+}

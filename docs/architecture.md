@@ -155,11 +155,20 @@ sequenceDiagram
 ```
 
 - `Ctrl Enter` and `Ctrl Shift Enter` run the selection, split into
-  statements, or the statement at the cursor (`sql::statement_at`);
-  `Ctrl Alt Enter` and the gutter buttons run all statements or one
-  (`query::Scope`). `result_tabs::ResultTabs` decides which result tab each
-  statement fills (`Placement`) and keeps each tab's pages; the next page is
-  read with `backend::fetch` from the result the session keeps open.
+  statements, or the statement at the cursor (`sql::statement_at`, which
+  picks nothing when the cursor is on no statement);
+  `Ctrl Alt Enter` and the gutter buttons run all statements or one, and a
+  result tab's `↻` runs its own statement again (`query::Scope`). While a run
+  is active, a run shortcut asks before cancelling
+  (`query::ShortcutAction`). `result_tabs::ResultTabs` decides which result
+  tab each statement fills (`Placement`, which never replaces a pinned tab)
+  and keeps each tab's pages; the next page is read with `backend::fetch`
+  from the result the session keeps open.
+- Splitting, highlighting and formatting share one tokenizer whose rules
+  follow the connection's `SqlDialect` (`jykre::sql`): MySQL backslash
+  escapes, `#` comments, `DELIMITER` and routine bodies; PostgreSQL `E''`
+  strings, dollar quotes and `BEGIN ATOMIC`; Databricks compound statements.
+  A tab without a connection uses generic rules.
 - Each tab keeps one session between runs ([ADR-0014](adr/0014-a-session-per-tab.md)).
   Databricks warehouses keep logical catalog/schema state; classic clusters keep
   a server SQL context. CLI authentication and HTTP pools are shared across
@@ -167,8 +176,15 @@ sequenceDiagram
   The workspace hands it to the run and takes it back with the result; a
   session that comes back from a superseded run, or after the connection
   changed, is closed.
-- Statements run in order and stop at the first failure; earlier statements
-  are not rolled back automatically, and the UI says so.
+- Statements run in order and stop at the first failure. Whether earlier
+  statements are committed depends on the session's transaction, which the
+  workspace infers from the statements it ran (`jykre::transaction`) and
+  shows in the toolbar; the failure message claims nothing about it.
+- Every statement that ends is logged in the tab's `run_log::RunLog`, shown
+  in Messages, independently of the result tabs.
+- A tab without a connection runs nothing outside the demo
+  (`JYKRE_DEMO`). A connection without a remembered password asks for it
+  before the session opens (`connection_store::needs_password`).
 - Cancelling fires the run's `CancellationToken`; the driver interrupts the
   server-side work and keeps the session when it can bring it back to a known
   state, or closes it.
@@ -250,5 +266,5 @@ Technical debt the maintainer accepted for now:
 
 | Standard | Current code |
 | --- | --- |
-| Statements are split as the database splits them | `sql::statements` splits on `;` outside strings, identifiers, comments and dollar quotes only. A MySQL `CREATE PROCEDURE`/`TRIGGER` body (`BEGIN ... ; ... END`, `DELIMITER`) or a PostgreSQL `BEGIN ATOMIC ... END` body is split into several statements |
-| Transactions are a supported workflow | Only autocommit is supported. An explicit `BEGIN`/`START TRANSACTION` stays open in the tab's session, but nothing shows that a transaction is open, there are no commit or rollback controls, and closing the tab rolls it back without asking |
+| Statements are split as the database splits them | `sql::statements` follows each dialect's rules in the application, not a splitter provided by the driver. Blocks are recognised by their keywords (`CREATE PROCEDURE/FUNCTION/TRIGGER/EVENT … BEGIN … END`, `BEGIN ATOMIC`, a Databricks `BEGIN … END`); other constructs that hold semicolons are split on them |
+| The UI shows the server's transaction state | Drivers do not report it. `jykre::transaction` infers it from the statements a tab ran (`BEGIN`, `COMMIT`, `ROLLBACK`, MySQL `SET autocommit` and implicit commits, PostgreSQL failures), so a transaction opened in a way these rules do not see, for example inside a procedure, is not shown |

@@ -427,6 +427,13 @@ fn add_warning(warning: &mut Option<String>, text: impl Into<String>) {
     });
 }
 
+/// Whether opening a session needs a password the application does not
+/// have: a driver that signs in with one (not Databricks, which uses the
+/// CLI) and no password in memory, because it was not remembered.
+pub fn needs_password(input: &ResolvedConnection) -> bool {
+    input.config.driver != DriverKind::Databricks && input.credentials.password.is_none()
+}
+
 /// Whether a password kept for `previous` may be sent to `next`: the same
 /// driver, host, port and user. Changing any of them points the credential
 /// at another identity, so an empty password field must not carry it over.

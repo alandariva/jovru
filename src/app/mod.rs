@@ -3,6 +3,7 @@ mod connections;
 mod databricks_connection;
 mod demo;
 mod layout;
+mod password;
 pub mod performance;
 mod probe;
 mod result_grid;
@@ -18,6 +19,8 @@ use gpui_kit::assets::IconName as I;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::{
     ActiveTheme, Sizable, Theme, ThemeMode, TitleBar, WindowExt as _,
+    button::{Button, ButtonVariants as _},
+    dialog::{DialogAction, DialogClose, DialogFooter},
     input::{Input, InputEvent, InputState},
     resizable::{ResizableState, h_resizable, resizable_panel},
     scroll::ScrollableElement,
@@ -26,6 +29,7 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::explorer::{Tree, TreeRow};
 use jykre::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId, TabId};
+use jykre::query::ShortcutAction;
 use jykre::refresh_queue::RefreshQueue;
 use jykre::{backend, connection_store, drivers::*, result::DEFAULT_ROW_LIMIT};
 use jykre_secrets::SystemSecretStore;
@@ -35,31 +39,76 @@ use std::collections::HashMap;
 use ui::*;
 use workspace::{Workspace, WorkspaceEvent};
 
+/// Where the keyboard is when a confirmation opens.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConfirmFocus {
+    /// On the dialog: Enter confirms, but no button looks focused.
+    Dialog,
+    /// On the OK button, visibly, so Enter confirms what the user sees.
+    Ok,
+}
+
+/// What a confirmation asks and how it opens.
+struct Confirmation {
+    title: String,
+    description: String,
+    ok: &'static str,
+    cancel: &'static str,
+    focus: ConfirmFocus,
+}
+
 /// Asks the user to confirm an action in a dialog drawn with the
 /// application's theme; `on_ok` runs only when they confirm.
 fn confirm(
     window: &mut Window,
     cx: &mut App,
-    title: String,
-    description: String,
-    ok: &'static str,
-    cancel: &'static str,
-    on_ok: impl Fn(&mut App) + 'static,
+    confirmation: Confirmation,
+    on_ok: impl Fn(&mut Window, &mut App) + 'static,
 ) {
+    let Confirmation {
+        title,
+        description,
+        ok,
+        cancel,
+        focus,
+    } = confirmation;
     let on_ok = std::rc::Rc::new(on_ok);
-    window.open_alert_dialog(cx, move |alert, _, _| {
+    let ok_focus = cx.focus_handle();
+    // The OK button takes focus once, when the dialog opens; later rebuilds
+    // must not take it back from where the user moved it.
+    let opening = std::cell::Cell::new(true);
+    window.open_alert_dialog(cx, move |alert, window, cx| {
         let on_ok = on_ok.clone();
-        alert
+        let alert = alert
             .title(title.clone())
             .description(description.clone())
             .confirm()
             .ok_text(ok)
             .cancel_text(cancel)
             .width(px(440.))
-            .on_ok(move |_, _, cx| {
-                on_ok(cx);
+            .on_ok(move |_, window, cx| {
+                on_ok(window, cx);
                 true
-            })
+            });
+        if focus == ConfirmFocus::Dialog {
+            return alert;
+        }
+        if opening.replace(false) {
+            ok_focus.focus(window, cx);
+        }
+        alert.footer(
+            DialogFooter::new()
+                .justify_center()
+                .child(DialogClose::new().trigger(|button| button.label(cancel)))
+                .child(
+                    DialogAction::new().child(
+                        Button::new("confirm-ok")
+                            .primary()
+                            .label(ok)
+                            .track_focus(&ok_focus),
+                    ),
+                ),
+        )
     });
 }
 
@@ -195,6 +244,14 @@ struct AppView {
     connection_testing: Option<CancellationToken>,
     connection_revision: usize,
     editing_connection: Option<usize>,
+    /// The password prompt and what waits for it, while it is open.
+    password_prompt: Option<password::PasswordPrompt>,
+    password_input: Entity<InputState>,
+    password_remember: bool,
+    /// Keeps Tab inside the password prompt.
+    password_focus: FocusHandle,
+    /// The prompt just opened: its field takes the keyboard.
+    password_needs_focus: bool,
     /// The open tabs, saved queries and history are written to `config.db`
     /// once the last session's were restored (never in the demo).
     persist_state: bool,
@@ -236,19 +293,37 @@ impl AppView {
                     this.request_move(*tab, *group, *index, window, cx)
                 }
                 GroupedTabsEvent::TabMoved { tab, from, to, .. } if from != to => {
-                    if let (Some(panel), Some(connection)) = (
-                        this.panels.get(tab),
-                        this.connections
-                            .iter()
-                            .find(|connection| connection.group == *to),
-                    ) {
-                        panel.update(cx, |panel, cx| {
-                            panel.rebind_connection(
+                    let target = this
+                        .connections
+                        .iter()
+                        .find(|connection| connection.group == *to)
+                        .map(|connection| {
+                            (
                                 connection.name.clone(),
                                 connection.input.clone(),
                                 connection.row_limit,
-                                cx,
                             )
+                        })
+                        // A group without a connection: the tab no longer
+                        // runs anywhere until one is chosen.
+                        .or_else(|| {
+                            this.orphan_groups
+                                .iter()
+                                .find(|(_, group)| group == to)
+                                .map(|(name, _)| {
+                                    let name = if name.is_empty() {
+                                        tr!("Without connection").to_owned()
+                                    } else {
+                                        name.clone()
+                                    };
+                                    (name, None, DEFAULT_ROW_LIMIT)
+                                })
+                        });
+                    if let (Some(panel), Some((name, input, row_limit))) =
+                        (this.panels.get(tab), target)
+                    {
+                        panel.update(cx, |panel, cx| {
+                            panel.rebind_connection(name, input, row_limit, cx)
                         });
                     }
                     this.save_state_soon(cx);
@@ -354,6 +429,15 @@ impl AppView {
             connection_testing: None,
             connection_revision: 0,
             editing_connection: None,
+            password_prompt: None,
+            password_input: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder(tr!("Enter the password"))
+            }),
+            password_remember: false,
+            password_focus: cx.focus_handle(),
+            password_needs_focus: false,
             persist_state: false,
             state_revision: 0,
             orphan_groups: Vec::new(),
@@ -396,6 +480,15 @@ impl AppView {
             app._subscriptions.push(subscription);
         }
         app._subscriptions.push(cx.subscribe_in(
+            &app.password_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.submit_password(window, cx);
+                }
+            },
+        ));
+        app._subscriptions.push(cx.subscribe_in(
             &app.connection_databricks,
             window,
             |this, _, event: &databricks_connection::FormEvent, window, cx| match event {
@@ -415,7 +508,7 @@ impl AppView {
                 scope_picker::PickerEvent::LoadRequested => this.load_namespaces(cx),
             },
         ));
-        if std::env::var_os("JYKRE_DEMO").is_some() {
+        if demo::enabled() {
             for (name, detail, color) in [
                 (tr!("PostgreSQL · Local"), "localhost:5432", MINT),
                 ("Databricks · Dev", "analytics / development", BLUE),
@@ -482,16 +575,24 @@ impl AppView {
             Some(index) => self.ensure_group(index, cx),
             None => group,
         };
+        // A tab whose connection is gone keeps that name, so it is saved and
+        // shown as such.
         let connection = self
             .connections
             .iter()
             .find(|c| c.group == group)
-            .map(|c| c.name.as_str())
-            .unwrap_or(tr!("Workspace"));
+            .map(|c| c.name.clone())
+            .or_else(|| {
+                self.orphan_groups
+                    .iter()
+                    .find(|(name, orphan)| *orphan == group && !name.is_empty())
+                    .map(|(name, _)| name.clone())
+            })
+            .unwrap_or_else(|| tr!("Without connection").to_owned());
         let panel = cx.new(|cx| {
             Workspace::new(
                 title,
-                connection,
+                &connection,
                 sql,
                 self.assistant_split.clone(),
                 window,
@@ -543,6 +644,23 @@ impl AppView {
                         );
                     }
                     WorkspaceEvent::Changed => {}
+                    WorkspaceEvent::PasswordRequired => {
+                        let name = panel_entity.read(cx).connection_name().to_owned();
+                        if let Some(index) = this.connections.iter().position(|c| c.name == name) {
+                            let resume = panel_entity.clone();
+                            let cancel = panel_entity.clone();
+                            this.ask_password(
+                                index,
+                                Box::new(move |_, _, cx| {
+                                    resume.update(cx, |panel, cx| panel.resume_pending(cx))
+                                }),
+                                Box::new(move |_, cx| {
+                                    cancel.update(cx, |panel, _| panel.cancel_pending())
+                                }),
+                                cx,
+                            );
+                        }
+                    }
                     WorkspaceEvent::ConnectionRequested(name) => {
                         let name = name.clone();
                         if let Some(tab) = this.tab_of(panel_entity)
@@ -628,12 +746,20 @@ impl AppView {
     }
 
     /// Closes a tab, asking first when a query is running in it (closing
-    /// cancels it) or when its SQL is not saved (closing loses it).
+    /// cancels it), a transaction is open (closing rolls it back) or its SQL
+    /// is not saved (closing loses it).
     fn request_close(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let (busy, unsaved) = self.panels.get(&tab).map_or((false, false), |panel| {
-            let panel = panel.read(cx);
-            (panel.is_busy(), panel.has_unsaved_sql())
-        });
+        let (busy, unsaved, transaction) =
+            self.panels
+                .get(&tab)
+                .map_or((false, false, false), |panel| {
+                    let panel = panel.read(cx);
+                    (
+                        panel.is_busy(),
+                        panel.has_unsaved_sql(),
+                        panel.has_open_transaction(),
+                    )
+                });
         let tabs = self.tabs.downgrade();
         let close = move |window: Option<&mut Window>, cx: &mut App| {
             let _ = tabs.update(cx, |tabs, cx| {
@@ -643,6 +769,28 @@ impl AppView {
                 }
             });
         };
+        if transaction && !busy {
+            let description = if unsaved {
+                tr!(
+                    "Closing the tab rolls back the open transaction and loses its SQL, which is not in the saved queries."
+                )
+            } else {
+                tr!("Closing the tab rolls back the open transaction.")
+            };
+            confirm(
+                window,
+                cx,
+                Confirmation {
+                    title: tr!("A transaction is open in this tab.").to_string(),
+                    description: description.to_string(),
+                    ok: tr!("Close and roll back"),
+                    cancel: tr!("Keep the tab"),
+                    focus: ConfirmFocus::Dialog,
+                },
+                move |window, cx| close(Some(window), cx),
+            );
+            return;
+        }
         let (title, description, ok) = match (busy, unsaved) {
             (false, false) => {
                 close(Some(window), cx);
@@ -669,11 +817,14 @@ impl AppView {
         confirm(
             window,
             cx,
-            title,
-            description,
-            ok,
-            tr!("Keep the tab"),
-            move |cx| close(None, cx),
+            Confirmation {
+                title,
+                description,
+                ok,
+                cancel: tr!("Keep the tab"),
+                focus: ConfirmFocus::Dialog,
+            },
+            move |window, cx| close(Some(window), cx),
         );
     }
 
@@ -691,9 +842,13 @@ impl AppView {
         let Some(panel) = self.panels.get(&tab) else {
             return;
         };
-        let (from, busy) = {
+        let (from, busy, transaction) = {
             let panel = panel.read(cx);
-            (panel.connection_name().to_owned(), panel.is_busy())
+            (
+                panel.connection_name().to_owned(),
+                panel.is_busy(),
+                panel.has_open_transaction(),
+            )
         };
         let to = self
             .connections
@@ -721,39 +876,86 @@ impl AppView {
                 to
             )
         };
+        let detail = if transaction {
+            format!("{detail} {}", tr!("The open transaction is rolled back."))
+        } else {
+            detail
+        };
         let tabs = self.tabs.downgrade();
         confirm(
             window,
             cx,
-            message,
-            detail,
-            tr!("Switch connection"),
-            tr!("Cancel"),
-            move |cx| {
+            Confirmation {
+                title: message,
+                description: detail,
+                ok: tr!("Switch connection"),
+                cancel: tr!("Cancel"),
+                focus: ConfirmFocus::Dialog,
+            },
+            move |_, cx| {
                 let _ = tabs.update(cx, |tabs, cx| tabs.move_tab(tab, group, index, cx));
             },
         );
     }
 
-    /// Runs `action` on the active tab's workspace, unless a dialog or the
-    /// command palette is in front of it.
-    fn with_active_panel(
+    /// A run shortcut on the active tab's workspace, unless a dialog or the
+    /// command palette is in front of it. It never cancels by itself: while
+    /// a run is active it asks first, with Yes focused so Enter confirms.
+    /// `all` is Ctrl+Alt+Enter, whose confirmation stops the whole run.
+    fn run_shortcut(
         &mut self,
+        run: fn(&mut Workspace, &mut Context<Workspace>),
+        all: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
-        action: fn(&mut Workspace, &mut Context<Workspace>),
     ) {
-        if self.connection_open || self.command_open {
+        if self.connection_open || self.command_open || self.password_prompt.is_some() {
             return;
         }
-        if let Some(panel) = self
+        let Some(panel) = self
             .tabs
             .read(cx)
             .active_tab()
             .and_then(|tab| self.panels.get(&tab))
             .cloned()
-        {
-            panel.update(cx, action);
+        else {
+            return;
+        };
+        if panel.read(cx).shortcut() != ShortcutAction::ConfirmCancel {
+            // Running, or telling that the previous run is still stopping.
+            panel.update(cx, run);
+            return;
         }
+        let (title, description) = if all {
+            (
+                tr!("Stop the whole run?"),
+                tr!(
+                    "Every statement of this tab is running in order. Stopping interrupts the one on the server and skips the ones still waiting; statements that finished keep their results."
+                ),
+            )
+        } else {
+            (
+                tr!("Cancel the running query?"),
+                tr!(
+                    "A query is still running in this tab. Cancelling interrupts it on the server; statements that finished keep their results."
+                ),
+            )
+        };
+        let panel = panel.downgrade();
+        confirm(
+            window,
+            cx,
+            Confirmation {
+                title: title.to_string(),
+                description: description.to_string(),
+                ok: tr!("Yes, cancel"),
+                cancel: tr!("No, keep running"),
+                focus: ConfirmFocus::Ok,
+            },
+            move |_, cx| {
+                let _ = panel.update(cx, |panel, cx| panel.stop(cx));
+            },
+        );
     }
 
     fn new_active_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1051,7 +1253,7 @@ impl AppView {
                             .on_click(cx.listener(|this, _, _, cx| { this.tables_open = !this.tables_open; cx.notify(); })))
                         .when(self.tables_open || !query.is_empty(), |s| s.children(TABLES.into_iter().enumerate().filter(|(_, table)| query.is_empty() || table.contains(&query)).map(|(table_index, table)| {
                             column().flex_none()
-                                .child(row().id(("schema-table", table_index)).role(Role::Button).aria_label(tr!("Open table {0}", table)).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(32.)).pl(px(71.)).pr_3().gap_2().cursor_pointer()
+                                .child(row().id(("schema-table", table_index)).role(Role::Button).aria_label(tr!("New query for table {0}", table)).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(32.)).pl(px(71.)).pr_3().gap_2().cursor_pointer()
                                     .when(table == "orders", |s| s.bg(rgb(0x25352f)))
                                     .hover(|s| s.bg(rgb(HOVER)))
                                     .child(icon(if table == "orders" && self.orders_open { I::ChevronDown } else { I::ChevronRight }, FAINT))
@@ -1136,17 +1338,19 @@ impl AppView {
                                     ),
                             )
                             .child(div().pl_6().child(label(query.connection.clone())))
+                            // A query whose connection is gone opens without
+                            // one, never on another connection.
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                let Some(group) = this
-                                    .connections
-                                    .iter()
-                                    .find(|c| c.name == query.connection)
-                                    .or(this.connections.first())
-                                    .map(|c| c.group)
-                                else {
-                                    return;
-                                };
-                                this.add_query(group, &query.title, &query.sql, window, cx);
+                                let missing =
+                                    !this.connections.iter().any(|c| c.name == query.connection);
+                                let group = this.group_for(&query.connection, cx);
+                                if let Some(tab) =
+                                    this.add_query(group, &query.title, &query.sql, window, cx)
+                                    && missing
+                                    && let Some(panel) = this.panels.get(&tab)
+                                {
+                                    panel.update(cx, |panel, cx| panel.warn_missing_connection(cx));
+                                }
                             }))
                     }))
                 },
@@ -1363,7 +1567,7 @@ impl AppView {
                                     row()
                                         .id(("command-table", index))
                                         .role(Role::ListBoxOption)
-                                        .aria_label(tr!("Open table {0}", name))
+                                        .aria_label(tr!("New query for table {0}", name))
                                         .aria_selected(selected)
                                         .focusable()
                                         .tab_index(0)
@@ -1403,7 +1607,9 @@ impl AppView {
                             .bg(rgb(BG))
                             .border_t_1()
                             .border_color(rgb(BORDER))
-                            .child(label(tr!("↑ ↓ choose · Enter opens · or click an object")))
+                            .child(label(tr!(
+                                "↑ ↓ choose · Enter creates a query for the table · or click an object"
+                            )))
                             .child(row().child(shortcut("Esc")).child(label(tr!("close")))),
                     )
                     // Tab cycles through the palette while it is open.
@@ -1436,10 +1642,14 @@ impl AppView {
 }
 
 impl Render for AppView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         probe::frame_started();
         probe::rendered("AppView");
         self.sync_explorer(cx);
+        if std::mem::take(&mut self.password_needs_focus) {
+            self.password_input
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
         column()
             .id("jykre")
             .relative()
@@ -1449,19 +1659,19 @@ impl Render for AppView {
             .text_color(rgb(TEXT))
             .font_family("Segoe UI")
             .text_size(px(14.))
-            .on_action(cx.listener(|this, _: &ExecuteCurrentQuery, _, cx| {
-                this.with_active_panel(cx, Workspace::execute_current);
+            .on_action(cx.listener(|this, _: &ExecuteCurrentQuery, window, cx| {
+                this.run_shortcut(Workspace::execute_current, false, window, cx);
             }))
             .on_action(
-                cx.listener(|this, _: &ExecuteCurrentQueryInNewResult, _, cx| {
-                    this.with_active_panel(cx, Workspace::execute_current_in_new_result);
+                cx.listener(|this, _: &ExecuteCurrentQueryInNewResult, window, cx| {
+                    this.run_shortcut(Workspace::execute_current_in_new_result, false, window, cx);
                 }),
             )
-            .on_action(cx.listener(|this, _: &ExecuteAllQueries, _, cx| {
-                this.with_active_panel(cx, Workspace::execute_all);
+            .on_action(cx.listener(|this, _: &ExecuteAllQueries, window, cx| {
+                this.run_shortcut(Workspace::execute_all, true, window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
-                if this.connection_open || this.command_open {
+                if this.connection_open || this.command_open || this.password_prompt.is_some() {
                     return;
                 }
                 if let Some(tab) = this.tabs.read(cx).active_tab() {
@@ -1470,7 +1680,9 @@ impl Render for AppView {
             }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
-                    if this.command_open {
+                    if this.password_prompt.is_some() {
+                        this.cancel_password(window, cx);
+                    } else if this.command_open {
                         this.command_open = false;
                         cx.notify();
                     } else {
@@ -1492,7 +1704,7 @@ impl Render for AppView {
                     cx.notify();
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.connection_open {
+                } else if this.connection_open || this.password_prompt.is_some() {
                     // Workspace shortcuts would act behind the modal form.
                 } else if event.keystroke.modifiers.control
                     && event.keystroke.modifiers.shift
@@ -1631,6 +1843,9 @@ impl Render for AppView {
             .when(self.command_open, |s| s.child(self.command_palette(cx)))
             .when(self.connection_open, |s| {
                 s.child(self.connection_dialog(cx))
+            })
+            .when(self.password_prompt.is_some(), |s| {
+                s.child(self.password_dialog(cx))
             })
             // Painted last, so it closes the frame for the probe.
             .child(probe::frame_end())

@@ -131,7 +131,7 @@ impl AppView {
     /// The tab group of the connection called `name`. A tab whose connection
     /// was removed opens in a group of its own, without a connection, so its
     /// SQL is not lost.
-    fn group_for(&mut self, name: &str, cx: &mut Context<Self>) -> TabGroupId {
+    pub(super) fn group_for(&mut self, name: &str, cx: &mut Context<Self>) -> TabGroupId {
         if let Some(connection) = self.connections.iter().find(|c| c.name == name) {
             return connection.group;
         }

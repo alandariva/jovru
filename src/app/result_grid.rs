@@ -14,7 +14,9 @@ use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
 use jykre::grid::{self, CellSelection, GridCache, GridKey, GridView, selection_block};
 use jykre::result::ResultData;
+use jykre::result_tabs::ResultId;
 use jykre::tr;
+use std::collections::HashMap;
 use std::{ops::Range, rc::Rc};
 
 /// What the grid reports to the view that embeds it.
@@ -25,8 +27,20 @@ pub enum ResultGridEvent {
     Notice(Feedback),
 }
 
+/// Where the user left a result tab: its page, selection and scroll.
+struct Place {
+    page: usize,
+    selection: Option<CellSelection>,
+    scroll: Point<Pixels>,
+}
+
 pub struct ResultGrid {
     result: Rc<ResultData>,
+    /// The result tab and page on screen, when it is a result tab's.
+    shown: Option<(ResultId, usize)>,
+    /// Where each other result tab was left, so switching back to it
+    /// restores its selection and scroll instead of inheriting this one's.
+    places: HashMap<ResultId, Place>,
     /// Bumped with every new result, so the cached view is rebuilt.
     version: u64,
     /// The demo result has fixed column proportions and a sortable column.
@@ -77,6 +91,8 @@ impl ResultGrid {
     pub fn new(result: Rc<ResultData>, sales: bool, cx: &mut Context<Self>) -> Self {
         Self {
             result,
+            shown: None,
+            places: HashMap::new(),
             version: 0,
             sales,
             first_row: 0,
@@ -91,26 +107,60 @@ impl ResultGrid {
         }
     }
 
-    /// Shows another result and clears the selection. The grid keeps a
-    /// shared handle; it never copies the data.
     /// Shows one page of a result whose first row is row `first_row` (zero
-    /// based) of the whole result.
+    /// based) of the whole result. The grid keeps a shared handle; it never
+    /// copies the data.
+    ///
+    /// `shown` is the result tab and page number. Leaving a tab remembers
+    /// its selection and scroll, and coming back to the same page of it
+    /// restores them; any other page starts at the top with nothing
+    /// selected.
     pub fn set_page(
         &mut self,
         result: Rc<ResultData>,
         sales: bool,
         first_row: usize,
+        shown: Option<(ResultId, usize)>,
         cx: &mut Context<Self>,
     ) {
-        if Rc::ptr_eq(&self.result, &result) && self.first_row == first_row && self.sales == sales {
+        if Rc::ptr_eq(&self.result, &result)
+            && self.first_row == first_row
+            && self.sales == sales
+            && self.shown == shown
+        {
             return;
         }
+        if let Some((id, page)) = self.shown
+            && self.shown.map(|(id, _)| id) != shown.map(|(id, _)| id)
+        {
+            let scroll = self.scroll.0.borrow().base_handle.offset();
+            self.places.insert(
+                id,
+                Place {
+                    page,
+                    selection: self.selection,
+                    scroll,
+                },
+            );
+        }
+        let place =
+            shown.and_then(|(id, page)| self.places.remove(&id).filter(|place| place.page == page));
         self.result = result;
         self.sales = sales;
         self.first_row = first_row;
+        self.shown = shown;
         self.version += 1;
-        self.select(None, cx);
+        let (selection, scroll) = place.map_or((None, Point::default()), |place| {
+            (place.selection, place.scroll)
+        });
+        self.scroll.0.borrow().base_handle.set_offset(scroll);
+        self.select(selection, cx);
         cx.notify();
+    }
+
+    /// Forgets where closed result tabs were left.
+    pub fn retain_places(&mut self, open: &[ResultId]) {
+        self.places.retain(|id, _| open.contains(id));
     }
 
     /// Filters rows by text in any column, ignoring case. An empty filter
@@ -318,14 +368,23 @@ impl ResultGrid {
                                 },
                             )),
                     )
-                    .child(if grid.rows.is_empty() {
+                    .child(if grid.rows.is_empty() && !self.filter.is_empty() {
+                        // The filter reads only the rows held for this page,
+                        // so "nothing found" says so.
+                        column()
+                            .p_6()
+                            .gap_2()
+                            .child(label(tr!("No rows on this page match the filter.")))
+                            .child(label(tr!(
+                                "The filter searches only the rows of this page, not other pages or rows past the row limit."
+                            )))
+                            .into_any_element()
+                    } else if grid.rows.is_empty() {
                         column()
                             .p_6()
                             .gap_2()
                             .child(label(tr!("No results for this selection.")))
-                            .child(label(tr!(
-                                "The query or the current filter returned no rows."
-                            )))
+                            .child(label(tr!("The query returned no rows.")))
                             .into_any_element()
                     } else {
                         // Only the rows on screen are built, so a frame costs
