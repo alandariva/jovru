@@ -126,6 +126,23 @@ pub struct Report {
 }
 
 impl Report {
+    /// An unsaved report with this SQL; its parameters follow the SQL's
+    /// markers, by generic rules until the connection's dialect is known.
+    pub fn draft(
+        title: impl Into<String>,
+        connection: ConnectionRef,
+        sql: impl Into<String>,
+    ) -> Self {
+        let sql = sql.into();
+        Self {
+            title: title.into(),
+            connection,
+            parameters: params::reconcile(&[], &params::names(&sql, None)),
+            sql,
+            ..Self::default()
+        }
+    }
+
     /// Whether the report's title, description, connection or SQL contains
     /// `query`, ignoring case. An empty query matches everything.
     pub fn matches(&self, query: &str) -> bool {

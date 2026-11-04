@@ -637,6 +637,34 @@ impl Workspace {
         });
     }
 
+    /// **Save as report**: the selection, else the statement at the cursor,
+    /// else the whole script becomes a draft report.
+    fn save_as_report(&mut self, cx: &mut Context<Self>) {
+        let sql = self.editor.read(cx).text().to_string();
+        let chosen = self
+            .run
+            .statements_for(&sql, &self.current_scope(cx))
+            .join("\n");
+        let sql = if chosen.trim().is_empty() {
+            sql
+        } else {
+            chosen
+        };
+        if sql.trim().is_empty() {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!("Write the SQL the report runs first."),
+            ));
+            cx.notify();
+            return;
+        }
+        cx.emit(WorkspaceEvent::SaveAsReport {
+            title: self.title.to_string(),
+            connection: self.connection.to_string(),
+            sql,
+        });
+    }
+
     /// The library saved this tab's SQL as the query `id`.
     pub fn saved(&mut self, id: u64, sql: String, cx: &mut Context<Self>) {
         let updated = self.saved_id == Some(id);
@@ -1680,6 +1708,10 @@ impl Workspace {
                             },
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.save_query(cx))),
+                    )
+                    .child(
+                        icon_button("save-report", I::FileChartColumn, tr!("Save as report"))
+                            .on_click(cx.listener(|this, _, _, cx| this.save_as_report(cx))),
                     )
                     .child(divider())
                     .child(
@@ -3041,6 +3073,13 @@ pub enum WorkspaceEvent {
     /// A statement ended, in success, failure or cancellation: an entry for
     /// the history.
     Executed(jykre::workspace_state::QueryEntry),
+    /// Start a report from this SQL (the selection, the statement at the
+    /// cursor or the whole script); the host opens it as a draft.
+    SaveAsReport {
+        title: String,
+        connection: String,
+        sql: String,
+    },
     /// Statements that ran changed the structure of these last-level
     /// namespaces (`CREATE`, `ALTER`, `DROP`, ...), so their metadata is
     /// stale.
@@ -3773,7 +3812,7 @@ impl Render for ResultTabPreview {
 
 /// What the confirmation before a risky run on production says: each
 /// risky statement's kind, numbered as the run orders them.
-fn risk_description(risks: &[(usize, jykre::guard::Risk)], total: usize) -> String {
+pub(super) fn risk_description(risks: &[(usize, jykre::guard::Risk)], total: usize) -> String {
     use jykre::guard::Risk;
     let lines: Vec<String> = risks
         .iter()

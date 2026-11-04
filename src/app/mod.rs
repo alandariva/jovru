@@ -6,6 +6,9 @@ mod layout;
 mod password;
 pub mod performance;
 mod probe;
+mod report_chart;
+mod report_view;
+mod reports;
 mod result_grid;
 mod scope_picker;
 mod sql_editor;
@@ -150,6 +153,7 @@ enum ConnectionSection {
 enum Section {
     Explorer,
     Saved,
+    Reports,
     History,
     Settings,
 }
@@ -223,6 +227,14 @@ struct PaletteMatch {
 struct AppView {
     tabs: Entity<GroupedTabs>,
     panels: HashMap<TabId, Entity<Workspace>>,
+    /// The report tabs, apart from the query tabs ([`reports`]).
+    report_tabs: HashMap<TabId, reports::ReportTab>,
+    /// The saved reports.
+    reports: jykre::reports::ReportLibrary,
+    /// The reports were read, so writing them loses nothing.
+    persist_reports: bool,
+    /// Bumped by every change, so only the last of a burst is written.
+    reports_revision: usize,
     /// What each SQL dialect has built in, read at start from the catalog
     /// directory and handed to every tab; the built-in words until then.
     sql_catalogs: std::sync::Arc<sql_editor::SqlCatalogs>,
@@ -364,7 +376,13 @@ impl AppView {
                 GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
                 GroupedTabsEvent::TabClosed(tab) => {
                     this.panels.remove(tab);
+                    this.report_tabs.remove(tab);
                     this.save_state_soon(cx);
+                }
+                GroupedTabsEvent::TabMoved { tab, from, to, .. }
+                    if from != to && this.report_tabs.contains_key(tab) =>
+                {
+                    this.report_moved(*tab, *to, cx);
                 }
                 GroupedTabsEvent::SelectionChanged(_) => this.save_state_soon(cx),
                 GroupedTabsEvent::CloseRequested(tab) => this.request_close(*tab, window, cx),
@@ -463,6 +481,10 @@ impl AppView {
             explorer_split,
             assistant_split,
             panels: HashMap::new(),
+            report_tabs: HashMap::new(),
+            reports: jykre::reports::ReportLibrary::default(),
+            persist_reports: false,
+            reports_revision: 0,
             sql_catalogs: std::sync::Arc::default(),
             saved_queries: vec![QueryEntry {
                 id: 1,
@@ -563,7 +585,14 @@ impl AppView {
             node_focus: std::cell::RefCell::new(HashMap::new()),
             _subscriptions: vec![
                 // The last edits are written before the application exits.
-                cx.on_app_quit(|this, cx| this.save_state_now(cx)),
+                cx.on_app_quit(|this, cx| {
+                    let state = this.save_state_now(cx);
+                    let reports = this.save_reports_now();
+                    async move {
+                        state.await;
+                        reports.await;
+                    }
+                }),
                 tab_subscription,
                 search_subscription,
                 command_subscription,
@@ -703,10 +732,24 @@ impl AppView {
     /// section changes, never while drawing.
     fn filter_library(&mut self, cx: &App) {
         let query = self.library_search.read(cx).value().to_lowercase();
-        let entries = if self.section == Section::History {
-            &self.history
-        } else {
-            &self.saved_queries
+        let entries = match self.section {
+            Section::History => &self.history,
+            Section::Saved => &self.saved_queries,
+            Section::Reports => {
+                self.library_shown = self
+                    .reports
+                    .reports
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, report)| report.matches(&query))
+                    .map(|(index, _)| index)
+                    .collect();
+                return;
+            }
+            Section::Explorer | Section::Settings => {
+                self.library_shown.clear();
+                return;
+            }
         };
         self.library_shown = entries
             .iter()
@@ -796,6 +839,8 @@ impl AppView {
         let _ = self.tabs.update(cx, |tabs, cx| tabs.select_tab(tab, cx));
         if let Some(panel) = self.panels.get(&tab) {
             panel.update(cx, |panel, cx| panel.focus_editor(window, cx));
+        } else if let Some(report) = self.report_tabs.get(&tab) {
+            report.view.update(cx, |view, cx| view.focus(window, cx));
         }
     }
 
@@ -908,6 +953,15 @@ impl AppView {
                         }
                     }
                     WorkspaceEvent::Changed => {}
+                    WorkspaceEvent::SaveAsReport {
+                        title,
+                        connection,
+                        sql,
+                    } => {
+                        let (title, connection, sql) =
+                            (title.clone(), connection.clone(), sql.clone());
+                        this.report_from_query(&title, &connection, &sql, window, cx);
+                    }
                     WorkspaceEvent::ConfirmRisk {
                         connection,
                         description,
@@ -1052,12 +1106,19 @@ impl AppView {
         for index in 0..self.connections.len() {
             self.push_context_choices(index, cx);
         }
+        self.sync_reports(cx);
     }
 
     /// Closes a tab, asking first when a query is running in it (closing
     /// cancels it), a transaction is open (closing rolls it back) or its SQL
     /// is not saved (closing loses it).
     fn request_close(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(report) = self.report_tabs.get(&tab) {
+            let view = report.view.read(cx);
+            let (busy, unsaved) = (view.is_busy(), view.has_unsaved_changes(cx));
+            self.request_report_close(tab, busy, unsaved, window, cx);
+            return;
+        }
         let (busy, unsaved, transaction) =
             self.panels
                 .get(&tab)
@@ -1148,6 +1209,14 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let same_group = self.tabs.read(cx).group_of(tab) == Some(group);
+        if self.report_tabs.contains_key(&tab) {
+            // A report keeps its definition on any connection; the move
+            // itself switches it ([`AppView::report_moved`]).
+            let _ = self
+                .tabs
+                .update(cx, |tabs, cx| tabs.move_tab(tab, group, index, cx));
+            return;
+        }
         let Some(panel) = self.panels.get(&tab) else {
             return;
         };
@@ -1221,13 +1290,13 @@ impl AppView {
         if self.connection_open || self.command_open || self.password_prompt.is_some() {
             return;
         }
-        let Some(panel) = self
-            .tabs
-            .read(cx)
-            .active_tab()
-            .and_then(|tab| self.panels.get(&tab))
-            .cloned()
-        else {
+        let active = self.tabs.read(cx).active_tab();
+        if let Some(report) = active.and_then(|tab| self.report_tabs.get(&tab)) {
+            // A report runs all of its SQL with whichever run shortcut.
+            report.view.update(cx, |view, cx| view.run(cx));
+            return;
+        }
+        let Some(panel) = active.and_then(|tab| self.panels.get(&tab)).cloned() else {
             return;
         };
         if panel.read(cx).shortcut() != ShortcutAction::ConfirmCancel {
@@ -1348,6 +1417,7 @@ impl AppView {
                 [
                     (Section::Explorer, I::Database, tr!("Explorer")),
                     (Section::Saved, I::Bookmark, tr!("Saved queries")),
+                    (Section::Reports, I::FileChartColumn, tr!("Reports")),
                     (Section::History, I::Clock, tr!("History")),
                 ]
                 .into_iter()
@@ -1356,7 +1426,7 @@ impl AppView {
                 .collect::<Vec<_>>(),
             )
             .child(div().flex_1())
-            .child(self.rail_item(3, Section::Settings, I::Settings2, tr!("Preferences"), cx))
+            .child(self.rail_item(4, Section::Settings, I::Settings2, tr!("Preferences"), cx))
             .child(
                 div()
                     .size(px(26.))
@@ -1376,6 +1446,7 @@ impl AppView {
         let title = match self.section {
             Section::Explorer => tr!("Explorer"),
             Section::Saved => tr!("Saved queries"),
+            Section::Reports => tr!("Reports"),
             Section::History => tr!("History"),
             Section::Settings => tr!("Preferences"),
         };
@@ -1407,6 +1478,14 @@ impl AppView {
                                         })
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.open_connection(None, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(self.section == Section::Reports, |s| {
+                                s.child(
+                                    icon_button("add-report", I::Plus, tr!("New report"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.new_report(window, cx)
                                         })),
                                 )
                             })
@@ -1827,6 +1906,9 @@ impl AppView {
                     })
                 },
             )
+            .when(self.section == Section::Reports, |s| {
+                self.reports_list(s, cx)
+            })
             .when(self.section == Section::Settings, |s| {
                 s.child(self.preferences(cx))
             })
@@ -1841,6 +1923,12 @@ impl AppView {
         for panel in self.panels.values() {
             let catalogs = catalogs.clone();
             panel.update(cx, |panel, cx| panel.set_catalogs(catalogs, cx));
+        }
+        for report in self.report_tabs.values() {
+            let catalogs = catalogs.clone();
+            report
+                .view
+                .update(cx, |view, cx| view.set_catalogs(catalogs, cx));
         }
         self.sql_catalogs = catalogs;
         cx.notify();

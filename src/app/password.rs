@@ -71,6 +71,13 @@ impl AppView {
                 }
             });
         }
+        for report in self.report_tabs.values() {
+            report.view.update(cx, |view, cx| {
+                if view.connection_name() == name {
+                    view.update_input(input.clone(), cx);
+                }
+            });
+        }
         if self.password_remember {
             self.remember_password(prompt.index, input.credentials, prompt.then, window, cx);
         } else {

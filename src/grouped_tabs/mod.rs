@@ -337,6 +337,20 @@ impl GroupedTabs {
         Ok(id)
     }
 
+    /// Renames a tab, as when its content is saved under a new title.
+    /// Redraws only when the title changed.
+    pub fn rename_tab(
+        &mut self,
+        tab: TabId,
+        title: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        if self.model.set_title(tab, title.into())? {
+            cx.notify();
+        }
+        Ok(())
+    }
+
     /// Shows what the tab's content is doing before its title. Redraws only
     /// when the status changed.
     pub fn set_tab_status(

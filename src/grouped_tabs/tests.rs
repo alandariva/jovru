@@ -112,6 +112,21 @@ fn foreign_instances_are_rejected_even_when_tab_ids_match() {
 }
 
 #[test]
+fn a_tab_is_renamed_in_place_and_reports_only_changes() {
+    let mut model: Model<()> = Model::default();
+    let first = model.add_group("First".into(), rgb(0x477de6).into());
+    let tab = model.add_tab(first, "Draft".into(), ()).unwrap();
+    assert_eq!(model.set_title(tab, "Revenue".into()), Ok(true));
+    assert_eq!(model.set_title(tab, "Revenue".into()), Ok(false));
+    assert_eq!(model.tab(tab).unwrap().title.as_ref(), "Revenue");
+    model.close(tab).unwrap();
+    assert_eq!(
+        model.set_title(tab, "Gone".into()),
+        Err(super::TabsError::TabNotFound)
+    );
+}
+
+#[test]
 fn a_tab_status_follows_the_tab_and_reports_only_changes() {
     use super::TabStatus;
     let mut model: Model<()> = Model::default();

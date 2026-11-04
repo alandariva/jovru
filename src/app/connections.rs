@@ -632,23 +632,30 @@ impl AppView {
                     Err(_) => connection_store::latest_backup(&dir).await,
                     Ok(_) => None,
                 };
-                let (font_size, state) = match ConfigRepository::open(&dir).await {
+                let (font_size, state, reports) = match ConfigRepository::open(&dir).await {
                     Ok(repository) => {
                         let font_size = repository.setting("editor.font_size").await;
                         let state = super::state::read_state(&repository).await;
+                        let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
                         repository.close().await;
-                        (font_size, state)
+                        (font_size, state, reports)
                     }
-                    Err(error) => (Err(error.clone()), Err(error)),
+                    Err(error) => (Err(error.clone()), Err(error.clone()), Err(error)),
                 };
-                Ok((connections, font_size, state, backup))
+                Ok((connections, font_size, state, reports, backup))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connections_loading = false;
-                let (connections, font_size, state, backup) = match result {
+                let (connections, font_size, state, reports, backup) = match result {
                     Ok(parts) => parts,
-                    Err(error) => (Err(error.clone()), Err(error.clone()), Err(error), None),
+                    Err(error) => (
+                        Err(error.clone()),
+                        Err(error.clone()),
+                        Err(error.clone()),
+                        Err(error),
+                        None,
+                    ),
                 };
                 this.config_backup = backup;
                 let mut problems = Vec::new();
@@ -689,6 +696,12 @@ impl AppView {
                         false
                     }
                 };
+                // The demo keeps no reports.
+                if !super::demo::enabled()
+                    && let Some(problem) = this.load_reports(reports, cx)
+                {
+                    problems.push(problem);
+                }
                 if !problems.is_empty() {
                     this.app_notice = Some(Feedback::new(Tone::Error, problems.join(" ")));
                 }
