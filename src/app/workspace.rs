@@ -726,6 +726,37 @@ impl Workspace {
         }
     }
 
+    /// The gear of the result toolbar: how the grid shows values. Its
+    /// options are toggles that leave the menu's button as an icon.
+    fn display_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = cx.entity().downgrade();
+        let numbers_pt_br = self.numbers_pt_br;
+        Button::new("display-menu")
+            .ghost()
+            .small()
+            .icon(I::Settings)
+            .when(numbers_pt_br, |s| s.text_color(rgb(MINT)))
+            .accessibility_label(tr!("Display settings"))
+            .tooltip(tr!("Display settings"))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let workspace = workspace.clone();
+                menu.item(
+                    PopupMenuItem::new(tr!("pt-BR numbers"))
+                        .checked(numbers_pt_br)
+                        .on_click(move |_, _, cx| {
+                            let _ = workspace.update(cx, |this, cx| {
+                                this.numbers_pt_br = !this.numbers_pt_br;
+                                let numbers_pt_br = this.numbers_pt_br;
+                                this.grid.update(cx, |grid, cx| {
+                                    grid.set_number_format(numbers_pt_br, cx)
+                                });
+                                cx.notify();
+                            });
+                        }),
+                )
+            })
+    }
+
     /// **Copy this page as CSV**. A copy estimated above 50 MiB asks first
     /// (unless `confirmed`), since building and holding it takes time and
     /// memory ([Results](../../docs/results.md#copying)).
@@ -2204,20 +2235,7 @@ impl Workspace {
                                 },
                             ))
                             .child(divider())
-                            .child(
-                                button("format-numbers", I::Settings, tr!("pt-BR numbers"))
-                                    .when(self.numbers_pt_br, |s| {
-                                        s.bg(rgb(HOVER)).text_color(rgb(MINT))
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.numbers_pt_br = !this.numbers_pt_br;
-                                        let numbers_pt_br = this.numbers_pt_br;
-                                        this.grid.update(cx, |grid, cx| {
-                                            grid.set_number_format(numbers_pt_br, cx)
-                                        });
-                                        cx.notify();
-                                    })),
-                            )
+                            .child(self.display_menu(cx))
                             .child({
                                 let records = self.grid.read(cx).records();
                                 icon_button(

@@ -897,9 +897,9 @@ impl AppView {
             warning,
         } = loaded;
         let color = connection_shade(input.config.driver, appearance);
-        let group = self.tabs.update(cx, |tabs, cx| {
-            tabs.add_group(profile.name.clone(), rgb(color).into(), cx)
-        });
+        // The group appears with the connection's first tab
+        // (`AppView::ensure_group`), so the strip never shows an empty one.
+        let group = self.tabs.update(cx, |tabs, _| tabs.reserve_group());
         let detail = connection_detail(&input.config);
         self.next_connection_key += 1;
         let mut connection = Connection {

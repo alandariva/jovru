@@ -15,7 +15,7 @@ is visible, and the keyboard reaches everything.
 │◷ │     ▸ schema │ │ SQL editor, status per statement in the gutter   │ │
 │⚙ │              │ │                                                  │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
-│  │              │ Results · Chart · Messages pt-BR·filter·copy ▾·CSV·⤓ │
+│  │              │ Results · Chart · Messages ⚙·filter·copy ▾·CSV·⤓     │
 │  │              │ Export bar (when open): format, options, progress    │
 │  │              │ ┌──────────────────────────────────────────────────┐ │
 │  │              │ │ Result grid                                      │ │
@@ -26,6 +26,9 @@ is visible, and the keyboard reaches everything.
 │ Status bar: workspace · connections · local data · version             │
 └────────────────────────────────────────────────────────────────────────┘
 ```
+
+A connection's tab group appears with its first tab and goes away with its
+last: the tab strip never shows a group without tabs, at start or later.
 
 The rail holds, from the top: Explorer, Saved queries, Reports, History and,
 at the bottom, Preferences.

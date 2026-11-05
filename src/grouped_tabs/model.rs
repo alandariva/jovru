@@ -37,9 +37,14 @@ impl<C> Default for Model<C> {
 }
 
 impl<C> Model<C> {
-    pub fn add_group(&mut self, name: SharedString, color: Hsla) -> TabGroupId {
+    /// An id that no group has and none will be given.
+    pub fn reserve_group(&mut self) -> TabGroupId {
         self.next_group += 1;
-        let id = TabGroupId(self.next_group);
+        TabGroupId(self.next_group)
+    }
+
+    pub fn add_group(&mut self, name: SharedString, color: Hsla) -> TabGroupId {
+        let id = self.reserve_group();
         self.groups.push(Group {
             id,
             name,
@@ -252,6 +257,21 @@ mod tests {
         assert_eq!(model.group_selection(second), Ok(Some(c)));
         model.select(b).unwrap();
         assert_eq!(model.group_selection(first), Ok(Some(b)));
+    }
+
+    #[test]
+    fn a_reserved_group_id_names_no_group_and_is_never_reused() {
+        let mut model: Model<()> = Model::default();
+        let reserved = model.reserve_group();
+        assert!(model.groups.is_empty());
+        assert!(model.group(reserved).is_none());
+        assert_eq!(
+            model.add_tab(reserved, "A".into(), ()),
+            Err(TabsError::GroupNotFound)
+        );
+        let added = group(&mut model);
+        assert_ne!(added, reserved);
+        assert_eq!(model.groups.len(), 1);
     }
 
     #[test]

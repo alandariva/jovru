@@ -230,6 +230,7 @@
   "Disconnect: close this tab's session": "Desconectar: fechar a sessão desta aba",
   "Disconnected": "Desconectado",
   "Disconnected. The next run opens a new session, and session settings such as the current schema start over.": "Desconectado. A próxima execução abre uma nova sessão, e as configurações da sessão, como o schema atual, recomeçam.",
+  "Display settings": "Configurações de exibição",
   "Distinct values": "Valores distintos",
   "Done editing": "Concluir edição",
   "Drag the dividers. With the keyboard, use Tab to focus a divider and the arrows to adjust it.": "Arraste os divisores. Com o teclado, use Tab para focar um divisor e as setas para ajustá-lo.",

@@ -53,8 +53,9 @@ alignment only; the value itself is never converted.
   tooltip and in copies.
 - A tooltip appears only when the value does not fit its column or has line
   breaks, so it never covers neighbours or the context menu needlessly.
-- **pt-BR numbers** groups digits and swaps the decimal separator as text,
-  without passing through floating point.
+- **pt-BR numbers**, a toggle in the gear of the result toolbar, groups
+  digits and swaps the decimal separator as text, without passing through
+  floating point.
 - Headers read `name : type`, the type in a neutral tone.
 
 ## Model in memory

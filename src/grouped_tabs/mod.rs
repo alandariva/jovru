@@ -254,6 +254,13 @@ impl GroupedTabs {
         self.confirm_changes = confirm;
     }
 
+    /// An id that names no group, for a host that adds a group only once it
+    /// has a tab to show: until then the strip shows nothing for it, and
+    /// [`GroupedTabs::group_ids`] does not list it.
+    pub fn reserve_group(&mut self) -> TabGroupId {
+        self.model.reserve_group()
+    }
+
     pub fn add_group(
         &mut self,
         name: impl Into<SharedString>,
