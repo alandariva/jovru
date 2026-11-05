@@ -18,6 +18,10 @@ pub const AMBER: u32 = 0xe6bb78;
 pub const TEAL: u32 = 0x7fd0d6;
 pub const PINK: u32 = 0xd995a7;
 pub const SLATE: u32 = 0x8f9bb0;
+/// A search match inside a result's text: brighter text on a faint mint
+/// wash, visible without shouting (`rgba`).
+pub const MATCH_TEXT: u32 = TEXT;
+pub const MATCH_BG: u32 = 0x8bddbc33;
 
 // SQL editor syntax.
 pub const SQL_KEYWORD: u32 = PURPLE;
@@ -142,6 +146,18 @@ pub fn spinning_icon(
 
 pub fn dot(color: u32) -> Div {
     div().size(px(6.)).flex_none().rounded_full().bg(rgb(color))
+}
+
+/// `text` with the byte `ranges` a search matched marked
+/// ([`MATCH_TEXT`], [`MATCH_BG`]).
+pub fn marked(text: impl Into<SharedString>, ranges: Vec<std::ops::Range<usize>>) -> StyledText {
+    let style = HighlightStyle {
+        color: Some(rgb(MATCH_TEXT).into()),
+        background_color: Some(rgba(MATCH_BG).into()),
+        ..HighlightStyle::default()
+    };
+    StyledText::new(text.into())
+        .with_highlights(ranges.into_iter().map(move |range| (range, style)))
 }
 
 pub fn label(value: impl Into<SharedString>) -> Div {

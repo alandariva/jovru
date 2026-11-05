@@ -2526,7 +2526,26 @@ impl AppView {
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(HOVER)))
         };
-        let text = |name: String, detail: String| {
+        // What the text asked for is marked where the row shows it: the
+        // words without `#tag` filters, and those filters in the tags.
+        let typed = self.command.read(cx).value().to_string();
+        let words = jykre::workspace_state::without_tag_filters(&typed);
+        let words = words.trim();
+        let tag_filters: Vec<&str> = typed
+            .split_whitespace()
+            .filter(|word| word.len() > 1 && word.starts_with('#'))
+            .collect();
+        let mark = |value: &str, tags: bool| {
+            let mut needles = vec![words];
+            if tags {
+                needles.extend(tag_filters.iter().copied());
+            }
+            marked(
+                value.to_owned(),
+                jykre::palette::highlights(value, &needles),
+            )
+        };
+        let text = |name: String, detail: String, tags: bool| {
             row()
                 .flex_1()
                 .min_w_0()
@@ -2537,7 +2556,7 @@ impl AppView {
                         .max_w(px(260.))
                         .truncate()
                         .text_size(px(14.))
-                        .child(name),
+                        .child(mark(&name, false)),
                 )
                 .child(
                     div()
@@ -2545,8 +2564,14 @@ impl AppView {
                         .truncate()
                         .text_size(px(12.))
                         .text_color(rgb(FAINT))
-                        .child(detail),
+                        .child(mark(&detail, tags)),
                 )
+        };
+        let connection_label = |name: &str| {
+            div()
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .child(mark(name, false))
         };
         let open = {
             let item = item.clone();
@@ -2566,8 +2591,8 @@ impl AppView {
                 option(("command-saved", index))
                     .aria_label(tr!("Open the saved query {0}", entry.title))
                     .child(icon(I::Bookmark, MINT))
-                    .child(text(entry.title.clone(), tags))
-                    .child(label(entry.connection.clone()))
+                    .child(text(entry.title.clone(), tags, true))
+                    .child(connection_label(&entry.connection))
                     .child(icon(I::CornerDownLeft, FAINT))
                     .on_click(open)
             }
@@ -2598,7 +2623,7 @@ impl AppView {
                         connection
                     ))
                     .child(icon(I::Table2, MINT))
-                    .child(text(name, location))
+                    .child(text(name, location, false))
                     .child(label(connection))
                     .child(icon(I::CornerDownLeft, FAINT))
                     .on_click(open)
