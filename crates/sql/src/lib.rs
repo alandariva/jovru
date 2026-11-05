@@ -1,5 +1,6 @@
-//! SQL text handling that needs no window: tokens, statement splitting,
-//! layout normalisation, preview checks and formatting.
+//! SQL text handling that the execution of queries needs and the editor
+//! shares: tokens, statement splitting, layout normalisation, `EXPLAIN` and
+//! position mapping, by the rules of each dialect.
 //!
 //! One tokenizer serves every function here, so splitting, highlighting and
 //! formatting always agree on where a literal or a comment ends. Its rules
@@ -7,12 +8,20 @@
 //! generic rules (`None`).
 //!
 //! Everything here is pure and synchronous: the same input gives the same
-//! output, and SQL is never sent anywhere or rewritten for execution.
-use crate::drivers::SqlDialect;
-use crate::tr;
+//! output, and SQL is never sent anywhere or rewritten for execution. This
+//! crate knows nothing about the editor's language features (completion,
+//! highlighting, formatting), which live in `jykre-sql-language` and can be
+//! removed without touching what runs queries.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
+pub mod names;
+
+pub use jykre_core::SqlDialect;
 use std::ops::Range;
 
-/// What a token is, for highlighting and formatting.
+/// What a token is, lexically. Whether a word is a keyword, a function or a
+/// name depends on the dialect's catalog, which the editor's language
+/// features know and this crate does not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TokenKind {
     Comment,
@@ -20,10 +29,15 @@ pub enum TokenKind {
     /// whole like a comment.
     Executable,
     String,
+    /// A name in the dialect's identifier quotes: `"x"` in PostgreSQL,
+    /// `` `x` `` in MySQL and Databricks, both without a dialect.
+    QuotedIdentifier,
     Number,
+    /// A keyword, a function or a name.
     Word,
-    Keyword,
-    Function,
+    /// A placeholder or a variable: `$1` (PostgreSQL), `?` (MySQL and
+    /// Databricks), `:name` (Databricks), `@var` and `@@var` (MySQL).
+    Parameter,
     Symbol,
 }
 
@@ -77,6 +91,43 @@ impl Rules {
     fn word_char(self, ch: char) -> bool {
         ch.is_alphanumeric() || ch == '_' || (ch == '$' && self.mysql())
     }
+
+    /// Whether `quote` opens a name rather than a string: `"` quotes strings
+    /// in MySQL (without `ANSI_QUOTES`) and Databricks, and PostgreSQL has no
+    /// backtick quotes.
+    fn identifier_quote(self, quote: char) -> bool {
+        match quote {
+            '"' => !self.mysql() && !self.databricks(),
+            '`' => !self.postgres(),
+            _ => false,
+        }
+    }
+
+    /// `?` is a placeholder except in PostgreSQL, where it is an operator
+    /// (`jsonb ? 'key'`) and placeholders are `$1`.
+    fn question_placeholder(self) -> bool {
+        !self.postgres()
+    }
+
+    /// `:name` is a named parameter in Databricks (and without a dialect).
+    fn colon_parameters(self) -> bool {
+        self.databricks() || self.dialect.is_none()
+    }
+}
+
+/// Whether the `:` at `start` opens a named parameter: a name follows, and
+/// what comes before is not something a Databricks path could continue
+/// (`raw:owner` reads a field of `raw`).
+fn named_parameter(sql: &str, start: usize) -> bool {
+    let follows = sql[start + 1..]
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_alphabetic() || ch == '_');
+    let continues = sql[..start]
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch.is_alphanumeric() || matches!(ch, '_' | ')' | ']' | '`' | '"' | ':'));
+    follows && !continues
 }
 
 /// Longest first, so `->>` wins over `->`.
@@ -163,9 +214,14 @@ fn next_token(sql: &str, mut pos: usize, rules: Rules) -> Option<(Range<usize>, 
         )
     } else if matches!(ch, '\'' | '"' | '`') {
         let quote = ch as u8;
+        let kind = if rules.identifier_quote(ch) {
+            TokenKind::QuotedIdentifier
+        } else {
+            TokenKind::String
+        };
         (
             quoted_end(sql, start, quote, rules.backslash(quote, false)),
-            TokenKind::String,
+            kind,
         )
     } else if matches!(ch, 'e' | 'E') && next == Some(b'\'') && rules.postgres() {
         // A PostgreSQL escape string, where a backslash escapes.
@@ -186,9 +242,29 @@ fn next_token(sql: &str, mut pos: usize, rules: Rules) -> Option<(Range<usize>, 
                 .find(delimiter)
                 .map_or(sql.len(), |close| body + close + delimiter.len());
             (end, TokenKind::String)
-        } else {
+        } else if tag_len > 0 && tag[..tag_len].bytes().all(|byte| byte.is_ascii_digit()) {
             // Positional parameter such as `$1`.
+            (start + 1 + tag_len, TokenKind::Parameter)
+        } else {
             (start + 1 + tag_len, TokenKind::Word)
+        }
+    } else if ch == '?' && rules.question_placeholder() {
+        (start + 1, TokenKind::Parameter)
+    } else if ch == ':' && rules.colon_parameters() && named_parameter(sql, start) {
+        let len = rest[1..]
+            .find(|c: char| !rules.word_char(c))
+            .unwrap_or(rest.len() - 1);
+        (start + 1 + len, TokenKind::Parameter)
+    } else if ch == '@' && rules.mysql() {
+        // A user variable (`@total`) or a system one (`@@autocommit`).
+        let at = if rest.starts_with("@@") { 2 } else { 1 };
+        let len = rest[at..]
+            .find(|c: char| !rules.word_char(c))
+            .unwrap_or(rest.len() - at);
+        if len > 0 {
+            (start + at + len, TokenKind::Parameter)
+        } else {
+            (start + 1, TokenKind::Symbol)
         }
     } else if ch.is_ascii_digit() {
         let len = rest
@@ -199,17 +275,7 @@ fn next_token(sql: &str, mut pos: usize, rules: Rules) -> Option<(Range<usize>, 
         let len = rest
             .find(|c: char| !rules.word_char(c))
             .unwrap_or(rest.len());
-        let end = start + len;
-        let kind = match sql[start..end].to_ascii_uppercase().as_str() {
-            "SELECT" | "FROM" | "WHERE" | "JOIN" | "LEFT" | "RIGHT" | "INNER" | "OUTER" | "ON"
-            | "AS" | "AND" | "OR" | "NOT" | "NULL" | "IS" | "IN" | "BETWEEN" | "LIKE" | "GROUP"
-            | "BY" | "ORDER" | "DESC" | "ASC" | "LIMIT" | "OFFSET" | "WITH" | "DISTINCT"
-            | "CASE" | "WHEN" | "THEN" | "ELSE" | "END" | "HAVING" => TokenKind::Keyword,
-            "COUNT" | "SUM" | "AVG" | "ROUND" | "MAX" | "MIN" | "COALESCE" | "DATE"
-            | "DATE_FORMAT" | "DATE_TRUNC" | "EXPLAIN" | "ANALYZE" => TokenKind::Function,
-            _ => TokenKind::Word,
-        };
-        (end, kind)
+        (start + len, TokenKind::Word)
     } else {
         // Multi-character operators are one token, so formatting never
         // splits `>=` into `> =` or `::` into `: :`.
@@ -236,13 +302,59 @@ pub fn tokens(sql: &str, dialect: Option<SqlDialect>) -> Vec<(Range<usize>, Toke
     tokens
 }
 
+/// Where an edit replaced bytes `start..old_end` of the previous text with
+/// bytes `start..new_end` of the new one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edit {
+    pub start: usize,
+    pub old_end: usize,
+    pub new_end: usize,
+}
+
+/// The tokens of `sql` (the text after `edit`) from `old`, the tokens of the
+/// text before it, reading only around the edit: the tokens that end before
+/// it are kept, reading restarts after them and stops at the first token
+/// that meets one of the old ones moved by the edit, after which the old
+/// tokens are kept, moved. The result is always what [`tokens`] gives for
+/// `sql`; only opening a literal or a comment reads to the end of the text.
+pub fn relex(
+    old: &[(Range<usize>, TokenKind)],
+    sql: &str,
+    edit: Edit,
+    dialect: Option<SqlDialect>,
+) -> Vec<(Range<usize>, TokenKind)> {
+    let rules = Rules { dialect };
+    // A token ending before the edit is read up to a character before it,
+    // so the edit cannot change it.
+    let keep = old.partition_point(|(range, _)| range.end < edit.start);
+    let mut found: Vec<_> = old[..keep].to_vec();
+    let mut pos = found.last().map_or(0, |(range, _)| range.end);
+    let moved = |(range, kind): &(Range<usize>, TokenKind)| {
+        let shift = |at: usize| at - edit.old_end + edit.new_end;
+        (shift(range.start)..shift(range.end), *kind)
+    };
+    let mut candidate = old.partition_point(|(range, _)| range.start < edit.old_end);
+    while let Some(token) = next_token(sql, pos, rules) {
+        if token.0.start >= edit.new_end {
+            while candidate < old.len() && moved(&old[candidate]).0.start < token.0.start {
+                candidate += 1;
+            }
+            if candidate < old.len() && moved(&old[candidate]) == token {
+                // In step again: the text from here on is the old text,
+                // moved, so its tokens are too.
+                found.extend(old[candidate..].iter().map(moved));
+                return found;
+            }
+        }
+        pos = token.0.end;
+        found.push(token);
+    }
+    found
+}
+
 /// The word of a token, upper case, or `None` for any other kind.
 fn word(sql: &str, token: &(Range<usize>, TokenKind)) -> Option<String> {
-    matches!(
-        token.1,
-        TokenKind::Word | TokenKind::Keyword | TokenKind::Function
-    )
-    .then(|| sql[token.0.clone()].to_ascii_uppercase())
+    (token.1 == TokenKind::Word).then(|| sql[token.0.clone()].to_ascii_uppercase())
 }
 
 /// The next token after `pos` that is not a comment.
@@ -365,7 +477,10 @@ pub fn statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<Range<usize>> {
             pos = end;
             continue;
         }
-        let found = if kind == TokenKind::String || kind == TokenKind::Executable {
+        let found = if matches!(
+            kind,
+            TokenKind::String | TokenKind::QuotedIdentifier | TokenKind::Executable
+        ) {
             None
         } else if sql[range.start..].starts_with(delimiter.as_str()) {
             Some(range.start)
@@ -555,183 +670,89 @@ pub fn explain(
     Ok(format!("EXPLAIN {body}"))
 }
 
-/// Why the demo would refuse to run `sql`, or `None` when it accepts it. The
-/// demo only simulates read queries; real connections never use this check.
-pub fn preview_error(sql: &str) -> Option<&'static str> {
-    let first = tokens(sql, None).into_iter().next()?;
-    let command = sql[first.0].to_ascii_uppercase();
-    if !matches!(
-        command.as_str(),
-        "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "DESCRIBE" | "VALUES"
-    ) {
-        Some(tr!(
-            "The demo accepts only read queries (SELECT, WITH, EXPLAIN, SHOW, DESCRIBE or VALUES)."
-        ))
-    } else if command == "SELECT"
-        && sql
-            .trim_end_matches([';', ' ', '\n', '\r'])
-            .trim()
-            .eq_ignore_ascii_case("SELECT")
-    {
-        Some(tr!("SELECT needs an expression or column."))
-    } else {
-        None
-    }
-}
-
-/// Why [`format`] could not format the SQL.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FormatError {
-    /// The formatter failed on this input, or its result would change more
-    /// than layout and keyword case; the SQL is left as it was.
-    Failed,
-}
-
-/// The SQL as [`format`] laid it out.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Formatted {
-    pub sql: String,
-    /// Part of the SQL does not parse in the dialect and was left as it was.
-    pub partial: bool,
-}
-
-/// The rules [`format`] applies: layout (spacing, indentation, line breaks,
-/// blank lines) and keyword capitalisation. Each changes only whitespace
-/// and the case of keywords; rules that rewrite SQL (aliases, quoting,
-/// semicolons, identifier case) are left out.
-const FORMAT_RULES: &str =
-    "LT01,LT02,LT03,LT04,LT05,LT06,LT07,LT08,LT09,LT10,LT11,LT12,LT13,LT14,LT15,CP01";
-
-/// The formatter for `dialect`, built once: building one sets up its
-/// dialect's grammar, which takes long. `None` when it could not be built.
-fn formatter(
-    dialect: Option<SqlDialect>,
-) -> Option<&'static sqruff_lib::core::linter::core::Linter> {
-    use sqruff_lib::core::{config::FluffConfig, linter::core::Linter};
-    use std::sync::OnceLock;
-    static FORMATTERS: [OnceLock<Option<Linter>>; 4] = [
-        OnceLock::new(),
-        OnceLock::new(),
-        OnceLock::new(),
-        OnceLock::new(),
+/// Whether `sql` is one statement that only reads: it starts as a query
+/// (`SELECT`, `WITH`, `VALUES`, `TABLE`, `SHOW`, `DESCRIBE`, `DESC` or
+/// `EXPLAIN`) and no word of its code writes, locks or runs something else
+/// (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `INTO`, `FOR UPDATE`, `CALL`,
+/// `ANALYZE`, ...). Words are read by the dialect's tokens, so a string or a
+/// comment holding `DELETE` does not count; a name such as a column called
+/// `update` does, and the statement is refused: the answer errs on the side
+/// of not running. A MySQL executable comment (`/*! … */`) is code, so it
+/// refuses too. Functions with side effects (`nextval`) cannot be told
+/// apart, which is why running a statement again for an export also asks
+/// the user.
+pub fn reads_only(sql: &str, dialect: Option<SqlDialect>) -> bool {
+    const STARTS: &[&str] = &[
+        "SELECT", "WITH", "VALUES", "TABLE", "SHOW", "DESCRIBE", "DESC", "EXPLAIN",
     ];
-    let (slot, name) = match dialect {
-        Some(SqlDialect::Postgres) => (0, "postgres"),
-        Some(SqlDialect::MySql) => (1, "mysql"),
-        Some(SqlDialect::DatabricksSql) => (2, "databricks"),
-        _ => (3, "ansi"),
-    };
-    FORMATTERS[slot]
-        .get_or_init(|| {
-            // In memory only: no configuration file is read, and files of any
-            // size are formatted.
-            let source = format!(
-                "[sqruff]\ndialect = {name}\nrules = {FORMAT_RULES}\nlarge_file_skip_byte_limit = 0\n\n\
-                 [sqruff:rules:capitalisation.keywords]\ncapitalisation_policy = upper\n"
-            );
-            let config = FluffConfig::try_from_source(&source, None).ok()?;
-            Linter::new(config, None, None, false).ok()
-        })
-        .as_ref()
-}
-
-/// Whether `after` holds the same text as `before` but for whitespace and
-/// ASCII letter case.
-fn same_text(before: &str, after: &str) -> bool {
-    let text = |sql: &str| {
-        sql.chars()
-            .filter(|ch| !ch.is_whitespace())
-            .map(|ch| ch.to_ascii_lowercase())
-            .collect::<Vec<_>>()
-    };
-    text(before) == text(after)
-}
-
-/// One statement laid out by sqruff, without the whitespace around it, or
-/// `None` when the formatter failed or changed more than layout and keyword
-/// case. The flag tells that part of it does not parse in the dialect.
-fn format_statement(statement: &str, dialect: Option<SqlDialect>) -> Option<(String, bool)> {
-    // A failure of the formatter on some input must not take the
-    // application down: the statement is left as it was.
-    let run = std::panic::AssertUnwindSafe(|| {
-        let linted = formatter(dialect)?
-            .lint_string(statement, None, true)
-            .ok()?;
-        let partial = linted.has_parse_or_templating_errors();
-        Some((linted.fix_string().trim().to_owned(), partial))
-    });
-    match std::panic::catch_unwind(run) {
-        Ok(Some((formatted, partial))) if same_text(statement, &formatted) => {
-            Some((formatted, partial))
+    const WRITES: &[&str] = &[
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "MERGE",
+        "UPSERT",
+        "REPLACE",
+        "CREATE",
+        "DROP",
+        "ALTER",
+        "TRUNCATE",
+        "RENAME",
+        "COMMENT",
+        "GRANT",
+        "REVOKE",
+        "CALL",
+        "EXEC",
+        "EXECUTE",
+        "DO",
+        "COPY",
+        "INTO",
+        "LOCK",
+        "SHARE",
+        "ANALYZE",
+        "ANALYSE",
+        "VACUUM",
+        "OPTIMIZE",
+        "REFRESH",
+        "CLUSTER",
+        "REINDEX",
+        "SET",
+        "RESET",
+        "BEGIN",
+        "START",
+        "COMMIT",
+        "ROLLBACK",
+        "SAVEPOINT",
+        "PREPARE",
+        "DEALLOCATE",
+        "HANDLER",
+        "LOAD",
+        "NOTIFY",
+        "LISTEN",
+        "USE",
+    ];
+    if statements(sql, dialect).len() != 1 {
+        return false;
+    }
+    let mut first = true;
+    for token in tokens(sql, dialect) {
+        match token.1 {
+            TokenKind::Comment => continue,
+            TokenKind::Executable => return false,
+            _ => {}
         }
-        _ => None,
-    }
-}
-
-/// Lays out `sql` by the rules of `dialect` with sqruff: spacing,
-/// indentation, line breaks and upper-case keywords. Each statement (as
-/// [`statements`] splits them) is formatted on its own, and the text between
-/// statements (blank lines, comments, MySQL `DELIMITER` lines) is kept as it
-/// was, so the script keeps its separation and every statement keeps its own
-/// first line. Only whitespace and the case of keywords change, so literals,
-/// comments and identifiers keep their meaning and [`map_offset`] finds any
-/// position again; a result that would change anything else is refused. A
-/// statement that does not parse in the dialect is left as it was
-/// (`partial`).
-///
-/// It is CPU work that grows with the SQL, and the first call per dialect
-/// builds its grammar: callers run it off the UI thread.
-pub fn format(sql: &str, dialect: Option<SqlDialect>) -> Result<Formatted, FormatError> {
-    let mut formatted = String::with_capacity(sql.len() + sql.len() / 8);
-    let mut partial = false;
-    let mut end = 0;
-    for range in statements(sql, dialect) {
-        formatted.push_str(&sql[end..range.start]);
-        match format_statement(&sql[range.clone()], dialect) {
-            Some((statement, unparsed)) => {
-                formatted.push_str(&statement);
-                partial |= unparsed;
+        let word = word(sql, &token);
+        if first {
+            first = false;
+            if !word.as_deref().is_some_and(|word| STARTS.contains(&word)) {
+                return false;
             }
-            None => {
-                formatted.push_str(&sql[range.clone()]);
-                partial = true;
-            }
+            continue;
         }
-        end = range.end;
+        if word.as_deref().is_some_and(|word| WRITES.contains(&word)) {
+            return false;
+        }
     }
-    formatted.push_str(&sql[end..]);
-    if same_text(sql, &formatted) {
-        Ok(Formatted {
-            sql: formatted,
-            partial,
-        })
-    } else {
-        Err(FormatError::Failed)
-    }
-}
-
-/// [`format`] applied to `range` of `sql` only, as the Format button does
-/// with a selection: the text outside it is kept as it was. Returns the
-/// whole text and the range the formatted part now takes.
-pub fn format_range(
-    sql: &str,
-    range: Range<usize>,
-    dialect: Option<SqlDialect>,
-) -> Result<(Formatted, Range<usize>), FormatError> {
-    let part = sql.get(range.clone()).ok_or(FormatError::Failed)?;
-    let Formatted {
-        sql: formatted,
-        partial,
-    } = format(part, dialect)?;
-    let whole = format!("{}{formatted}{}", &sql[..range.start], &sql[range.end..]);
-    let end = range.start + formatted.len();
-    Ok((
-        Formatted {
-            sql: whole,
-            partial,
-        },
-        range.start..end,
-    ))
+    !first
 }
 
 /// Where byte `offset` of `before` is in `after`, when the two differ only
@@ -755,11 +776,151 @@ pub fn map_offset(before: &str, after: &str, offset: usize) -> usize {
         .map_or(after.len(), |(at, ch)| at + ch.len_utf8())
 }
 
+/// `value` as a string literal of `dialect`, for SQL the application
+/// writes from values (a copy as an `IN` list or as `INSERT`s). Where a
+/// backslash escapes inside strings (MySQL, Databricks and generic rules),
+/// backslashes and quotes are escaped with one, since Databricks reads two
+/// adjacent quotes as two literals; PostgreSQL doubles the quote.
+pub fn string_literal(value: &str, dialect: Option<SqlDialect>) -> String {
+    let backslash = Rules { dialect }.backslash(b'\'', false);
+    let mut literal = String::with_capacity(value.len() + 2);
+    literal.push('\'');
+    for ch in value.chars() {
+        match ch {
+            '\'' if backslash => literal.push_str("\\'"),
+            '\'' => literal.push_str("''"),
+            '\\' if backslash => literal.push_str("\\\\"),
+            ch => literal.push(ch),
+        }
+    }
+    literal.push('\'');
+    literal
+}
+
+/// A `:name` parameter marker of a report (ADR-0023).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedMarker {
+    pub name: String,
+    /// The marker's bytes, colon included.
+    pub range: Range<usize>,
+}
+
+/// The `:name` markers of `sql`, in order, by the rules of `dialect`. Only
+/// code counts: strings, comments and quoted names are skipped whole. A
+/// marker is a `:` right before a name (ASCII letters, digits and `_`, not
+/// starting with a digit) and not right after something it could continue:
+/// `x::int`, `a := 1`, `raw:owner`, `arr[1:2]`, `arr[lo:hi]` and `arr[:hi]`
+/// hold no marker. Finding markers changes nothing: the driver binds the
+/// values ([`jykre_core::QueryParameter`]).
+pub fn named_markers(sql: &str, dialect: Option<SqlDialect>) -> Vec<NamedMarker> {
+    let tokens = tokens(sql, dialect);
+    let mut markers = Vec::new();
+    for (index, (range, kind)) in tokens.iter().enumerate() {
+        let marker = match kind {
+            TokenKind::Parameter if sql.get(range.clone()).is_some_and(|t| t.starts_with(':')) => {
+                range.clone()
+            }
+            TokenKind::Symbol if sql.get(range.clone()) == Some(":") => {
+                let Some((word, TokenKind::Word)) = tokens.get(index + 1) else {
+                    continue;
+                };
+                if word.start != range.end || !named_parameter(sql, range.start) {
+                    continue;
+                }
+                range.start..word.end
+            }
+            _ => continue,
+        };
+        // `arr[:hi]` slices an array.
+        if sql
+            .get(..marker.start)
+            .is_some_and(|before| before.ends_with('['))
+        {
+            continue;
+        }
+        let Some(name) = sql.get(marker.start + 1..marker.end) else {
+            continue;
+        };
+        if jykre_core::is_parameter_name(name) {
+            markers.push(NamedMarker {
+                name: name.to_owned(),
+                range: marker,
+            });
+        }
+    }
+    markers
+}
+
+#[cfg(test)]
+mod named_marker_tests {
+    use super::{SqlDialect, named_markers};
+
+    const DIALECTS: [Option<SqlDialect>; 4] = [
+        Some(SqlDialect::Postgres),
+        Some(SqlDialect::MySql),
+        Some(SqlDialect::DatabricksSql),
+        None,
+    ];
+
+    fn names(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
+        named_markers(sql, dialect)
+            .into_iter()
+            .map(|marker| {
+                assert_eq!(&sql[marker.range.clone()], format!(":{}", marker.name));
+                marker.name
+            })
+            .collect()
+    }
+
+    #[test]
+    fn markers_are_found_in_every_dialect_in_order_with_repeats() {
+        for dialect in DIALECTS {
+            assert_eq!(
+                names(
+                    "SELECT * FROM t WHERE a = :start AND b <= :_end2 OR c = :start",
+                    dialect
+                ),
+                ["start", "_end2", "start"],
+                "{dialect:?}"
+            );
+            assert_eq!(names("SELECT (:a)+:b", dialect), ["a", "b"], "{dialect:?}");
+        }
+    }
+
+    #[test]
+    fn code_that_only_looks_like_a_marker_holds_none() {
+        for dialect in DIALECTS {
+            for sql in [
+                "SELECT x::int, y :: text",
+                "SELECT ':a', ' :b '",
+                "SELECT 1 -- :a",
+                "SELECT /* :a */ 1",
+                "SELECT raw:owner FROM t",
+                "SELECT arr[1:2], arr[lo:hi], arr[:hi] FROM t",
+                "SELECT : a",
+                "SELECT :1",
+                "SELECT x:=1",
+            ] {
+                assert!(names(sql, dialect).is_empty(), "{dialect:?} {sql}");
+            }
+        }
+        assert!(names("SELECT $$ :a $$, E'\\' :b'", Some(SqlDialect::Postgres)).is_empty());
+        assert!(names("SELECT \":a\"", Some(SqlDialect::Postgres)).is_empty());
+        assert!(names("SELECT `:a`", Some(SqlDialect::MySql)).is_empty());
+        assert!(names("SELECT 1 # :a", Some(SqlDialect::MySql)).is_empty());
+    }
+
+    #[test]
+    fn names_outside_ascii_are_not_markers() {
+        assert!(names("SELECT :ação", Some(SqlDialect::Postgres)).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SqlDialect, TokenKind, format, map_offset, normalized_statements, preview_error,
-        statement_at, statement_lines, statements, tokens,
+        SqlDialect, TokenKind, map_offset, normalized_statements, statement_at, statement_lines,
+        statements, string_literal, tokens,
     };
     use std::time::{Duration, Instant};
 
@@ -774,102 +935,35 @@ mod tests {
             .collect()
     }
 
-    fn formatted(sql: &str, dialect: Option<SqlDialect>) -> String {
-        format(sql, dialect).expect("the formatter runs").sql
-    }
-
     #[test]
-    fn format_keeps_operators_literals_and_parameters_intact() {
-        let sql = "select a from t where a>=1 and b<=2 and c<>3 and d!=4 and e::int=5 \
-                   and f||'x'='y' and g->>'k'=$1 and h=$$a >= b;$$ and i=$q$x$q$";
-        let formatted = formatted(sql, POSTGRES);
-        for kept in [
-            ">= 1",
-            "<= 2",
-            "<> 3",
-            "!= 4",
-            "::",
-            "||",
-            "->>",
-            "$1",
-            "$$a >= b;$$",
-            "$q$x$q$",
-        ] {
-            assert!(formatted.contains(kept), "{kept:?} in {formatted:?}");
+    fn string_literals_escape_as_the_dialect_reads_them() {
+        let value = r"it's C:\temp";
+        assert_eq!(string_literal(value, POSTGRES), r"'it''s C:\temp'");
+        assert_eq!(string_literal(value, MYSQL), r"'it\'s C:\\temp'");
+        assert_eq!(string_literal(value, DATABRICKS), r"'it\'s C:\\temp'");
+        // Each literal is one string under its own dialect's rules.
+        for dialect in [POSTGRES, MYSQL, DATABRICKS, None] {
+            let sql = format!("SELECT {};", string_literal(value, dialect));
+            assert_eq!(statements(&sql, dialect).len(), 1, "{sql}");
         }
-        assert!(formatted.starts_with("SELECT"), "{formatted:?}");
-        assert!(!formatted.contains("> ="), "{formatted:?}");
-        assert!(!formatted.contains(": :"), "{formatted:?}");
-        // Formatting is stable, so a second run changes nothing.
-        assert_eq!(super::format(&formatted, POSTGRES).unwrap().sql, formatted);
     }
 
     #[test]
-    fn format_keeps_mysql_backslash_escapes_and_the_statements_apart() {
-        // `'a\'b'` is one literal in MySQL: formatting must not treat the
-        // rest of the line as a string and change what follows it.
-        let sql = "select 'a\\'b' as x, 'c' from t where y = 'd;e';\n\ninsert into t values (1);";
-        let formatted = formatted(sql, MYSQL);
-        assert!(formatted.contains("'a\\'b' AS x"), "{formatted:?}");
-        assert!(formatted.contains("'d;e'"), "{formatted:?}");
-        assert!(formatted.contains("INSERT INTO t"), "{formatted:?}");
-        // Statements stay apart, with the blank line between them.
-        assert!(formatted.contains(";\n\nINSERT"), "{formatted:?}");
-        assert_eq!(split(&formatted, MYSQL).len(), 2);
-        let kinds: Vec<_> = tokens(sql, MYSQL)
-            .into_iter()
-            .map(|(range, kind)| (&sql[range], kind))
-            .collect();
-        assert_eq!(kinds[1], ("'a\\'b'", TokenKind::String));
-        // In PostgreSQL a backslash is literal, except in E'' strings.
-        assert_eq!(split("SELECT 'C:\\'; SELECT 2;", POSTGRES).len(), 2);
-        assert_eq!(split("SELECT E'a\\';b'; SELECT 2;", POSTGRES).len(), 2);
-    }
-
-    #[test]
-    fn what_does_not_parse_is_left_as_it_was() {
-        let sql = "select a from t;\nselect * from orders where";
-        let result = format(sql, POSTGRES).unwrap();
-        assert!(result.partial);
-        assert!(
-            result.sql.starts_with("SELECT a FROM t;"),
-            "{:?}",
-            result.sql
-        );
-        assert!(result.sql.contains("where"), "{:?}", result.sql);
-        let clean = format("select 1", DATABRICKS).unwrap();
-        assert!(!clean.partial);
-        assert_eq!(clean.sql.trim_end(), "SELECT 1");
-        // Without a connection the generic rules apply.
-        assert_eq!(formatted("select 1", None).trim_end(), "SELECT 1");
-    }
-
-    #[test]
-    fn only_layout_and_keyword_case_may_change() {
-        assert!(super::same_text("select  a\nfrom t", "SELECT a FROM t"));
-        assert!(!super::same_text("select 'a b'", "select 'a', 'b'"));
-        assert!(!super::same_text("select a", "select a;"));
-    }
-
-    #[test]
-    fn map_offset_follows_the_text_through_formatting() {
-        let sql = "select a,\n   b from t\nwhere   a = 1";
-        let formatted = formatted(sql, POSTGRES);
+    fn map_offset_follows_the_text_through_a_layout_change() {
+        let before = "select a,\n   b from t\nwhere   a = 1";
+        let after = "SELECT\n    a,\n    b\nFROM t\nWHERE a = 1";
         for word in ["a,", "b", "t", "where", "1"] {
-            let at = sql.find(word).unwrap();
-            let mapped = map_offset(sql, &formatted, at + word.len());
+            let at = before.find(word).unwrap();
+            let mapped = map_offset(before, after, at + word.len());
             assert!(
-                formatted[..mapped]
+                after[..mapped]
                     .to_ascii_lowercase()
                     .ends_with(&word.to_ascii_lowercase()),
-                "{word:?} -> {mapped} in {formatted:?}"
+                "{word:?} -> {mapped} in {after:?}"
             );
         }
-        assert_eq!(map_offset(sql, &formatted, 0), 0);
-        assert_eq!(
-            map_offset(sql, &formatted, sql.len()),
-            formatted.trim_end().len()
-        );
+        assert_eq!(map_offset(before, after, 0), 0);
+        assert_eq!(map_offset(before, after, before.len()), after.len());
         assert_eq!(map_offset("é  x", "é x", "é  x".len()), "é x".len());
     }
 
@@ -896,37 +990,39 @@ mod tests {
     }
 
     #[test]
-    fn format_keeps_blank_lines_comments_and_each_statement_on_its_own_line() {
-        let sql = "insert into t values (1); -- first\n\n\n-- the second\ndelete from t where a = 1;\nupdate t set a = 2;";
-        let formatted = formatted(sql, POSTGRES);
-        assert!(
-            formatted.starts_with(
-                "INSERT INTO t VALUES (1); -- first\n\n\n-- the second\nDELETE FROM t"
-            ),
-            "{formatted:?}"
-        );
-        assert!(formatted.contains("= 1;\nUPDATE t"), "{formatted:?}");
-        // Every statement still starts a line of its own, never sharing one
-        // with the statement before it.
-        assert_eq!(split(&formatted, POSTGRES).len(), 3);
-        for range in statements(&formatted, POSTGRES).into_iter().skip(1) {
-            assert!(formatted[..range.start].ends_with('\n'), "{formatted:?}");
+    fn only_a_single_query_that_writes_nothing_reads_only() {
+        use super::reads_only;
+        for sql in [
+            "SELECT * FROM t WHERE note = 'DELETE' -- update later",
+            "  /* insert? */ with x as (select 1) select * from x;",
+            "VALUES (1), (2)",
+            "SHOW TABLES",
+            "EXPLAIN SELECT 1",
+            "SELECT nextval('s')",
+        ] {
+            assert!(reads_only(sql, POSTGRES), "{sql}");
         }
-    }
-
-    #[test]
-    fn format_range_changes_only_the_selection() {
-        let sql = "select a from t;\nselect b   from u;\nselect c from v;";
-        let start = sql.find("select b").unwrap();
-        let end = sql.find("u;").unwrap() + 2;
-        let (result, range) = super::format_range(sql, start..end, POSTGRES).unwrap();
-        assert!(!result.partial);
-        assert_eq!(
-            result.sql,
-            "select a from t;\nSELECT b FROM u;\nselect c from v;"
-        );
-        assert_eq!(&result.sql[range], "SELECT b FROM u;");
-        assert!(super::format_range(sql, 0..sql.len() + 1, POSTGRES).is_err());
+        for sql in [
+            "WITH gone AS (DELETE FROM t RETURNING *) SELECT * FROM gone",
+            "SELECT * FROM t FOR UPDATE",
+            "SELECT * FROM t FOR SHARE",
+            "SELECT * INTO copy_of_t FROM t",
+            "EXPLAIN ANALYZE SELECT 1",
+            "UPDATE t SET a = 1",
+            "SELECT 1; DELETE FROM t",
+            "CALL refresh()",
+            // A column named like a keyword errs on the side of refusing.
+            "SELECT update FROM t",
+            "",
+            "-- only a comment",
+        ] {
+            assert!(!reads_only(sql, POSTGRES), "{sql}");
+        }
+        assert!(!reads_only("SELECT 1 /*! , (DELETE FROM t) */", MYSQL));
+        assert!(!reads_only("SELECT * FROM t INTO OUTFILE '/tmp/x'", MYSQL));
+        assert!(!reads_only("SELECT * FROM t LOCK IN SHARE MODE", MYSQL));
+        assert!(reads_only("SELECT `delete` FROM t", MYSQL));
+        assert!(reads_only("SELECT * FROM `cat`.`sch`.`t`", DATABRICKS));
     }
 
     #[test]
@@ -1124,6 +1220,35 @@ mod tests {
     }
 
     #[test]
+    fn one_keystroke_in_a_long_script_rereads_only_around_it() {
+        // Reading the whole script again on every keystroke grows with the
+        // script; reading around the edit does not.
+        let script: String = (0..10_000)
+            .map(|index| {
+                format!(
+                    "-- statement {index}
+SELECT 'a;b' FROM t{index};
+"
+                )
+            })
+            .collect();
+        let old = tokens(&script, None);
+        let middle = script.find("t5000").unwrap();
+        let mut edited = script.clone();
+        edited.insert(middle, 'x');
+        let edit = super::Edit {
+            start: middle,
+            old_end: middle,
+            new_end: middle + 1,
+        };
+        let start = Instant::now();
+        let relexed = super::relex(&old, &edited, edit, None);
+        let elapsed = start.elapsed();
+        assert_eq!(relexed, tokens(&edited, None));
+        assert!(elapsed < Duration::from_millis(50), "took {elapsed:?}");
+    }
+
+    #[test]
     fn a_long_script_maps_its_statements_to_lines_within_budget() {
         // Counting lines from the start for every statement is quadratic in
         // the script; this is one pass, paid once per edit.
@@ -1143,20 +1268,106 @@ mod tests {
         let sql = "SELECT 'ação;';\n SELECT $tag$é;$tag$";
         assert_eq!(statements(sql, None).len(), 2);
         assert_eq!(statements("SELECT 'é", None), vec![0..10]);
-        assert!(preview_error("SELECT;").is_some());
-        assert!(preview_error("DELETE FROM orders;").is_some());
-        assert!(preview_error("SELECT 1;").is_none());
     }
 
     #[test]
-    fn tokens_classify_keywords_literals_comments_and_operators() {
+    fn relex_after_any_edit_matches_reading_the_whole_text() {
+        let scripts = [
+            "SELECT 'a;b', \"x\" FROM t -- c\nWHERE a >= $1 AND b::int = 2;\n/* x /* y */ */ SELECT $$a$$;",
+            "SELECT `a`, \"s\", 'it\\'s', @v, @@autocommit # note\nFROM t WHERE x = ?;",
+            "SELECT raw:owner, :id FROM t WHERE c = 'é' AND d = `q`;",
+        ];
+        let inserts = [
+            "'", "\"", "--", "/*", "*/", "$$", "x", " ", "\n", ";", "é", "`", "@", ":",
+        ];
+        // A small linear congruential generator keeps the test repeatable.
+        let mut seed: u64 = 0x5eed;
+        let mut next = |bound: usize| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 33) as usize % bound.max(1)
+        };
+        for (script, dialect) in scripts.iter().zip([POSTGRES, MYSQL, DATABRICKS]) {
+            let mut text = (*script).to_owned();
+            let mut current = tokens(&text, dialect);
+            for _ in 0..400 {
+                let boundaries: Vec<usize> = (0..=text.len())
+                    .filter(|at| text.is_char_boundary(*at))
+                    .collect();
+                let start = boundaries[next(boundaries.len())];
+                let ends: Vec<usize> = boundaries
+                    .iter()
+                    .copied()
+                    .filter(|at| *at >= start && *at <= start + 6)
+                    .collect();
+                let old_end = ends[next(ends.len())];
+                let inserted = if next(3) == 0 {
+                    ""
+                } else {
+                    inserts[next(inserts.len())]
+                };
+                text.replace_range(start..old_end, inserted);
+                let edit = super::Edit {
+                    start,
+                    old_end,
+                    new_end: start + inserted.len(),
+                };
+                current = super::relex(&current, &text, edit, dialect);
+                assert_eq!(current, tokens(&text, dialect), "{text:?} after {edit:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_names_and_parameters_follow_the_dialect() {
+        let kinds = |sql: &str, dialect| -> Vec<(String, TokenKind)> {
+            tokens(sql, dialect)
+                .into_iter()
+                .map(|(range, kind)| (sql[range].to_owned(), kind))
+                .collect()
+        };
+        let pg = kinds("SELECT \"a;b\", `x`, $1, data ? 'k' FROM t", POSTGRES);
+        assert!(pg.contains(&("\"a;b\"".into(), TokenKind::QuotedIdentifier)));
+        assert!(pg.contains(&("`x`".into(), TokenKind::String)));
+        assert!(pg.contains(&("$1".into(), TokenKind::Parameter)));
+        // In PostgreSQL `?` is a jsonb operator.
+        assert!(pg.contains(&("?".into(), TokenKind::Symbol)));
+        let mysql = kinds(
+            "SELECT `a`, \"s\", @x, @@session.autocommit, ? FROM t",
+            MYSQL,
+        );
+        assert!(mysql.contains(&("`a`".into(), TokenKind::QuotedIdentifier)));
+        assert!(mysql.contains(&("\"s\"".into(), TokenKind::String)));
+        assert!(mysql.contains(&("@x".into(), TokenKind::Parameter)));
+        assert!(mysql.contains(&("@@session".into(), TokenKind::Parameter)));
+        assert!(mysql.contains(&("?".into(), TokenKind::Parameter)));
+        let databricks = kinds("SELECT raw:owner, a::int FROM t WHERE id = :id", DATABRICKS);
+        assert!(databricks.contains(&(":id".into(), TokenKind::Parameter)));
+        assert!(databricks.contains(&(":".into(), TokenKind::Symbol)));
+        assert!(databricks.contains(&("::".into(), TokenKind::Symbol)));
+        // A semicolon inside a quoted name does not end the statement.
+        assert_eq!(split("SELECT \"a;b\" FROM t; SELECT 2;", POSTGRES).len(), 2);
+        assert_eq!(split("SELECT `a;b` FROM t; SELECT 2;", MYSQL).len(), 2);
+    }
+
+    #[test]
+    fn a_mysql_variable_named_like_a_keyword_opens_no_block() {
+        // `@begin` is a variable: it must not open a block in the routine.
+        let sql =
+            "CREATE PROCEDURE p()\nBEGIN\n  SET @begin = 1;\n  SELECT @begin;\nEND;\nSELECT 2;";
+        let parts = split(sql, MYSQL);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert_eq!(parts[1], "SELECT 2;");
+    }
+
+    #[test]
+    fn tokens_mark_words_literals_comments_and_operators() {
         let sql = "select count(x) -- c\nfrom t where a->>'k' = 1.5";
         let kinds: Vec<_> = tokens(sql, None)
             .into_iter()
             .map(|(range, kind)| (&sql[range], kind))
             .collect();
-        assert_eq!(kinds[0], ("select", TokenKind::Keyword));
-        assert_eq!(kinds[1], ("count", TokenKind::Function));
+        assert_eq!(kinds[0], ("select", TokenKind::Word));
+        assert_eq!(kinds[1], ("count", TokenKind::Word));
         assert!(kinds.contains(&("-- c", TokenKind::Comment)));
         assert!(kinds.contains(&("->>", TokenKind::Symbol)));
         assert!(kinds.contains(&("'k'", TokenKind::String)));

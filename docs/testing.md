@@ -16,8 +16,11 @@ cargo deny --locked check
 ```
 
 The basic gate checks the direct dependencies between crates (including dev
-and build), formatting, Clippy with warnings treated as errors and
-`cargo test --workspace --locked`. It includes binary, library, contract,
+and build), the SQL catalogs in `catalog/` (`cargo xtask catalogs check`),
+formatting, Clippy with warnings treated as errors and
+`cargo test --workspace --locked`, then Clippy and the tests of
+`jykre-sql-language` without its default features (the built-in formatter
+instead of sqruff). It includes binary, library, contract,
 local Databricks HTTP and gate tests, plus the `compile_fail` credential
 doctests. Clippy also checks the examples. `live` tests are compiled but
 ignored in basic mode; Cargo prints their names and counts. No database,
@@ -46,6 +49,10 @@ no fallback that skips checks.
 - Drivers depend on core and external libraries; they do not depend on the
   application, other drivers or the UI.
 - The application composes the drivers; `xtask` is a separate tool.
+- `jykre-sql` depends only on core and on no editor engine;
+  `jykre-sql-language` only on core and `jykre-sql`; neither on GPUI or
+  `lsp-types`. No library file outside `src/app/` and `src/main.rs` uses
+  `jykre_sql_language` (a source check).
 - The check covers direct Cargo edges, including dev and build dependencies.
   Where logic lives and transitive dependencies still need review.
 
@@ -63,16 +70,22 @@ that blocks the gate must be fixed or receive a documented decision with a
 reason and a review date in `deny.toml`, never a silent suppression.
 
 It starts dedicated fixtures, waits for the health checks and runs
-`--test live -- --ignored` for each version:
+`--test live -- --ignored` for each version, first in the driver's crate and
+then in `jykre` (`tests/live.rs`, with `JYKRE_TEST_DRIVER` set to `postgres`
+or `mysql`), which exports 250,000 generated rows through the application's
+backend: the rest of an open result to CSV, a statement run again to XLSX,
+and a cancellation that must leave the chosen file as it was:
 
-| Database | Image | Local port |
+| Database | Image | Compose service |
 | --- | --- | --- |
-| PostgreSQL | postgres:14 | 55424 |
-| PostgreSQL | postgres:18 | 55428 |
-| MySQL | mysql:8.4 | 55394 |
-| MySQL | mysql:9.7 | 55399 |
+| PostgreSQL | postgres:14 | `postgres-min` |
+| PostgreSQL | postgres:18 | `postgres-max` |
+| MySQL | mysql:8.4 | `mysql-lts` |
+| MySQL | mysql:9.7 | `mysql-current` |
 
-Services publish only on 127.0.0.1. Database/user: `jykre`; the public,
+Services publish only on 127.0.0.1, on a free port Docker picks for each run;
+the gate reads it with `docker compose port` and hands it to the tests in
+`JYKRE_TEST_PORT`. Database/user: `jykre`; the public,
 fixture-only password is `jykre-test`. Images follow these version lines and
 are not pinned by digest. Seeds in `tests/fixtures/` create tables with keys,
 defaults and comments, a view, a materialized view and a partitioned table
@@ -82,18 +95,74 @@ and a sequence (PostgreSQL), and a login `gate_reader` (same fixture-only
 password) that may not use one schema or database, for permission warnings,
 with synthetic data. Never use production credentials or data.
 
-Each run creates a Compose project `jykre-gate-<pid>` and tries to remove it,
-with its volumes, at the end, even if startup or a test fails. An abrupt
-interruption can leave resources behind: run
+Each run creates a Compose project `jykre-gate-<pid>-<suffix>` and tries to
+remove it, with its volumes, at the end, even if startup or a test fails. An
+abrupt interruption can leave resources behind: run
 `docker compose -p <project> -f docker-compose.test.yml down --volumes` only
-for that run's project. Ports are fixed, so concurrent full runs can conflict.
+for that run's project.
+
+To run one live suite by hand, start the fixtures under a project of your own
+and pass the published port:
+
+```bash
+docker compose -p jykre-manual -f docker-compose.test.yml up -d --wait
+docker compose -p jykre-manual -f docker-compose.test.yml port postgres-min 5432
+JYKRE_TEST_PORT=<port> cargo test -p jykre-driver-postgres --locked --test live -- --ignored
+JYKRE_TEST_PORT=<port> JYKRE_TEST_DRIVER=postgres cargo test -p jykre --locked --test live -- --ignored
+docker compose -p jykre-manual -f docker-compose.test.yml down --volumes
+```
 
 The tests cover connection, invalid authentication, exact values and NULL,
 empty results, metadata, timeout, cancellation, row limits and stops requested
 by the receiver. A session must keep its state after a database error, a
-timeout, a cancellation and an interruption by a limit or the receiver; a new
-session must run normally. TLS with certificates and effective server-side interruption need
+timeout, a cancellation and an interruption by a limit or the receiver, also
+when the interruption lands halfway through reading a row (MySQL, with rows of
+several megabytes); a new session must run normally. TLS with certificates and effective server-side interruption need
 additional scenarios before the guarantees are extended.
+
+## SQL catalogs
+
+`catalog/` holds the SQL dialect catalogs the editor reads at run time
+([ADR-0021](adr/0021-sql-catalogs-read-at-run-time.md)). The basic gate only
+checks them, offline. Regenerating them is a task of its own, reviewed in
+the diff:
+
+```bash
+# PostgreSQL: kwlist.h, pg_proc.dat and pg_type.dat of each release tag (network)
+cargo xtask catalogs postgresql REL_14_0,REL_15_0,REL_16_0,REL_17_0,REL_18_0 --verified-through 18.6
+# MySQL: the gate's MySQL services in Docker (8.4 and 9.7)
+cargo xtask catalogs mysql
+# Databricks: Apache Spark's keyword table and function schema (network),
+# optionally with exports from a workspace
+cargo xtask catalogs databricks v4.0.1 [--keywords sql_keywords.csv] [--functions functions.csv]
+```
+
+Downloads are kept in `target/catalog-sources/`, so a second run works
+offline. Each generation checks the dialect it wrote.
+
+## Completion scopes
+
+`crates/sql-language/tests/fixtures/scopes.txt` holds 122 statements in the
+three dialects, each with the cursor marked, the relations whose columns
+completion offers there and the columns CTEs and derived tables make;
+`tests/scopes.rs` checks them through `completion::request`, with an index
+that holds every relation the cases read, so one read in the wrong query
+fails. New behaviour adds cases; a
+change that alters a case's answer updates it and says why in the report.
+
+## Concurrent runs
+
+Gates (basic or full) can run at the same time from separate worktrees. Each
+run has its own Compose project, its own published ports and its own
+application data folder: the gate sets `JYKRE_CONFIG_DIR` to an empty
+temporary folder for the tests and the benchmarks, fails if anything is
+written there, and removes it at the end. The user's real `config.db`,
+metadata caches and logs are never used.
+
+Two runs in the same checkout share `target/`: Cargo makes the second wait
+for the first, and the benchmark output in `target/criterion` is shared.
+Concurrent runs also slow each other down, so benchmark numbers taken then are
+not comparable.
 
 ## Local databases for manual testing
 
@@ -137,7 +206,10 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
 - Do not remove, ignore or weaken tests to pass the gate. Fixing an incorrect
   test requires explaining why in the report.
 - Tests use synthetic data and isolated resources, do not depend on order and
-  must have a bounded duration. Flakiness requires a record, an owner and a fix;
+  must have a bounded duration. They never call
+  `connection_store::data_dir()` or touch the application data folder: open
+  repositories in a temporary folder with a unique name, and bind servers to
+  port 0. Flakiness requires a record, an owner and a fix;
   retrying until it passes does not replace investigation.
 - Ignored tests need a reason and a way to run them. Relational `live` tests
   always run in full mode; authenticated Databricks tests are separate.

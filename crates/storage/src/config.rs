@@ -1,6 +1,6 @@
 use crate::*;
 use sqlx::Row;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SCHEMA: &str = r#"
 CREATE TABLE connections (
@@ -238,6 +238,76 @@ impl ConfigRepository {
         self.set_setting(&explorer_key(id), state).await
     }
 
+    /// Deletes a profile and every setting kept under its identity (row
+    /// limit, what to introspect, appearance, explorer state) in one
+    /// transaction. Refused when the profile changed since `revision` was
+    /// read, as a save is, so a connection edited in another window is not
+    /// deleted unseen.
+    pub async fn delete(&self, id: ConnectionId, revision: i64) -> DriverResult<()> {
+        let mut tx = self.pool.begin().await.map_err(sql_error)?;
+        let deleted = sqlx::query("DELETE FROM connections WHERE id=? AND revision=?")
+            .bind(id.to_string())
+            .bind(revision)
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        if deleted.rows_affected() != 1 {
+            return Err(DriverError::validation(
+                "The connection was changed in another window. Reopen the configuration.",
+            ));
+        }
+        // Compared as a prefix, not with LIKE, so no character of the key
+        // is read as a wildcard.
+        sqlx::query("DELETE FROM settings WHERE substr(key, 1, length(?1)) = ?1")
+            .bind(format!("connection.{id}."))
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        tx.commit().await.map_err(sql_error)
+    }
+
+    /// Copies `config.db` to `backups/config-v<version>-<millis>.db` in the
+    /// data folder `dir`, as a consistent snapshot (`VACUUM INTO`), and keeps
+    /// the [`CONFIG_BACKUPS_KEPT`] most recent copies. A copy identical to
+    /// the newest one is not kept twice. Returns the newest copy.
+    pub async fn back_up(&self, dir: &Path) -> DriverResult<PathBuf> {
+        let folder = dir.join(BACKUP_FOLDER);
+        tokio::fs::create_dir_all(&folder)
+            .await
+            .map_err(|_| error("Could not prepare the configuration backup."))?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(sql_error)?;
+        let mut stamp = now_millis();
+        let mut path = folder.join(format!("config-v{version}-{stamp}.db"));
+        // Two starts within the same millisecond never overwrite a copy.
+        while tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            stamp += 1;
+            path = folder.join(format!("config-v{version}-{stamp}.db"));
+        }
+        let newest = config_backups(dir).await.into_iter().next();
+        sqlx::query("VACUUM INTO ?")
+            .bind(path.to_string_lossy().as_ref())
+            .execute(&self.pool)
+            .await
+            .map_err(|_| error("Could not write the configuration backup."))?;
+        if let Some(newest) = newest
+            && same_contents(&newest, &path).await
+        {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Ok(newest);
+        }
+        for old in config_backups(dir)
+            .await
+            .into_iter()
+            .skip(CONFIG_BACKUPS_KEPT)
+        {
+            let _ = tokio::fs::remove_file(old).await;
+        }
+        Ok(path)
+    }
+
     pub async fn setting(&self, key: &str) -> DriverResult<Option<serde_json::Value>> {
         let value: Option<String> =
             sqlx::query_scalar("SELECT value_json FROM settings WHERE key=?")
@@ -253,6 +323,99 @@ impl ConfigRepository {
         sqlx::query("INSERT INTO settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json")
             .bind(key).bind(serde_json::to_string(value).map_err(json_error)?).execute(&self.pool).await.map_err(sql_error)?;
         Ok(())
+    }
+}
+
+/// How many copies of `config.db` [`ConfigRepository::back_up`] keeps.
+pub const CONFIG_BACKUPS_KEPT: usize = 5;
+
+const BACKUP_FOLDER: &str = "backups";
+
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis())
+}
+
+/// The copies of `config.db` in `backups/`, newest first. Only the copies
+/// [`ConfigRepository::back_up`] writes are listed.
+pub async fn config_backups(dir: &Path) -> Vec<PathBuf> {
+    let Ok(mut entries) = tokio::fs::read_dir(dir.join(BACKUP_FOLDER)).await else {
+        return Vec::new();
+    };
+    let mut backups = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if is_backup(&path) {
+            backups.push((backup_stamp(&path), path));
+        }
+    }
+    backups.sort_by_key(|backup| std::cmp::Reverse(backup.0));
+    backups.into_iter().map(|(_, path)| path).collect()
+}
+
+/// When a copy listed by [`config_backups`] was taken, read from its name.
+pub fn config_backup_time(path: &Path) -> std::time::SystemTime {
+    let millis = u64::try_from(backup_stamp(path)).unwrap_or(u64::MAX);
+    std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis)
+}
+
+/// Puts `backup` in place of `config.db`, which is renamed (with its `-wal`
+/// and `-shm` files) to `config.db.broken-<millis>` and kept for diagnosis.
+/// The copy is checked before anything moves. Returns where the previous
+/// file went.
+pub async fn restore_config_backup(dir: &Path, backup: &Path) -> DriverResult<PathBuf> {
+    if !is_backup(backup) || backup.parent() != Some(dir.join(BACKUP_FOLDER).as_path()) {
+        return Err(DriverError::validation("Not a configuration backup."));
+    }
+    // A copy that does not open is never put in place.
+    open_pool(backup, false).await?.close().await;
+    let stamp = now_millis();
+    let current = dir.join("config.db");
+    let aside = dir.join(format!("config.db.broken-{stamp}"));
+    if tokio::fs::try_exists(&current).await.unwrap_or(false) {
+        tokio::fs::rename(&current, &aside)
+            .await
+            .map_err(|_| error("Could not set the damaged configuration aside."))?;
+    }
+    for suffix in ["-wal", "-shm"] {
+        let companion = dir.join(format!("config.db{suffix}"));
+        if tokio::fs::try_exists(&companion).await.unwrap_or(false) {
+            let _ = tokio::fs::rename(
+                &companion,
+                dir.join(format!("config.db.broken-{stamp}{suffix}")),
+            )
+            .await;
+        }
+    }
+    tokio::fs::copy(backup, &current)
+        .await
+        .map_err(|_| error("Could not restore the configuration backup."))?;
+    Ok(aside)
+}
+
+/// A name [`ConfigRepository::back_up`] writes: `config-v<n>-<millis>.db`.
+fn is_backup(path: &Path) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("config-v")?.strip_suffix(".db"))
+        .and_then(|rest| rest.split_once('-'))
+        .is_some_and(|(version, millis)| digits(version) && digits(millis))
+}
+
+fn backup_stamp(path: &Path) -> u128 {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.rsplit_once('-'))
+        .and_then(|(_, millis)| millis.parse().ok())
+        .unwrap_or(0)
+}
+
+async fn same_contents(a: &Path, b: &Path) -> bool {
+    match (tokio::fs::read(a).await, tokio::fs::read(b).await) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 

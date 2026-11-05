@@ -5,7 +5,7 @@ services:
       POSTGRES_USER: jykre
       POSTGRES_PASSWORD: jykre-test
       POSTGRES_DB: jykre
-    ports: ["127.0.0.1:55424:5432"]
+    ports: ["127.0.0.1::5432"]
     volumes:
       - ./tests/fixtures/postgres.sql:/docker-entrypoint-initdb.d/fixture.sql:ro
     healthcheck:
@@ -19,7 +19,7 @@ services:
       POSTGRES_USER: jykre
       POSTGRES_PASSWORD: jykre-test
       POSTGRES_DB: jykre
-    ports: ["127.0.0.1:55428:5432"]
+    ports: ["127.0.0.1::5432"]
     volumes:
       - ./tests/fixtures/postgres.sql:/docker-entrypoint-initdb.d/fixture.sql:ro
     healthcheck:
@@ -34,7 +34,7 @@ services:
       MYSQL_DATABASE: jykre
       MYSQL_USER: jykre
       MYSQL_PASSWORD: jykre-test
-    ports: ["127.0.0.1:55394:3306"]
+    ports: ["127.0.0.1::3306"]
     volumes:
       - ./tests/fixtures/mysql.sql:/docker-entrypoint-initdb.d/fixture.sql:ro
     healthcheck:
@@ -49,7 +49,7 @@ services:
       MYSQL_DATABASE: jykre
       MYSQL_USER: jykre
       MYSQL_PASSWORD: jykre-test
-    ports: ["127.0.0.1:55399:3306"]
+    ports: ["127.0.0.1::3306"]
     volumes:
       - ./tests/fixtures/mysql.sql:/docker-entrypoint-initdb.d/fixture.sql:ro
     healthcheck:

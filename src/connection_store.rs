@@ -1,4 +1,5 @@
 //! Application connection service: validation, SQLite migration and vault policy.
+use crate::connection_appearance::{Appearance, appearance_key};
 use crate::tr;
 use crate::{
     backend::{self, MetadataSnapshot},
@@ -53,6 +54,8 @@ pub struct LoadedConnection {
     /// Hours after which opening the connection reads its chosen namespaces
     /// again; 0 never does.
     pub revalidate_hours: u32,
+    /// Its colour and environment.
+    pub appearance: Appearance,
     pub warning: Option<String>,
 }
 
@@ -99,11 +102,41 @@ pub struct LoadedConnections {
 
 /// Loads every saved connection. A profile that cannot be read or is no
 /// longer valid is left out with a problem, so it never hides the others.
+/// A configuration that opened and was read is copied to `backups/` (the
+/// five most recent distinct copies are kept), so a start that finds it
+/// damaged can offer to restore it.
 pub async fn load(dir: &Path, secrets: &dyn SecretStore) -> DriverResult<LoadedConnections> {
     let repository = ConfigRepository::open(dir).await?;
-    let result = load_from(dir, secrets, &repository).await;
+    let mut result = load_from(dir, secrets, &repository).await;
+    if let Ok(loaded) = &mut result
+        && let Err(error) = repository.back_up(dir).await
+    {
+        tracing::warn!(error_code = ?error.code, "configuration backup failed");
+        loaded
+            .problems
+            .push(tr!("Could not back up the configuration: {0}", error));
+    }
     repository.close().await;
     result
+}
+
+/// The newest copy of the configuration and when it was taken, for a start
+/// whose `config.db` cannot be opened.
+pub async fn latest_backup(dir: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
+    jykre_storage::config_backups(dir)
+        .await
+        .into_iter()
+        .next()
+        .map(|path| {
+            let taken = jykre_storage::config_backup_time(&path);
+            (path, taken)
+        })
+}
+
+/// Puts the copy `backup` in place of the damaged `config.db`, which is
+/// kept next to it; returns where it went.
+pub async fn restore_backup(dir: &Path, backup: &Path) -> DriverResult<PathBuf> {
+    jykre_storage::restore_config_backup(dir, backup).await
 }
 
 async fn load_from(
@@ -272,6 +305,14 @@ async fn load_from(
             .and_then(|value| value.as_u64())
             .and_then(|hours| u32::try_from(hours).ok())
             .unwrap_or(0);
+        let appearance = Appearance::from_value(
+            repository
+                .setting(&appearance_key(profile.id))
+                .await
+                .ok()
+                .flatten()
+                .as_ref(),
+        );
         loaded.push(LoadedConnection {
             profile,
             input,
@@ -280,6 +321,7 @@ async fn load_from(
             cache,
             expanded,
             revalidate_hours,
+            appearance,
             warning,
         });
     }
@@ -299,6 +341,8 @@ pub struct Preferences {
     /// Hours after which opening the connection reads its chosen namespaces
     /// again; 0 never does.
     pub revalidate_hours: u32,
+    /// Its colour and environment.
+    pub appearance: Appearance,
 }
 
 /// Saves a profile, its preferences and, when asked to remember it, its
@@ -331,6 +375,7 @@ async fn save_to(
         row_limit,
         scope,
         revalidate_hours,
+        appearance,
     } = preferences;
     // Another profile that cannot be read does not block this one.
     let previous = repository
@@ -395,6 +440,7 @@ async fn save_to(
             revalidate_key(profile.id),
             serde_json::json!(revalidate_hours),
         ),
+        (appearance_key(profile.id), appearance.to_value()),
     ];
     let profile = match repository.save_with_settings(&profile, &settings).await {
         Ok(profile) => profile,
@@ -444,8 +490,50 @@ async fn save_to(
         cache,
         expanded: Vec::new(),
         revalidate_hours,
+        appearance,
         warning,
     })
+}
+
+/// Deletes a saved connection: its profile and settings (in one
+/// transaction), then its vault entry and its metadata cache. The profile
+/// goes first, so a failure after it never leaves a connection that is
+/// half deleted; what could not be cleaned up afterwards is returned as a
+/// warning, never with the secret.
+pub async fn delete(
+    dir: &Path,
+    profile: &ConnectionProfile,
+    secrets: &dyn SecretStore,
+) -> DriverResult<Option<String>> {
+    let repository = ConfigRepository::open(dir).await?;
+    let result = repository.delete(profile.id, profile.revision).await;
+    repository.close().await;
+    result?;
+    let mut warning = None;
+    // Removed even when Remember password is off: an entry an earlier
+    // version left must not outlive its connection.
+    if let Err(error) = vault(secrets.delete(profile.id)).await {
+        add_warning(
+            &mut warning,
+            tr!(
+                "The connection was deleted, but its password could not be removed from the vault: {0}",
+                error
+            ),
+        );
+    }
+    if let Err(error) = backend::remove_cache(dir, profile.id).await {
+        tracing::warn!(connection_id = %profile.id, error_code = ?error.code, "metadata cache not removed");
+        add_warning(
+            &mut warning,
+            tr!(
+                "The connection was deleted, but its metadata cache could not be removed. It is safe to delete {0} and the files next to it that start with the same name.",
+                dir.join("metadata")
+                    .join(format!("{}.db", profile.id))
+                    .display()
+            ),
+        );
+    }
+    Ok(warning)
 }
 
 /// Writes of one preference where the last one asked for wins: a write that

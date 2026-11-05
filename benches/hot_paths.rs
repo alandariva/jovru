@@ -1,6 +1,7 @@
 //! Benchmarks for the hot paths listed in ADR-0010: building the grid view,
-//! converting driver rows to result data, splitting large scripts and paging
-//! metadata children from a large local cache.
+//! converting driver rows to result data, splitting large scripts, paging
+//! metadata children from a large local cache and encoding a result for an
+//! export.
 //!
 //! ```text
 //! cargo bench --bench hot_paths -- --save-baseline main   # before a change
@@ -143,6 +144,34 @@ fn statement_splitting(c: &mut Criterion) {
     });
 }
 
+/// The editor's tokens of a 10 MB script: reading it all, as an opened
+/// file is, and again after one keystroke in the middle, as typing does.
+fn sql_tokens(c: &mut Criterion) {
+    let line = "SELECT o.id, 'a;b' AS text, count(*) FROM sales.orders o /* ; */ WHERE o.id > 42;
+";
+    let script = line.repeat(10 * 1024 * 1024 / line.len());
+    let tokens = jykre::sql::tokens(&script, None);
+    let middle = script.len() / 2;
+    let middle = (middle..script.len())
+        .find(|at| script.is_char_boundary(*at))
+        .unwrap_or(middle);
+    let mut edited = script.clone();
+    edited.insert(middle, 'x');
+    let edit = jykre::sql::Edit {
+        start: middle,
+        old_end: middle,
+        new_end: middle + 1,
+    };
+    let mut group = c.benchmark_group("sql tokens of a 10 MB script");
+    group.bench_function("whole text", |b| {
+        b.iter(|| jykre::sql::tokens(black_box(&script), None))
+    });
+    group.bench_function("after one keystroke", |b| {
+        b.iter(|| jykre::sql::relex(black_box(&tokens), black_box(&edited), edit, None))
+    });
+    group.finish();
+}
+
 fn large_cache_config() -> ConnectionConfig {
     ConnectionConfig {
         driver: DriverKind::Postgres,
@@ -248,11 +277,48 @@ fn metadata_paging(c: &mut Criterion) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Encoding a page for an export, as each part is before it reaches the
+/// file ([Results](../docs/results.md#export)).
+fn export_encoding(c: &mut Criterion) {
+    use jykre::export::{Encoder, ExportFormat, ExportOptions, SqlTarget};
+    let result = event_log(100_000);
+    let sql = SqlTarget {
+        table: "sales.event_log".into(),
+        ..SqlTarget::default()
+    };
+    let mut group = c.benchmark_group("export, 100,000 rows x 5 columns");
+    group.sample_size(10);
+    for format in [
+        ExportFormat::Csv,
+        ExportFormat::JsonLines,
+        ExportFormat::Insert,
+    ] {
+        let options = ExportOptions {
+            format,
+            ..ExportOptions::default()
+        };
+        group.bench_function(format.extension(), |b| {
+            b.iter(|| {
+                let mut encoder =
+                    Encoder::new(&options, result.columns(), &sql).expect("a text format");
+                let mut out = String::new();
+                encoder.begin(&mut out);
+                encoder.rows(black_box(&result), &mut out);
+                encoder.end(&mut out);
+                out
+            })
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     grid_view,
     result_conversion,
     statement_splitting,
-    metadata_paging
+    sql_tokens,
+    metadata_paging,
+    export_encoding
 );
 criterion_main!(benches);

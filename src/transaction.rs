@@ -137,7 +137,8 @@ impl Transaction {
             let assignment: Vec<_> = words
                 .iter()
                 .skip(1)
-                .filter(|word| !matches!(word.as_str(), "SESSION" | "@" | "."))
+                // `@@session.autocommit` is one token, `@@SESSION`.
+                .filter(|word| !matches!(word.trim_start_matches('@'), "SESSION" | "" | "."))
                 .collect();
             if assignment
                 .first()

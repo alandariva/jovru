@@ -1,0 +1,82 @@
+{"category":"other","display":"aclitem","name":"aclitem","source":"pg_type.dat"}
+{"category":"bit","display":"bit","name":"bit","params":"(n)","source":"pg_type.dat"}
+{"aliases":["boolean"],"category":"boolean","display":"boolean","name":"bool","source":"pg_type.dat"}
+{"category":"geometric","display":"box","name":"box","source":"pg_type.dat"}
+{"aliases":["character"],"category":"string","display":"character","name":"bpchar","params":"(n)","source":"pg_type.dat"}
+{"category":"other","display":"bytea","name":"bytea","source":"pg_type.dat"}
+{"category":"string","display":"char","name":"char","source":"pg_type.dat","until":"15"}
+{"category":"other","display":"cid","name":"cid","source":"pg_type.dat"}
+{"category":"network","display":"cidr","name":"cidr","source":"pg_type.dat"}
+{"category":"geometric","display":"circle","name":"circle","source":"pg_type.dat"}
+{"category":"datetime","display":"date","name":"date","source":"pg_type.dat"}
+{"category":"range","display":"datemultirange","name":"datemultirange","source":"pg_type.dat"}
+{"category":"range","display":"daterange","name":"daterange","source":"pg_type.dat"}
+{"aliases":["real"],"category":"numeric","display":"real","name":"float4","source":"pg_type.dat"}
+{"aliases":["double precision"],"category":"numeric","display":"double precision","name":"float8","source":"pg_type.dat"}
+{"category":"other","display":"gtsvector","name":"gtsvector","source":"pg_type.dat"}
+{"category":"network","display":"inet","name":"inet","source":"pg_type.dat"}
+{"aliases":["smallint"],"category":"numeric","display":"smallint","name":"int2","source":"pg_type.dat"}
+{"category":"other","display":"int2vector","name":"int2vector","source":"pg_type.dat"}
+{"aliases":["integer"],"category":"numeric","display":"integer","name":"int4","source":"pg_type.dat"}
+{"category":"range","display":"int4multirange","name":"int4multirange","source":"pg_type.dat"}
+{"category":"range","display":"int4range","name":"int4range","source":"pg_type.dat"}
+{"aliases":["bigint"],"category":"numeric","display":"bigint","name":"int8","source":"pg_type.dat"}
+{"category":"range","display":"int8multirange","name":"int8multirange","source":"pg_type.dat"}
+{"category":"range","display":"int8range","name":"int8range","source":"pg_type.dat"}
+{"category":"datetime","display":"interval","name":"interval","params":"(precision)","source":"pg_type.dat"}
+{"category":"other","display":"json","name":"json","source":"pg_type.dat"}
+{"category":"other","display":"jsonb","name":"jsonb","source":"pg_type.dat"}
+{"category":"other","display":"jsonpath","name":"jsonpath","source":"pg_type.dat"}
+{"category":"geometric","display":"line","name":"line","source":"pg_type.dat"}
+{"category":"geometric","display":"lseg","name":"lseg","source":"pg_type.dat"}
+{"category":"other","display":"macaddr","name":"macaddr","source":"pg_type.dat"}
+{"category":"other","display":"macaddr8","name":"macaddr8","source":"pg_type.dat"}
+{"category":"numeric","display":"money","name":"money","source":"pg_type.dat"}
+{"category":"string","display":"name","name":"name","source":"pg_type.dat"}
+{"category":"numeric","display":"numeric","name":"numeric","params":"(precision, scale)","source":"pg_type.dat"}
+{"category":"range","display":"nummultirange","name":"nummultirange","source":"pg_type.dat"}
+{"category":"range","display":"numrange","name":"numrange","source":"pg_type.dat"}
+{"category":"numeric","display":"oid","name":"oid","source":"pg_type.dat"}
+{"category":"other","display":"oidvector","name":"oidvector","source":"pg_type.dat"}
+{"category":"geometric","display":"path","name":"path","source":"pg_type.dat"}
+{"category":"string","display":"pg_brin_bloom_summary","name":"pg_brin_bloom_summary","source":"pg_type.dat","until":"15"}
+{"category":"string","display":"pg_brin_minmax_multi_summary","name":"pg_brin_minmax_multi_summary","source":"pg_type.dat","until":"15"}
+{"category":"string","display":"pg_dependencies","name":"pg_dependencies","source":"pg_type.dat","until":"15"}
+{"category":"other","display":"pg_lsn","name":"pg_lsn","source":"pg_type.dat"}
+{"category":"string","display":"pg_mcv_list","name":"pg_mcv_list","source":"pg_type.dat","until":"15"}
+{"category":"string","display":"pg_ndistinct","name":"pg_ndistinct","source":"pg_type.dat","until":"15"}
+{"category":"string","display":"pg_node_tree","name":"pg_node_tree","source":"pg_type.dat","until":"15"}
+{"category":"other","display":"pg_snapshot","name":"pg_snapshot","source":"pg_type.dat"}
+{"category":"geometric","display":"point","name":"point","source":"pg_type.dat"}
+{"category":"geometric","display":"polygon","name":"polygon","source":"pg_type.dat"}
+{"category":"other","display":"refcursor","name":"refcursor","source":"pg_type.dat"}
+{"category":"numeric","display":"regclass","name":"regclass","source":"pg_type.dat"}
+{"category":"numeric","display":"regcollation","name":"regcollation","source":"pg_type.dat"}
+{"category":"numeric","display":"regconfig","name":"regconfig","source":"pg_type.dat"}
+{"category":"numeric","display":"regdictionary","name":"regdictionary","source":"pg_type.dat"}
+{"category":"numeric","display":"regnamespace","name":"regnamespace","source":"pg_type.dat"}
+{"category":"numeric","display":"regoper","name":"regoper","source":"pg_type.dat"}
+{"category":"numeric","display":"regoperator","name":"regoperator","source":"pg_type.dat"}
+{"category":"numeric","display":"regproc","name":"regproc","source":"pg_type.dat"}
+{"category":"numeric","display":"regprocedure","name":"regprocedure","source":"pg_type.dat"}
+{"category":"numeric","display":"regrole","name":"regrole","source":"pg_type.dat"}
+{"category":"numeric","display":"regtype","name":"regtype","source":"pg_type.dat"}
+{"category":"string","display":"text","name":"text","source":"pg_type.dat"}
+{"category":"other","display":"tid","name":"tid","source":"pg_type.dat"}
+{"aliases":["time without time zone"],"category":"datetime","display":"time without time zone","name":"time","params":"(precision)","source":"pg_type.dat"}
+{"aliases":["timestamp without time zone"],"category":"datetime","display":"timestamp without time zone","name":"timestamp","params":"(precision)","source":"pg_type.dat"}
+{"aliases":["timestamp with time zone"],"category":"datetime","display":"timestamp with time zone","name":"timestamptz","params":"(precision)","source":"pg_type.dat"}
+{"aliases":["time with time zone"],"category":"datetime","display":"time with time zone","name":"timetz","params":"(precision)","source":"pg_type.dat"}
+{"category":"range","display":"tsmultirange","name":"tsmultirange","source":"pg_type.dat"}
+{"category":"other","display":"tsquery","name":"tsquery","source":"pg_type.dat"}
+{"category":"range","display":"tsrange","name":"tsrange","source":"pg_type.dat"}
+{"category":"range","display":"tstzmultirange","name":"tstzmultirange","source":"pg_type.dat"}
+{"category":"range","display":"tstzrange","name":"tstzrange","source":"pg_type.dat"}
+{"category":"other","display":"tsvector","name":"tsvector","source":"pg_type.dat"}
+{"category":"other","display":"txid_snapshot","name":"txid_snapshot","source":"pg_type.dat"}
+{"category":"other","display":"uuid","name":"uuid","source":"pg_type.dat"}
+{"aliases":["bit varying"],"category":"bit","display":"bit varying","name":"varbit","params":"(n)","source":"pg_type.dat"}
+{"aliases":["character varying"],"category":"string","display":"character varying","name":"varchar","params":"(n)","source":"pg_type.dat"}
+{"category":"other","display":"xid","name":"xid","source":"pg_type.dat"}
+{"category":"other","display":"xid8","name":"xid8","source":"pg_type.dat"}
+{"category":"other","display":"xml","name":"xml","source":"pg_type.dat"}

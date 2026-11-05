@@ -524,41 +524,66 @@ impl Server {
             .filter(|database| self.database.as_ref() != Some(database));
         if let Some(database) = &apply {
             let sql = format!("USE `{}`", database.replace('`', "``"));
-            let applied = bounded(&cancel, options.timeout, async {
-                sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
-                    .execute(&mut *connection)
-                    .await
-                    .map_err(map_error)
-                    .map(|_| ())
-            })
-            .await;
-            if let Err(error) = applied {
-                return self.fail(connection, error, &events).await;
+            let applied = self
+                .step(&Limit::new(&cancel, options.timeout), async {
+                    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str()))
+                        .execute(&mut *connection)
+                        .await
+                        .map_err(map_error)
+                        .map(|_| ())
+                })
+                .await;
+            if let Err(stopped) = applied {
+                return self.fail(connection, stopped, &events).await;
             }
             self.database = apply;
         }
-        let columns = bounded(&cancel, options.timeout, async {
-            let description = connection
-                .prepare(sqlx::AssertSqlSafe(request.sql.as_str()).into_sql_str())
-                .await
-                .map_err(map_error)?;
-            Ok(description
-                .columns()
-                .iter()
-                .map(|c| ColumnInfo {
-                    name: c.name().into(),
-                    data_type: c.type_info().name().into(),
-                    nullable: None,
+        let sql = request.with_references(parameter_reference);
+        if let Some(set) = bind_statement(&request.parameters) {
+            let bound = self
+                .step(&Limit::new(&cancel, options.timeout), async {
+                    let mut query = sqlx::query(sqlx::AssertSqlSafe(set));
+                    for parameter in &request.parameters {
+                        query = match (&parameter.value, parameter.kind) {
+                            (None, _) => continue,
+                            (Some(value), ParameterKind::Boolean) => query.bind(value == "true"),
+                            (Some(value), _) => query.bind(value.clone()),
+                        };
+                    }
+                    query
+                        .execute(&mut *connection)
+                        .await
+                        .map_err(map_error)
+                        .map(|_| ())
                 })
-                .collect::<Vec<_>>())
-        })
-        .await;
+                .await;
+            if let Err(stopped) = bound {
+                return self.fail(connection, stopped, &events).await;
+            }
+        }
+        let columns = self
+            .step(&Limit::new(&cancel, options.timeout), async {
+                let description = connection
+                    .prepare(sqlx::AssertSqlSafe(sql.as_str()).into_sql_str())
+                    .await
+                    .map_err(map_error)?;
+                Ok(description
+                    .columns()
+                    .iter()
+                    .map(|c| ColumnInfo {
+                        name: c.name().into(),
+                        data_type: c.type_info().name().into(),
+                        nullable: None,
+                    })
+                    .collect::<Vec<_>>())
+            })
+            .await;
         // Some statements (USE, and others MySQL cannot prepare: error 1295)
         // run as text only; their columns, if any, come with their rows.
         let mut describe = Describe::Prepared;
         let columns = match columns {
             Ok(columns) => columns,
-            Err(error)
+            Err((error, _))
                 if error
                     .server
                     .as_ref()
@@ -568,38 +593,37 @@ impl Server {
                 describe = Describe::FromRows;
                 Vec::new()
             }
-            Err(error) => return self.fail(connection, error, &events).await,
+            Err(stopped) => return self.fail(connection, stopped, &events).await,
         };
         let mut returns_rows = !columns.is_empty();
         if returns_rows && events.send(Event::Columns(columns)).await.is_err() {
-            return self.recover(connection, false).await;
+            return self.recover(connection, Unfinished::Cut).await;
         }
         let mut stream =
-            sqlx::raw_sql(sqlx::AssertSqlSafe(request.sql.as_str())).fetch_many(&mut *connection);
-        let mut ahead = None;
-        let mut affected = None;
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str())).fetch_many(&mut *connection);
+        let mut reading = Reading {
+            ahead: None,
+            affected: None,
+            describe,
+        };
         loop {
-            let page = bounded(
-                &cancel,
-                options.timeout,
-                read_page(
+            let page = self
+                .read_page(
                     &mut stream,
-                    &mut ahead,
-                    &mut affected,
-                    &mut describe,
+                    &mut reading,
                     options.max_rows,
                     &events,
-                ),
-            )
-            .await;
-            if describe == Describe::Sent {
+                    &Limit::new(&cancel, options.timeout),
+                )
+                .await;
+            if reading.describe == Describe::Sent {
                 returns_rows = true;
             }
             match page {
                 Ok(PageEnd::Finished) => {
                     drop(stream);
                     let outcome = DriverOutcome {
-                        rows_affected: if returns_rows { None } else { affected },
+                        rows_affected: if returns_rows { None } else { reading.affected },
                         has_more: false,
                         ..DriverOutcome::default()
                     };
@@ -614,7 +638,7 @@ impl Server {
                     };
                     if events.send(Event::Done(Ok(outcome))).await.is_err() {
                         drop(stream);
-                        return self.recover(connection, false).await;
+                        return self.recover(connection, Unfinished::Cut).await;
                     }
                     // The result stays open until the next command.
                     match commands.recv().await {
@@ -629,7 +653,7 @@ impl Server {
                         }
                         Some(other) => {
                             drop(stream);
-                            return match self.recover(connection, false).await {
+                            return match self.recover(connection, Unfinished::Cut).await {
                                 Flow::Ready => Flow::Next(other),
                                 flow => flow,
                             };
@@ -639,27 +663,20 @@ impl Server {
                 }
                 Ok(PageEnd::Gone) => {
                     drop(stream);
-                    return self.recover(connection, false).await;
+                    return self.recover(connection, Unfinished::Cut).await;
                 }
-                Err(error) => {
+                Err(stopped) => {
                     drop(stream);
-                    return self.fail(connection, error, &events).await;
+                    return self.fail(connection, stopped, &events).await;
                 }
             }
         }
     }
 
-    /// Brings the protocol back to a known state after a statement was left
-    /// unfinished, or reports that the connection must be closed. A result
-    /// cut by the reader is drained first, since its statement may already be
-    /// done; a statement that may still run, or a result too long to drain
-    /// in time, is killed from another connection.
-    async fn recover(&self, connection: &mut MySqlConnection, running: bool) -> Flow {
-        if !running
-            && let Ok(Ok(())) = tokio::time::timeout(RECOVERY, resynchronize(connection)).await
-        {
-            return Flow::Ready;
-        }
+    /// Kills the session's running statement from another connection. One
+    /// attempt, within [`RECOVERY`]; whether it worked shows in what the
+    /// session's connection reads next.
+    async fn kill(&self) {
         let kill = async {
             let mut control = connect(&self.input, &CancellationToken::new()).await?;
             let sql = format!("KILL QUERY {}", self.backend);
@@ -670,7 +687,71 @@ impl Server {
             Ok::<_, DriverError>(())
         };
         let _ = tokio::time::timeout(RECOVERY, kill).await;
-        match tokio::time::timeout(RECOVERY, resynchronize(connection)).await {
+    }
+
+    /// Drives `work`, a read on the session's connection, until it ends or
+    /// `limit` comes first. SQLx reads a packet's header and its payload in
+    /// separate steps, so a read dropped between them leaves the connection
+    /// out of step for good, whatever is read afterwards. When the limit
+    /// comes first, the statement is killed and `work` is still driven to its
+    /// end, for at most [`RECOVERY`].
+    async fn guard<E, T>(
+        &self,
+        limit: impl Future<Output = E>,
+        work: impl Future<Output = T>,
+    ) -> Guarded<E, T> {
+        tokio::pin!(work);
+        let reason = tokio::select! { biased;
+            reason = limit => reason,
+            done = &mut work => return Guarded::Done(done),
+        };
+        self.kill().await;
+        let until = tokio::time::Instant::now() + RECOVERY;
+        match tokio::time::timeout_at(until, work).await {
+            Ok(done) => Guarded::Killed(reason, done, until),
+            Err(_) => Guarded::Lost(reason),
+        }
+    }
+
+    /// Runs one step of a statement that reads from the session's
+    /// connection, within `limit`.
+    async fn step<T>(
+        &self,
+        limit: &Limit<'_>,
+        work: impl Future<Output = DriverResult<T>>,
+    ) -> Result<T, Stop> {
+        match self.guard(limit.reached(), work).await {
+            Guarded::Done(done) => done.map_err(stop),
+            Guarded::Killed(error, _, until) => Err((error, Unfinished::Killed(until))),
+            Guarded::Lost(error) => Err((error, Unfinished::Lost)),
+        }
+    }
+
+    /// Brings the protocol back to a known state after a statement was left
+    /// unfinished, or reports that the connection must be closed. A result
+    /// cut by the reader is drained first, since its statement may already be
+    /// done; a statement that may still run, or a result too long to drain
+    /// in time, is killed from another connection, and what is left of its
+    /// response is then read.
+    async fn recover(&self, connection: &mut MySqlConnection, unfinished: Unfinished) -> Flow {
+        let until = match unfinished {
+            Unfinished::Lost => return Flow::Broken,
+            Unfinished::Killed(until) => until,
+            Unfinished::Running => {
+                self.kill().await;
+                tokio::time::Instant::now() + RECOVERY
+            }
+            Unfinished::Cut => {
+                let drain = self
+                    .guard(tokio::time::sleep(RECOVERY), resynchronize(connection))
+                    .await;
+                return match drain {
+                    Guarded::Done(Ok(())) | Guarded::Killed((), Ok(()), _) => Flow::Ready,
+                    _ => Flow::Broken,
+                };
+            }
+        };
+        match tokio::time::timeout_at(until, resynchronize(connection)).await {
             Ok(Ok(())) => Flow::Ready,
             _ => Flow::Broken,
         }
@@ -681,28 +762,164 @@ impl Server {
     async fn fail(
         &self,
         connection: &mut MySqlConnection,
-        error: DriverError,
+        (error, unfinished): Stop,
         events: &mpsc::Sender<Event>,
     ) -> Flow {
-        let flow = if error.code == ErrorCode::Connection {
-            Flow::Broken
-        } else {
-            let running = matches!(
-                error.code,
-                ErrorCode::Cancelled | ErrorCode::Timeout | ErrorCode::Protocol
-            );
-            self.recover(connection, running).await
-        };
+        let flow = self.recover(connection, unfinished).await;
         if matches!(flow, Flow::Broken) {
             self.open.store(false, Ordering::SeqCst);
         }
         let _ = events.send(Event::Done(Err(error))).await;
         flow
     }
+
+    /// Sends up to `max_rows` rows, starting with the one read ahead last
+    /// time, and reads one row ahead to tell a full page from the end of the
+    /// result.
+    async fn read_page<S>(
+        &self,
+        stream: &mut S,
+        reading: &mut Reading,
+        max_rows: u32,
+        events: &mpsc::Sender<Event>,
+        limit: &Limit<'_>,
+    ) -> Result<PageEnd, Stop>
+    where
+        S: futures_util::Stream<
+                Item = Result<
+                    sqlx::Either<sqlx::mysql::MySqlQueryResult, sqlx::mysql::MySqlRow>,
+                    sqlx::Error,
+                >,
+            > + Unpin,
+    {
+        let mut count = 0u32;
+        if let Some(row) = reading.ahead.take() {
+            if !deliver(events, Event::Row(row), limit).await? {
+                return Ok(PageEnd::Gone);
+            }
+            count = 1;
+        }
+        while let Some(item) = self
+            .step(limit, async { stream.try_next().await.map_err(map_error) })
+            .await?
+        {
+            match item {
+                sqlx::Either::Left(result) => reading.affected = Some(result.rows_affected()),
+                sqlx::Either::Right(row) => {
+                    if reading.describe == Describe::FromRows {
+                        let columns = row
+                            .columns()
+                            .iter()
+                            .map(|column| ColumnInfo {
+                                name: column.name().into(),
+                                data_type: column.type_info().name().into(),
+                                nullable: None,
+                            })
+                            .collect();
+                        if !deliver(events, Event::Columns(columns), limit).await? {
+                            return Ok(PageEnd::Gone);
+                        }
+                        reading.describe = Describe::Sent;
+                    }
+                    let cells = decode(&row).map_err(stop)?;
+                    if count >= max_rows {
+                        reading.ahead = Some(cells);
+                        return Ok(PageEnd::Full);
+                    }
+                    if !deliver(events, Event::Row(cells), limit).await? {
+                        return Ok(PageEnd::Gone);
+                    }
+                    count += 1;
+                }
+            }
+        }
+        Ok(PageEnd::Finished)
+    }
 }
 
-/// Sends up to `max_rows` rows, starting with the one read ahead last time,
-/// and reads one row ahead to tell a full page from the end of the result.
+/// When a statement on a session must stop: when it is cancelled, or when
+/// the current step runs out of time.
+struct Limit<'a> {
+    cancel: &'a CancellationToken,
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl<'a> Limit<'a> {
+    fn new(cancel: &'a CancellationToken, timeout: Option<Duration>) -> Self {
+        Self {
+            cancel,
+            deadline: timeout.map(|limit| tokio::time::Instant::now() + limit),
+        }
+    }
+
+    /// Resolves, with the error to report, once the statement must stop.
+    async fn reached(&self) -> DriverError {
+        let expired = async {
+            match self.deadline {
+                Some(deadline) => tokio::time::sleep_until(deadline).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! { biased;
+            _ = self.cancel.cancelled() => DriverError::cancelled(),
+            _ = expired => DriverError::new(ErrorCode::Timeout, "Database operation timed out"),
+        }
+    }
+}
+
+/// How a guarded read on the session's connection ended.
+enum Guarded<E, T> {
+    /// The read ended before its limit.
+    Done(T),
+    /// The limit came first: the statement was killed and the read then
+    /// ended. What is left of the response must be read by the instant.
+    Killed(E, T, tokio::time::Instant),
+    /// The read did not end in time after the kill.
+    Lost(E),
+}
+
+/// What a session's connection needs after a statement was left unfinished.
+#[derive(Clone, Copy, Debug)]
+enum Unfinished {
+    /// The protocol is in step, and the statement may already be done.
+    Cut,
+    /// The protocol is in step, and the statement may still run.
+    Running,
+    /// The statement was killed and the protocol is in step; what is left
+    /// of its response must be read by the instant.
+    Killed(tokio::time::Instant),
+    /// The protocol is out of step.
+    Lost,
+}
+
+/// Why a statement stopped, and what its connection needs.
+type Stop = (DriverError, Unfinished);
+
+/// A statement stopped by `error` after its reads ended, so the protocol is
+/// in step unless the connection itself failed.
+fn stop(error: DriverError) -> Stop {
+    let unfinished = match error.code {
+        ErrorCode::Connection => Unfinished::Lost,
+        ErrorCode::Cancelled | ErrorCode::Timeout | ErrorCode::Protocol => Unfinished::Running,
+        _ => Unfinished::Cut,
+    };
+    (error, unfinished)
+}
+
+/// Sends `event` to the handle unless `limit` comes first; `false` when the
+/// handle stopped listening. Nothing is being read meanwhile, so the
+/// protocol stays in step.
+async fn deliver(
+    events: &mpsc::Sender<Event>,
+    event: Event,
+    limit: &Limit<'_>,
+) -> Result<bool, Stop> {
+    tokio::select! { biased;
+        error = limit.reached() => Err((error, Unfinished::Running)),
+        sent = events.send(event) => Ok(sent.is_ok()),
+    }
+}
+
 /// Where a statement's columns come from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Describe {
@@ -714,90 +931,41 @@ enum Describe {
     Sent,
 }
 
-async fn read_page<S>(
-    stream: &mut S,
-    ahead: &mut Option<Row>,
-    affected: &mut Option<u64>,
-    describe: &mut Describe,
-    max_rows: u32,
-    events: &mpsc::Sender<Event>,
-) -> DriverResult<PageEnd>
-where
-    S: futures_util::Stream<
-            Item = Result<
-                sqlx::Either<sqlx::mysql::MySqlQueryResult, sqlx::mysql::MySqlRow>,
-                sqlx::Error,
-            >,
-        > + Unpin,
-{
-    let mut count = 0u32;
-    if let Some(row) = ahead.take() {
-        if events.send(Event::Row(row)).await.is_err() {
-            return Ok(PageEnd::Gone);
-        }
-        count = 1;
-    }
-    while let Some(item) = stream.try_next().await.map_err(map_error)? {
-        match item {
-            sqlx::Either::Left(result) => *affected = Some(result.rows_affected()),
-            sqlx::Either::Right(row) => {
-                if *describe == Describe::FromRows {
-                    let columns = row
-                        .columns()
-                        .iter()
-                        .map(|column| ColumnInfo {
-                            name: column.name().into(),
-                            data_type: column.type_info().name().into(),
-                            nullable: None,
-                        })
-                        .collect();
-                    if events.send(Event::Columns(columns)).await.is_err() {
-                        return Ok(PageEnd::Gone);
-                    }
-                    *describe = Describe::Sent;
-                }
-                let mut cells = Vec::with_capacity(row.len());
-                for index in 0..row.len() {
-                    let value = row.try_get_raw(index).map_err(map_error)?;
-                    if value.is_null() {
-                        cells.push(Cell::Null);
-                        continue;
-                    }
-                    let bytes =
-                        <Vec<u8> as sqlx::Decode<sqlx::MySql>>::decode(value).map_err(|_| {
-                            DriverError::new(ErrorCode::Protocol, "Invalid database value")
-                        })?;
-                    let kind = row.columns()[index].type_info().name();
-                    if matches!(
-                        kind,
-                        "BLOB"
-                            | "TINYBLOB"
-                            | "MEDIUMBLOB"
-                            | "LONGBLOB"
-                            | "BINARY"
-                            | "VARBINARY"
-                            | "BIT"
-                    ) {
-                        cells.push(Cell::Binary(bytes));
-                    } else {
-                        cells.push(Cell::Text(String::from_utf8(bytes).map_err(|_| {
-                            DriverError::new(ErrorCode::Protocol, "Invalid database text encoding")
-                        })?));
-                    }
-                }
-                if count >= max_rows {
-                    *ahead = Some(cells);
-                    return Ok(PageEnd::Full);
-                }
-                if events.send(Event::Row(cells)).await.is_err() {
-                    return Ok(PageEnd::Gone);
-                }
-                count += 1;
-            }
-        }
-    }
-    Ok(PageEnd::Finished)
+/// Where the reading of a result stands between its pages.
+struct Reading {
+    /// The row read ahead of the last page, sent first in the next one.
+    ahead: Option<Row>,
+    /// The rows affected, reported by a statement without rows.
+    affected: Option<u64>,
+    describe: Describe,
 }
+
+/// The cells of a row as the text protocol sent them.
+fn decode(row: &sqlx::mysql::MySqlRow) -> DriverResult<Row> {
+    let mut cells = Vec::with_capacity(row.len());
+    for index in 0..row.len() {
+        let value = row.try_get_raw(index).map_err(map_error)?;
+        if value.is_null() {
+            cells.push(Cell::Null);
+            continue;
+        }
+        let bytes = <Vec<u8> as sqlx::Decode<sqlx::MySql>>::decode(value)
+            .map_err(|_| DriverError::new(ErrorCode::Protocol, "Invalid database value"))?;
+        let kind = row.columns()[index].type_info().name();
+        if matches!(
+            kind,
+            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "BIT"
+        ) {
+            cells.push(Cell::Binary(bytes));
+        } else {
+            cells.push(Cell::Text(String::from_utf8(bytes).map_err(|_| {
+                DriverError::new(ErrorCode::Protocol, "Invalid database text encoding")
+            })?));
+        }
+    }
+    Ok(cells)
+}
+
 pub async fn introspect(
     input: &ResolvedConnection,
     scope: &ObjectPath,
@@ -1142,3 +1310,119 @@ const FOREIGN_KEYS_SQL: &str = r#"SELECT k.table_schema AS db, k.table_name AS r
 FROM information_schema.key_column_usage k
 WHERE k.referenced_table_name IS NOT NULL AND k.table_schema NOT IN ('mysql','information_schema','performance_schema','sys') AND (? IS NULL OR k.table_schema = ?) AND (? IS NULL OR k.table_name = ?)
 ORDER BY k.table_schema, k.table_name, k.constraint_name, k.ordinal_position"#;
+
+/// The session variable that holds parameter `index` for a run.
+fn parameter_variable(index: usize) -> String {
+    format!("@jykre_p_{index}")
+}
+
+/// The scale an exact number keeps: its fraction digits, at most MySQL's 30;
+/// 30 for a number with an exponent.
+fn decimal_scale(value: &str) -> usize {
+    if value.contains(['e', 'E']) {
+        return 30;
+    }
+    value
+        .split_once('.')
+        .map_or(0, |(_, fraction)| fraction.len())
+        .min(30)
+}
+
+/// What a parameter's marker becomes (ADR-0023): a read of the variable
+/// bound before the statement, cast to the parameter's type, or a typed
+/// NULL. Neither holds the value. Text is read as it is, so it keeps the
+/// connection's collation.
+fn parameter_reference(index: usize, parameter: &QueryParameter) -> String {
+    let variable = parameter_variable(index);
+    match (parameter.kind, &parameter.value) {
+        (ParameterKind::Text | ParameterKind::Boolean, Some(_)) => variable,
+        (ParameterKind::Number, Some(value)) => {
+            format!("CAST({variable} AS DECIMAL(65,{}))", decimal_scale(value))
+        }
+        (ParameterKind::Date, Some(_)) => format!("CAST({variable} AS DATE)"),
+        (ParameterKind::Timestamp, Some(_)) => format!("CAST({variable} AS DATETIME(6))"),
+        (ParameterKind::Text, None) => "CAST(NULL AS CHAR)".into(),
+        (ParameterKind::Number, None) => "CAST(NULL AS DECIMAL(65,30))".into(),
+        (ParameterKind::Boolean, None) => "CAST(NULL AS SIGNED)".into(),
+        (ParameterKind::Date, None) => "CAST(NULL AS DATE)".into(),
+        (ParameterKind::Timestamp, None) => "CAST(NULL AS DATETIME(6))".into(),
+    }
+}
+
+/// The prepared `SET` that binds every parameter that is not NULL, in the
+/// order of `parameters`; `None` when there is none. The values travel with
+/// the binary protocol as bound parameters; the user's SQL then reads the
+/// variables with the text protocol. They stay in this session until the
+/// next run sets them again: a result can stay open for paging, and nothing
+/// else can run until it ends.
+fn bind_statement(parameters: &[QueryParameter]) -> Option<String> {
+    let assignments: Vec<String> = parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, parameter)| parameter.value.is_some())
+        .map(|(index, _)| format!("{} = ?", parameter_variable(index)))
+        .collect();
+    (!assignments.is_empty()).then(|| format!("SET {}", assignments.join(", ")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bind_statement, parameter_reference};
+    use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+
+    fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
+        QueryParameter {
+            name: name.into(),
+            kind,
+            value: value.map(Into::into),
+            markers: sql
+                .match_indices(&format!(":{name}"))
+                .map(|(start, found)| start..start + found.len())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn markers_become_reads_of_bound_variables_and_values_stay_out_of_the_sql() {
+        let sql = "SELECT :who, :amount, :e, :flag, :day, :at, :none";
+        let request = QueryRequest {
+            parameters: vec![
+                marked(
+                    sql,
+                    "who",
+                    ParameterKind::Text,
+                    Some("x'; DROP TABLE t; --"),
+                ),
+                marked(sql, "amount", ParameterKind::Number, Some("-12.345")),
+                marked(sql, "e", ParameterKind::Number, Some("1e3")),
+                marked(sql, "flag", ParameterKind::Boolean, Some("false")),
+                marked(sql, "day", ParameterKind::Date, Some("2024-02-29")),
+                marked(
+                    sql,
+                    "at",
+                    ParameterKind::Timestamp,
+                    Some("2024-02-29 10:00"),
+                ),
+                marked(sql, "none", ParameterKind::Number, None),
+            ],
+            ..QueryRequest::new(sql, ExecutionOptions::default())
+        };
+        assert_eq!(request.validate(), Ok(()));
+        let bound = request.with_references(parameter_reference);
+        assert_eq!(
+            bound,
+            "SELECT @jykre_p_0, CAST(@jykre_p_1 AS DECIMAL(65,3)), \
+             CAST(@jykre_p_2 AS DECIMAL(65,30)), @jykre_p_3, CAST(@jykre_p_4 AS DATE), \
+             CAST(@jykre_p_5 AS DATETIME(6)), CAST(NULL AS DECIMAL(65,30))"
+        );
+        assert!(!bound.contains("DROP"));
+        assert_eq!(
+            bind_statement(&request.parameters).as_deref(),
+            Some(
+                "SET @jykre_p_0 = ?, @jykre_p_1 = ?, @jykre_p_2 = ?, @jykre_p_3 = ?, \
+                 @jykre_p_4 = ?, @jykre_p_5 = ?"
+            )
+        );
+        assert_eq!(bind_statement(&[]), None);
+    }
+}

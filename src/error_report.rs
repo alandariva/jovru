@@ -200,7 +200,7 @@ pub fn action(code: ErrorCode, sqlstate: Option<&str>) -> Option<String> {
 }
 
 /// `seconds` since the epoch as `YYYY-MM-DD HH:MM:SS`.
-fn utc(seconds: u64) -> String {
+pub(crate) fn utc(seconds: u64) -> String {
     let days = (seconds / 86_400) as i64;
     let rest = seconds % 86_400;
     // Days to a civil date (Howard Hinnant's algorithm).

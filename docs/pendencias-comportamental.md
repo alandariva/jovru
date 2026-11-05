@@ -65,7 +65,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N003 — Abrir uma tabela não mostra os dados
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
-- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`). Atualização (5 de novembro de 2026): substituída a pedido do mantenedor pela vista **Dados** (“Visualizador de dados da tabela”): duplo clique, Enter, a palette e **View data** abrem uma aba com `SELECT * FROM …;`, sem `LIMIT`, que executa a leitura na hora num result tab chamado Data e pagina pelo cursor da sessão, com o SQL visível no editor. **New query for table** continua no menu, abrindo outra aba com o SQL e o `LIMIT`, sem executar.
 - **Funcionalidade:** Explorer / navegação
 - **Comportamento atual:** Duplo clique, Enter, “Open preview” ou Enter na palette chamam `add_query` com `SELECT * FROM … LIMIT 100;`. Abre uma aba de consulta com o SQL e o estado vazio “Ready to explore — Run the query”. Nada é executado.
 - **Comportamento de referência:** Nas três ferramentas, abrir a tabela leva aos dados ou ao editor do objeto:
@@ -197,7 +197,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 - **Diferença identificada:** Um limite embutido no SQL anula o mecanismo de páginas do próprio produto.
 - **Por que o comportamento atual é inferior:** Para ver a linha 101, o usuário precisa editar o SQL; a configuração “Row limit” parece não funcionar.
 - **Comportamento recomendado:** Gerar `SELECT * FROM x` e deixar o limite de linhas e a paginação controlarem o volume.
-- **Decisão:** A consulta gerada mantém um `LIMIT` por padrão, com o valor do limite de linhas da conexão em vez do 100 fixo.
+- **Decisão:** A consulta gerada mantém um `LIMIT` por padrão, com o valor do limite de linhas da conexão em vez do 100 fixo. Atualização (5 de novembro de 2026): vale só para **New query for table**; a vista Dados não escreve `LIMIT` no texto e lê as páginas seguintes pela sessão (ver N003).
 - **Evidência no projeto:** `src/backend.rs` — `preview_sql`; `docs/results.md` (Limits).
 - **Confiança:** Confirmado no projeto; referência documentada em A e C.
 
@@ -476,7 +476,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N031 — Cópias grandes rodam na thread da UI, sem confirmação (Backlog: N033)
 - **Prioridade:** Média
 - **Aprovação:** Aprovada (4 de novembro de 2026)
-- **Status:** Parcial (4 de novembro de 2026; alterações locais não commitadas). O tamanho é estimado pelo comprimento das células antes de gerar o texto (`grid::selection_bytes`, `grid::csv_bytes`), e acima de 50 MiB a cópia da seleção (`Ctrl C`, menu) e “Copy this page as CSV” pedem confirmação. Bloqueado: gerar o texto fora da thread da UI. O resultado é compartilhado como `Rc<ResultData>`, como registra o [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md), e não pode ir para outra thread; a mudança proposta é compartilhá-lo como `Arc<ResultData>` (ou gerar a cópia no runtime a partir de um `Arc`), o que pede um novo ADR ou a aprovação do mantenedor. O desvio de `docs/results.md` foi atualizado.
+- **Status:** Parcial (4 de novembro de 2026; alterações locais não commitadas). O tamanho é estimado pelo comprimento das células antes de gerar o texto (`grid::selection_bytes`, `grid::csv_bytes`), e acima de 50 MiB a cópia da seleção (`Ctrl C`, menu) e “Copy this page as CSV” pedem confirmação. Bloqueado: gerar o texto fora da thread da UI. O resultado é compartilhado como `Rc<ResultData>`, como registra o [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md), e não pode ir para outra thread; a mudança proposta é compartilhá-lo como `Arc<ResultData>` (ou gerar a cópia no runtime a partir de um `Arc`), o que pede um novo ADR ou a aprovação do mantenedor. O desvio de `docs/results.md` foi atualizado. Atualização (4 de novembro de 2026): a exportação para arquivo trouxe o [ADR-0022](adr/0022-result-pages-shared-across-threads.md) (proposto, decisão aprovada pelo mantenedor), e as páginas passaram a ser `Arc<ResultData>`; gerar a cópia fora da thread da UI deixou de estar bloqueado, mas ainda não foi feito.
 - **Funcionalidade:** Clipboard
 - **Comportamento atual:** “Copy this page as CSV” e `Ctrl+C` materializam o texto no thread da UI e escrevem direto no clipboard. É um desvio registrado em `docs/results.md`.
 - **Comportamento de referência:** Princípio, e a regra do próprio Jykre: confirmar acima de 50 MiB e copiar fora da thread da UI.

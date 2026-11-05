@@ -1,0 +1,39 @@
+{"display":"BIGINT","name":"bigint","source":"curated"}
+{"display":"BINARY","name":"binary","params":"(n)","source":"curated"}
+{"display":"BIT","name":"bit","params":"(n)","source":"curated"}
+{"display":"BLOB","name":"blob","source":"curated"}
+{"aliases":["bool"],"display":"BOOLEAN","name":"boolean","source":"curated"}
+{"aliases":["character"],"display":"CHAR","name":"char","params":"(n)","source":"curated"}
+{"display":"DATE","name":"date","source":"curated"}
+{"display":"DATETIME","name":"datetime","params":"(fsp)","source":"curated"}
+{"aliases":["numeric","dec","fixed"],"display":"DECIMAL","name":"decimal","params":"(precision, scale)","source":"curated"}
+{"aliases":["double precision","real"],"display":"DOUBLE","name":"double","source":"curated"}
+{"display":"ENUM","name":"enum","params":"('value', ...)","source":"curated"}
+{"display":"FLOAT","name":"float","source":"curated"}
+{"display":"GEOMETRY","name":"geometry","source":"curated"}
+{"display":"GEOMETRYCOLLECTION","name":"geometrycollection","source":"curated"}
+{"aliases":["integer"],"display":"INT","name":"int","source":"curated"}
+{"display":"JSON","name":"json","source":"curated"}
+{"display":"LINESTRING","name":"linestring","source":"curated"}
+{"display":"LONGBLOB","name":"longblob","source":"curated"}
+{"display":"LONGTEXT","name":"longtext","source":"curated"}
+{"display":"MEDIUMBLOB","name":"mediumblob","source":"curated"}
+{"display":"MEDIUMINT","name":"mediumint","source":"curated"}
+{"display":"MEDIUMTEXT","name":"mediumtext","source":"curated"}
+{"display":"MULTILINESTRING","name":"multilinestring","source":"curated"}
+{"display":"MULTIPOINT","name":"multipoint","source":"curated"}
+{"display":"MULTIPOLYGON","name":"multipolygon","source":"curated"}
+{"display":"POINT","name":"point","source":"curated"}
+{"display":"POLYGON","name":"polygon","source":"curated"}
+{"display":"SET","name":"set","params":"('value', ...)","source":"curated"}
+{"display":"SMALLINT","name":"smallint","source":"curated"}
+{"display":"TEXT","name":"text","source":"curated"}
+{"display":"TIME","name":"time","params":"(fsp)","source":"curated"}
+{"display":"TIMESTAMP","name":"timestamp","params":"(fsp)","source":"curated"}
+{"display":"TINYBLOB","name":"tinyblob","source":"curated"}
+{"display":"TINYINT","name":"tinyint","source":"curated"}
+{"display":"TINYTEXT","name":"tinytext","source":"curated"}
+{"display":"VARBINARY","name":"varbinary","params":"(n)","source":"curated"}
+{"aliases":["character varying"],"display":"VARCHAR","name":"varchar","params":"(n)","source":"curated"}
+{"display":"VECTOR","name":"vector","params":"(dimension)","since":"9.7.4","source":"curated"}
+{"display":"YEAR","name":"year","source":"curated"}

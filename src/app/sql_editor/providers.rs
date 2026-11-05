@@ -1,9 +1,11 @@
-//! The SQL editor's completion, hover and go to definition. They answer from
-//! the tab's own connection cache: the workspace holds the connection's name
-//! index and the columns read so far, and [`jykre::completion`] decides what
-//! the SQL around the cursor means.
-use super::workspace::Workspace;
-use gpui_kit::component::input::{CompletionProvider, DefinitionProvider, HoverProvider};
+//! The SQL editor's completion, hover and go to definition, as the editor's
+//! providers. They ask the tab's [`SqlEditor`], which holds the connection's
+//! name index and the columns read so far; `jykre_sql_language::completion`
+//! decides what the SQL around the cursor means.
+use super::SqlEditor;
+use gpui_kit::component::input::{
+    CompletionProvider, DefinitionProvider, EditorState, HoverProvider,
+};
 use gpui_kit::component::{Rope, RopeExt as _};
 use gpui_kit::*;
 use lsp_types::{
@@ -19,25 +21,33 @@ type ShowDocument = Rc<dyn Fn(&lsp_types::ShowDocumentParams, &mut Window, &mut 
 /// The URI scheme a definition uses for an object of the explorer.
 const OBJECT_SCHEME: &str = "jykre-object";
 
-pub(super) struct SqlProviders {
-    workspace: WeakEntity<Workspace>,
+struct SqlProviders {
+    editor: WeakEntity<SqlEditor>,
 }
 
-impl SqlProviders {
-    pub(super) fn new(workspace: WeakEntity<Workspace>) -> Rc<Self> {
-        Rc::new(Self { workspace })
-    }
+/// Gives `editor` completion, hover and go to definition from `features`.
+pub(super) fn install(editor: &Entity<EditorState>, features: WeakEntity<SqlEditor>, cx: &mut App) {
+    editor.update(cx, |editor, _| {
+        let providers = Rc::new(SqlProviders {
+            editor: features.clone(),
+        });
+        let lsp = editor.lsp_mut();
+        lsp.completion_provider = Some(providers.clone());
+        lsp.hover_provider = Some(providers.clone());
+        lsp.definition_provider = Some(providers);
+        lsp.show_document = Some(show_object(features));
+    });
 }
 
 /// The URI that names an object path, hex-encoded so any name survives.
-pub(super) fn object_uri(path: &jykre::drivers::ObjectPath) -> Option<Uri> {
+fn object_uri(path: &jykre::drivers::ObjectPath) -> Option<Uri> {
     let json = serde_json::to_vec(path).ok()?;
     let hex: String = json.iter().map(|byte| format!("{byte:02x}")).collect();
     Uri::from_str(&format!("{OBJECT_SCHEME}:{hex}")).ok()
 }
 
 /// The object path an [`object_uri`] names.
-pub(super) fn object_path(uri: &Uri) -> Option<jykre::drivers::ObjectPath> {
+fn object_path(uri: &Uri) -> Option<jykre::drivers::ObjectPath> {
     let text = uri.as_str().strip_prefix(&format!("{OBJECT_SCHEME}:"))?;
     let bytes = (0..text.len())
         .step_by(2)
@@ -55,14 +65,22 @@ impl CompletionProvider for SqlProviders {
         _: &mut Window,
         cx: &mut App,
     ) -> Task<Result<CompletionResponse>> {
-        let sql = text.to_string();
-        let items = self
-            .workspace
-            .update(cx, |workspace, cx| {
-                workspace.completion_items(&sql, offset, text, cx)
-            })
-            .unwrap_or_default();
-        Task::ready(Ok(CompletionResponse::Array(items)))
+        let Ok(snapshot) = self.editor.update(cx, |features, _| features.snapshot()) else {
+            return Task::ready(Ok(CompletionResponse::Array(Vec::new())));
+        };
+        // Reading the statement and matching names grows with the script and
+        // the cache, so it runs off the UI thread; the editor drops a
+        // response for a text that changed meanwhile.
+        let text = text.clone();
+        let work = cx.background_spawn(async move { snapshot.completions(&text, offset) });
+        let features = self.editor.clone();
+        cx.spawn(async move |cx| {
+            let (items, missing) = work.await;
+            if !missing.is_empty() {
+                let _ = features.update(cx, |features, cx| features.load_columns(missing, cx));
+            }
+            Ok(CompletionResponse::Array(items))
+        })
     }
 
     fn is_completion_trigger(&self, _: usize, new_text: &str, _: &mut App) -> bool {
@@ -82,10 +100,12 @@ impl HoverProvider for SqlProviders {
     ) -> Task<Result<Option<Hover>>> {
         let sql = text.to_string();
         let hover = self
-            .workspace
-            .update(cx, |workspace, cx| {
-                let (symbol, range) = workspace.symbol_at(&sql, offset, cx)?;
-                let value = workspace.describe(&symbol)?;
+            .editor
+            .update(cx, |features, cx| {
+                let (value, range) = match features.symbol_at(&sql, offset, cx) {
+                    Some((symbol, range)) => (features.describe(&symbol)?, range),
+                    None => features.function_at(&sql, offset)?,
+                };
                 Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
                         kind: MarkupKind::Markdown,
@@ -113,9 +133,9 @@ impl DefinitionProvider for SqlProviders {
     ) -> Task<Result<Vec<LocationLink>>> {
         let sql = text.to_string();
         let links = self
-            .workspace
-            .update(cx, |workspace, cx| {
-                let (symbol, range) = workspace.symbol_at(&sql, offset, cx)?;
+            .editor
+            .update(cx, |features, cx| {
+                let (symbol, range) = features.symbol_at(&sql, offset, cx)?;
                 let range = lsp_types::Range {
                     start: text.offset_to_position(range.start),
                     end: text.offset_to_position(range.end),
@@ -136,13 +156,13 @@ impl DefinitionProvider for SqlProviders {
 
 /// Reveals in the explorer the object a definition names, instead of moving
 /// the editor's cursor.
-pub(super) fn show_object(workspace: WeakEntity<Workspace>) -> ShowDocument {
+fn show_object(features: WeakEntity<SqlEditor>) -> ShowDocument {
     Rc::new(move |params, _, cx| {
         let Some(path) = object_path(&params.uri) else {
             return false;
         };
-        workspace
-            .update(cx, |workspace, cx| workspace.reveal(path, cx))
+        features
+            .update(cx, |features, cx| features.reveal(path, cx))
             .is_ok()
     })
 }

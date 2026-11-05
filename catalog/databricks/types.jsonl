@@ -1,0 +1,21 @@
+{"display":"ARRAY","name":"array","params":"<element>","source":"curated"}
+{"aliases":["long"],"display":"BIGINT","name":"bigint","source":"curated"}
+{"display":"BINARY","name":"binary","source":"curated"}
+{"display":"BOOLEAN","name":"boolean","source":"curated"}
+{"display":"CHAR","name":"char","params":"(n)","source":"curated"}
+{"display":"DATE","name":"date","source":"curated"}
+{"aliases":["dec","numeric"],"display":"DECIMAL","name":"decimal","params":"(precision, scale)","source":"curated"}
+{"display":"DOUBLE","name":"double","source":"curated"}
+{"aliases":["real"],"display":"FLOAT","name":"float","source":"curated"}
+{"aliases":["integer"],"display":"INT","name":"int","source":"curated"}
+{"display":"INTERVAL","name":"interval","params":"start [TO end]","source":"curated"}
+{"display":"MAP","name":"map","params":"<key, value>","source":"curated"}
+{"aliases":["short"],"display":"SMALLINT","name":"smallint","source":"curated"}
+{"display":"STRING","name":"string","source":"curated"}
+{"display":"STRUCT","name":"struct","params":"<field: type, ...>","source":"curated"}
+{"display":"TIMESTAMP","name":"timestamp","source":"curated"}
+{"display":"TIMESTAMP_NTZ","name":"timestamp_ntz","source":"curated"}
+{"aliases":["byte"],"display":"TINYINT","name":"tinyint","source":"curated"}
+{"display":"VARCHAR","name":"varchar","params":"(n)","source":"curated"}
+{"display":"VARIANT","name":"variant","source":"curated"}
+{"display":"VOID","name":"void","source":"curated"}

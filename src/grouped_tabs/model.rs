@@ -1,10 +1,11 @@
 use gpui_kit::{Hsla, SharedString};
 
-use super::{TabGroupId, TabId, TabsError};
+use super::{TabGroupId, TabId, TabStatus, TabsError};
 
 pub(super) struct Tab<C> {
     pub id: TabId,
     pub title: SharedString,
+    pub status: TabStatus,
     pub content: C,
 }
 
@@ -14,6 +15,8 @@ pub(super) struct Group<C> {
     pub color: Hsla,
     pub tabs: Vec<Tab<C>>,
     pub last_selected: Option<TabId>,
+    /// The group's header offers a button for a new tab.
+    pub new_tab: bool,
 }
 
 /// Layout and selection are independent of GPUI windows and content types.
@@ -36,17 +39,36 @@ impl<C> Default for Model<C> {
 }
 
 impl<C> Model<C> {
-    pub fn add_group(&mut self, name: SharedString, color: Hsla) -> TabGroupId {
+    /// An id that no group has and none will be given.
+    pub fn reserve_group(&mut self) -> TabGroupId {
         self.next_group += 1;
-        let id = TabGroupId(self.next_group);
+        TabGroupId(self.next_group)
+    }
+
+    pub fn add_group(&mut self, name: SharedString, color: Hsla) -> TabGroupId {
+        let id = self.reserve_group();
         self.groups.push(Group {
             id,
             name,
             color,
             tabs: Vec::new(),
             last_selected: None,
+            new_tab: true,
         });
         id
+    }
+
+    /// Whether the group's header offers a new tab; `Ok(true)` when that
+    /// changed.
+    pub fn set_new_tab(&mut self, id: TabGroupId, new_tab: bool) -> Result<bool, TabsError> {
+        let group = self
+            .groups
+            .iter_mut()
+            .find(|group| group.id == id)
+            .ok_or(TabsError::GroupNotFound)?;
+        let changed = group.new_tab != new_tab;
+        group.new_tab = new_tab;
+        Ok(changed)
     }
 
     pub fn group(&self, id: TabGroupId) -> Option<&Group<C>> {
@@ -84,9 +106,37 @@ impl<C> Model<C> {
             .ok_or(TabsError::GroupNotFound)?;
         self.next_tab += 1;
         let id = TabId(self.next_tab);
-        group.tabs.push(Tab { id, title, content });
+        group.tabs.push(Tab {
+            id,
+            title,
+            status: TabStatus::Idle,
+            content,
+        });
         self.select(id)?;
         Ok(id)
+    }
+
+    /// Sets what a tab shows about its work; `false` when it already showed
+    /// it, so the host redraws nothing.
+    pub fn set_status(&mut self, id: TabId, status: TabStatus) -> Result<bool, TabsError> {
+        let (group, tab) = self.location(id).ok_or(TabsError::TabNotFound)?;
+        let tab = &mut self.groups[group].tabs[tab];
+        if tab.status == status {
+            return Ok(false);
+        }
+        tab.status = status;
+        Ok(true)
+    }
+
+    /// Changes a tab's title; `false` when it already had it.
+    pub fn set_title(&mut self, id: TabId, title: SharedString) -> Result<bool, TabsError> {
+        let (group, tab) = self.location(id).ok_or(TabsError::TabNotFound)?;
+        let tab = &mut self.groups[group].tabs[tab];
+        if tab.title == title {
+            return Ok(false);
+        }
+        tab.title = title;
+        Ok(true)
     }
 
     pub fn select(&mut self, id: TabId) -> Result<(), TabsError> {
@@ -223,6 +273,21 @@ mod tests {
         assert_eq!(model.group_selection(second), Ok(Some(c)));
         model.select(b).unwrap();
         assert_eq!(model.group_selection(first), Ok(Some(b)));
+    }
+
+    #[test]
+    fn a_reserved_group_id_names_no_group_and_is_never_reused() {
+        let mut model: Model<()> = Model::default();
+        let reserved = model.reserve_group();
+        assert!(model.groups.is_empty());
+        assert!(model.group(reserved).is_none());
+        assert_eq!(
+            model.add_tab(reserved, "A".into(), ()),
+            Err(TabsError::GroupNotFound)
+        );
+        let added = group(&mut model);
+        assert_ne!(added, reserved);
+        assert_eq!(model.groups.len(), 1);
     }
 
     #[test]

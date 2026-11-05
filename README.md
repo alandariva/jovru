@@ -57,6 +57,9 @@ Demo connections and results are labelled as such and never reach a server.
   (Windows Credential Manager, macOS Keychain, Linux Secret Service). Without
   it, the password lives only in the session. If the vault fails, the UI says
   so; there is no fallback to a password file.
+- **Delete connection…** in a connection's context menu (or `Delete` on it)
+  removes it, with its remembered password and metadata cache, after a
+  confirmation. Its open tabs keep their SQL, without a connection.
 - `↻` on a connection refreshes everything; **Refresh** in the context menu
   (right click, or `F5` on a focused node) of a database, catalog, schema,
   table, view or column refreshes only that node and its descendants. While a
@@ -64,6 +67,12 @@ Demo connections and results are labelled as such and never reach a server.
   keep the last good read, and permission warnings
   keep the parts that could not be read. Each scope keeps its own state and
   timestamp.
+- **Export** (the download button, or `Ctrl Shift E`) writes the whole
+  result to CSV, Excel, JSON, JSON Lines, SQL `INSERT`s or Markdown, not only
+  the page on screen. It reads the rest of the result from the server when
+  the session still has it, or runs a read-only statement again after
+  asking; the file appears only once complete, and cancelling leaves the
+  chosen file as it was. See [Results](docs/results.md#export).
 - The metadata cache is stored locally, read page by page and browsable offline
   after a restart. Search also queries the local cache.
 - Double-click a table or view (or press Enter) for a new query on it, with
@@ -89,6 +98,21 @@ Demo connections and results are labelled as such and never reach a server.
   spreadsheets; the context menu also copies it with headers. **pt-BR
   numbers** groups digits without converting decimals or integers to floating
   point. CSV copy keeps the original values regardless of presentation.
+- **Reports** (a section of the rail) gather panels, each on its own
+  connection and database (schema, catalog, or another PostgreSQL database
+  when the connection offers them), chosen from the panel's header. A panel
+  shows a table, a bar, line or pie chart, or a single number, at half or
+  full width, and is dragged by its grip to another place. The panels share
+  `:name` parameters filled in before each run (text, number, true or false,
+  date, date and time, or one of a list; bound by the database driver, never
+  written into the SQL), and the panels of different databases or
+  connections run at the same time. A report tab has a tab group of its own.
+  The SQL editor completes names like a query tab, for the panel's
+  connection. Create a report with **+**, or from a query tab with **Save as
+  a new report** or **Add to a report…**, which adds a panel to any saved
+  report. Copy a panel's result as CSV or for a spreadsheet, or export a
+  print document (HTML) with every panel that the browser prints or saves as
+  PDF. Parameters need a SQL warehouse on Databricks.
 - `Ctrl B` toggles the explorer and `Ctrl Shift B` the assistant. Dividers and
   the SQL font size are adjustable.
 
@@ -117,8 +141,10 @@ the demo data are not translatable yet.
 
 | Data | Location |
 | --- | --- |
-| Connections, preferences | `config.db` in the data folder |
+| Connections, preferences, report definitions | `config.db` in the data folder |
+| A report's print document | Only where you save it with **Export for printing or PDF…** |
 | Metadata cache | `metadata/<connection-id>.db` in the data folder |
+| Copies of `config.db` (the five most recent, one per start) | `backups/` in the data folder; offered for restore when `config.db` cannot be opened |
 | Passwords (only with **Remember password**) | OS vault, service `JykreStudio` |
 
 The data folder follows each platform's convention:
@@ -134,7 +160,8 @@ folder). Only when no home directory can be found does the app fall back to
 `.jykre/` in the working directory.
 
 Logs are written to `logs/` inside the data folder as JSON lines, one file per
-day, keeping the last seven. `JYKRE_LOG` changes the level (for example
+day, keeping the last seven; **Open log folder** in Preferences shows them.
+`JYKRE_LOG` changes the level (for example
 `JYKRE_LOG=jykre=debug`); SQL text is logged only at `trace` and passwords
 never. `JYKRE_PROBE=1` adds frame-time measurements to the log.
 

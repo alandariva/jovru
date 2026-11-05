@@ -84,6 +84,19 @@ impl RunState {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Running { .. } | Self::Cancelling)
     }
+
+    /// What the query tab shows before its title: a spinner while the run
+    /// is active (stopping included), then how the last run ended.
+    pub fn tab_status(&self) -> crate::grouped_tabs::TabStatus {
+        use crate::grouped_tabs::TabStatus;
+        match self {
+            Self::Idle => TabStatus::Idle,
+            Self::Running { .. } | Self::Cancelling => TabStatus::Running,
+            Self::Done => TabStatus::Succeeded,
+            Self::Failed { .. } => TabStatus::Failed,
+            Self::Cancelled => TabStatus::Cancelled,
+        }
+    }
 }
 
 /// Identity of one run.
@@ -248,6 +261,16 @@ impl QueryRun {
         }
     }
 
+    /// The statements [`QueryRun::start`] would run for `scope`, without
+    /// starting anything: what a check before running reads.
+    pub fn statements_for(&self, sql: &str, scope: &Scope) -> Vec<String> {
+        self.select(sql, scope.clone())
+            .0
+            .into_iter()
+            .map(|(_, sql)| sql)
+            .collect()
+    }
+
     /// Starts a run of the statements of `sql` that `scope` picks. Returns
     /// `None` when there is nothing to run or a run is still active: one
     /// that is `Cancelling` may still change data on the server, so the next
@@ -256,6 +279,29 @@ impl QueryRun {
         if self.is_active() {
             return None;
         }
+        let ranges = sql::statements(sql, self.dialect);
+        let (statements, starts) = self.select(sql, scope);
+        if statements.is_empty() {
+            return None;
+        }
+        self.sql = sql.to_owned();
+        self.sync();
+        self.statuses.resize(ranges.len(), StatementStatus::Ready);
+        self.current = RunId(self.current.0 + 1);
+        self.planned = statements.iter().map(|(index, _)| *index).collect();
+        self.state = RunState::Running {
+            started_at: Instant::now(),
+        };
+        Some(Plan {
+            id: self.current,
+            statements,
+            starts,
+        })
+    }
+
+    /// The statements `scope` picks in `sql`, each with its index among the
+    /// editor's statements, and where each starts.
+    fn select(&self, sql: &str, scope: Scope) -> (Vec<(usize, String)>, Vec<usize>) {
         let dialect = self.dialect;
         let ranges = sql::statements(sql, dialect);
         let whole = |index: usize| -> Option<(usize, String)> {
@@ -303,22 +349,7 @@ impl QueryRun {
                 }
             }
         };
-        if statements.is_empty() {
-            return None;
-        }
-        self.sql = sql.to_owned();
-        self.sync();
-        self.statuses.resize(ranges.len(), StatementStatus::Ready);
-        self.current = RunId(self.current.0 + 1);
-        self.planned = statements.iter().map(|(index, _)| *index).collect();
-        self.state = RunState::Running {
-            started_at: Instant::now(),
-        };
-        Some(Plan {
-            id: self.current,
-            statements,
-            starts,
-        })
+        (statements, starts)
     }
 
     /// Marks one planned statement as running. Returns `false` when the run
@@ -573,6 +604,41 @@ mod tests {
         assert_eq!(run.state(), &RunState::Idle);
         assert_eq!(run.statuses(), [Ready, Ready]);
         assert!(!run.is_active());
+    }
+
+    #[test]
+    fn the_query_tab_shows_the_run_while_active_and_then_how_it_ended() {
+        use crate::grouped_tabs::TabStatus;
+        assert_eq!(QueryRun::new(TWO).state().tab_status(), TabStatus::Idle);
+
+        let (mut run, plan) = started(TWO);
+        assert_eq!(run.state().tab_status(), TabStatus::Running);
+        assert!(run.finish(
+            plan.id,
+            Outcome::Batch {
+                completed: 2,
+                error: None
+            }
+        ));
+        assert_eq!(run.state().tab_status(), TabStatus::Succeeded);
+
+        let (mut run, plan) = started(TWO);
+        assert!(run.finish(
+            plan.id,
+            Outcome::Batch {
+                completed: 1,
+                error: Some(DriverError::validation("boom")),
+            }
+        ));
+        assert_eq!(run.state().tab_status(), TabStatus::Failed);
+
+        let (mut run, plan) = started(TWO);
+        assert!(run.cancel());
+        // Stopping is still work in progress.
+        assert_eq!(run.state().tab_status(), TabStatus::Running);
+        // What arrives after the request is not shown; the run ends cancelled.
+        assert!(!run.finish(plan.id, Outcome::Failed(DriverError::cancelled())));
+        assert_eq!(run.state().tab_status(), TabStatus::Cancelled);
     }
 
     #[test]

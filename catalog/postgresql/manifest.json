@@ -1,0 +1,59 @@
+{
+  "dialect": "postgresql",
+  "doc_base": "https://www.postgresql.org/docs/{series}/",
+  "files": {
+    "functions": "functions.jsonl",
+    "keywords": "keywords.jsonl",
+    "types": "types.jsonl"
+  },
+  "generator": {
+    "name": "cargo xtask catalogs",
+    "version": "1"
+  },
+  "name": "PostgreSQL",
+  "schema_version": 1,
+  "series_components": 1,
+  "sources": [
+    {
+      "id": "kwlist.h",
+      "license": "PostgreSQL",
+      "notice": "LICENSE-postgresql",
+      "redistributable": true,
+      "title": "Keywords of the parser",
+      "url": "https://github.com/postgres/postgres/blob/REL_{series}_STABLE/src/include/parser/kwlist.h"
+    },
+    {
+      "id": "pg_proc.dat",
+      "license": "PostgreSQL",
+      "notice": "LICENSE-postgresql",
+      "redistributable": true,
+      "title": "Built-in functions of the catalog",
+      "url": "https://github.com/postgres/postgres/blob/REL_{series}_STABLE/src/include/catalog/pg_proc.dat"
+    },
+    {
+      "id": "pg_type.dat",
+      "license": "PostgreSQL",
+      "notice": "LICENSE-postgresql",
+      "redistributable": true,
+      "title": "Built-in types of the catalog",
+      "url": "https://github.com/postgres/postgres/blob/REL_{series}_STABLE/src/include/catalog/pg_type.dat"
+    },
+    {
+      "id": "curated",
+      "license": "CC0-1.0",
+      "redistributable": true,
+      "title": "Written by the project",
+      "url": "https://github.com/alandariva/jykre-studio"
+    }
+  ],
+  "updated_at": "2026-11-04",
+  "verified_through": "18.6",
+  "version_scheme": "numeric",
+  "versions": [
+    "14",
+    "15",
+    "16",
+    "17",
+    "18"
+  ]
+}

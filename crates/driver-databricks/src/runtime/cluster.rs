@@ -538,6 +538,71 @@ impl ClusterResult {
     }
 }
 
+/// The Spark SQL literal a classic cluster reads for a parameter
+/// (ADR-0026). Text travels as the hex of its UTF-8 bytes, so no quote,
+/// backslash or comment from the value reaches the SQL whatever the
+/// cluster's escaping settings; the other kinds are written only after
+/// checking that they hold nothing but their own characters. A NULL is a
+/// typed NULL.
+fn literal(parameter: &QueryParameter) -> DriverResult<String> {
+    let number_type = |value: Option<&str>| match value {
+        None => Ok("DECIMAL(38,18)".to_owned()),
+        Some(value) => decimal_type(value).ok_or_else(|| {
+            DriverError::validation(format!(
+                "Parameter {} has more than 38 digits",
+                parameter.name
+            ))
+        }),
+    };
+    let Some(value) = parameter.value.as_deref() else {
+        let kind = match parameter.kind {
+            ParameterKind::Text => "STRING".to_owned(),
+            ParameterKind::Number => number_type(None)?,
+            ParameterKind::Boolean => "BOOLEAN".to_owned(),
+            ParameterKind::Date => "DATE".to_owned(),
+            ParameterKind::Timestamp => "TIMESTAMP".to_owned(),
+        };
+        return Ok(format!("CAST(NULL AS {kind})"));
+    };
+    let only = |allowed: fn(char) -> bool| {
+        if value.chars().all(allowed) {
+            Ok(())
+        } else {
+            Err(DriverError::validation(format!(
+                "Parameter {} does not hold a valid value",
+                parameter.name
+            )))
+        }
+    };
+    Ok(match parameter.kind {
+        ParameterKind::Text if value.is_empty() => "''".to_owned(),
+        ParameterKind::Text => {
+            let hex: String = value.bytes().map(|byte| format!("{byte:02X}")).collect();
+            format!("decode(X'{hex}', 'UTF-8')")
+        }
+        ParameterKind::Number => {
+            only(|c| c.is_ascii_digit() || matches!(c, '+' | '-' | '.' | 'e' | 'E'))?;
+            format!("CAST('{value}' AS {})", number_type(Some(value))?)
+        }
+        ParameterKind::Boolean => match value {
+            "true" => "TRUE".to_owned(),
+            "false" => "FALSE".to_owned(),
+            _ => {
+                only(|_| false)?;
+                String::new()
+            }
+        },
+        ParameterKind::Date => {
+            only(|c| c.is_ascii_digit() || c == '-')?;
+            format!("DATE'{value}'")
+        }
+        ParameterKind::Timestamp => {
+            only(|c| c.is_ascii_digit() || matches!(c, '-' | ':' | '.' | ' ' | 'T'))?;
+            format!("TIMESTAMP'{value}'")
+        }
+    })
+}
+
 fn execution_deadline(options: &ExecutionOptions) -> DriverResult<Option<Instant>> {
     options
         .timeout
@@ -558,6 +623,18 @@ impl Session for ClusterSession {
         cancel: CancellationToken,
     ) -> DriverResult<DriverOutcome> {
         request.validate()?;
+        // The command API has no bound values: each marker becomes a typed
+        // literal that never holds the value's own text (ADR-0026).
+        let sql = if request.parameters.is_empty() {
+            request.sql.clone()
+        } else {
+            let literals = request
+                .parameters
+                .iter()
+                .map(literal)
+                .collect::<DriverResult<Vec<_>>>()?;
+            request.with_references(|index, _| literals[index].clone())
+        };
         self.pending = None;
         if !self.open {
             return Err(error(
@@ -577,7 +654,7 @@ impl Session for ClusterSession {
             .await?;
             self.requested = context;
         }
-        let value = self.run(&request.sql, &cancel, deadline).await?;
+        let value = self.run(&sql, &cancel, deadline).await?;
         if let Some(change) = use_statement(&request.sql) {
             self.apply(change);
         }
@@ -598,6 +675,7 @@ impl Session for ClusterSession {
         cancel: CancellationToken,
     ) -> DriverResult<DriverOutcome> {
         QueryRequest {
+            parameters: Vec::new(),
             sql: "fetch".into(),
             options: options.clone(),
         }
@@ -736,6 +814,7 @@ mod tests {
     }
     fn query(sql: &str, max_rows: u32) -> QueryRequest {
         QueryRequest {
+            parameters: Vec::new(),
             sql: sql.into(),
             options: ExecutionOptions {
                 max_rows,
@@ -778,6 +857,133 @@ mod tests {
             "bad"
         );
     }
+    fn parameter(name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
+        QueryParameter {
+            name: name.into(),
+            kind,
+            value: value.map(str::to_owned),
+            markers: Vec::new(),
+        }
+    }
+    #[test]
+    fn literals_never_hold_the_text_of_a_value() {
+        let hostile = "' \\ ; -- /* $$ `x` café";
+        let text = literal(&parameter("t", ParameterKind::Text, Some(hostile))).unwrap();
+        assert!(text.starts_with("decode(X'"));
+        assert!(text.ends_with("', 'UTF-8')"));
+        let hex = &text["decode(X'".len()..text.len() - "', 'UTF-8')".len()];
+        assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{text}");
+        assert_eq!(hex.len(), hostile.len() * 2);
+    }
+    #[test]
+    fn literals_are_typed_for_every_kind_and_null() {
+        let cases = [
+            (ParameterKind::Text, Some("ab"), "decode(X'6162', 'UTF-8')"),
+            (ParameterKind::Text, Some(""), "''"),
+            (
+                ParameterKind::Number,
+                Some("-12.50"),
+                "CAST('-12.50' AS DECIMAL(4,2))",
+            ),
+            (ParameterKind::Number, Some("1e6"), "CAST('1e6' AS DOUBLE)"),
+            (ParameterKind::Boolean, Some("true"), "TRUE"),
+            (ParameterKind::Boolean, Some("false"), "FALSE"),
+            (ParameterKind::Date, Some("2026-11-05"), "DATE'2026-11-05'"),
+            (
+                ParameterKind::Timestamp,
+                Some("2026-11-05T10:30:00.5"),
+                "TIMESTAMP'2026-11-05T10:30:00.5'",
+            ),
+            (ParameterKind::Text, None, "CAST(NULL AS STRING)"),
+            (ParameterKind::Number, None, "CAST(NULL AS DECIMAL(38,18))"),
+            (ParameterKind::Boolean, None, "CAST(NULL AS BOOLEAN)"),
+            (ParameterKind::Date, None, "CAST(NULL AS DATE)"),
+            (ParameterKind::Timestamp, None, "CAST(NULL AS TIMESTAMP)"),
+        ];
+        for (kind, value, expected) in cases {
+            assert_eq!(literal(&parameter("p", kind, value)).unwrap(), expected);
+        }
+        let digits = "1".repeat(39);
+        assert_eq!(
+            literal(&parameter("n", ParameterKind::Number, Some(&digits)))
+                .unwrap_err()
+                .code,
+            ErrorCode::Validation
+        );
+        // Shapes are checked by `QueryRequest::validate`; the literal refuses
+        // anything else on its own too.
+        for (kind, value) in [
+            (ParameterKind::Number, "1'--"),
+            (ParameterKind::Date, "2026-01-01'"),
+            (ParameterKind::Timestamp, "2026-01-01 00:00'"),
+            (ParameterKind::Boolean, "yes"),
+        ] {
+            assert!(
+                literal(&parameter("p", kind, Some(value))).is_err(),
+                "{value}"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn parameters_become_literals_and_the_value_never_reaches_the_command() {
+        let (client, task) = client(vec![
+            (200, json!({"id":"context-1"})),
+            (200, json!({"status":"Running"})),
+            (200, json!({"id":"command-1"})),
+            (200, finished()),
+            (200, json!({})),
+        ])
+        .await;
+        let mut session = open(client, &CancellationToken::new()).await.unwrap();
+        let mut request = query("SELECT :who, :who, :day, raw:owner", 10);
+        request.parameters = vec![
+            QueryParameter {
+                markers: vec![7..11, 13..17],
+                ..parameter("who", ParameterKind::Text, Some("o'neil -- x"))
+            },
+            QueryParameter {
+                markers: std::iter::once(19..23).collect(),
+                ..parameter("day", ParameterKind::Date, None)
+            },
+        ];
+        session
+            .execute(&request, &mut Rows::default(), CancellationToken::new())
+            .await
+            .unwrap();
+        session.close().await.unwrap();
+        let requests = task.await.unwrap();
+        let body: Value =
+            serde_json::from_str(requests[2].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let who = "decode(X'6F276E65696C202D2D2078', 'UTF-8')";
+        assert_eq!(
+            body["command"],
+            format!("SELECT {who}, {who}, CAST(NULL AS DATE), raw:owner")
+        );
+        assert!(!requests[2].contains("neil"));
+    }
+    #[tokio::test]
+    async fn a_number_past_38_digits_is_refused_before_it_is_sent() {
+        let (client, task) = client(vec![
+            (200, json!({"id":"context-1"})),
+            (200, json!({"status":"Running"})),
+        ])
+        .await;
+        let mut session = open(client, &CancellationToken::new()).await.unwrap();
+        let mut request = query("SELECT :n", 10);
+        let digits = "9".repeat(39);
+        request.parameters.push(QueryParameter {
+            markers: std::iter::once(7..9).collect(),
+            ..parameter("n", ParameterKind::Number, Some(&digits))
+        });
+        let refused = session
+            .execute(&request, &mut Rows::default(), CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Validation);
+        drop(session);
+        assert_eq!(task.await.unwrap().len(), 2);
+    }
+
     #[tokio::test]
     async fn classic_context_is_reused_pages_are_local_and_close_destroys_context() {
         let (client, task) = client(vec![

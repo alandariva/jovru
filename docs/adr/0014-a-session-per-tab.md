@@ -1,6 +1,6 @@
 # ADR-0014: A session per tab, kept between runs and after errors
 
-- **Status:** Proposed
+- **Status:** Proposed (amended for report tabs by [ADR-0025](0025-report-panels.md): a session per connection and database a report's panels use)
 - **Date:** 2026-11-03
 
 ## Context

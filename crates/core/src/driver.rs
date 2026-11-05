@@ -18,6 +18,10 @@ pub struct DriverCapabilities {
     pub hierarchy: Vec<ObjectKind>,
     pub default_port: Option<u16>,
     pub identifier_quote: char,
+    /// Binds [`crate::QueryParameter`]s (ADR-0023, ADR-0026). A driver may
+    /// still reject them for some connections.
+    #[serde(default)]
+    pub named_parameters: bool,
 }
 
 impl DriverCapabilities {
@@ -214,6 +218,23 @@ pub trait Driver: Debug + Send + Sync + 'static {
     fn left_out_of_everything(&self, path: &ObjectPath) -> bool {
         let _ = path;
         false
+    }
+
+    /// The connection a session opens with so that unqualified names resolve
+    /// in `context` from its first statement. Drivers whose sessions switch
+    /// with a statement (`USE`, `SET search_path`) or keep the context
+    /// themselves return `connection` unchanged, the default. A driver whose
+    /// sessions are bound to one level of the hierarchy (a PostgreSQL
+    /// database) returns the connection for the level `context` names, or a
+    /// validation error when the configuration does not reach it. Only the
+    /// configuration changes; credentials are kept as they are.
+    fn session_connection(
+        &self,
+        connection: &ResolvedConnection,
+        context: &SessionContext,
+    ) -> DriverResult<ResolvedConnection> {
+        let _ = context;
+        Ok(connection.clone())
     }
 
     async fn test(

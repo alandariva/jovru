@@ -2,7 +2,11 @@
 
 Local data lives in SQLite files owned by `jykre-storage`
 ([ADR-0003](adr/0003-sqlite-for-local-storage.md)). Passwords are never stored
-here ([Security](security.md)); query results are never written to disk.
+here ([Security](security.md)). The application never writes query results
+to disk on its own: only an export the user asks for writes them, to the
+file the user chose ([Results](results.md#export)), and so does a report's
+print HTML ([ADR-0024](adr/0024-reports.md)). Report definitions live in the
+`reports` setting ([below](#schema-configdb)).
 
 ## Files
 
@@ -17,6 +21,8 @@ isolated folder for tests and manual checks).
 | `metadata/<connection-id>.db` | Metadata cache of one connection, refresh runs and per-scope status | Rebuildable from the server |
 | `metadata/<connection-id>.lock` | Writer lock: one refresh per cache at a time, across processes | Recreated as needed |
 | `metadata/<connection-id>.db.corrupt-<stamp>` | A cache set aside after confirmed corruption | Kept for diagnosis; safe to delete |
+| `backups/config-v<version>-<millis>.db` | Copies of `config.db`: one each start whose configuration opened and was read, unless it equals the newest copy; the five most recent are kept | Rotated automatically; restored from when `config.db` cannot be opened |
+| `config.db.broken-<millis>` | A configuration set aside when a backup was restored in its place | Kept for diagnosis; safe to delete |
 | `logs/jykre.<date>.log` | JSON log lines, one file per day; the last 7 are kept ([Reliability](reliability.md#logs)) | Rotated automatically; safe to delete |
 | `connections.json` (legacy) | Profiles from earlier builds | Imported once into `config.db` in a single transaction, deleted only after the import is verified |
 
@@ -44,23 +50,71 @@ value that cannot be read is reported and treated as nothing chosen; a cache
 written before the choice existed becomes the choice of its last-level
 namespaces, once), and
 `connection.<connection-id>.row_limit` for each connection's row limit (a
-missing or out-of-range value reads as the default, 1,000).
+missing or out-of-range value reads as the default, 1,000), and
+`connection.<connection-id>.appearance` for its colour and environment
+(`{"color": "red", "environment": "production"}`, either key optional;
+`jykre::connection_appearance`). A missing value, or one naming a colour or
+environment this version does not know, reads as the driver's colour and no
+environment.
+
+`export.preferences` keeps the export bar's last choices
+(`jykre::export::ExportPreferences`): `{"format": "csv", "separator": ";",
+"quoting": "all", "header": true, "bom": false, "directory": "…"}`, the
+directory being the folder of the last exported file. It is read each time a
+tab opens its export bar and written when an export starts, the last write
+asked for winning across tabs. A missing or unknown value takes its default
+(CSV with `;`, every value quoted, headers, no BOM, the Downloads folder).
+
+`copy.preferences` keeps the choices of the copy menu
+(`jykre::copy_as::CopyOptions`): `{"format": "text", "header": false,
+"separator": ";", "quoting": "all", "null": "empty"}`, the format being the
+one `Ctrl C` copies in (`text`, `csv`, `json`, `jsonl`, `markdown`, `html`,
+`insert`, `insert_values`, `in_list`, `value_list`, `column_names`) and
+`null` either `empty` or `null`. It is read once at start, with the
+connections, and written each time a choice changes, the last write asked
+for winning across tabs. A missing or unknown value takes its default
+(tab-separated text without the column names, `;`, every CSV value quoted,
+NULL as an empty field); a value that cannot be read is reported and the
+defaults are used.
 
 `workspace.state` keeps the workspace between sessions
 (`jykre::workspace_state`): the open query tabs in order (title, connection
 name, SQL, the SQL last saved to the library and the identity of that saved
-query, the table or view the tab was opened for, its context and the
-statement timeout), the tab on screen, the saved queries, each with a stable
-numeric `id` (its title is only a label; `next_id` is the next one), and the
+query, the table or view the tab was opened for, its context, the
+statement timeout and its `:name` parameter fields: name, type chosen
+(`auto` or a type), the text typed and whether it binds NULL,
+[ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)), the tab on screen, the saved queries, each with a stable
+numeric `id` (its title is only a label; `next_id` is the next one) and its
+`tags` (labels without `#`, each once ignoring case), and the
 last 200 history entries, each with when it ended, how (`succeeded`,
 `failed`, `cancelled`), its outcome and how long it took. Values written by
-an earlier version still read: saved queries without an `id` get one, a tab
+an earlier version still read: saved queries without an `id` get one, those
+without `tags` have none, a tab
 is linked to the saved query with its title, connection and SQL, and old
 history entries have no time or status. It is
 written half a second after changes settle and when the application quits,
 and read once the connections are loaded. A tab whose connection no longer
 exists reopens in a group of its own, without a connection. A value that
 cannot be read starts an empty workspace. Results are never stored.
+
+`reports` keeps the report definitions ([ADR-0024](adr/0024-reports.md),
+[ADR-0025](adr/0025-report-panels.md), `jykre::reports`):
+`{"version": 3, "next_id": n, "reports": [...]}`, each report with a stable
+numeric `id`, its title, description, parameters (name, label, kind,
+default, required, choices), panels (`id`, title, connection as
+`{"id": …, "name": …}`, SQL, context as `{"catalog": …, "schema": …}`,
+optional chart, `table`, `width`) and when it was created and last changed.
+A version 1 report (one top-level SQL and chart) is read as one panel, and
+the report-level connection of versions 1 and 2 is given to each of its
+panels; both are written back as version 3. Keys this version does not know
+are kept in the library, each
+report, parameter and panel. It stores definitions only: never results, and
+never the values typed for a run, only each parameter's default and the
+choices of a list. It lives apart from `workspace.state`, whose writer keeps
+only the fields it knows, so an older version cannot erase reports. A missing
+value is an empty library; a value that cannot be read is reported and never
+written over. It is written half a second after changes settle and when the
+application quits; the demo writes nothing.
 
 `connection.<connection-id>.explorer` keeps what the explorer shows expanded
 for that connection (`{"expanded": [paths]}`), written half a second after a
@@ -72,7 +126,7 @@ snapshot; a value that cannot be read starts collapsed.
 password and token fields there. `revision` provides optimistic concurrency:
 a save names the revision it edited, so a change made in another window is
 rejected instead of silently overwritten. Saving a connection writes its
-profile, row limit, metadata choice and revalidation hours in one
+profile, row limit, metadata choice, revalidation hours and appearance in one
 transaction (`ConfigRepository::save_with_settings`): a failure writes none
 of them and the profile keeps its revision, so a retry is not refused.
 
@@ -196,8 +250,18 @@ The standard for schema changes:
   renamed to `*.corrupt-<stamp>`, an empty cache is created and the UI tells
   the user to refresh. Permission and I/O errors never trigger this, so a
   valid cache is not set aside by mistake.
+- **Deleting a connection** removes its profile and every
+  `connection.<connection-id>.*` setting in one transaction
+  (`ConfigRepository::delete`, refused when the profile changed since it
+  was read), then its vault entry and its metadata files
+  (`MetadataRepository::remove`). What could not be cleaned up after the
+  profile is gone is reported; the connection is never half deleted.
 - **`config.db`:** never recreated automatically. The application reports the
-  error; with backups in place it offers to restore the latest one.
+  error; with backups in place it offers to restore the latest one
+  (**Restore the backup** in the explorer, after a confirmation). The file
+  that could not be opened is renamed to `config.db.broken-<millis>` (with
+  its `-wal`/`-shm` files), the copy takes its place once it opens, and the
+  connections are loaded again.
 
 ## Rules
 
@@ -206,7 +270,9 @@ The standard for schema changes:
   SQL.
 - Repositories take and return `jykre-core` types, never raw rows.
 - Reads for the UI are paged (children of a node, search with a limit).
-- Nothing secret is stored, and no query result is written to disk.
+- Nothing secret is stored, and no query result is written to disk, apart
+  from a report's print HTML at the path the user picks
+  ([ADR-0024](adr/0024-reports.md)).
 - A schema change follows [Migrations](#migrations) and needs an ADR when it
   changes what is stored.
 
@@ -215,4 +281,4 @@ The standard for schema changes:
 | Standard | Current code |
 | --- | --- |
 | Numbered forward-only migration steps | `config.db` has no step yet; the metadata files have their mechanism and step 2 |
-| `config.db` backup before migrating, restore offered on failure | Not implemented; a broken `config.db` produces an error only |
+| `config.db` backup before migrating, restore offered on failure | The restore is offered, from the copies taken at each start (`backups/config-v<version>-<millis>.db`). The only migration so far (creating version 1) still copies to `backups/config-before-v1-<id>.db`, a name the restore does not list |

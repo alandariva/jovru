@@ -5,6 +5,8 @@
 //! ([Persistence](../docs/persistence.md)). Reading tolerates missing or
 //! unknown fields, so a file written by another version still opens.
 use crate::drivers::ObjectPath;
+use crate::parameters::{KindChoice, TabParameter};
+use jykre_core::is_parameter_name;
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime};
 
@@ -50,6 +52,12 @@ pub struct TabState {
     /// The table or view the tab was opened for, so opening it again shows
     /// this tab instead of a copy.
     pub object: Option<ObjectPath>,
+    /// What the tab's `:name` fields hold, kept with the tab (ADR-0026).
+    pub parameters: Vec<TabParameter>,
+    /// The statement the tab reads its table's rows with, when it was opened
+    /// as the table's Data view; its result tab is called Data. `None` for
+    /// other tabs and tabs from older versions.
+    pub data_sql: Option<String>,
 }
 
 impl TabState {
@@ -127,6 +135,51 @@ pub struct QueryEntry {
     pub detail: Option<String>,
     /// History: how long it ran.
     pub elapsed_ms: Option<u64>,
+    /// Saved query: the labels the user gave it, as [`parse_tags`] keeps
+    /// them. Empty in the history.
+    pub tags: Vec<String>,
+}
+
+/// The tags typed in a field, separated by commas: trimmed, without a
+/// leading `#`, without blanks and without repeats (ignoring case), in the
+/// order typed.
+pub fn parse_tags(text: &str) -> Vec<String> {
+    clean_tags(text.split(','))
+}
+
+/// See [`parse_tags`]; also cleans tags read from a stored state.
+fn clean_tags<'a>(raw: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in raw {
+        let tag = tag.trim().trim_start_matches('#').trim();
+        if !tag.is_empty() && !tags.iter().any(|kept| kept.eq_ignore_ascii_case(tag)) {
+            tags.push(tag.to_owned());
+        }
+    }
+    tags
+}
+
+/// Every tag of the saved queries, once each (ignoring case), in
+/// alphabetical order.
+pub fn all_tags(saved: &[QueryEntry]) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in saved.iter().flat_map(|entry| &entry.tags) {
+        if !tags.iter().any(|kept| kept.eq_ignore_ascii_case(tag)) {
+            tags.push(tag.clone());
+        }
+    }
+    tags.sort_by_key(|tag| tag.to_lowercase());
+    tags
+}
+
+/// The words of a search that are not `#tag` filters, for searches that
+/// know nothing of tags (the explorer's metadata).
+pub fn without_tag_filters(query: &str) -> String {
+    query
+        .split_whitespace()
+        .filter(|word| !word.starts_with('#'))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl QueryEntry {
@@ -151,6 +204,7 @@ impl QueryEntry {
             status: Some(status),
             detail,
             elapsed_ms,
+            tags: Vec::new(),
         }
     }
 
@@ -176,14 +230,25 @@ impl QueryEntry {
         preview
     }
 
-    /// Whether the entry matches a search, ignoring case: its SQL, title or
-    /// connection contains `query` (already lower case). An empty search
-    /// matches everything.
+    /// Whether the entry matches a search, ignoring case (`query` is already
+    /// lower case). Each `#word` asks for a tag that starts with `word`; the
+    /// rest of the search must be in its SQL, title, connection or tags. An
+    /// empty search matches everything.
     pub fn matches(&self, query: &str) -> bool {
-        query.is_empty()
-            || [&self.sql, &self.title, &self.connection]
-                .iter()
-                .any(|text| text.to_lowercase().contains(query))
+        let tags: Vec<String> = self.tags.iter().map(|tag| tag.to_lowercase()).collect();
+        let tagged = query
+            .split_whitespace()
+            .filter_map(|word| word.strip_prefix('#'))
+            // A `#` alone is a tag still being typed.
+            .filter(|wanted| !wanted.is_empty())
+            .all(|wanted| tags.iter().any(|tag| tag.starts_with(wanted)));
+        let text = without_tag_filters(query);
+        tagged
+            && (text.is_empty()
+                || [&self.sql, &self.title, &self.connection]
+                    .into_iter()
+                    .chain(&self.tags)
+                    .any(|field| field.to_lowercase().contains(&text)))
     }
 
     fn from_value(value: &Value) -> Self {
@@ -197,6 +262,13 @@ impl QueryEntry {
             status: value["status"].as_str().and_then(RunStatus::parse),
             detail: value["detail"].as_str().map(str::to_owned),
             elapsed_ms: value["elapsed_ms"].as_u64(),
+            tags: clean_tags(
+                value["tags"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str),
+            ),
         }
     }
 
@@ -210,8 +282,30 @@ impl QueryEntry {
             "status": self.status.map(RunStatus::as_str),
             "detail": self.detail,
             "elapsed_ms": self.elapsed_ms,
+            "tags": self.tags,
         })
     }
+}
+
+/// A tab's parameter fields; a field without a valid name is dropped, and an
+/// unknown kind reads as automatic.
+fn read_parameters(value: &Value) -> Vec<TabParameter> {
+    let mut parameters: Vec<TabParameter> = Vec::new();
+    for item in value.as_array().into_iter().flatten() {
+        let Some(name) = item["name"].as_str().filter(|name| is_parameter_name(name)) else {
+            continue;
+        };
+        if parameters.iter().any(|known| known.name == name) {
+            continue;
+        }
+        parameters.push(TabParameter {
+            name: name.to_owned(),
+            kind: KindChoice::parse(item["kind"].as_str().unwrap_or_default()),
+            text: item["text"].as_str().unwrap_or_default().to_owned(),
+            null: item["null"].as_bool().unwrap_or(false),
+        });
+    }
+    parameters
 }
 
 impl WorkspaceState {
@@ -244,6 +338,8 @@ impl WorkspaceState {
                 catalog: tab["catalog"].as_str().map(str::to_owned),
                 schema: tab["schema"].as_str().map(str::to_owned),
                 object: serde_json::from_value(tab["object"].clone()).ok(),
+                parameters: read_parameters(&tab["parameters"]),
+                data_sql: tab["data_sql"].as_str().map(str::to_owned),
             })
             .collect();
         let mut history = entries("history");
@@ -324,6 +420,13 @@ impl WorkspaceState {
                 "catalog": tab.catalog,
                 "schema": tab.schema,
                 "object": tab.object,
+                "parameters": tab.parameters.iter().map(|parameter| json!({
+                    "name": parameter.name,
+                    "kind": parameter.kind.as_str(),
+                    "text": parameter.text,
+                    "null": parameter.null,
+                })).collect::<Vec<_>>(),
+                "data_sql": tab.data_sql,
             })).collect::<Vec<_>>(),
             "active": self.active,
             "saved_queries": entries(&self.saved_queries),
@@ -341,13 +444,15 @@ impl WorkspaceState {
 }
 
 /// Saves a query in the library: the one with identity `id` is updated in
-/// place (its title stays), otherwise a new one is added. Saving never
-/// removes anything, so saving twice keeps the query. Returns the identity.
+/// place (its title and tags stay), otherwise a new one is added with
+/// `title` and `tags`. Saving never removes anything, so saving twice keeps
+/// the query. Returns the identity.
 pub fn save_query(
     saved: &mut Vec<QueryEntry>,
     next_id: &mut u64,
     id: Option<u64>,
     title: &str,
+    tags: &[String],
     connection: &str,
     sql: &str,
 ) -> u64 {
@@ -363,9 +468,21 @@ pub fn save_query(
         title: title.to_owned(),
         connection: connection.to_owned(),
         sql: sql.to_owned(),
+        tags: tags.to_vec(),
         ..QueryEntry::default()
     });
     id
+}
+
+/// Renames the saved query `id` and replaces its tags. `false` when it is
+/// no longer in the library.
+pub fn edit_saved(saved: &mut [QueryEntry], id: u64, title: &str, tags: &[String]) -> bool {
+    let Some(entry) = saved.iter_mut().find(|entry| entry.id == id) else {
+        return false;
+    };
+    entry.title = title.to_owned();
+    entry.tags = tags.to_vec();
+    true
 }
 
 #[cfg(test)]
@@ -396,6 +513,21 @@ mod tests {
                         name: "orders".into(),
                     },
                 ])),
+                parameters: vec![
+                    TabParameter {
+                        name: "id".into(),
+                        kind: KindChoice::Auto,
+                        text: "42".into(),
+                        null: false,
+                    },
+                    TabParameter {
+                        name: "day".into(),
+                        kind: KindChoice::Fixed(jykre_core::ParameterKind::Date),
+                        text: "kept while NULL".into(),
+                        null: true,
+                    },
+                ],
+                data_sql: Some("SELECT * FROM \"sales\".\"orders\";".into()),
             }],
             active: Some(0),
             saved_queries: vec![QueryEntry {
@@ -403,6 +535,7 @@ mod tests {
                 title: "Saved".into(),
                 connection: "MySQL".into(),
                 sql: "SELECT 2".into(),
+                tags: vec!["finance".into(), "monthly".into()],
                 ..QueryEntry::default()
             }],
             history: vec![QueryEntry::ran(
@@ -423,12 +556,30 @@ mod tests {
         assert_eq!(read.tabs[0].title, "Old");
         assert_eq!(read.tabs[0].schema, None);
         assert_eq!(read.tabs[0].object, None);
+        assert_eq!(read.tabs[0].data_sql, None);
         assert_eq!(
             read.tabs[0].timeout(Some(Duration::from_secs(300))),
             Some(Duration::from_secs(300))
         );
         assert_eq!(read.active, None);
         assert_eq!(read.next_query, 1);
+        assert!(read.tabs[0].parameters.is_empty());
+        let fields = serde_json::json!({"tabs": [{"parameters": [
+            {"name": "a", "kind": "money", "text": "1"},
+            {"name": "not valid", "text": "x"},
+            {"name": "a", "kind": "date"},
+            "broken",
+        ]}]});
+        let read = WorkspaceState::from_value(Some(fields));
+        assert_eq!(
+            read.tabs[0].parameters,
+            vec![TabParameter {
+                name: "a".into(),
+                kind: KindChoice::Auto,
+                text: "1".into(),
+                null: false,
+            }]
+        );
         assert_eq!(
             WorkspaceState::from_value(Some(serde_json::json!("broken"))),
             WorkspaceState {
@@ -485,9 +636,25 @@ mod tests {
     fn saving_is_idempotent_and_never_replaces_a_query_with_the_same_title() {
         let mut saved = Vec::new();
         let mut next = 1;
-        let first = save_query(&mut saved, &mut next, None, "orders", "Local", "SELECT 1");
+        let first = save_query(
+            &mut saved,
+            &mut next,
+            None,
+            "orders",
+            &[],
+            "Local",
+            "SELECT 1",
+        );
         // Another tab with the same title is another saved query.
-        let second = save_query(&mut saved, &mut next, None, "orders", "Local", "SELECT 2");
+        let second = save_query(
+            &mut saved,
+            &mut next,
+            None,
+            "orders",
+            &[],
+            "Local",
+            "SELECT 2",
+        );
         assert_ne!(first, second);
         assert_eq!(saved.len(), 2);
         // Saving the same query again updates it, never removes it.
@@ -497,6 +664,7 @@ mod tests {
                 &mut next,
                 Some(first),
                 "renamed",
+                &[],
                 "Local",
                 "SELECT 1"
             ),
@@ -508,6 +676,7 @@ mod tests {
                 &mut next,
                 Some(first),
                 "renamed",
+                &[],
                 "Local",
                 "SELECT 10"
             ),
@@ -524,10 +693,96 @@ mod tests {
             &mut next,
             Some(first),
             "orders",
+            &[],
             "Local",
             "SELECT 1",
         );
         assert!(third > second);
+    }
+
+    #[test]
+    fn tags_are_cleaned_listed_and_read_from_older_states() {
+        assert_eq!(
+            parse_tags(" #Finance, monthly ,, finance,#,  report "),
+            ["Finance", "monthly", "report"]
+        );
+        assert!(parse_tags("  , ").is_empty());
+        let tagged = |tags: &[&str]| QueryEntry {
+            tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            ..QueryEntry::default()
+        };
+        assert_eq!(
+            all_tags(&[tagged(&["sales", "Daily"]), tagged(&["daily", "audit"])]),
+            ["audit", "Daily", "sales"]
+        );
+        // A saved query written before tags reads without them, and stored
+        // tags are cleaned like typed ones.
+        let read = WorkspaceState::from_value(Some(serde_json::json!({
+            "saved_queries": [
+                {"id": 1, "title": "old", "sql": "SELECT 1"},
+                {"id": 2, "title": "new", "sql": "SELECT 2", "tags": ["a", " A ", "", 3, "#b"]},
+            ],
+        })));
+        assert!(read.saved_queries[0].tags.is_empty());
+        assert_eq!(read.saved_queries[1].tags, ["a", "b"]);
+    }
+
+    #[test]
+    fn saved_queries_are_renamed_and_retagged_by_identity() {
+        let mut saved = Vec::new();
+        let mut next = 1;
+        let tags = parse_tags("sales");
+        let id = save_query(
+            &mut saved, &mut next, None, "Query 1", &tags, "Local", "SELECT 1",
+        );
+        assert_eq!(saved[0].tags, ["sales"]);
+        // Saving the SQL again keeps the name and the tags.
+        save_query(
+            &mut saved,
+            &mut next,
+            Some(id),
+            "Query 9",
+            &[],
+            "Local",
+            "SELECT 2",
+        );
+        assert_eq!(
+            (saved[0].title.as_str(), &saved[0].tags[..]),
+            ("Query 1", &tags[..])
+        );
+        assert!(edit_saved(
+            &mut saved,
+            id,
+            "Orders by day",
+            &parse_tags("daily, sales")
+        ));
+        assert_eq!(saved[0].title, "Orders by day");
+        assert_eq!(saved[0].tags, ["daily", "sales"]);
+        assert_eq!(saved[0].sql, "SELECT 2");
+        assert!(!edit_saved(&mut saved, id + 1, "x", &[]));
+    }
+
+    #[test]
+    fn searches_filter_by_tag_with_a_hash() {
+        let entry = QueryEntry {
+            title: "Revenue".into(),
+            connection: "Local".into(),
+            sql: "SELECT SUM(total) FROM orders".into(),
+            tags: vec!["Finance".into(), "monthly".into()],
+            ..QueryEntry::default()
+        };
+        // Tags are searched like the other fields.
+        assert!(entry.matches("month"));
+        // `#word` needs a tag that starts with it, every one of them.
+        assert!(entry.matches("#fin"));
+        assert!(entry.matches("#fin #month"));
+        assert!(!entry.matches("#fin #weekly"));
+        assert!(!entry.matches("#revenue"));
+        // The rest of the search applies as well.
+        assert!(entry.matches("#fin orders"));
+        assert!(!entry.matches("#fin customers"));
+        assert!(entry.matches("#"));
+        assert_eq!(without_tag_filters("#fin  orders #x by"), "orders by");
     }
 
     #[test]

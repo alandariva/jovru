@@ -28,9 +28,12 @@ impl IntrospectionSink for Metadata {
     }
 }
 fn input() -> ResolvedConnection {
+    // The fixture port is chosen by Docker for each run: `cargo xtask check
+    // --full` sets it, and docs/testing.md shows how to run these by hand.
     let port: u16 = std::env::var("JYKRE_TEST_PORT")
-        .map(|value| value.parse().expect("JYKRE_TEST_PORT must be a valid port"))
-        .unwrap_or(55394);
+        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/testing.md)")
+        .parse()
+        .expect("JYKRE_TEST_PORT must be a valid port");
     ResolvedConnection {
         config: ConnectionConfig {
             driver: DriverKind::MySql,
@@ -47,6 +50,7 @@ async fn keep_state(session: &mut Box<dyn Session>) {
     session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SET @jykre_kept := 'jykre-kept'".into(),
                 options: ExecutionOptions::default(),
             },
@@ -63,6 +67,7 @@ async fn assert_kept(session: &mut Box<dyn Session>) {
     session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT CAST(@jykre_kept AS CHAR)".into(),
                 options: ExecutionOptions::default(),
             },
@@ -91,7 +96,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
     keep_state(&mut session).await;
     let mut sink = Sink::default();
-    session.execute(&QueryRequest{sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
+    session.execute(&QueryRequest{parameters:Vec::new(),sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
     assert_eq!(sink.columns, 3);
     assert_eq!(sink.rows.len(), 1);
     assert_eq!(sink.rows[0][1], Cell::Null);
@@ -100,6 +105,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT 1 AS answer WHERE 1=0".into(),
                 options: ExecutionOptions::default(),
             },
@@ -146,6 +152,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     let err = session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT SLEEP(10)".into(),
                 options: ExecutionOptions {
                     timeout: Some(Duration::from_millis(100)),
@@ -184,6 +191,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     let cancelled = session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT SLEEP(10)".into(),
                 options: ExecutionOptions::default(),
             },
@@ -200,6 +208,7 @@ async fn live_connection_queries_metadata_and_timeout() {
         .unwrap();
     keep_state(&mut session).await;
     let query = QueryRequest {
+        parameters: Vec::new(),
         sql: "SELECT 1 UNION ALL SELECT 2".into(),
         options: ExecutionOptions {
             max_rows: 1,
@@ -245,6 +254,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     let failed = session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: "SELECT * FROM jykre_missing_table".into(),
                 options: ExecutionOptions::default(),
             },
@@ -263,6 +273,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     // A long result cut by the row limit, then one cancelled while its rows
     // stream: the rest is drained or stopped, and the session is kept.
     let big = QueryRequest {
+        parameters: Vec::new(),
         sql: "SELECT a.n * 400 + b.n + 1 AS n, REPEAT('x', 200) FROM (WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 499) SELECT n FROM s) a CROSS JOIN (WITH RECURSIVE s(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM s WHERE n < 399) SELECT n FROM s) b ORDER BY n".into(),
         options: ExecutionOptions {
             max_rows: 10,
@@ -305,6 +316,7 @@ async fn live_connection_queries_metadata_and_timeout() {
     }
     let token = CancellationToken::new();
     let unlimited = QueryRequest {
+        parameters: Vec::new(),
         options: ExecutionOptions::default(),
         ..big
     };
@@ -317,6 +329,69 @@ async fn live_connection_queries_metadata_and_timeout() {
     session.close().await.unwrap();
 
     }).await.expect("live scenario exceeded its time budget");
+}
+
+/// SQLx reads a packet's header and its payload in separate steps. Rows of
+/// several megabytes keep the reader inside a payload most of the time, so a
+/// cancellation or a time limit almost always lands halfway through a row;
+/// the session must still be kept, with its state.
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_interrupting_a_half_read_row_keeps_the_session() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        struct CancelAtFirst(CancellationToken);
+        impl RowSink for CancelAtFirst {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                SinkControl::Continue
+            }
+            fn row(&mut self, _: Row) -> SinkControl {
+                self.0.cancel();
+                SinkControl::Continue
+            }
+        }
+        let wide = "SELECT n, REPEAT('x', 4194304) FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 32) SELECT n FROM s) t";
+        let driver = MySqlDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        keep_state(&mut session).await;
+        for _ in 0..5 {
+            let token = CancellationToken::new();
+            let cancelled = session
+                .execute(
+                    &QueryRequest {
+                        parameters: Vec::new(),
+                        sql: wide.into(),
+                        options: ExecutionOptions::default(),
+                    },
+                    &mut CancelAtFirst(token.clone()),
+                    token,
+                )
+                .await;
+            assert_eq!(cancelled.unwrap_err().code, ErrorCode::Cancelled);
+            assert_kept(&mut session).await;
+            let timed_out = session
+                .execute(
+                    &QueryRequest {
+                        parameters: Vec::new(),
+                        sql: wide.into(),
+                        options: ExecutionOptions {
+                            timeout: Some(Duration::from_millis(50)),
+                            ..ExecutionOptions::default()
+                        },
+                    },
+                    &mut Sink::default(),
+                    CancellationToken::new(),
+                )
+                .await;
+            assert_eq!(timed_out.unwrap_err().code, ErrorCode::Timeout);
+            assert_kept(&mut session).await;
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live scenario exceeded its time budget");
 }
 
 #[tokio::test]
@@ -347,6 +422,7 @@ async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
         }
         let driver = MySqlDriver;
         let query = QueryRequest {
+            parameters: Vec::new(),
             sql: "SELECT 1 UNION ALL SELECT 2".into(),
             options: ExecutionOptions::default(),
         };
@@ -479,6 +555,7 @@ async fn text_in(session: &mut Box<dyn Session>, sql: &str, context: &SessionCon
     session
         .execute(
             &QueryRequest {
+                parameters: Vec::new(),
                 sql: sql.into(),
                 options: ExecutionOptions {
                     context: context.clone(),
@@ -658,4 +735,121 @@ async fn live_autocommit_off_is_reported() {
     })
     .await
     .unwrap();
+}
+
+/// A parameter with a marker at every `:name` in `sql`.
+fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
+    QueryParameter {
+        name: name.into(),
+        kind,
+        value: value.map(Into::into),
+        markers: sql
+            .match_indices(&format!(":{name}"))
+            .map(|(start, found)| start..start + found.len())
+            .collect(),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_named_parameters_are_bound_and_never_interpolated() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = MySqlDriver;
+        let cancel = CancellationToken::new();
+        let mut session = driver.open_session(&input(), cancel.clone()).await.unwrap();
+        let sql = "SELECT :who AS who, :n + 1 AS next, :d AS day, :b AS flag, :ts AS at, \
+                   :missing AS missing, CHAR_LENGTH(:who) AS len";
+        for text in [
+            "O'Brien",
+            "x'); DROP TABLE t; --",
+            r"back\slash '' \'",
+            "/* c */ -- d # e",
+            ":who",
+            "",
+        ] {
+            let request = QueryRequest {
+                parameters: vec![
+                    marked(sql, "who", ParameterKind::Text, Some(text)),
+                    marked(sql, "n", ParameterKind::Number, Some("41.50")),
+                    marked(sql, "d", ParameterKind::Date, Some("2024-02-29")),
+                    marked(sql, "b", ParameterKind::Boolean, Some("true")),
+                    marked(
+                        sql,
+                        "ts",
+                        ParameterKind::Timestamp,
+                        Some("2024-02-29T23:59:59.5"),
+                    ),
+                    marked(sql, "missing", ParameterKind::Text, None),
+                ],
+                ..QueryRequest::new(sql, ExecutionOptions::default())
+            };
+            let mut sink = Sink::default();
+            session
+                .execute(&request, &mut sink, cancel.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                sink.rows,
+                vec![vec![
+                    Cell::Text(text.into()),
+                    Cell::Text("42.50".into()),
+                    Cell::Text("2024-02-29".into()),
+                    Cell::Text("1".into()),
+                    Cell::Text("2024-02-29 23:59:59.500000".into()),
+                    Cell::Null,
+                    Cell::Text(text.chars().count().to_string()),
+                ]],
+                "{text:?}"
+            );
+        }
+        // Paging keeps reading the result the bound values chose.
+        let sql = "WITH RECURSIVE s(g) AS (SELECT 1 UNION ALL SELECT g + 1 FROM s WHERE g < :last) \
+                   SELECT g FROM s WHERE g > :first";
+        let options = ExecutionOptions {
+            max_rows: 2,
+            ..ExecutionOptions::default()
+        };
+        let request = QueryRequest {
+            parameters: vec![
+                marked(sql, "last", ParameterKind::Number, Some("5")),
+                marked(sql, "first", ParameterKind::Number, Some("1")),
+            ],
+            ..QueryRequest::new(sql, options.clone())
+        };
+        let mut first = Sink::default();
+        let outcome = session
+            .execute(&request, &mut first, cancel.clone())
+            .await
+            .unwrap();
+        assert!(outcome.has_more);
+        let mut next = Sink::default();
+        session
+            .fetch(&options, &mut next, cancel.clone())
+            .await
+            .unwrap();
+        let read: Vec<_> = first.rows.into_iter().chain(next.rows).collect();
+        assert_eq!(
+            read,
+            ["2", "3", "4", "5"].map(|g| vec![Cell::Text(g.into())])
+        );
+        // A later run reads its own values: a NULL never reads what an
+        // earlier run bound.
+        let sql = "SELECT :who";
+        for value in [Some("second"), None] {
+            let request = QueryRequest {
+                parameters: vec![marked(sql, "who", ParameterKind::Text, value)],
+                ..QueryRequest::new(sql, ExecutionOptions::default())
+            };
+            let mut sink = Sink::default();
+            session
+                .execute(&request, &mut sink, cancel.clone())
+                .await
+                .unwrap();
+            let expected = value.map_or(Cell::Null, |value| Cell::Text(value.into()));
+            assert_eq!(sink.rows, vec![vec![expected]]);
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live named parameters took too long");
 }

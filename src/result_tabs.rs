@@ -8,7 +8,8 @@
 //! are read from the result the session keeps open.
 use crate::error_report::ErrorReport;
 use crate::result::{ResultColumn, ResultData, ResultLimit};
-use std::rc::Rc;
+use jykre_core::QueryParameter;
+use std::sync::Arc;
 
 /// Where the results of a run go.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,9 +30,57 @@ pub enum Placement {
     Hidden,
 }
 
+/// What opening a table's Data view does with its query tab's results
+/// ([`ResultTabs::data_view`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataView {
+    /// The tab at this index holds the table's rows, or is reading them:
+    /// it is shown, and nothing runs.
+    Show(usize),
+    /// The rows are read with this placement: into the tab where reading
+    /// them failed or was cancelled, or into a new tab, so no other result
+    /// is replaced.
+    Read(Placement),
+}
+
+/// Where an export of a result tab reads its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportSource {
+    /// The tab holds every row of the result.
+    Held,
+    /// The tab holds the start of the result and the session keeps the rest
+    /// open.
+    Rest,
+    /// Part of the result can no longer be read: only the rows held, or the
+    /// statement run again, can be exported.
+    Partial(Missing),
+    /// Nothing to export: the statement returned no rows (a data change) or
+    /// did not end.
+    Nothing,
+}
+
+/// Why part of a result can no longer be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Missing {
+    /// Its first pages were released to stay under the memory ceiling.
+    Released,
+    /// More rows existed, but the session no longer has them (another
+    /// statement ran, a page could not be read, a limit stopped reading or
+    /// the server cut the result).
+    Closed,
+}
+
 /// Identity of a result tab, stable while the tab is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ResultId(u64);
+
+impl ResultId {
+    /// The number behind the identity, for element IDs that follow a tab
+    /// wherever it moves.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResultState {
@@ -45,7 +94,7 @@ pub enum ResultState {
 /// One page of rows and where it starts in the whole result.
 #[derive(Clone, Debug)]
 pub struct Page {
-    pub data: Rc<ResultData>,
+    pub data: Arc<ResultData>,
     /// Zero-based position of the page's first row in the result.
     pub first_row: usize,
 }
@@ -60,12 +109,15 @@ pub struct ResultTab {
     /// Byte offset of the statement in the editor when it ran, to mark an
     /// error's position there.
     pub origin: Option<usize>,
+    /// The `:name` values bound for the statement, so running it again for
+    /// an export reads the result shown (ADR-0026).
+    pub parameters: Vec<QueryParameter>,
     pub state: ResultState,
     pub rows_affected: Option<u64>,
     pub elapsed_ms: u128,
     /// The limit that ended the last page read, if any.
     pub limit: Option<ResultLimit>,
-    /// The demo's result has a chart.
+    /// The demo's result has an analysis.
     pub sales: bool,
     /// No run replaces a pinned tab; only closing it removes it.
     pub pinned: bool,
@@ -88,6 +140,7 @@ impl ResultTab {
             number,
             sql,
             origin: None,
+            parameters: Vec::new(),
             state: ResultState::Running,
             rows_affected: None,
             elapsed_ms: 0,
@@ -99,6 +152,18 @@ impl ResultTab {
             page: 0,
             has_more: false,
             rest_closed: false,
+        }
+    }
+
+    /// What the tab is called: **Data** when its statement is `data`, the
+    /// statement its query tab reads a table's rows with (the table's Data
+    /// view), otherwise "Result n" by its number.
+    pub fn title(&self, data: Option<&str>) -> String {
+        use crate::tr;
+        if data.is_some_and(|data| data == self.sql) {
+            tr!("Data").to_owned()
+        } else {
+            tr!("Result {0}", self.number)
         }
     }
 
@@ -134,6 +199,38 @@ impl ResultTab {
     /// Pages before the first one held were released for memory.
     pub fn released_pages(&self) -> usize {
         self.released
+    }
+
+    /// What an export of this tab can read ([Results](../docs/results.md#export)).
+    pub fn export_source(&self) -> ExportSource {
+        if self.state != ResultState::Done
+            || self
+                .pages
+                .first()
+                .is_none_or(|page| page.data.column_count() == 0)
+        {
+            return ExportSource::Nothing;
+        }
+        if self.released > 0 {
+            return ExportSource::Partial(Missing::Released);
+        }
+        if self.has_more {
+            return ExportSource::Rest;
+        }
+        if self.rest_closed {
+            return ExportSource::Partial(Missing::Closed);
+        }
+        ExportSource::Held
+    }
+
+    /// The pages the tab holds, in order, shared with an export.
+    pub fn held_pages(&self) -> Vec<Arc<ResultData>> {
+        self.pages.iter().map(|page| page.data.clone()).collect()
+    }
+
+    /// The rows the tab holds.
+    pub fn held_rows(&self) -> usize {
+        self.pages.iter().map(|page| page.data.row_count()).sum()
     }
 
     /// The columns of the result, for reading its next page.
@@ -177,7 +274,7 @@ pub struct ResultTabs {
     /// Memory the pages of one tab may hold; older pages are released past it.
     ceiling: usize,
     /// Pages no tab holds any more, for the caller to free off the UI thread.
-    dropped: Vec<Rc<ResultData>>,
+    dropped: Vec<Arc<ResultData>>,
 }
 
 impl ResultTabs {
@@ -195,7 +292,7 @@ impl ResultTabs {
     /// Pages that closed tabs, replaced results and released pages let go
     /// of. A large result is freed off the UI thread, so the caller takes
     /// them once nothing on screen shows them.
-    pub fn take_dropped(&mut self) -> Vec<Rc<ResultData>> {
+    pub fn take_dropped(&mut self) -> Vec<Arc<ResultData>> {
         std::mem::take(&mut self.dropped)
     }
 
@@ -233,11 +330,47 @@ impl ResultTabs {
         }
     }
 
+    /// How the Data view that reads its table with `sql` comes back: the
+    /// last tab created for that statement is shown when it holds its rows
+    /// or is reading them, and read again in its place when the read failed
+    /// or was cancelled; without one, the rows go to a new tab.
+    pub fn data_view(&self, sql: &str) -> DataView {
+        let found = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.sql == sql)
+            .max_by_key(|(_, tab)| tab.id);
+        match found {
+            Some((index, tab)) if matches!(tab.state, ResultState::Done | ResultState::Running) => {
+                DataView::Show(index)
+            }
+            Some((_, tab)) => DataView::Read(Placement::Replace(tab.id)),
+            None => DataView::Read(Placement::New),
+        }
+    }
+
     /// Pins or unpins the tab at `index`.
     pub fn toggle_pin(&mut self, index: usize) {
         if let Some(tab) = self.tabs.get_mut(index) {
             tab.pinned = !tab.pinned;
         }
+    }
+
+    /// Moves the tab at `from` to position `to`; the tab on screen stays
+    /// on screen. Numbers, pins and what a run replaces do not change.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return;
+        }
+        let active = self.tabs[self.active].id;
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active)
+            .unwrap_or_default();
     }
 
     /// Closes the tab at `index`; the one before it becomes active.
@@ -350,7 +483,7 @@ impl ResultTabs {
         let old = std::mem::replace(
             &mut tab.pages,
             vec![Page {
-                data: Rc::new(completed.data),
+                data: Arc::new(completed.data),
                 first_row: 0,
             }],
         );
@@ -374,6 +507,13 @@ impl ResultTabs {
     pub fn set_origin(&mut self, id: ResultId, origin: usize) {
         if let Some(tab) = self.get_mut(id) {
             tab.origin = Some(origin);
+        }
+    }
+
+    /// Records the values bound for the tab's statement.
+    pub fn set_parameters(&mut self, id: ResultId, parameters: Vec<QueryParameter>) {
+        if let Some(tab) = self.get_mut(id) {
+            tab.parameters = parameters;
         }
     }
 
@@ -448,7 +588,7 @@ impl ResultTabs {
         tab.limit = page.limit;
         tab.elapsed_ms += page.elapsed_ms;
         tab.pages.push(Page {
-            data: Rc::new(page.data),
+            data: Arc::new(page.data),
             first_row,
         });
         tab.page = tab.pages.len() - 1;
@@ -466,6 +606,13 @@ impl ResultTabs {
         if let Some(tab) = self.get_mut(id) {
             tab.close_rest();
         }
+    }
+
+    /// An export read the rest of the result from the session (whether it
+    /// ended or not): what it read went to the file, so the grid can no
+    /// longer page past what the tab holds.
+    pub fn rest_exported(&mut self, id: ResultId) {
+        self.page_failed(id);
     }
 
     /// Ends every running tab as cancelled, for an abandoned run.
@@ -527,6 +674,64 @@ mod tests {
     use crate::result::ResultColumn;
 
     #[test]
+    fn moving_a_tab_keeps_the_one_on_screen_and_what_runs_replace() {
+        let mut tabs = ResultTabs::new(usize::MAX);
+        let ids = tabs.begin(&["a".into(), "b".into(), "c".into()], Placement::New);
+        tabs.select(1);
+        tabs.move_tab(0, 2);
+        let order: Vec<_> = tabs.tabs().iter().map(|tab| tab.id).collect();
+        assert_eq!(order, [ids[1], ids[2], ids[0]]);
+        assert_eq!(tabs.active().map(|tab| tab.id), Some(ids[1]));
+        // Out of range or onto itself changes nothing.
+        tabs.move_tab(5, 0);
+        tabs.move_tab(1, 1);
+        assert_eq!(
+            tabs.tabs().iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            order
+        );
+        // Ctrl+Enter still replaces the tab on screen, wherever it sits.
+        tabs.begin(&["d".into()], Placement::ReplaceActive);
+        assert_eq!(tabs.active_index(), 0);
+        assert_eq!(tabs.tabs()[0].number, 2);
+    }
+
+    #[test]
+    fn the_data_view_shows_its_rows_or_reads_them_without_replacing_others() {
+        let data = "SELECT * FROM \"sales\".\"orders\";";
+        let mut tabs = ResultTabs::new(usize::MAX);
+        // Nothing yet: the rows go to a new tab, named Data.
+        assert_eq!(tabs.data_view(data), DataView::Read(Placement::New));
+        let id = tabs.begin(&[data.to_owned()], Placement::New)[0];
+        assert_eq!(tabs.data_view(data), DataView::Show(0), "reading");
+        tabs.complete(
+            id,
+            Completed {
+                data: rows(2),
+                ..Completed::default()
+            },
+        );
+        assert_eq!(tabs.tabs()[0].title(Some(data)), "Data");
+        assert_eq!(tabs.tabs()[0].title(None), "Result 1");
+        // Another statement's result keeps its number, and opening the
+        // table again shows the Data tab, wherever it is.
+        tabs.begin(&sql(&["SELECT 1;"]), Placement::New);
+        assert_eq!(tabs.tabs()[1].title(Some(data)), "Result 2");
+        assert_eq!(tabs.data_view(data), DataView::Show(0));
+        // A read that failed or was cancelled is read again in its place.
+        let again = tabs.begin(&[data.to_owned()], Placement::Replace(id))[0];
+        tabs.cancel(again);
+        assert_eq!(
+            tabs.data_view(data),
+            DataView::Read(Placement::Replace(again))
+        );
+        // Once its tab is replaced by another statement, the rows are read
+        // into a new tab, never over another result.
+        tabs.select(0);
+        tabs.begin(&sql(&["SELECT 2;"]), Placement::ReplaceActive);
+        assert_eq!(tabs.data_view(data), DataView::Read(Placement::New));
+    }
+
+    #[test]
     fn the_footer_counts_the_rows_the_filter_shows() {
         assert_eq!(rows_label(1_000, 0, false, None), "1,000 rows");
         assert_eq!(rows_label(1, 0, false, None), "1 row");
@@ -549,6 +754,93 @@ mod tests {
 
     fn sql(statements: &[&str]) -> Vec<String> {
         statements.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn an_export_reads_what_the_tab_holds_and_what_the_session_keeps() {
+        let mut tabs = ResultTabs::new(usize::MAX);
+        let ids = tabs.begin(&sql(&["select", "update"]), Placement::New);
+        let source = |tabs: &ResultTabs, index: usize| tabs.tabs()[index].export_source();
+        assert_eq!(source(&tabs, 0), ExportSource::Nothing);
+        tabs.complete(
+            ids[0],
+            Completed {
+                data: rows(10),
+                limit: Some(ResultLimit::Rows(10)),
+                has_more: true,
+                ..Completed::default()
+            },
+        );
+        // A data change has no rows to export.
+        tabs.complete(
+            ids[1],
+            Completed {
+                rows_affected: Some(3),
+                ..Completed::default()
+            },
+        );
+        assert_eq!(source(&tabs, 0), ExportSource::Rest);
+        assert_eq!(source(&tabs, 1), ExportSource::Nothing);
+        tabs.add_page(
+            ids[0],
+            Completed {
+                data: rows(4),
+                ..Completed::default()
+            },
+        );
+        assert_eq!(source(&tabs, 0), ExportSource::Held);
+        assert_eq!(tabs.tabs()[0].held_rows(), 14);
+        assert_eq!(tabs.tabs()[0].held_pages().len(), 2);
+
+        // Once an export used up the rest, it cannot be read again.
+        let ids = tabs.begin(&sql(&["select"]), Placement::New);
+        tabs.complete(
+            ids[0],
+            Completed {
+                data: rows(10),
+                limit: Some(ResultLimit::Rows(10)),
+                has_more: true,
+                ..Completed::default()
+            },
+        );
+        tabs.rest_exported(ids[0]);
+        let last = tabs.tabs().len() - 1;
+        assert_eq!(source(&tabs, last), ExportSource::Partial(Missing::Closed));
+        // A memory limit or a server cut leaves the rest unreadable too.
+        let ids = tabs.begin(&sql(&["select"]), Placement::New);
+        tabs.complete(
+            ids[0],
+            Completed {
+                data: rows(10),
+                limit: Some(ResultLimit::Memory(1)),
+                ..Completed::default()
+            },
+        );
+        let last = tabs.tabs().len() - 1;
+        assert_eq!(source(&tabs, last), ExportSource::Partial(Missing::Closed));
+
+        // Pages released for memory take the first rows with them.
+        let mut tabs = ResultTabs::new(1);
+        let ids = tabs.begin(&sql(&["select"]), Placement::New);
+        tabs.complete(
+            ids[0],
+            Completed {
+                data: rows(10),
+                limit: Some(ResultLimit::Rows(10)),
+                has_more: true,
+                ..Completed::default()
+            },
+        );
+        tabs.add_page(
+            ids[0],
+            Completed {
+                data: rows(10),
+                limit: Some(ResultLimit::Rows(10)),
+                has_more: true,
+                ..Completed::default()
+            },
+        );
+        assert_eq!(source(&tabs, 0), ExportSource::Partial(Missing::Released));
     }
 
     fn numbers(tabs: &ResultTabs) -> Vec<(usize, String)> {

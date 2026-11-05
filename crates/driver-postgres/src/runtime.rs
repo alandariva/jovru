@@ -351,6 +351,52 @@ impl Session for DatabaseSession {
     }
 }
 
+/// The PostgreSQL type a parameter's value is read as.
+fn parameter_type(kind: ParameterKind) -> &'static str {
+    match kind {
+        ParameterKind::Text => "text",
+        ParameterKind::Number => "numeric",
+        ParameterKind::Boolean => "boolean",
+        ParameterKind::Date => "date",
+        ParameterKind::Timestamp => "timestamp",
+    }
+}
+
+/// The session setting that holds parameter `index` for a run.
+fn parameter_setting(index: usize) -> String {
+    format!("jykre.p_{index}")
+}
+
+/// What a parameter's marker becomes (ADR-0023): a read of the setting
+/// bound before the statement, or a typed NULL. Neither holds the value.
+fn parameter_reference(index: usize, parameter: &QueryParameter) -> String {
+    let kind = parameter_type(parameter.kind);
+    match parameter.value {
+        Some(_) => format!("(current_setting('{}')::{kind})", parameter_setting(index)),
+        None => format!("CAST(NULL AS {kind})"),
+    }
+}
+
+/// The settings to bind before the statement, as names and values: one per
+/// parameter that is not NULL.
+fn parameter_settings(parameters: &[QueryParameter]) -> (Vec<String>, Vec<String>) {
+    parameters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parameter)| {
+            let value = parameter.value.clone()?;
+            Some((parameter_setting(index), value))
+        })
+        .unzip()
+}
+
+/// Binds the settings with the extended protocol, so the values travel as
+/// bound parameters; the user's SQL then reads them with the text protocol.
+/// They stay in this session until the next run sets them again: a result
+/// can stay open for paging, and nothing else can run until it ends.
+const BIND_SETTINGS: &str =
+    "SELECT set_config(name, value, false) FROM unnest($1::text[], $2::text[]) AS p(name, value)";
+
 /// What a statement does to the first snapshot of the transaction it runs
 /// in. PostgreSQL takes that snapshot at the first query of a transaction,
 /// and some commands (`SET TRANSACTION`) are allowed only before it, so the
@@ -621,9 +667,11 @@ impl Server {
         mut cancel: CancellationToken,
         commands: &mut mpsc::Receiver<Command>,
     ) -> Flow {
+        let sql = request.with_references(parameter_reference);
+        let (names, values) = parameter_settings(&request.parameters);
         // Until it ends well, the statement may have taken a snapshot (or
         // failed the transaction): the session queries the server again.
-        let effect = snapshot_effect(&request.sql);
+        let effect = snapshot_effect(&sql);
         let unread = std::mem::take(&mut self.unread);
         let mut options = request.options.clone();
         // The chosen schema goes first in search_path only when it changed,
@@ -655,6 +703,14 @@ impl Server {
                     .await
                     .map_err(map_error)?;
             }
+            if !names.is_empty() {
+                sqlx::query(BIND_SETTINGS)
+                    .bind(&names)
+                    .bind(&values)
+                    .execute(&mut *connection)
+                    .await
+                    .map_err(map_error)?;
+            }
             Ok(())
         })
         .await;
@@ -666,7 +722,7 @@ impl Server {
         }
         let columns = bounded(&cancel, options.timeout, async {
             let description = connection
-                .prepare(sqlx::AssertSqlSafe(request.sql.as_str()).into_sql_str())
+                .prepare(sqlx::AssertSqlSafe(sql.as_str()).into_sql_str())
                 .await
                 .map_err(map_error)?;
             Ok(description
@@ -689,7 +745,7 @@ impl Server {
             return self.recover(connection, false).await;
         }
         let mut stream =
-            sqlx::raw_sql(sqlx::AssertSqlSafe(request.sql.as_str())).fetch_many(&mut *connection);
+            sqlx::raw_sql(sqlx::AssertSqlSafe(sql.as_str())).fetch_many(&mut *connection);
         let mut ahead = None;
         let mut affected = None;
         loop {
@@ -868,14 +924,28 @@ where
 /// The connection to read `database` with: the configured one, or another
 /// database of the server when the profile offers them all.
 fn database_input(input: &ResolvedConnection, database: &str) -> DriverResult<ResolvedConnection> {
+    database_connection(
+        input,
+        database,
+        "Metadata scope belongs to another database",
+    )
+}
+
+/// The connection to `database` on the same server, with the same user and
+/// credentials: `input` itself for its own database, a copy that names the
+/// other one when the profile offers the server's other databases, and a
+/// validation error with `refusal` otherwise.
+pub(crate) fn database_connection(
+    input: &ResolvedConnection,
+    database: &str,
+    refusal: &'static str,
+) -> DriverResult<ResolvedConnection> {
     let config = PostgresConfig::parse(&input.config.options)?;
     if database == config.database {
         return Ok(input.clone());
     }
     if !config.all_databases {
-        return Err(DriverError::validation(
-            "Metadata scope belongs to another database",
-        ));
+        return Err(DriverError::validation(refusal));
     }
     let mut other = input.clone();
     other.config.options["database"] = serde_json::Value::String(database.to_owned());
@@ -1392,7 +1462,51 @@ ORDER BY n.nspname, c.relname, k.conname"#;
 
 #[cfg(test)]
 mod tests {
-    use super::{SnapshotEffect, snapshot_effect};
+    use super::{SnapshotEffect, parameter_reference, parameter_settings, snapshot_effect};
+    use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+
+    fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
+        QueryParameter {
+            name: name.into(),
+            kind,
+            value: value.map(Into::into),
+            markers: sql
+                .match_indices(&format!(":{name}"))
+                .map(|(start, found)| start..start + found.len())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn markers_become_reads_of_bound_settings_and_values_stay_out_of_the_sql() {
+        let sql =
+            "SELECT * FROM t WHERE name = :who AND total > :min AND day = :day AND :who <> ''";
+        let request = QueryRequest {
+            parameters: vec![
+                marked(
+                    sql,
+                    "who",
+                    ParameterKind::Text,
+                    Some("x'; DROP TABLE t; --"),
+                ),
+                marked(sql, "min", ParameterKind::Number, None),
+                marked(sql, "day", ParameterKind::Date, Some("2024-02-29")),
+            ],
+            ..QueryRequest::new(sql, ExecutionOptions::default())
+        };
+        assert_eq!(request.validate(), Ok(()));
+        let bound = request.with_references(parameter_reference);
+        assert_eq!(
+            bound,
+            "SELECT * FROM t WHERE name = (current_setting('jykre.p_0')::text) \
+             AND total > CAST(NULL AS numeric) AND day = (current_setting('jykre.p_2')::date) \
+             AND (current_setting('jykre.p_0')::text) <> ''"
+        );
+        assert!(!bound.contains("DROP"));
+        let (names, values) = parameter_settings(&request.parameters);
+        assert_eq!(names, ["jykre.p_0", "jykre.p_2"]);
+        assert_eq!(values, ["x'; DROP TABLE t; --", "2024-02-29"]);
+    }
 
     #[test]
     fn statements_that_open_keep_or_take_the_first_snapshot() {

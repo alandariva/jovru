@@ -16,13 +16,7 @@ fn statement_error(status: &Value) -> DriverError {
     let Some(message) = status["message"].as_str().filter(|m| !m.trim().is_empty()) else {
         return error(ErrorCode::Database, "Databricks SQL statement failed");
     };
-    let sqlstate = message.split_once("SQLSTATE: ").and_then(|(_, rest)| {
-        let state: String = rest
-            .chars()
-            .take_while(char::is_ascii_alphanumeric)
-            .collect();
-        (state.len() == 5).then_some(state)
-    });
+    let sqlstate = sqlstate_in(message);
     let vendor_code = status["error_code"].as_str().map(str::to_owned);
     let code = match vendor_code.as_deref() {
         Some("PERMISSION_DENIED") => ErrorCode::PermissionDenied,
@@ -38,6 +32,75 @@ fn statement_error(status: &Value) -> DriverError {
             position: None,
         },
     )
+}
+/// How much of a rejected request's body is read. An error is a short JSON
+/// object; a body cut at this size is not read as one.
+const MAX_ERROR_BODY: usize = 64 * 1024;
+
+/// A request the API rejected with an HTTP error, from any endpoint. The
+/// error keeps Databricks' whole message, verbatim, and the HTTP status with
+/// its error class (`error_code`) as the server's code. A body that is not
+/// a Databricks error (a proxy's page, nothing at all) is never shown: the
+/// status alone says what happened.
+fn rejected(status: u16, body: &[u8]) -> DriverError {
+    let code = match status {
+        401 => ErrorCode::Authentication,
+        403 => ErrorCode::PermissionDenied,
+        404 => ErrorCode::NotFound,
+        429 => ErrorCode::Connection,
+        _ => ErrorCode::Database,
+    };
+    let parsed: Option<Value> = serde_json::from_slice(body).ok();
+    // An error class is a short upper-case name; anything else is not one.
+    let class = parsed
+        .as_ref()
+        .and_then(|value| value["error_code"].as_str())
+        .filter(|class| {
+            !class.is_empty()
+                && class.len() <= 64
+                && class
+                    .bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        });
+    let vendor_code = Some(match class {
+        Some(class) => format!("HTTP {status} · {class}"),
+        None => format!("HTTP {status}"),
+    });
+    let message = parsed
+        .as_ref()
+        .and_then(|value| value["message"].as_str())
+        .map(str::trim)
+        .filter(|message| !message.is_empty());
+    match message {
+        Some(message) => DriverError::from_server(
+            code,
+            message,
+            ServerDiagnostic {
+                sqlstate: sqlstate_in(message),
+                vendor_code,
+                position: None,
+            },
+        ),
+        None => DriverError::from_server(
+            code,
+            "Databricks rejected the API request",
+            ServerDiagnostic {
+                sqlstate: None,
+                vendor_code,
+                position: None,
+            },
+        ),
+    }
+}
+/// The SQLSTATE Databricks writes into a message (`… SQLSTATE: 42P01`).
+fn sqlstate_in(message: &str) -> Option<String> {
+    message.split_once("SQLSTATE: ").and_then(|(_, rest)| {
+        let state: String = rest
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect();
+        (state.len() == 5).then_some(state)
+    })
 }
 pub(super) fn protocol() -> DriverError {
     error(ErrorCode::Protocol, "Invalid Databricks API response")
@@ -120,16 +183,18 @@ impl Client {
             }
         }
         if !response.status().is_success() {
-            return Err(error(
-                match response.status().as_u16() {
-                    401 => ErrorCode::Authentication,
-                    403 => ErrorCode::PermissionDenied,
-                    404 => ErrorCode::NotFound,
-                    429 => ErrorCode::Connection,
-                    _ => ErrorCode::Database,
-                },
-                "Databricks rejected the API request",
-            ));
+            let status = response.status().as_u16();
+            // Only the start of the body: an error is a short JSON object,
+            // and a proxy's page must not be read whole.
+            let mut body = Vec::new();
+            while let Ok(Some(chunk)) = response.chunk().await {
+                body.extend_from_slice(&chunk);
+                if body.len() >= MAX_ERROR_BODY {
+                    body.truncate(MAX_ERROR_BODY);
+                    break;
+                }
+            }
+            return Err(rejected(status, &body));
         }
         // Bound the wire payload too: a single large cell must not bypass the
         // result builder's memory ceiling. Inline SQL responses cap at 25 MiB.
@@ -1091,6 +1156,48 @@ fn qualified_name(text: &str) -> Option<Vec<String>> {
     }
     rest.trim().is_empty().then_some(parts)
 }
+/// The Statement Execution API's typed parameters (ADR-0023). The server
+/// reads `:name` markers itself, so the SQL goes unchanged; a NULL omits
+/// `value`.
+fn statement_parameters(parameters: &[QueryParameter]) -> DriverResult<Vec<Value>> {
+    parameters
+        .iter()
+        .map(|parameter| {
+            let kind = match (parameter.kind, &parameter.value) {
+                (ParameterKind::Text, _) => "STRING".to_owned(),
+                (ParameterKind::Boolean, _) => "BOOLEAN".to_owned(),
+                (ParameterKind::Date, _) => "DATE".to_owned(),
+                (ParameterKind::Timestamp, _) => "TIMESTAMP".to_owned(),
+                (ParameterKind::Number, None) => "DECIMAL(38,18)".to_owned(),
+                (ParameterKind::Number, Some(value)) => decimal_type(value).ok_or_else(|| {
+                    DriverError::validation(format!(
+                        "Parameter {} has more than 38 digits",
+                        parameter.name
+                    ))
+                })?,
+            };
+            let mut item = json!({"name": parameter.name, "type": kind});
+            if let Some(value) = &parameter.value {
+                item["value"] = json!(value);
+            }
+            Ok(item)
+        })
+        .collect()
+}
+
+/// The exact type of a number's text: `DECIMAL(p,s)` with its digits, or
+/// `DOUBLE` for a number with an exponent; `None` past Databricks' 38 digits.
+fn decimal_type(value: &str) -> Option<String> {
+    if value.contains(['e', 'E']) {
+        return Some("DOUBLE".to_owned());
+    }
+    let unsigned = value.trim_start_matches(['+', '-']);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let scale = fraction.len();
+    let precision = (whole.trim_start_matches('0').len() + scale).max(1);
+    (precision <= 38).then(|| format!("DECIMAL({precision},{scale})"))
+}
+
 #[async_trait]
 impl Session for DatabricksSession {
     async fn execute(
@@ -1112,6 +1219,9 @@ impl Session for DatabricksSession {
             .saturating_mul(SERVER_PAGES)
             .min(100_000);
         let mut body = json!({"warehouse_id":self.client.config.warehouse_id,"statement":request.sql,"wait_timeout":FIRST_WAIT,"on_wait_timeout":"CONTINUE","format":"JSON_ARRAY","disposition":"INLINE","row_limit":row_limit});
+        if !request.parameters.is_empty() {
+            body["parameters"] = Value::Array(statement_parameters(&request.parameters)?);
+        }
         let context = &request.options.context;
         if *context != self.requested {
             if let Some(catalog) = &context.catalog {
@@ -1396,6 +1506,61 @@ mod tests {
         assert!(task.await.unwrap()[0].starts_with("GET /api/2.1/clusters/get?cluster_id=classic"));
     }
     #[tokio::test]
+    async fn a_refused_statement_keeps_databricks_message_class_and_status() {
+        let (client, task) = fixture(vec![(
+            400,
+            json!({"error_code":"INVALID_PARAMETER_VALUE",
+                   "message":"  Catalog 'gone' was not found. SQLSTATE: 42704  "}),
+        )])
+        .await;
+        let error = client
+            .request(
+                Method::POST,
+                "/api/2.0/sql/statements",
+                &[],
+                Some(json!({})),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Database);
+        assert_eq!(
+            error.message,
+            "Catalog 'gone' was not found. SQLSTATE: 42704"
+        );
+        let server = error.server.unwrap();
+        assert_eq!(
+            server.vendor_code.as_deref(),
+            Some("HTTP 400 · INVALID_PARAMETER_VALUE")
+        );
+        assert_eq!(server.sqlstate.as_deref(), Some("42704"));
+        // A refused request is not sent again.
+        assert_eq!(task.await.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_rejection_without_a_databricks_error_says_only_the_status() {
+        let generic = |error: DriverError| {
+            assert_eq!(error.message, "Databricks rejected the API request");
+            error.server.and_then(|server| server.vendor_code)
+        };
+        // Not an error object: a proxy's page, or nothing at all.
+        assert_eq!(
+            generic(rejected(502, b"<html>gateway</html>")).as_deref(),
+            Some("HTTP 502")
+        );
+        assert_eq!(generic(rejected(500, b"")).as_deref(), Some("HTTP 500"));
+        // Something that is not an error class is left out, and a blank
+        // message is no message.
+        let odd = br#"{"error_code":"not a class <b>","message":" "}"#;
+        assert_eq!(generic(rejected(400, odd)).as_deref(), Some("HTTP 400"));
+        // The whole message, however long, as Databricks wrote it.
+        let long = "é".repeat(10_000);
+        let error = rejected(404, json!({"message": long}).to_string().as_bytes());
+        assert_eq!(error.code, ErrorCode::NotFound);
+        assert_eq!(error.message, long);
+    }
+
+    #[tokio::test]
     async fn unauthorized_refresh_is_retried_once_and_other_failures_are_not_replayed() {
         let (client, task) = fixture(vec![(401, json!({})), (401, json!({}))]).await;
         assert_eq!(
@@ -1521,6 +1686,7 @@ mod tests {
         let result = session
             .execute(
                 &QueryRequest {
+                    parameters: Vec::new(),
                     sql: "SELECT 1".into(),
                     options: ExecutionOptions {
                         timeout: Some(Duration::from_millis(50)),
@@ -1556,6 +1722,7 @@ mod tests {
         session
             .execute(
                 &QueryRequest {
+                    parameters: Vec::new(),
                     sql: "SELECT amount".into(),
                     options: ExecutionOptions::default(),
                 },
@@ -1606,6 +1773,7 @@ mod tests {
         let mut session = DatabricksSession::new(client);
         let mut rows = Rows::default();
         let request = QueryRequest {
+            parameters: Vec::new(),
             sql: "SELECT n".into(),
             options: options.clone(),
         };
@@ -1643,6 +1811,86 @@ mod tests {
         assert_eq!(body["wait_timeout"], FIRST_WAIT);
         assert!(requests[1].starts_with("GET /api/2.0/sql/statements/abc/result/chunks/1 "));
         assert!(requests[2].starts_with("GET /api/2.0/sql/statements/abc/result/chunks/1 "));
+    }
+
+    #[test]
+    fn parameters_travel_typed_beside_the_unchanged_sql() {
+        let parameter = |name: &str, kind, value: Option<&str>| QueryParameter {
+            name: name.into(),
+            kind,
+            value: value.map(Into::into),
+            markers: Vec::new(),
+        };
+        let items = statement_parameters(&[
+            parameter("who", ParameterKind::Text, Some("x'; DROP TABLE t; --")),
+            parameter("amount", ParameterKind::Number, Some("-0012.340")),
+            parameter("small", ParameterKind::Number, Some(".5")),
+            parameter("big", ParameterKind::Number, Some("1e30")),
+            parameter("on", ParameterKind::Boolean, Some("true")),
+            parameter("day", ParameterKind::Date, Some("2024-02-29")),
+            parameter("at", ParameterKind::Timestamp, Some("2024-02-29 10:00")),
+            parameter("none", ParameterKind::Number, None),
+        ])
+        .unwrap();
+        assert_eq!(
+            Value::Array(items),
+            json!([
+                {"name":"who","type":"STRING","value":"x'; DROP TABLE t; --"},
+                {"name":"amount","type":"DECIMAL(5,3)","value":"-0012.340"},
+                {"name":"small","type":"DECIMAL(1,1)","value":".5"},
+                {"name":"big","type":"DOUBLE","value":"1e30"},
+                {"name":"on","type":"BOOLEAN","value":"true"},
+                {"name":"day","type":"DATE","value":"2024-02-29"},
+                {"name":"at","type":"TIMESTAMP","value":"2024-02-29 10:00"},
+                {"name":"none","type":"DECIMAL(38,18)"}
+            ])
+        );
+        let long = "1".repeat(39);
+        assert!(
+            statement_parameters(&[parameter("n", ParameterKind::Number, Some(&long))]).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_parameterized_statement_is_sent_as_written_with_its_parameters() {
+        let (client, task) = fixture(vec![(
+            200,
+            json!({"statement_id":"abc","status":{"state":"SUCCEEDED"},"manifest":{"schema":{"columns":[{"name":"who","type_text":"STRING"}]}},"result":{"data_array":[["x"]]}}),
+        )])
+        .await;
+        struct Rows;
+        impl RowSink for Rows {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                SinkControl::Continue
+            }
+            fn row(&mut self, _: Row) -> SinkControl {
+                SinkControl::Continue
+            }
+        }
+        let mut session = DatabricksSession::new(client);
+        let sql = "SELECT :who";
+        let request = QueryRequest {
+            parameters: vec![QueryParameter {
+                name: "who".into(),
+                kind: ParameterKind::Text,
+                value: Some("x".into()),
+                markers: std::iter::once(7..11).collect(),
+            }],
+            ..QueryRequest::new(sql, ExecutionOptions::default())
+        };
+        session
+            .execute(&request, &mut Rows, CancellationToken::new())
+            .await
+            .unwrap();
+        let requests = task.await.unwrap();
+        let body: Value =
+            serde_json::from_str(&requests[0][requests[0].find("\r\n\r\n").unwrap() + 4..])
+                .unwrap();
+        assert_eq!(body["statement"], sql);
+        assert_eq!(
+            body["parameters"],
+            json!([{"name":"who","type":"STRING","value":"x"}])
+        );
     }
 
     #[test]
@@ -1732,6 +1980,7 @@ mod tests {
             "USE other.finance",
         ] {
             let request = QueryRequest {
+                parameters: Vec::new(),
                 sql: sql.into(),
                 options: ExecutionOptions::default(),
             };
@@ -1938,13 +2187,25 @@ mod tests {
             ErrorCode::Protocol
         );
         task.await.unwrap();
-        let (client, task) = fixture(vec![(403, json!({"message":"private-server-detail"}))]).await;
+        // Any endpoint keeps Databricks' own message, its class and status.
+        let (client, task) = fixture(vec![(
+            403,
+            json!({"error_code":"PERMISSION_DENIED","message":"User does not have USE CATALOG on main."}),
+        )])
+        .await;
         let error = client
             .request(Method::GET, "/api/2.1/unity-catalog/catalogs", &[], None)
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::PermissionDenied);
-        assert!(!error.message.contains("private-server-detail"));
+        assert_eq!(error.message, "User does not have USE CATALOG on main.");
+        assert_eq!(
+            error
+                .server
+                .and_then(|server| server.vendor_code)
+                .as_deref(),
+            Some("HTTP 403 · PERMISSION_DENIED")
+        );
         task.await.unwrap();
         assert_eq!(
             client

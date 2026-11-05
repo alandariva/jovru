@@ -7,6 +7,7 @@ fn preferences(row_limit: u32) -> Preferences {
         row_limit,
         scope: MetadataScope::default(),
         revalidate_hours: 0,
+        appearance: Appearance::default(),
     }
 }
 
@@ -14,6 +15,8 @@ fn preferences(row_limit: u32) -> Preferences {
 struct MemoryVault {
     passwords: Mutex<HashMap<ConnectionId, SecretString>>,
     unavailable: bool,
+    /// Removing an entry fails, as a locked vault does.
+    refuses_delete: bool,
 }
 #[async_trait]
 impl SecretStore for MemoryVault {
@@ -39,6 +42,12 @@ impl SecretStore for MemoryVault {
         Ok(())
     }
     async fn delete(&self, id: ConnectionId) -> DriverResult<()> {
+        if self.refuses_delete {
+            return Err(DriverError::new(
+                ErrorCode::Authentication,
+                "Fixture vault refused",
+            ));
+        }
         self.passwords.lock().unwrap().remove(&id);
         Ok(())
     }
@@ -561,6 +570,10 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
                 include: vec![sales.clone()],
             },
             revalidate_hours: 0,
+            appearance: Appearance {
+                color: Some(crate::connection_appearance::ConnectionColor::Red),
+                environment: Some(crate::connection_appearance::Environment::Production),
+            },
         },
         &vault,
     )
@@ -569,6 +582,9 @@ async fn the_metadata_choice_is_saved_and_an_old_cache_becomes_the_choice_once()
     assert_eq!(saved.scope.include, std::slice::from_ref(&sales));
     let loaded = load(&dir, &vault).await.unwrap().connections.remove(0);
     assert_eq!(loaded.scope.include, [sales]);
+    // The colour and environment are saved with the other preferences.
+    assert_eq!(loaded.appearance, saved.appearance);
+    assert!(loaded.appearance.is_production());
     assert!(loaded.warning.is_none());
     backend::release_caches(&dir).await;
     std::fs::remove_dir_all(&dir).unwrap();
@@ -702,5 +718,91 @@ async fn the_font_size_is_written_by_its_latest_ticket() {
         Some(serde_json::json!(18.0))
     );
     repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn deleting_a_connection_removes_its_profile_password_and_cache() {
+    let (dir, mut profile) = fixture();
+    profile.remember_password = true;
+    let vault = MemoryVault::default();
+    let credentials = Credentials {
+        password: Some(SecretString::from("synthetic-vault-password".to_owned())),
+    };
+    let saved = save(&dir, profile, credentials, preferences(500), &vault)
+        .await
+        .unwrap()
+        .profile;
+    assert_eq!(vault.passwords.lock().unwrap().len(), 1);
+    let cache = dir.join("metadata").join(format!("{}.db", saved.id));
+    assert!(cache.exists());
+
+    // A profile changed since it was read is not deleted, and nothing else
+    // goes with it.
+    let mut stale = saved.clone();
+    stale.revision -= 1;
+    assert!(delete(&dir, &stale, &vault).await.is_err());
+    assert_eq!(load(&dir, &vault).await.unwrap().connections.len(), 1);
+    assert_eq!(vault.passwords.lock().unwrap().len(), 1);
+
+    assert_eq!(delete(&dir, &saved, &vault).await.unwrap(), None);
+    assert!(load(&dir, &vault).await.unwrap().connections.is_empty());
+    assert!(vault.passwords.lock().unwrap().is_empty());
+    assert!(!cache.exists());
+    backend::release_caches(&dir).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_vault_that_keeps_the_password_is_reported_after_the_delete() {
+    let (dir, profile) = fixture();
+    let vault = MemoryVault {
+        refuses_delete: true,
+        ..MemoryVault::default()
+    };
+    let saved = save(
+        &dir,
+        profile,
+        Credentials::default(),
+        preferences(500),
+        &vault,
+    )
+    .await
+    .unwrap()
+    .profile;
+    let warning = delete(&dir, &saved, &vault).await.unwrap();
+    assert!(warning.is_some_and(|warning| warning.contains("vault")));
+    assert!(load(&dir, &vault).await.unwrap().connections.is_empty());
+    backend::release_caches(&dir).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn each_start_keeps_a_copy_of_the_configuration_to_restore() {
+    let (dir, profile) = fixture();
+    let vault = MemoryVault::default();
+    assert!(latest_backup(&dir).await.is_none());
+    let saved = save(
+        &dir,
+        profile,
+        Credentials::default(),
+        preferences(500),
+        &vault,
+    )
+    .await
+    .unwrap()
+    .profile;
+    load(&dir, &vault).await.unwrap();
+    let (backup, taken) = latest_backup(&dir).await.unwrap();
+    assert!(taken <= std::time::SystemTime::now());
+
+    std::fs::write(dir.join("config.db"), b"synthetic corrupt configuration").unwrap();
+    assert!(load(&dir, &vault).await.is_err());
+    let aside = restore_backup(&dir, &backup).await.unwrap();
+    assert!(aside.exists());
+    let loaded = load(&dir, &vault).await.unwrap();
+    assert_eq!(loaded.connections.len(), 1);
+    assert_eq!(loaded.connections[0].profile.id, saved.id);
+    backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }

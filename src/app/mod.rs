@@ -1,15 +1,21 @@
 use jykre::tr;
 mod connections;
+mod copying;
 mod databricks_connection;
 mod demo;
 mod layout;
 mod password;
 pub mod performance;
 mod probe;
+mod report_chart;
+mod report_panel;
+mod report_picker;
+mod report_view;
+mod reports;
 mod result_grid;
+mod saved_query_dialog;
 mod scope_picker;
-mod sql;
-mod sql_providers;
+mod sql_editor;
 mod state;
 mod ui;
 mod workspace;
@@ -22,7 +28,7 @@ use gpui_kit::component::{
     ActiveTheme, Sizable, Theme, ThemeMode, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogClose, DialogFooter},
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, ShowCompletions},
     resizable::{ResizableState, h_resizable, resizable_panel},
     scroll::ScrollableElement,
     tooltip::Tooltip,
@@ -134,7 +140,13 @@ actions!(
         /// Ctrl+Tab or Ctrl+Page Down: the next query tab, from anywhere.
         NextTab,
         /// Ctrl+Shift+Tab or Ctrl+Page Up: the previous query tab.
-        PreviousTab
+        PreviousTab,
+        /// Ctrl+Shift+E: opens or closes the export bar of the result on
+        /// screen.
+        ExportResult,
+        /// Ctrl+/ in the SQL editor: comments the selected lines (or the
+        /// caret's line) with `--`, or uncomments them.
+        ToggleComment
     ]
 );
 
@@ -151,11 +163,16 @@ enum ConnectionSection {
 enum Section {
     Explorer,
     Saved,
+    Reports,
     History,
     Settings,
 }
 
 struct Connection {
+    /// Identifies the connection for as long as the application runs, so
+    /// work that comes back later finds it even after another connection
+    /// was deleted and the list shifted ([`AppView::connection_index`]).
+    key: u64,
     name: String,
     profile: Option<ConnectionProfile>,
     metadata_statuses: Vec<RefreshStatus>,
@@ -171,7 +188,7 @@ struct Connection {
     namespaces: Vec<ObjectPath>,
     /// The editor's index of the cached relations, built off the UI thread
     /// after each read of the cache.
-    names: Option<std::sync::Arc<jykre::completion::NameIndex>>,
+    names: Option<std::sync::Arc<sql_editor::NameIndex>>,
     /// The rows of the current explorer search.
     search_rows: Vec<TreeRow>,
     /// Bumped whenever `search_rows` changes.
@@ -181,7 +198,11 @@ struct Connection {
     expanded_revision: usize,
     refresh_generation: usize,
     detail: String,
+    /// The colour its explorer entry and tab group share: the one the user
+    /// chose, or the driver's.
     color: u32,
+    /// The colour and environment the user chose.
+    appearance: jykre::connection_appearance::Appearance,
     group: TabGroupId,
     expanded: bool,
     input: Option<ResolvedConnection>,
@@ -213,9 +234,32 @@ struct PaletteMatch {
     stored_at: ObjectPath,
 }
 
+/// A row of the command palette: a saved query, listed first, or a table
+/// or view.
+#[derive(Clone, PartialEq)]
+enum PaletteItem {
+    /// The saved query with this identity.
+    Saved(u64),
+    Relation(PaletteMatch),
+}
+
+/// Saved queries the palette lists at most, above the tables.
+const PALETTE_SAVED_LIMIT: usize = 20;
+
 struct AppView {
     tabs: Entity<GroupedTabs>,
     panels: HashMap<TabId, Entity<Workspace>>,
+    /// The report tabs, apart from the query tabs ([`reports`]).
+    report_tabs: HashMap<TabId, reports::ReportTab>,
+    /// The saved reports.
+    reports: jykre::reports::ReportLibrary,
+    /// The reports were read, so writing them loses nothing.
+    persist_reports: bool,
+    /// Bumped by every change, so only the last of a burst is written.
+    reports_revision: usize,
+    /// What each SQL dialect has built in, read at start from the catalog
+    /// directory and handed to every tab; the built-in words until then.
+    sql_catalogs: std::sync::Arc<sql_editor::SqlCatalogs>,
     explorer_split: Entity<ResizableState>,
     assistant_split: Entity<ResizableState>,
     saved_queries: Vec<QueryEntry>,
@@ -229,6 +273,8 @@ struct AppView {
     library_shown: Vec<usize>,
     library_scroll: UniformListScrollHandle,
     connections: Vec<Connection>,
+    /// The key of the last connection added.
+    next_connection_key: u64,
     section: Section,
     next_query: usize,
     /// Bumped by every font size change, so only the last of a burst is
@@ -255,6 +301,8 @@ struct AppView {
     search: Entity<InputState>,
     command: Entity<InputState>,
     command_open: bool,
+    /// The palette found more rows than it lists.
+    command_more: bool,
     connection_open: bool,
     connection_section: ConnectionSection,
     connection_focus: FocusHandle,
@@ -265,6 +313,8 @@ struct AppView {
     driver: usize,
     connection_port: Entity<InputState>,
     connection_row_limit: Entity<InputState>,
+    /// The colour and environment chosen in the connection dialog.
+    connection_appearance: jykre::connection_appearance::Appearance,
     connection_password: Entity<InputState>,
     connection_ssl: Entity<InputState>,
     /// PostgreSQL: the search_path sessions start with.
@@ -280,13 +330,16 @@ struct AppView {
     /// Application-level problem (loading connections, saving preferences,
     /// searching) shown in the explorer until dismissed.
     app_notice: Option<Feedback>,
+    /// The newest copy of `config.db` and when it was taken, offered when
+    /// the configuration could not be opened at start.
+    config_backup: Option<(std::path::PathBuf, std::time::SystemTime)>,
     command_searching: bool,
     remember_password: bool,
     connection_saving: bool,
     connections_loading: bool,
     search_revision: usize,
     command_revision: usize,
-    command_matches: Vec<PaletteMatch>,
+    command_matches: Vec<PaletteItem>,
     /// The match Enter opens; the arrow keys move it.
     command_selected: usize,
     command_scroll: ScrollHandle,
@@ -305,6 +358,21 @@ struct AppView {
     password_focus: FocusHandle,
     /// The prompt just opened: its field takes the keyboard.
     password_needs_focus: bool,
+    /// The dialog that names a saved query and gives it tags, while open.
+    query_details: Option<saved_query_dialog::QueryDetails>,
+    details_name: Entity<InputState>,
+    details_tags: Entity<InputState>,
+    /// Why the dialog did not save (a blank name).
+    details_error: Option<String>,
+    /// Keeps Tab inside the dialog.
+    details_focus: FocusHandle,
+    /// The dialog just opened: its name field takes the keyboard.
+    details_needs_focus: bool,
+    /// The dialog that adds a query tab's SQL to a saved report, while open.
+    report_picker: Option<report_picker::ReportPicker>,
+    /// The tag chosen under the library search; only saved queries with it
+    /// are listed.
+    library_tag: Option<String>,
     /// The open tabs, saved queries and history are written to `config.db`
     /// once the last session's were restored (never in the demo).
     persist_state: bool,
@@ -333,11 +401,23 @@ impl AppView {
         let assistant_split = cx.new(|_| ResizableState::default());
         let explorer_resize = cx.observe(&explorer_split, |_, _, cx| cx.notify());
         let assistant_resize = cx.observe(&assistant_split, |_, _, cx| cx.notify());
+        // The SQL catalogs are read off the UI thread; tabs use the built-in
+        // words until they arrive.
+        cx.spawn(async move |weak, cx| {
+            let catalogs = sql_editor::load_catalogs().await;
+            let _ = weak.update(cx, |this: &mut Self, cx| {
+                this.set_sql_catalogs(catalogs, cx)
+            });
+        })
+        .detach();
         let tab_subscription =
             cx.subscribe_in(&tabs, window, |this, _, event, window, cx| match event {
+                // A report's own group offers no new tab.
+                GroupedTabsEvent::NewTabRequested(group) if this.is_report_group(*group) => {}
                 GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
                 GroupedTabsEvent::TabClosed(tab) => {
                     this.panels.remove(tab);
+                    this.report_tabs.remove(tab);
                     this.save_state_soon(cx);
                 }
                 GroupedTabsEvent::SelectionChanged(_) => this.save_state_soon(cx),
@@ -346,6 +426,13 @@ impl AppView {
                     this.request_move(*tab, *group, *index, window, cx)
                 }
                 GroupedTabsEvent::TabMoved { tab, from, to, .. } if from != to => {
+                    let appearance = this
+                        .connections
+                        .iter()
+                        .find(|connection| connection.group == *to)
+                        .map_or((FAINT, None), |connection| {
+                            (connection.color, connection.appearance.environment)
+                        });
                     let target = this
                         .connections
                         .iter()
@@ -376,7 +463,8 @@ impl AppView {
                         (this.panels.get(tab), target)
                     {
                         panel.update(cx, |panel, cx| {
-                            panel.rebind_connection(name, input, row_limit, cx)
+                            panel.rebind_connection(name, input, row_limit, cx);
+                            panel.set_appearance(appearance.0, appearance.1, cx);
                         });
                     }
                     this.save_state_soon(cx);
@@ -385,7 +473,7 @@ impl AppView {
             });
         let search = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search objects…")));
         let command = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(tr!("Search tables in the workspace…"))
+            InputState::new(window, cx).placeholder(tr!("Search saved queries and tables…"))
         });
         let search_subscription = cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -403,16 +491,8 @@ impl AppView {
                 if let InputEvent::PressEnter { .. } = event {
                     let _ = input;
                     // Enter opens the highlighted match, not always the first.
-                    if let Some(found) = this.command_matches.get(this.command_selected).cloned() {
-                        this.open_relation(
-                            found.connection,
-                            &found.path,
-                            &found.stored_at,
-                            false,
-                            window,
-                            cx,
-                        );
-                        this.command_open = false;
+                    if let Some(item) = this.command_matches.get(this.command_selected).cloned() {
+                        this.open_palette_item(item, window, cx);
                     }
                 }
                 cx.notify();
@@ -429,6 +509,11 @@ impl AppView {
             explorer_split,
             assistant_split,
             panels: HashMap::new(),
+            report_tabs: HashMap::new(),
+            reports: jykre::reports::ReportLibrary::default(),
+            persist_reports: false,
+            reports_revision: 0,
+            sql_catalogs: std::sync::Arc::default(),
             saved_queries: vec![QueryEntry {
                 id: 1,
                 title: tr!("Active customers").into(),
@@ -452,6 +537,7 @@ impl AppView {
             library_scroll: UniformListScrollHandle::new(),
             font_revision: 0,
             connections: Vec::new(),
+            next_connection_key: 0,
             section: Section::Explorer,
             next_query: 1,
             sidebar_open: true,
@@ -467,6 +553,7 @@ impl AppView {
             search,
             command,
             command_open: false,
+            command_more: false,
             connection_open: false,
             connection_section: ConnectionSection::Connection,
             connection_focus: cx.focus_handle(),
@@ -478,6 +565,7 @@ impl AppView {
             connection_port: cx.new(|cx| InputState::new(window, cx).default_value("5432")),
             connection_row_limit: cx
                 .new(|cx| InputState::new(window, cx).default_value(DEFAULT_ROW_LIMIT.to_string())),
+            connection_appearance: Default::default(),
             connection_password: cx.new(|cx| {
                 InputState::new(window, cx)
                     .masked(true)
@@ -495,6 +583,7 @@ impl AppView {
             connection_scope: cx.new(|cx| scope_picker::ScopePicker::new(window, cx)),
             connection_status: None,
             app_notice: None,
+            config_backup: None,
             command_searching: false,
             remember_password: false,
             connection_saving: false,
@@ -518,6 +607,16 @@ impl AppView {
             password_remember: false,
             password_focus: cx.focus_handle(),
             password_needs_focus: false,
+            query_details: None,
+            details_name: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr!("e.g. Revenue by month"))),
+            details_tags: cx
+                .new(|cx| InputState::new(window, cx).placeholder(tr!("e.g. finance, monthly"))),
+            details_error: None,
+            details_focus: cx.focus_handle(),
+            details_needs_focus: false,
+            report_picker: None,
+            library_tag: None,
             persist_state: false,
             state_revision: 0,
             orphan_groups: Vec::new(),
@@ -525,7 +624,14 @@ impl AppView {
             node_focus: std::cell::RefCell::new(HashMap::new()),
             _subscriptions: vec![
                 // The last edits are written before the application exits.
-                cx.on_app_quit(|this, cx| this.save_state_now(cx)),
+                cx.on_app_quit(|this, cx| {
+                    let state = this.save_state_now(cx);
+                    let reports = this.save_reports_now();
+                    async move {
+                        state.await;
+                        reports.await;
+                    }
+                }),
                 tab_subscription,
                 search_subscription,
                 command_subscription,
@@ -568,6 +674,21 @@ impl AppView {
                 }
             },
         ));
+        // Enter in either field of the saved query dialog saves it.
+        for input in [app.details_name.clone(), app.details_tags.clone()] {
+            app._subscriptions.push(cx.subscribe_in(
+                &input,
+                window,
+                |this, _, event: &InputEvent, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.submit_details(window, cx),
+                    InputEvent::Change if this.details_error.is_some() => {
+                        this.details_error = None;
+                        cx.notify();
+                    }
+                    _ => {}
+                },
+            ));
+        }
         app._subscriptions.push(cx.subscribe_in(
             &app.connection_databricks,
             window,
@@ -597,7 +718,9 @@ impl AppView {
                 let group = app
                     .tabs
                     .update(cx, |tabs, cx| tabs.add_group(name, rgb(color).into(), cx));
+                app.next_connection_key += 1;
                 app.connections.push(Connection {
+                    key: app.next_connection_key,
                     name: name.into(),
                     profile: None,
                     metadata_statuses: Vec::new(),
@@ -612,6 +735,7 @@ impl AppView {
                     refresh_generation: 0,
                     detail: detail.into(),
                     color,
+                    appearance: Default::default(),
                     group,
                     expanded: app.connections.is_empty(),
                     input: None,
@@ -662,17 +786,139 @@ impl AppView {
     /// section changes, never while drawing.
     fn filter_library(&mut self, cx: &App) {
         let query = self.library_search.read(cx).value().to_lowercase();
-        let entries = if self.section == Section::History {
-            &self.history
-        } else {
-            &self.saved_queries
+        // A chosen tag that no saved query has any more stops filtering.
+        if let Some(tag) = &self.library_tag
+            && !self
+                .saved_queries
+                .iter()
+                .any(|entry| entry.tags.iter().any(|kept| kept.eq_ignore_ascii_case(tag)))
+        {
+            self.library_tag = None;
+        }
+        let (entries, tag) = match self.section {
+            Section::History => (&self.history, None),
+            Section::Saved => (&self.saved_queries, self.library_tag.as_deref()),
+            Section::Reports => {
+                self.library_shown = self
+                    .reports
+                    .reports
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, report)| report.matches(&query))
+                    .map(|(index, _)| index)
+                    .collect();
+                return;
+            }
+            Section::Explorer | Section::Settings => {
+                self.library_shown.clear();
+                return;
+            }
         };
         self.library_shown = entries
             .iter()
             .enumerate()
-            .filter(|(_, entry)| entry.matches(&query))
+            .filter(|(_, entry)| {
+                entry.matches(&query)
+                    && tag.is_none_or(|tag| {
+                        entry.tags.iter().any(|kept| kept.eq_ignore_ascii_case(tag))
+                    })
+            })
             .map(|(index, _)| index)
             .collect();
+    }
+
+    /// A tag under the library search: choosing it lists only the saved
+    /// queries that have it, choosing it again lists them all.
+    fn library_tag_chip(
+        &self,
+        position: usize,
+        tag: String,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let chosen = self
+            .library_tag
+            .as_ref()
+            .is_some_and(|current| current.eq_ignore_ascii_case(&tag));
+        div()
+            .id(("library-tag", position))
+            .role(Role::CheckBox)
+            .aria_label(tr!("Show only queries tagged {0}", tag))
+            .aria_toggled(if chosen {
+                Toggled::True
+            } else {
+                Toggled::False
+            })
+            .focusable()
+            .tab_index(0)
+            .flex_none()
+            .px(px(7.))
+            .py(px(2.))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(if chosen {
+                rgb(MINT)
+            } else {
+                transparent_black().into()
+            })
+            .focus_visible(|s| s.border_color(rgb(TEXT)))
+            .cursor_pointer()
+            .text_size(px(12.))
+            .text_color(rgb(if chosen { MINT } else { MUTED }))
+            .bg(Hsla::from(rgb(if chosen { MINT } else { FAINT })).opacity(0.12))
+            .hover(|s| s.text_color(rgb(TEXT)))
+            .child(format!("#{tag}"))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.library_tag = if chosen { None } else { Some(tag.clone()) };
+                this.filter_library(cx);
+                cx.notify();
+            }))
+    }
+
+    /// The saved queries the palette's text matches, listed above the tables
+    /// found so far (kept until their search answers). Called as the text
+    /// changes, so they show at once.
+    pub(super) fn match_saved_in_palette(&mut self, cx: &App) {
+        let query = self.command.read(cx).value().to_lowercase();
+        let chosen = self.command_matches.get(self.command_selected).cloned();
+        let relations = self
+            .command_matches
+            .drain(..)
+            .filter(|item| matches!(item, PaletteItem::Relation(_)));
+        let saved = self
+            .saved_queries
+            .iter()
+            .filter(|entry| entry.matches(&query))
+            .take(PALETTE_SAVED_LIMIT)
+            .map(|entry| PaletteItem::Saved(entry.id));
+        self.command_matches = saved.chain(relations).collect::<Vec<_>>();
+        self.command_more = jykre::palette::truncate(&mut self.command_matches, &query);
+        self.command_selected = jykre::palette::keep(chosen.as_ref(), &self.command_matches);
+        self.command_scroll.scroll_to_item(self.command_selected);
+    }
+
+    /// Opens what a palette row holds and closes the palette.
+    fn open_palette_item(
+        &mut self,
+        item: PaletteItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_open = false;
+        match item {
+            PaletteItem::Saved(id) => {
+                if let Some(entry) = self.saved_queries.iter().find(|entry| entry.id == id) {
+                    self.open_saved_query(entry.clone(), window, cx);
+                }
+            }
+            PaletteItem::Relation(found) => self.open_relation(
+                found.connection,
+                &found.path,
+                &found.stored_at,
+                connections::OpenTable::Data,
+                window,
+                cx,
+            ),
+        }
     }
 
     /// Opens a saved query: the tab that edits it, when one is open,
@@ -755,13 +1001,19 @@ impl AppView {
         let _ = self.tabs.update(cx, |tabs, cx| tabs.select_tab(tab, cx));
         if let Some(panel) = self.panels.get(&tab) {
             panel.update(cx, |panel, cx| panel.focus_editor(window, cx));
+        } else if let Some(report) = self.report_tabs.get(&tab) {
+            report.view.update(cx, |view, cx| view.focus(window, cx));
         }
     }
 
     /// Ctrl+Tab and Ctrl+Shift+Tab (or Ctrl+Page Down and Ctrl+Page Up):
     /// the next or previous query tab, from wherever the keyboard is.
     fn step_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.connection_open || self.command_open || self.password_prompt.is_some() {
+        if self.connection_open
+            || self.command_open
+            || self.password_prompt.is_some()
+            || self.dialog_open()
+        {
             return;
         }
         let next = {
@@ -813,6 +1065,8 @@ impl AppView {
                 cx,
             )
         });
+        let catalogs = self.sql_catalogs.clone();
+        panel.update(cx, |panel, cx| panel.set_catalogs(catalogs, cx));
         if let Some((input, row_limit)) = self
             .connections
             .iter()
@@ -821,16 +1075,44 @@ impl AppView {
         {
             panel.update(cx, |panel, cx| panel.set_connection(input, row_limit, cx));
         }
+        if let Some(connection) = self
+            .connections
+            .iter()
+            .find(|connection| connection.group == group && connection.input.is_some())
+        {
+            let (color, environment) = (connection.color, connection.appearance.environment);
+            panel.update(cx, |panel, cx| panel.set_appearance(color, environment, cx));
+        }
         let subscription = cx.subscribe_in(
             &panel,
             window,
             |this, panel_entity, event: &WorkspaceEvent, window, cx| {
                 match event {
+                    // A new query is named and tagged first, in a dialog
+                    // that starts from the tab's title.
+                    WorkspaceEvent::Saved {
+                        id: None,
+                        title,
+                        connection,
+                        sql,
+                    } => {
+                        this.open_details(
+                            saved_query_dialog::QueryDetails::New {
+                                panel: panel_entity.downgrade(),
+                                connection: connection.clone(),
+                                sql: sql.clone(),
+                            },
+                            title,
+                            &[],
+                            window,
+                            cx,
+                        );
+                    }
                     // A saved query is found by its identity, never by its
                     // title, so two tabs with the same title never replace
                     // each other's query.
                     WorkspaceEvent::Saved {
-                        id,
+                        id: Some(id),
                         title,
                         connection,
                         sql,
@@ -838,8 +1120,9 @@ impl AppView {
                         let id = jykre::workspace_state::save_query(
                             &mut this.saved_queries,
                             &mut this.next_saved_id,
-                            *id,
+                            Some(*id),
                             title,
+                            &[],
                             connection,
                             sql,
                         );
@@ -857,6 +1140,57 @@ impl AppView {
                         }
                     }
                     WorkspaceEvent::Changed => {}
+                    WorkspaceEvent::SaveAsReport {
+                        title,
+                        connection,
+                        sql,
+                        context,
+                    } => {
+                        let (title, connection, sql) =
+                            (title.clone(), connection.clone(), sql.clone());
+                        this.report_from_query(
+                            &title,
+                            &connection,
+                            &sql,
+                            context.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    WorkspaceEvent::AddToReport {
+                        connection,
+                        sql,
+                        context,
+                    } => {
+                        let connection = connection.clone();
+                        this.open_report_picker(
+                            &connection,
+                            sql.clone(),
+                            context.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    WorkspaceEvent::ConfirmRisk {
+                        connection,
+                        description,
+                    } => {
+                        let panel = panel_entity.downgrade();
+                        confirm(
+                            window,
+                            cx,
+                            Confirmation {
+                                title: tr!("Run on {0}?", connection),
+                                description: description.clone(),
+                                ok: tr!("Run"),
+                                cancel: tr!("Cancel"),
+                                focus: ConfirmFocus::Dialog,
+                            },
+                            move |_, cx| {
+                                let _ = panel.update(cx, |panel, cx| panel.confirm_risk(cx));
+                            },
+                        );
+                    }
                     WorkspaceEvent::PasswordRequired => {
                         let name = panel_entity.read(cx).connection_name().to_owned();
                         if let Some(index) = this.connections.iter().position(|c| c.name == name) {
@@ -907,6 +1241,17 @@ impl AppView {
             },
         );
         self._subscriptions.push(subscription);
+        // The tab shows the run in progress and how the last one ended. The
+        // tab bar redraws only when that changes, not on every keystroke.
+        let status = cx.observe(&panel, |this, panel, cx| {
+            let status = panel.read(cx).tab_status();
+            if let Some(tab) = this.tab_of(&panel) {
+                let _ = this
+                    .tabs
+                    .update(cx, |tabs, cx| tabs.set_tab_status(tab, status, cx));
+            }
+        });
+        self._subscriptions.push(status);
         // The group exists: it was recreated above when it had been closed.
         let Ok(tab) = self.tabs.update(cx, |tabs, cx| {
             tabs.add_tab(group, title.to_string(), panel.clone(), cx)
@@ -970,21 +1315,29 @@ impl AppView {
         for index in 0..self.connections.len() {
             self.push_context_choices(index, cx);
         }
+        self.sync_reports(cx);
     }
 
     /// Closes a tab, asking first when a query is running in it (closing
     /// cancels it), a transaction is open (closing rolls it back) or its SQL
     /// is not saved (closing loses it).
     fn request_close(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) {
-        let (busy, unsaved, transaction) =
+        if let Some(report) = self.report_tabs.get(&tab) {
+            let view = report.view.read(cx);
+            let (busy, unsaved) = (view.is_busy(), view.has_unsaved_changes(cx));
+            self.request_report_close(tab, busy, unsaved, window, cx);
+            return;
+        }
+        let (busy, unsaved, transaction, exporting) =
             self.panels
                 .get(&tab)
-                .map_or((false, false, false), |panel| {
+                .map_or((false, false, false, false), |panel| {
                     let panel = panel.read(cx);
                     (
                         panel.is_busy(),
                         panel.has_unsaved_sql(),
                         panel.has_open_transaction(),
+                        panel.is_exporting(),
                     )
                 });
         let tabs = self.tabs.downgrade();
@@ -996,6 +1349,36 @@ impl AppView {
                 }
             });
         };
+        if exporting {
+            let description = if unsaved {
+                tr!(
+                    "Closing the tab cancels the export, which leaves no file, and loses its SQL, which is not in the saved queries."
+                )
+            } else {
+                tr!("Closing the tab cancels the export, which leaves no file.")
+            };
+            let description = if transaction {
+                format!(
+                    "{description} {}",
+                    tr!("The open transaction is rolled back.")
+                )
+            } else {
+                description.to_owned()
+            };
+            confirm(
+                window,
+                cx,
+                Confirmation {
+                    title: tr!("An export is running in this tab.").to_string(),
+                    description: description.to_string(),
+                    ok: tr!("Close and cancel"),
+                    cancel: tr!("Keep the tab"),
+                    focus: ConfirmFocus::Dialog,
+                },
+                move |window, cx| close(Some(window), cx),
+            );
+            return;
+        }
         if transaction && !busy {
             let description = if unsaved {
                 tr!(
@@ -1066,6 +1449,15 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let same_group = self.tabs.read(cx).group_of(tab) == Some(group);
+        // A report tab stays in its own group, and no other tab joins one.
+        if self.report_tabs.contains_key(&tab) || self.is_report_group(group) {
+            if same_group {
+                let _ = self
+                    .tabs
+                    .update(cx, |tabs, cx| tabs.move_tab(tab, group, index, cx));
+            }
+            return;
+        }
         let Some(panel) = self.panels.get(&tab) else {
             return;
         };
@@ -1136,16 +1528,27 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.connection_open || self.command_open || self.password_prompt.is_some() {
+        if self.connection_open
+            || self.command_open
+            || self.password_prompt.is_some()
+            || self.dialog_open()
+        {
             return;
         }
-        let Some(panel) = self
-            .tabs
-            .read(cx)
-            .active_tab()
-            .and_then(|tab| self.panels.get(&tab))
-            .cloned()
-        else {
+        let active = self.tabs.read(cx).active_tab();
+        if let Some(report) = active.and_then(|tab| self.report_tabs.get(&tab)) {
+            // A report runs the panel whose SQL has the keyboard, or all of
+            // them; Ctrl+Alt+Enter always runs all of them.
+            report.view.update(cx, |view, cx| {
+                if all {
+                    view.run(jykre::reports::run::RunScope::All, cx);
+                } else {
+                    view.run_shortcut(window, cx);
+                }
+            });
+            return;
+        }
+        let Some(panel) = active.and_then(|tab| self.panels.get(&tab)).cloned() else {
             return;
         };
         if panel.read(cx).shortcut() != ShortcutAction::ConfirmCancel {
@@ -1266,6 +1669,7 @@ impl AppView {
                 [
                     (Section::Explorer, I::Database, tr!("Explorer")),
                     (Section::Saved, I::Bookmark, tr!("Saved queries")),
+                    (Section::Reports, I::FileChartColumn, tr!("Reports")),
                     (Section::History, I::Clock, tr!("History")),
                 ]
                 .into_iter()
@@ -1274,7 +1678,7 @@ impl AppView {
                 .collect::<Vec<_>>(),
             )
             .child(div().flex_1())
-            .child(self.rail_item(3, Section::Settings, I::Settings2, tr!("Preferences"), cx))
+            .child(self.rail_item(4, Section::Settings, I::Settings2, tr!("Preferences"), cx))
             .child(
                 div()
                     .size(px(26.))
@@ -1294,6 +1698,7 @@ impl AppView {
         let title = match self.section {
             Section::Explorer => tr!("Explorer"),
             Section::Saved => tr!("Saved queries"),
+            Section::Reports => tr!("Reports"),
             Section::History => tr!("History"),
             Section::Settings => tr!("Preferences"),
         };
@@ -1325,6 +1730,14 @@ impl AppView {
                                         })
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.open_connection(None, window, cx)
+                                        })),
+                                )
+                            })
+                            .when(self.section == Section::Reports, |s| {
+                                s.child(
+                                    icon_button("add-report", I::Plus, tr!("New report"))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.new_report(window, cx)
                                         })),
                                 )
                             })
@@ -1395,6 +1808,43 @@ impl AppView {
                             ),
                     )
                 })
+                .when_some(self.config_backup.as_ref(), |s, (_, taken)| {
+                    let age = jykre::explorer::format_age(
+                        std::time::SystemTime::now()
+                            .duration_since(*taken)
+                            .unwrap_or_default(),
+                    );
+                    s.child(
+                        column()
+                            .id("config-backup")
+                            .role(Role::Status)
+                            .mx_3()
+                            .mb_2()
+                            .p_2()
+                            .gap_2()
+                            .rounded(px(6.))
+                            .bg(rgb(SURFACE))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child(tr!(
+                                        "A copy of the configuration, taken {0}, is available. Restoring it keeps the damaged file next to it.",
+                                        age
+                                    )),
+                            )
+                            .child(
+                                button(
+                                    "restore-config-backup",
+                                    I::ArchiveRestore,
+                                    tr!("Restore the backup"),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.restore_config_backup(window, cx)
+                                })),
+                            ),
+                    )
+                })
                 .child(
                     column()
                         .id("connection-tree")
@@ -1461,14 +1911,15 @@ impl AppView {
         let query = self.search.read(cx).value().to_lowercase();
         let expanded = connection.expanded || !query.is_empty();
         column().flex_none()
-            .child(row().id(("connection", index)).role(Role::Button).aria_label(connection.name.clone()).aria_expanded(expanded).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(38.)).px_3().gap_2().cursor_pointer().hover(|s| s.bg(rgb(SURFACE)))
+            .child(row().id(("connection", index)).role(Role::Button).aria_label(connection.name.clone()).aria_description(connection.detail.clone()).aria_expanded(expanded).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(38.)).px_3().gap_2().cursor_pointer().hover(|s| s.bg(rgb(SURFACE)))
                 .on_click(cx.listener(move |this, _, _, cx| { this.connections[index].expanded = !this.connections[index].expanded; cx.notify(); }))
+                // Where it connects, built only when shown.
+                .tooltip({ let detail = connection.detail.clone(); move |window, cx| gpui_kit::component::tooltip::Tooltip::new(detail.clone()).build(window, cx) })
                 .child(icon(if expanded { I::ChevronDown } else { I::ChevronRight }, FAINT))
-                .child(icon(I::Database, connection.color))
+                .child(icon(I::Server, connection.color))
                 .child(div().text_size(px(14.)).flex_1().truncate().child(connection.name.clone()))
                 .child(dot(connection.color)))
             .when(expanded, |s| s
-                .child(div().pl(px(43.)).pb_2().child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(connection.detail.clone())))
                 .when(index == 0, |s| s
                     .child(row().px_3().pl(px(29.)).h(px(30.)).child(icon(I::ChevronDown, FAINT)).child(icon(I::Database, MUTED)).child(label("commerce")))
                     .child(row().id("schema-public").role(Role::Button).aria_label(tr!("Schema public")).aria_expanded(self.schema_open).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).pl(px(43.)).h(px(30.)).cursor_pointer()
@@ -1526,11 +1977,12 @@ impl AppView {
         .clone();
         let preview = entry.preview(80);
         let (symbol, color, headline, detail) = if saved {
+            let tags: String = entry.tags.iter().map(|tag| format!("#{tag} ")).collect();
             (
                 I::Bookmark,
                 MINT,
                 entry.title.clone(),
-                format!("{} · {preview}", entry.connection),
+                format!("{tags}{} · {preview}", entry.connection),
             )
         } else {
             use jykre::workspace_state::RunStatus;
@@ -1565,6 +2017,9 @@ impl AppView {
         Some(
             row()
                 .id(("library-entry", position))
+                // The list's width, so the text truncates before the
+                // buttons instead of pushing them out of sight.
+                .w_full()
                 .h(px(LIBRARY_ROW_HEIGHT))
                 .gap_1()
                 .child(
@@ -1618,6 +2073,13 @@ impl AppView {
                 // save button in the editor never removes.
                 .when(saved, |s| {
                     s.child(
+                        icon_button("edit", I::Pencil, tr!("Rename or edit tags")).on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.edit_saved_query(id, window, cx)
+                            }),
+                        ),
+                    )
+                    .child(
                         icon_button("remove", I::Trash, tr!("Remove from saved queries")).on_click(
                             cx.listener(move |this, _, window, cx| {
                                 this.remove_saved_query(id, window, cx)
@@ -1660,6 +2122,25 @@ impl AppView {
                                     tr!("Search the history")
                                 }),
                         )
+                    })
+                    .when(saved, |s| {
+                        let tags = jykre::workspace_state::all_tags(&self.saved_queries);
+                        s.when(!tags.is_empty(), |s| {
+                            s.child(
+                                div()
+                                    .id("library-tags")
+                                    .role(Role::Group)
+                                    .aria_label(tr!("Tags"))
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_1()
+                                    .max_h(px(64.))
+                                    .overflow_y_scroll()
+                                    .children(tags.into_iter().enumerate().map(
+                                        |(position, tag)| self.library_tag_chip(position, tag, cx),
+                                    )),
+                            )
+                        })
                     })
                     .map(|s| {
                         if empty {
@@ -1708,9 +2189,53 @@ impl AppView {
                     })
                 },
             )
+            .when(self.section == Section::Reports, |s| {
+                self.reports_list(s, cx)
+            })
             .when(self.section == Section::Settings, |s| {
                 s.child(self.preferences(cx))
             })
+    }
+
+    /// Hands the SQL catalogs to every tab, and to the ones opened later.
+    fn set_sql_catalogs(
+        &mut self,
+        catalogs: std::sync::Arc<sql_editor::SqlCatalogs>,
+        cx: &mut Context<Self>,
+    ) {
+        for panel in self.panels.values() {
+            let catalogs = catalogs.clone();
+            panel.update(cx, |panel, cx| panel.set_catalogs(catalogs, cx));
+        }
+        for report in self.report_tabs.values() {
+            let catalogs = catalogs.clone();
+            report
+                .view
+                .update(cx, |view, cx| view.set_catalogs(catalogs, cx));
+        }
+        self.sql_catalogs = catalogs;
+        cx.notify();
+    }
+
+    /// Which SQL catalogs the editor uses, for Settings.
+    fn sql_catalog_status(&self) -> Div {
+        let loaded: Vec<String> = self
+            .sql_catalogs
+            .loaded()
+            .map(|(_, catalog)| match &catalog.version {
+                Some(version) => format!("{} {version}", catalog.name),
+                None => catalog.name.clone(),
+            })
+            .collect();
+        let text = if loaded.is_empty() {
+            tr!("Not found: built-in keywords only").to_owned()
+        } else {
+            loaded.join(" · ")
+        };
+        row()
+            .justify_between()
+            .child(label(tr!("SQL catalogs")))
+            .child(label(text))
     }
 
     fn preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -1719,6 +2244,7 @@ impl AppView {
             .child(row().justify_between().child(label(tr!("Theme"))).child(badge("Graphite", MINT)))
             .child(row().justify_between().child(label(tr!("SQL font"))).child(label("Cascadia Code")))
             .child(row().justify_between().child(label(tr!("SQL size"))).child(badge(format!("{} px", f32::from(cx.theme().mono_font_size)), MINT)))
+            .child(self.sql_catalog_status())
             .child(row().gap_1().children([12., 14., 16., 18., 20.].into_iter().enumerate().map(|(index, size)| {
                 div().id(("sql-font-size", index)).role(Role::Button).aria_label(tr!("SQL font at {0} pixels", size))
                     .focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))).w(px(37.)).h(px(32.)).flex().items_center().justify_center()
@@ -1743,6 +2269,10 @@ impl AppView {
                 (tr!("Assistant"), "Ctrl Shift B"), (tr!("Next or previous tab"), "Ctrl Tab / Ctrl Shift Tab"),
                 (tr!("SQL font"), "Ctrl + / −"), (tr!("Reset font"), "Ctrl 0"),
             ].into_iter().map(|(title, key)| row().justify_between().child(label(title)).child(shortcut(key))))
+            .child(div().mt_3().child(label(tr!("Diagnostics"))))
+            .child(label(tr!("The log keeps the last 7 days, without passwords, SQL or values.")))
+            .child(button("open-log-folder", I::FolderOpen, tr!("Open log folder"))
+                .on_click(cx.listener(|this, _, _, cx| this.open_log_folder(cx))))
             .child(div().mt_3().child(label(tr!("Preferences saved on this computer."))))
     }
 
@@ -1894,7 +2424,7 @@ impl AppView {
                             .pt_4()
                             .pb_2()
                             .justify_between()
-                            .child(label(tr!("Tables and views · connections")))
+                            .child(label(tr!("Saved queries · tables and views")))
                             .when(pending, |s| {
                                 s.child(
                                     row()
@@ -1915,7 +2445,7 @@ impl AppView {
                         column()
                             .id("command-results")
                             .role(Role::ListBox)
-                            .aria_label(tr!("Tables and views · connections"))
+                            .aria_label(tr!("Saved queries · tables and views"))
                             .max_h(px(320.))
                             .overflow_y_scroll()
                             .track_scroll(&self.command_scroll)
@@ -1925,88 +2455,28 @@ impl AppView {
                             .when(matches.is_empty(), |s| {
                                 s.child(div().p_5().child(label(if self.command_searching {
                                     tr!("Searching…")
-                                } else if self.connections.is_empty() {
+                                } else if self.connections.is_empty() && self.saved_queries.is_empty() {
                                     tr!("No connections yet. Add one to search its tables.")
                                 } else {
                                     tr!("No objects found. Refresh the connection metadata.")
                                 })))
                             })
-                            .children(matches.iter().enumerate().map(|(index, found)| {
-                                let selected = index == self.command_selected;
-                                let name = found
-                                    .path
-                                    .0
-                                    .last()
-                                    .map(|part| part.name.clone())
-                                    .unwrap_or_default();
-                                // Where it is, so objects of the same name in
-                                // other schemas tell apart.
-                                let location = found.path.0[..found.path.0.len().saturating_sub(1)]
-                                    .iter()
-                                    .map(|part| part.name.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(".");
-                                let connection = self
-                                    .connections
-                                    .get(found.connection)
-                                    .map(|connection| connection.name.clone())
-                                    .unwrap_or_default();
-                                let found = found.clone();
-                                row()
-                                    .id(("command-table", index))
-                                    .role(Role::ListBoxOption)
-                                    .aria_label(tr!(
-                                        "New query for table {0} in {1}, {2}",
-                                        name,
-                                        location,
-                                        connection
-                                    ))
-                                    .aria_selected(selected)
-                                    .focusable()
-                                    .tab_index(0)
-                                    .when(selected, |s| s.bg(rgb(SURFACE)))
-                                    .focus_visible(|s| s.bg(rgb(HOVER)))
-                                    .h(px(43.))
-                                    .px_3()
-                                    .rounded(px(5.))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(HOVER)))
-                                    .child(icon(I::Table2, MINT))
-                                    .child(
-                                        row()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .text_size(px(14.))
-                                                    .child(name),
-                                            )
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(12.))
-                                                    .text_color(rgb(FAINT))
-                                                    .child(location),
-                                            ),
-                                    )
-                                    .child(label(connection))
-                                    .child(icon(I::CornerDownLeft, FAINT))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.open_relation(
-                                            found.connection,
-                                            &found.path,
-                                            &found.stored_at,
-                                            false,
-                                            window,
-                                            cx,
-                                        );
-                                        this.command_open = false;
-                                    }))
+                            .children(matches.iter().enumerate().map(|(index, item)| {
+                                self.palette_row(index, item, cx)
                             })),
                     )
+                    .when(self.command_more, |s| {
+                        s.child(div().px_4().pb_2().child(label(
+                            if self.command.read(cx).value().trim().is_empty() {
+                                tr!("Type to search every table, view and saved query.").to_string()
+                            } else {
+                                tr!(
+                                    "Showing the first {0}. Type more to narrow the search.",
+                                    matches.len()
+                                )
+                            },
+                        )))
+                    })
                     .child(
                         row()
                             .h(px(40.))
@@ -2016,7 +2486,7 @@ impl AppView {
                             .border_t_1()
                             .border_color(rgb(BORDER))
                             .child(label(tr!(
-                                "↑ ↓ choose · Enter creates a query for the table · or click an object"
+                                "↑ ↓ choose · Enter opens the saved query or the table's data · #tag filters"
                             )))
                             .child(row().child(shortcut("Esc")).child(label(tr!("close")))),
                     )
@@ -2024,6 +2494,150 @@ impl AppView {
                     .focus_trap("command-focus-trap", &self.command_focus),
             )
             .into_any_element()
+    }
+
+    /// One row of the palette. The first row of each kind carries its
+    /// heading, so the rows stay the list's children one for one and the
+    /// arrows scroll to the right one.
+    fn palette_row(&self, index: usize, item: &PaletteItem, cx: &mut Context<Self>) -> Div {
+        let selected = index == self.command_selected;
+        let previous = index
+            .checked_sub(1)
+            .and_then(|at| self.command_matches.get(at));
+        let first_of_kind = matches!(
+            (previous, item),
+            (None, _) | (Some(PaletteItem::Saved(_)), PaletteItem::Relation(_))
+        );
+        let heading = first_of_kind.then(|| match item {
+            PaletteItem::Saved(_) => tr!("Saved queries"),
+            PaletteItem::Relation(_) => tr!("Tables and views · connections"),
+        });
+        let option = |id: (&'static str, usize)| {
+            row()
+                .id(id)
+                .role(Role::ListBoxOption)
+                .aria_selected(selected)
+                .focusable()
+                .tab_index(0)
+                .when(selected, |s| s.bg(rgb(SURFACE)))
+                .focus_visible(|s| s.bg(rgb(HOVER)))
+                .h(px(43.))
+                .px_3()
+                .rounded(px(5.))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(HOVER)))
+        };
+        // What the text asked for is marked where the row shows it: the
+        // words without `#tag` filters, and those filters in the tags.
+        let typed = self.command.read(cx).value().to_string();
+        let words = jykre::workspace_state::without_tag_filters(&typed);
+        let words = words.trim();
+        let tag_filters: Vec<&str> = typed
+            .split_whitespace()
+            .filter(|word| word.len() > 1 && word.starts_with('#'))
+            .collect();
+        let mark = |value: &str, tags: bool| {
+            let mut needles = vec![words];
+            if tags {
+                needles.extend(tag_filters.iter().copied());
+            }
+            marked(
+                value.to_owned(),
+                jykre::palette::highlights(value, &needles),
+            )
+        };
+        let text = |name: String, detail: String, tags: bool| {
+            row()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .max_w(px(260.))
+                        .truncate()
+                        .text_size(px(14.))
+                        .child(mark(&name, false)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(rgb(FAINT))
+                        .child(mark(&detail, tags)),
+                )
+        };
+        let connection_label = |name: &str| {
+            div()
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .child(mark(name, false))
+        };
+        let open = {
+            let item = item.clone();
+            cx.listener(move |this, _, window, cx| this.open_palette_item(item.clone(), window, cx))
+        };
+        let row_element = match item {
+            PaletteItem::Saved(id) => {
+                let Some(entry) = self.saved_queries.iter().find(|entry| entry.id == *id) else {
+                    return div();
+                };
+                let tags = entry
+                    .tags
+                    .iter()
+                    .map(|tag| format!("#{tag}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                option(("command-saved", index))
+                    .aria_label(tr!("Open the saved query {0}", entry.title))
+                    .child(icon(I::Bookmark, MINT))
+                    .child(text(entry.title.clone(), tags, true))
+                    .child(connection_label(&entry.connection))
+                    .child(icon(I::CornerDownLeft, FAINT))
+                    .on_click(open)
+            }
+            PaletteItem::Relation(found) => {
+                let name = found
+                    .path
+                    .0
+                    .last()
+                    .map(|part| part.name.clone())
+                    .unwrap_or_default();
+                // Where it is, so objects of the same name in other schemas
+                // tell apart.
+                let location = found.path.0[..found.path.0.len().saturating_sub(1)]
+                    .iter()
+                    .map(|part| part.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                let connection = self
+                    .connections
+                    .get(found.connection)
+                    .map(|connection| connection.name.clone())
+                    .unwrap_or_default();
+                option(("command-table", index))
+                    .aria_label(tr!(
+                        "View data of table {0} in {1}, {2}",
+                        name,
+                        location,
+                        connection
+                    ))
+                    .child(icon(I::Table2, MINT))
+                    .child(text(name, location, false))
+                    .child(label(connection))
+                    .child(icon(I::CornerDownLeft, FAINT))
+                    .on_click(open)
+            }
+        };
+        // Rows keep their height and the list scrolls; shrinking them to fit
+        // piles them on top of each other.
+        column()
+            .flex_none()
+            .when_some(heading, |s, heading| {
+                s.child(div().px_3().pt_2().pb_1().child(label(heading)))
+            })
+            .child(row_element.flex_none())
     }
 
     fn overlay(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -2057,6 +2671,16 @@ impl Render for AppView {
         probe::frame_started();
         probe::rendered("AppView");
         self.sync_explorer(cx);
+        if std::mem::take(&mut self.details_needs_focus) {
+            self.details_name
+                .update(cx, |input, cx| input.focus(window, cx));
+        }
+        if let Some(picker) = self.report_picker.as_mut()
+            && std::mem::take(&mut picker.needs_focus)
+        {
+            let search = picker.search().clone();
+            search.update(cx, |input, cx| input.focus(window, cx));
+        }
         if std::mem::take(&mut self.password_needs_focus) {
             self.password_input
                 .update(cx, |input, cx| input.focus(window, cx));
@@ -2086,17 +2710,43 @@ impl Render for AppView {
                 cx.listener(|this, _: &PreviousTab, window, cx| this.step_tab(-1, window, cx)),
             )
             .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
-                if this.connection_open || this.command_open || this.password_prompt.is_some() {
+                if this.connection_open
+                    || this.command_open
+                    || this.password_prompt.is_some()
+                    || this.dialog_open()
+                {
                     return;
                 }
                 if let Some(tab) = this.tabs.read(cx).active_tab() {
                     this.request_close(tab, window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ExportResult, _, cx| {
+                if this.connection_open
+                    || this.command_open
+                    || this.password_prompt.is_some()
+                    || this.dialog_open()
+                {
+                    return;
+                }
+                if let Some(panel) = this
+                    .tabs
+                    .read(cx)
+                    .active_tab()
+                    .and_then(|tab| this.panels.get(&tab))
+                    .cloned()
+                {
+                    panel.update(cx, Workspace::toggle_export);
+                }
+            }))
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     if this.password_prompt.is_some() {
                         this.cancel_password(window, cx);
+                    } else if this.details_open() {
+                        this.cancel_details(window, cx);
+                    } else if this.report_picker.is_some() {
+                        this.close_report_picker(window, cx);
                     } else if this.inspection.take().is_some() {
                         cx.notify();
                     } else if this.command_open {
@@ -2121,7 +2771,10 @@ impl Render for AppView {
                     cx.notify();
                     window.prevent_default();
                     cx.stop_propagation();
-                } else if this.connection_open || this.password_prompt.is_some() {
+                } else if this.connection_open
+                    || this.password_prompt.is_some()
+                    || this.dialog_open()
+                {
                     // Workspace shortcuts would act behind the modal form.
                 } else if event.keystroke.modifiers.control
                     && event.keystroke.modifiers.shift
@@ -2267,6 +2920,10 @@ impl Render for AppView {
             .when(self.password_prompt.is_some(), |s| {
                 s.child(self.password_dialog(cx))
             })
+            .when(self.details_open(), |s| s.child(self.details_dialog(cx)))
+            .when(self.report_picker.is_some(), |s| {
+                s.child(self.report_picker_dialog(cx))
+            })
             // Painted last, so it closes the frame for the probe.
             .child(probe::frame_end())
     }
@@ -2285,6 +2942,8 @@ pub fn run() {
             KeyBinding::new("ctrl-shift-enter", ExecuteCurrentQueryInNewResult, None),
             KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, None),
             KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, Some(&editor)),
+            // Suggestions on demand, also with nothing typed yet.
+            KeyBinding::new("ctrl-space", ShowCompletions, Some(&editor)),
             KeyBinding::new(
                 "ctrl-shift-enter",
                 ExecuteCurrentQueryInNewResult,
@@ -2303,6 +2962,9 @@ pub fn run() {
             KeyBinding::new("ctrl-pagedown", NextTab, Some(&editor)),
             KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(&editor)),
             KeyBinding::new("ctrl-pageup", PreviousTab, Some(&editor)),
+            KeyBinding::new("ctrl-shift-e", ExportResult, None),
+            KeyBinding::new("ctrl-shift-e", ExportResult, Some(&editor)),
+            KeyBinding::new("ctrl-/", ToggleComment, Some(&editor)),
         ]);
         Theme::change(ThemeMode::Dark, None, cx);
         Theme::update(cx, |theme| {

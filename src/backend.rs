@@ -16,6 +16,12 @@ use std::{
 };
 use tracing::Instrument as _;
 
+mod exporting;
+pub use exporting::{
+    ExportProgress, ExportRead, ExportRequest, ExportRun, Exported, FILE_TIMEOUT, export,
+    export_with,
+};
+
 /// How long a read from the local metadata cache is expected to take
 /// ([Performance](../docs/performance.md#budgets)).
 const CACHE_READ_BUDGET: Duration = Duration::from_millis(50);
@@ -98,6 +104,16 @@ fn keep_cache(dir: &Path, id: ConnectionId, repository: MetadataRepository) {
 /// read opens and checks the file again.
 fn forget_cache(dir: &Path, id: ConnectionId) {
     caches().remove(&(dir.to_path_buf(), id));
+}
+
+/// Closes the connection's cache, if one is kept open, and removes its
+/// files: what deleting the connection leaves behind.
+pub async fn remove_cache(dir: &Path, id: ConnectionId) -> DriverResult<()> {
+    let kept = caches().remove(&(dir.to_path_buf(), id));
+    if let Some(repository) = kept {
+        repository.close().await;
+    }
+    MetadataRepository::remove(dir, id).await
 }
 
 /// Closes every cache kept open under `dir`, so its files can be removed.
@@ -266,48 +282,50 @@ pub async fn cached_namespaces(
     result
 }
 
-/// Builds the editor's index of the connection's cached relations, off the
-/// UI thread. Its version tells a tab whether the index it holds is current.
-pub async fn name_index(
+/// Every relation the connection's cache holds (tables, views and
+/// materialized views) with its kind, and the cache version they were read
+/// from: what the editor builds its name index from. Only the read happens
+/// here; what the editor makes of the names is the editor's business.
+pub async fn cached_relations(
     dir: &Path,
     id: ConnectionId,
     config: &ConnectionConfig,
-) -> DriverResult<crate::completion::NameIndex> {
-    let started = Instant::now();
-    let descriptor = builtin_registry()?.get(config.driver)?.descriptor();
+) -> DriverResult<(i64, Vec<(ObjectPath, ObjectKind)>)> {
     let result = match cache(dir, id, config).await {
         Ok((repository, _)) => repository.relations().await,
         Err(error) => Err(error),
     };
-    let (version, relations) = match result {
-        Ok(read) => read,
-        Err(error) => {
-            forget_cache(dir, id);
-            return Err(error);
-        }
-    };
-    let count = relations.len();
-    // Grouping thousands of names is CPU work; it stays on the runtime.
-    let index = tokio::task::spawn_blocking(move || {
-        crate::completion::NameIndex::new(
-            version,
-            descriptor.capabilities.namespace_levels(),
-            descriptor.dialect,
-            relations
-                .into_iter()
-                .map(|(path, kind)| crate::completion::Relation { path, kind })
-                .collect(),
-        )
-    })
-    .await
-    .map_err(|_| DriverError::new(ErrorCode::Internal, tr!("Database task failed")))?;
-    tracing::debug!(
-        connection_id = %id,
-        relations = count,
-        elapsed_ms = started.elapsed().as_millis() as u64,
-        "editor name index built"
-    );
-    Ok(index)
+    if result.is_err() {
+        forget_cache(dir, id);
+    }
+    result
+}
+
+/// The texts of `files` (paths relative to `dir`), read on the runtime: how
+/// the editor's SQL catalogs are read from their data directory. A file that
+/// is missing, larger than `max_bytes` or not UTF-8 is `None`; one that exists
+/// but cannot be used is logged.
+pub async fn read_text_files(dir: &Path, files: &[String], max_bytes: u64) -> Vec<Option<String>> {
+    let mut texts = Vec::with_capacity(files.len());
+    for file in files {
+        let path = dir.join(file);
+        let text = match tokio::fs::metadata(&path).await {
+            Ok(found) if found.len() > max_bytes => {
+                tracing::warn!(file = %file, bytes = found.len(), "data file too large; ignored");
+                None
+            }
+            Ok(_) => match tokio::fs::read_to_string(&path).await {
+                Ok(text) => Some(text),
+                Err(error) => {
+                    tracing::warn!(file = %file, error = %error, "data file unreadable; ignored");
+                    None
+                }
+            },
+            Err(_) => None,
+        };
+        texts.push(text);
+    }
+    texts
 }
 
 /// The columns and keys of one relation, read from the cache: what the
@@ -987,13 +1005,106 @@ pub async fn query_with(
         driver,
         input,
         session,
-        requests,
-        memory_ceiling,
+        Statements {
+            requests,
+            memory_ceiling,
+            progress,
+            settle: false,
+        },
         cancel,
-        progress,
     )
     .instrument(span.clone())
     .await;
+    log_run(&span, started, &run);
+    Ok(run)
+}
+
+/// [`query`] for a report panel, whose session belongs to one `context`
+/// (ADR-0025): the session opens, or reopens when it was lost, with the
+/// connection the driver gives for that context
+/// ([`Driver::session_connection`]: another database's for a PostgreSQL
+/// profile that offers the server's databases), and every request carries
+/// it. The session is always settled after the run, even when the last
+/// result has more rows (a report does not page): asking the session where
+/// names resolve discards that result, and a `USE` the panel ran is undone
+/// for the next panel of the same session.
+pub async fn query_in_context(
+    input: ResolvedConnection,
+    context: SessionContext,
+    session: Option<Box<dyn Session>>,
+    requests: Vec<QueryRequest>,
+    memory_ceiling: usize,
+    cancel: CancellationToken,
+) -> DriverResult<SessionRun> {
+    let driver = match builtin_registry().and_then(|registry| registry.get(input.config.driver)) {
+        Ok(driver) => driver,
+        Err(error) => {
+            close_session(session).await;
+            return Err(error);
+        }
+    };
+    query_in_context_with(
+        driver,
+        input,
+        context,
+        session,
+        requests,
+        memory_ceiling,
+        cancel,
+    )
+    .await
+}
+
+/// [`query_in_context`] with a given driver.
+pub async fn query_in_context_with(
+    driver: Arc<dyn Driver>,
+    input: ResolvedConnection,
+    context: SessionContext,
+    session: Option<Box<dyn Session>>,
+    requests: Vec<QueryRequest>,
+    memory_ceiling: usize,
+    cancel: CancellationToken,
+) -> DriverResult<SessionRun> {
+    let input = match driver.session_connection(&input, &context) {
+        Ok(input) => input,
+        Err(error) => {
+            close_session(session).await;
+            return Err(error);
+        }
+    };
+    let requests = requests
+        .into_iter()
+        .map(|mut request| {
+            request.options.context = context.clone();
+            request
+        })
+        .collect::<Vec<_>>();
+    let span = tracing::info_span!(
+        "query",
+        driver = ?input.config.driver,
+        statements = requests.len()
+    );
+    let started = Instant::now();
+    let run = run_statements(
+        driver,
+        input,
+        session,
+        Statements {
+            requests,
+            memory_ceiling,
+            progress: None,
+            settle: true,
+        },
+        cancel,
+    )
+    .instrument(span.clone())
+    .await;
+    log_run(&span, started, &run);
+    Ok(run)
+}
+
+/// Logs how a run ended, with its duration, rows and error code.
+fn log_run(span: &tracing::Span, started: Instant, run: &SessionRun) {
     let _entered = span.enter();
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &run.batch {
@@ -1012,18 +1123,31 @@ pub async fn query_with(
         }
         Err(error) => tracing::info!(elapsed_ms, error_code = ?error.code, "run failed"),
     }
-    Ok(run)
+}
+
+/// What [`run_statements`] runs and how it ends.
+struct Statements {
+    requests: Vec<QueryRequest>,
+    memory_ceiling: usize,
+    progress: Option<Progress>,
+    /// Ask the session's context and transaction even when the last result
+    /// is still open, discarding it (a report never pages).
+    settle: bool,
 }
 
 async fn run_statements(
     driver: Arc<dyn Driver>,
     input: ResolvedConnection,
     session: Option<Box<dyn Session>>,
-    requests: Vec<QueryRequest>,
-    memory_ceiling: usize,
+    statements: Statements,
     cancel: CancellationToken,
-    progress: Option<Progress>,
 ) -> SessionRun {
+    let Statements {
+        requests,
+        memory_ceiling,
+        progress,
+        settle,
+    } = statements;
     let mut run = SessionRun {
         batch: Err(DriverError::cancelled()),
         session: None,
@@ -1037,27 +1161,14 @@ async fn run_statements(
         run.session = session;
         return run;
     }
-    let kept = match session {
-        Some(mut session) => match session.ping().await {
-            Ok(()) if session.is_open() => Some(session),
-            _ => {
-                tracing::debug!("kept session no longer answers; opening another");
-                close_session(Some(session)).await;
-                run.reopened = true;
-                None
-            }
-        },
-        None => None,
-    };
-    let mut session = match kept {
-        Some(session) => session,
-        None => match driver.open_session(&input, cancel.clone()).await {
-            Ok(session) => session,
-            Err(error) => {
-                run.batch = Err(error);
-                return run;
-            }
-        },
+    let (session, reopened) = session_for_run(&*driver, &input, session, &cancel).await;
+    run.reopened = reopened;
+    let mut session = match session {
+        Ok(session) => session,
+        Err(error) => {
+            run.batch = Err(error);
+            return run;
+        }
     };
     let mut results = Vec::new();
     let mut failure = None;
@@ -1105,8 +1216,8 @@ async fn run_statements(
         }
     }
     // Asking would close a result still open for paging; its context is
-    // asked once it is read to the end.
-    if session.is_open() && !results.last().is_some_and(|result| result.has_more) {
+    // asked once it is read to the end, unless the run is settled anyway.
+    if session.is_open() && (settle || !results.last().is_some_and(|result| result.has_more)) {
         run.context = session_context(&mut *session, &cancel).await;
         run.transaction = transaction_status(&mut *session, &cancel).await;
     }
@@ -1121,6 +1232,29 @@ async fn run_statements(
         error: failure,
     });
     run
+}
+
+/// The tab's kept session when it still answers its ping, otherwise a new
+/// one; `true` when a kept session had to be replaced, so the caller tells
+/// the user that session state started over.
+async fn session_for_run(
+    driver: &dyn Driver,
+    input: &ResolvedConnection,
+    session: Option<Box<dyn Session>>,
+    cancel: &CancellationToken,
+) -> (DriverResult<Box<dyn Session>>, bool) {
+    let mut reopened = false;
+    if let Some(mut session) = session {
+        match session.ping().await {
+            Ok(()) if session.is_open() => return (Ok(session), false),
+            _ => {
+                tracing::debug!("kept session no longer answers; opening another");
+                close_session(Some(session)).await;
+                reopened = true;
+            }
+        }
+    }
+    (driver.open_session(input, cancel.clone()).await, reopened)
 }
 
 /// The page's data and the limit that ended it: the memory ceiling when the
@@ -1262,14 +1396,23 @@ pub fn release<T: Send + 'static>(value: T) {
     }
 }
 
-/// A query for the relation at `path`, quoted by the driver's rules, that
-/// reads at most `row_limit` rows: the connection's row limit, so the first
-/// page holds what the limit allows and the next pages follow it.
+/// **New query for table**: a query for the relation at `path`, quoted by the
+/// driver's rules, that reads at most `row_limit` rows, the connection's row
+/// limit, written into its `LIMIT`.
 pub fn preview_sql(driver: &dyn Driver, path: &ObjectPath, row_limit: u32) -> String {
     format!(
         "SELECT * FROM {} LIMIT {row_limit};",
         driver.relation_name(path)
     )
+}
+
+/// The statement the **Data** view reads the relation at `path` with: every
+/// row, quoted by the driver's rules and without a `LIMIT`. The row limit
+/// applies while it is read, as the size of each page, and the next pages
+/// are read from the result the session keeps open ([`fetch`]), so the text
+/// says what runs and no page is cut by it.
+pub fn data_sql(driver: &dyn Driver, path: &ObjectPath) -> String {
+    format!("SELECT * FROM {};", driver.relation_name(path))
 }
 
 #[cfg(test)]
@@ -1386,6 +1529,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_data_view_reads_every_row_without_a_limit_in_its_text() {
+        let path = ObjectPath::default()
+            .child(ObjectKind::Database, "db")
+            .child(ObjectKind::Schema, "a.b")
+            .child(ObjectKind::Table, "t\"x");
+        assert_eq!(
+            data_sql(&PostgresDriver, &path),
+            "SELECT * FROM \"a.b\".\"t\"\"x\";"
+        );
+        let path = ObjectPath::default()
+            .child(ObjectKind::Database, "d`b")
+            .child(ObjectKind::View, "orders");
+        assert_eq!(
+            data_sql(&MySqlDriver, &path),
+            "SELECT * FROM `d``b`.`orders`;"
+        );
+        let path = ObjectPath::default()
+            .child(ObjectKind::Catalog, "cat")
+            .child(ObjectKind::Schema, "sch")
+            .child(ObjectKind::Table, "a`b");
+        assert_eq!(
+            data_sql(&DatabricksDriver, &path),
+            "SELECT * FROM `cat`.`sch`.`a``b`;"
+        );
+        // One statement, which the run takes whole.
+        for dialect in [
+            SqlDialect::Postgres,
+            SqlDialect::MySql,
+            SqlDialect::DatabricksSql,
+        ] {
+            let sql = data_sql(&PostgresDriver, &path);
+            assert_eq!(
+                crate::sql::statements(&sql, Some(dialect)),
+                vec![0..sql.len()]
+            );
+        }
+    }
+
     /// Answers every statement with `rows` rows, honouring the row limit and
     /// the sink like a driver, without a database.
     #[derive(Debug)]
@@ -1475,6 +1657,7 @@ mod tests {
         let requests = ["SELECT 'synthetic-sql-marker'", "SELECT 2"]
             .into_iter()
             .map(|sql| QueryRequest {
+                parameters: Vec::new(),
                 sql: sql.into(),
                 options: ExecutionOptions::default(),
             })
@@ -1508,6 +1691,7 @@ mod tests {
         let requests = ["SELECT 1", "SELECT 2", "SELECT 3"]
             .into_iter()
             .map(|sql| QueryRequest {
+                parameters: Vec::new(),
                 sql: sql.into(),
                 options: ExecutionOptions::default(),
             })
@@ -1561,6 +1745,7 @@ mod tests {
             credentials: Credentials::default(),
         };
         let request = QueryRequest {
+            parameters: Vec::new(),
             sql: "SELECT 1".into(),
             options: ExecutionOptions {
                 max_rows,
@@ -1599,6 +1784,8 @@ mod tests {
         opened: std::sync::atomic::AtomicUsize,
         /// Sessions stop answering pings, as after an idle disconnect.
         dead: std::sync::atomic::AtomicBool,
+        /// The database each session opened on.
+        databases: std::sync::Mutex<Vec<Option<String>>>,
     }
 
     #[derive(Debug)]
@@ -1741,12 +1928,31 @@ mod tests {
         ) -> DriverResult<ServerInfo> {
             Ok(ServerInfo { version: None })
         }
+        /// Sessions open on the context's catalog, as PostgreSQL's do.
+        fn session_connection(
+            &self,
+            connection: &ResolvedConnection,
+            context: &SessionContext,
+        ) -> DriverResult<ResolvedConnection> {
+            let mut other = connection.clone();
+            if let Some(catalog) = &context.catalog {
+                other.config.options["database"] = serde_json::json!(catalog);
+            }
+            Ok(other)
+        }
         async fn open_session(
             &self,
-            _: &ResolvedConnection,
+            connection: &ResolvedConnection,
             _: CancellationToken,
         ) -> DriverResult<Box<dyn Session>> {
             use std::sync::atomic::Ordering;
+            if let Ok(mut databases) = self.databases.lock() {
+                databases.push(
+                    connection.config.options["database"]
+                        .as_str()
+                        .map(str::to_owned),
+                );
+            }
             Ok(Box::new(StateSession {
                 id: self.opened.fetch_add(1, Ordering::SeqCst) + 1,
                 settings: Vec::new(),
@@ -1784,6 +1990,7 @@ mod tests {
         let requests = statements
             .iter()
             .map(|sql| QueryRequest {
+                parameters: Vec::new(),
                 sql: (*sql).into(),
                 options: ExecutionOptions::default(),
             })
@@ -1852,6 +2059,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_report_session_opens_and_reopens_in_its_context_and_always_settles() {
+        let driver = Arc::new(StateDriver::default());
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({"database": "home"}),
+            },
+            credentials: Credentials::default(),
+        };
+        let context = SessionContext {
+            catalog: Some("archive".into()),
+            schema: Some("public".into()),
+        };
+        let requests = |sql: &str| {
+            vec![QueryRequest {
+                parameters: Vec::new(),
+                sql: sql.into(),
+                options: ExecutionOptions {
+                    max_rows: 2,
+                    ..ExecutionOptions::default()
+                },
+            }]
+        };
+        // The first session will stop answering, as after an idle
+        // disconnect.
+        driver.dead.store(true, std::sync::atomic::Ordering::SeqCst);
+        let run = query_in_context_with(
+            driver.clone(),
+            input.clone(),
+            context.clone(),
+            None,
+            requests("ROWS 5"),
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        let first = &run.batch.as_ref().unwrap().completed[0];
+        assert!(first.has_more, "the panel stopped at its row limit");
+        // A report does not page: the session is asked where names resolve
+        // even though rows were left, so a USE cannot leak to the next panel.
+        assert!(run.context.is_some());
+        assert_eq!(run.transaction, Some(TransactionStatus::Idle));
+        // A session that stopped answering reopens in the same database,
+        // not in the one the profile names.
+        driver
+            .dead
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let run = query_in_context_with(
+            driver.clone(),
+            input.clone(),
+            context.clone(),
+            run.session,
+            requests("SELECT"),
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(run.reopened);
+        assert!(run.batch.is_ok());
+        let opened = driver.databases.lock().unwrap().clone();
+        assert_eq!(
+            opened,
+            [Some("archive".to_owned()), Some("archive".to_owned())]
+        );
+    }
+
+    #[tokio::test]
     async fn a_session_that_stopped_answering_is_replaced_without_retrying() {
         let driver = Arc::new(StateDriver::default());
         driver.dead.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1864,6 +2140,7 @@ mod tests {
         assert_eq!(cells, ["2:"], "state starts over in the new session");
         // An invalid request runs nothing and hands the session back.
         let invalid = QueryRequest {
+            parameters: Vec::new(),
             sql: String::new(),
             options: ExecutionOptions::default(),
         };
@@ -1893,6 +2170,7 @@ mod tests {
             input,
             None,
             vec![QueryRequest {
+                parameters: Vec::new(),
                 sql: "ROWS 5".into(),
                 options: options.clone(),
             }],

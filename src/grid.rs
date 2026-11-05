@@ -6,6 +6,7 @@
 //! so hover, scroll and selection frames never pay for it. Selections address
 //! data rows, so filtering or sorting does not change what is selected.
 use crate::cell_format::{self, ValueFamily};
+use crate::decimal::compare_numbers;
 use crate::result::ResultData;
 use std::{cell::RefCell, ops::RangeInclusive, rc::Rc};
 
@@ -81,116 +82,6 @@ impl ColumnSort {
                 descending: false,
             }),
         }
-    }
-}
-
-/// A number as the database wrote it (`-12.50`, `1.5e-05`), read without
-/// floating point: `0.<digits> × 10^exponent`, where the digits are those
-/// of `integer` then `fraction` after their leading zeros.
-struct Decimal<'a> {
-    negative: bool,
-    integer: &'a str,
-    fraction: &'a str,
-    /// Where the decimal point falls before the first significant digit.
-    exponent: i64,
-}
-
-impl<'a> Decimal<'a> {
-    /// `None` for anything that is not a decimal, with or without an
-    /// exponent (`NaN`, `Infinity`, text).
-    fn parse(text: &'a str) -> Option<Self> {
-        let text = text.trim();
-        let (negative, rest) = match text.as_bytes().first()? {
-            b'-' => (true, &text[1..]),
-            b'+' => (false, &text[1..]),
-            _ => (false, text),
-        };
-        let (mantissa, exponent) = match rest.split_once(['e', 'E']) {
-            Some((mantissa, exponent)) => {
-                let digits = exponent.strip_prefix(['+', '-']).unwrap_or(exponent);
-                if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-                    return None;
-                }
-                (mantissa, exponent.parse::<i64>().ok()?)
-            }
-            None => (rest, 0),
-        };
-        let (integer, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-        if integer.is_empty() && fraction.is_empty()
-            || !integer
-                .bytes()
-                .chain(fraction.bytes())
-                .all(|byte| byte.is_ascii_digit())
-        {
-            return None;
-        }
-        let integer = integer.trim_start_matches('0');
-        let point = if integer.is_empty() {
-            -((fraction.len() - fraction.trim_start_matches('0').len()) as i64)
-        } else {
-            integer.len() as i64
-        };
-        Some(Self {
-            negative,
-            integer,
-            fraction,
-            exponent: point.checked_add(exponent)?,
-        })
-    }
-
-    fn digits(&self) -> impl Iterator<Item = u8> + '_ {
-        self.integer
-            .bytes()
-            .chain(self.fraction.bytes())
-            .skip_while(|digit| *digit == b'0')
-    }
-
-    fn is_zero(&self) -> bool {
-        self.digits().next().is_none()
-    }
-
-    /// Orders the absolute values of two nonzero numbers.
-    fn magnitude(&self, other: &Self) -> std::cmp::Ordering {
-        self.exponent.cmp(&other.exponent).then_with(|| {
-            // Missing digits are zeros, so `1.50` and `1.5` are equal.
-            let (mut left, mut right) = (self.digits(), other.digits());
-            loop {
-                match (left.next(), right.next()) {
-                    (None, None) => return std::cmp::Ordering::Equal,
-                    (left, right) => {
-                        let order = left.unwrap_or(b'0').cmp(&right.unwrap_or(b'0'));
-                        if order.is_ne() {
-                            return order;
-                        }
-                    }
-                }
-            }
-        })
-    }
-}
-
-/// Orders two numbers exactly, as the database wrote them: decimals (also
-/// in exponent form, as `float8` prints `1.5e-05`) are compared digit by
-/// digit, never through floating point. Values that are not decimals
-/// (`NaN`, `Infinity`) sort after them, by their text.
-fn compare_numbers(left: &str, right: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    // Negative, zero (with or without a sign), positive.
-    let class = |number: &Decimal| match (number.is_zero(), number.negative) {
-        (true, _) => 1,
-        (false, true) => 0,
-        (false, false) => 2,
-    };
-    match (Decimal::parse(left), Decimal::parse(right)) {
-        (Some(left), Some(right)) => match (class(&left), class(&right)) {
-            (1, 1) => Ordering::Equal,
-            (0, 0) => left.magnitude(&right).reverse(),
-            (2, 2) => left.magnitude(&right),
-            (left, right) => left.cmp(&right),
-        },
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => left.cmp(right),
     }
 }
 
@@ -335,6 +226,36 @@ impl CellSelection {
         }
     }
 
+    /// A `Ctrl` click on a column's header: every displayed row of that
+    /// column, or with `extend` every column from the anchor's to it.
+    pub fn click_column(
+        current: Option<Self>,
+        visible: &[usize],
+        column: usize,
+        extend: bool,
+    ) -> Option<Self> {
+        let (first, last) = (*visible.first()?, *visible.last()?);
+        let from = match current {
+            Some(selection) if extend => selection.anchor.1,
+            _ => column,
+        };
+        Some(Self {
+            anchor: (first, from),
+            focus: (last, column),
+        })
+    }
+
+    /// A drag from the anchor reached the cell at `(row, column)`: the block
+    /// from the anchor to it, or `None` when the focus is already there, so
+    /// a pointer moving inside one cell redraws nothing.
+    pub fn dragged(current: Option<Self>, row: usize, column: usize) -> Option<Self> {
+        let current = current?;
+        (current.focus != (row, column)).then_some(Self {
+            anchor: current.anchor,
+            focus: (row, column),
+        })
+    }
+
     /// Every visible cell, from the first displayed row to the last.
     pub fn all(visible: &[usize], columns: usize) -> Option<Self> {
         let (first, last) = (visible.first()?, visible.last()?);
@@ -407,6 +328,93 @@ pub enum Jump {
     Last,
     /// This many rows down, or up when negative (`Page Down`, `Page Up`).
     Rows(isize),
+}
+
+/// The narrowest and widest a column can be dragged or fitted to.
+pub const MIN_COLUMN_WIDTH: f32 = 48.;
+pub const MAX_COLUMN_WIDTH: f32 = 1600.;
+
+/// Rows a fitted column measures, so fitting a long page stays instant.
+pub const FIT_ROWS: usize = 5_000;
+
+/// The width of a column dragged by `delta` pixels from `start`.
+pub fn resized_width(start: f32, delta: f32) -> f32 {
+    (start + delta).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
+}
+
+/// The width that shows a column's header and the values of the first
+/// [`FIT_ROWS`] displayed rows in full, measured as [`GridView`] measures
+/// (8 px per character plus the cell's padding).
+pub fn fit_width(
+    result: &ResultData,
+    visible: &[usize],
+    column: usize,
+    family: ValueFamily,
+    numbers_pt_br: bool,
+) -> f32 {
+    let Some(info) = result.columns().get(column) else {
+        return MIN_COLUMN_WIDTH;
+    };
+    let header = info.name.chars().count() + 3 + info.data_type.chars().count();
+    let content = visible
+        .iter()
+        .take(FIT_ROWS)
+        .map(|row| {
+            cell_format::display(result.value(*row, column), family, numbers_pt_br)
+                .chars()
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    ((content.max(header) as f32 * 8.) + 32.).clamp(MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
+}
+
+/// How many rows (or columns) a drag past an edge moves per step: none
+/// while the pointer is between `start` and `end`, then one more for every
+/// 24 px beyond, up to 10.
+pub fn edge_step(position: f32, start: f32, end: f32) -> isize {
+    let beyond = if position < start {
+        -(start - position)
+    } else if position > end {
+        position - end
+    } else {
+        return 0;
+    };
+    let step = (1. + beyond.abs() / 24.).min(10.) as isize;
+    if beyond < 0. { -step } else { step }
+}
+
+/// The horizontal pan that brings `column` into a viewport `viewport` px
+/// wide, scrolled `pan` px, with `lead` px of row numbers before the first
+/// column; `None` when the column is already in view.
+pub fn pan_to_column(
+    widths: &[f32],
+    column: usize,
+    lead: f32,
+    viewport: f32,
+    pan: f32,
+) -> Option<f32> {
+    let left = lead + widths.iter().take(column).sum::<f32>();
+    let right = left + widths.get(column).copied()?;
+    if left - lead < pan {
+        Some(left - lead)
+    } else if right > pan + viewport {
+        Some((right - viewport).min(left - lead))
+    } else {
+        None
+    }
+}
+
+/// The data rows of the selection's visible block, in display order: what
+/// the records view shows side by side.
+pub fn selected_rows(selection: Option<CellSelection>, visible: &[usize]) -> Vec<usize> {
+    selection
+        .and_then(|selection| selection_block(selection, visible))
+        .map(|(rows, _)| {
+            rows.filter_map(|position| visible.get(position).copied())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Copies above this size ask for confirmation first
@@ -825,5 +833,81 @@ mod tests {
         assert_eq!(copy_selection(&result, &visible, None, false), None);
         // A selection whose rows are hidden copies nothing.
         assert_eq!(copy_selection(&result, &[1], Some(block), false), None);
+    }
+
+    #[test]
+    fn a_drag_extends_from_the_anchor_and_ignores_moves_inside_a_cell() {
+        let start = CellSelection::cell(2, 1);
+        let block = CellSelection::dragged(Some(start), 5, 3).expect("a block");
+        assert_eq!((block.anchor, block.focus), ((2, 1), (5, 3)));
+        assert_eq!(CellSelection::dragged(Some(block), 5, 3), None);
+        assert_eq!(CellSelection::dragged(None, 5, 3), None);
+    }
+
+    #[test]
+    fn a_header_selects_its_column_over_the_displayed_rows() {
+        let visible = [4, 2, 0];
+        let column = CellSelection::click_column(None, &visible, 1, false).expect("a column");
+        assert_eq!((column.anchor, column.focus), ((4, 1), (0, 1)));
+        assert_eq!(selected_cells(Some(column), &visible), 3);
+        let columns =
+            CellSelection::click_column(Some(column), &visible, 3, true).expect("columns");
+        assert_eq!((columns.anchor, columns.focus), ((4, 1), (0, 3)));
+        assert_eq!(CellSelection::click_column(None, &[], 1, false), None);
+    }
+
+    #[test]
+    fn columns_resize_within_bounds_and_fit_their_values() {
+        assert_eq!(resized_width(120., 30.), 150.);
+        assert_eq!(resized_width(120., -500.), MIN_COLUMN_WIDTH);
+        assert_eq!(resized_width(120., 5_000.), MAX_COLUMN_WIDTH);
+        let result = ResultData::from_rows(
+            vec![ResultColumn::new("id", "int8")],
+            [
+                [Some("1")],
+                [Some(
+                    "123456789012345678901234567890123456789012345678901234567890",
+                )],
+            ],
+        );
+        // The long value fits, past the 360 px the grid starts with.
+        assert_eq!(
+            fit_width(&result, &[0, 1], 0, ValueFamily::Number, false),
+            60. * 8. + 32.
+        );
+        // Only displayed rows count; the header is the minimum.
+        assert_eq!(
+            fit_width(&result, &[0], 0, ValueFamily::Number, false),
+            9. * 8. + 32.
+        );
+    }
+
+    #[test]
+    fn a_drag_past_an_edge_steps_faster_the_further_it_goes() {
+        assert_eq!(edge_step(50., 0., 100.), 0);
+        assert_eq!(edge_step(-1., 0., 100.), -1);
+        assert_eq!(edge_step(130., 0., 100.), 2);
+        assert_eq!(edge_step(10_000., 0., 100.), 10);
+    }
+
+    #[test]
+    fn panning_brings_a_column_into_view() {
+        let widths = [100., 100., 100., 100.];
+        // A 250 px viewport after 35 px of row numbers, not scrolled.
+        assert_eq!(pan_to_column(&widths, 0, 35., 250., 0.), None);
+        assert_eq!(pan_to_column(&widths, 2, 35., 250., 0.), Some(85.));
+        assert_eq!(pan_to_column(&widths, 0, 35., 250., 85.), Some(0.));
+        assert_eq!(pan_to_column(&widths, 9, 35., 250., 0.), None);
+    }
+
+    #[test]
+    fn records_are_the_selected_rows_in_display_order() {
+        let visible = [4, 2, 0, 1];
+        let block = CellSelection {
+            anchor: (2, 1),
+            focus: (1, 0),
+        };
+        assert_eq!(selected_rows(Some(block), &visible), [2, 0, 1]);
+        assert!(selected_rows(None, &visible).is_empty());
     }
 }

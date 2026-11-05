@@ -136,6 +136,34 @@ pub fn duration(ms: u64) -> String {
     crate::tr!("{0} h {1} min", minutes / 60, minutes % 60)
 }
 
+/// A file size for user-facing text, in the scale that reads best: bytes,
+/// then KB, MB and GB (powers of 1,024), with one decimal from MB on in the
+/// UI language's decimal separator. Truncated, never rounded up.
+pub fn size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if bytes < KB {
+        return crate::tr!("{0} B", bytes);
+    }
+    if bytes < MB {
+        return crate::tr!("{0} KB", bytes / KB);
+    }
+    let (unit, scale) = if bytes < GB { (MB, "MB") } else { (GB, "GB") };
+    let separator = if crate::i18n::locale().starts_with("pt") {
+        ','
+    } else {
+        '.'
+    };
+    let tenths = bytes / (unit / 10);
+    let value = format!("{}{separator}{}", tenths / 10, tenths % 10);
+    if scale == "MB" {
+        crate::tr!("{0} MB", value)
+    } else {
+        crate::tr!("{0} GB", value)
+    }
+}
+
 pub fn number_pt_br(value: &str) -> String {
     let unsigned = value.strip_prefix(['+', '-']).unwrap_or(value);
     let mut parts = unsigned.split('.');
@@ -226,9 +254,91 @@ pub fn copy_cells(headers: Option<&[&str]>, rows: &[Vec<Option<&str>>]) -> Strin
     lines.join("\n")
 }
 
+/// JSON text laid out with two-space indentation for the value viewer, every
+/// token kept as written (numbers are not parsed, so none changes a digit).
+/// `None` when the text is not an object or an array whose brackets balance.
+pub fn pretty_json(text: &str) -> Option<String> {
+    let text = text.trim();
+    if !text.starts_with(['{', '[']) {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len() * 2);
+    // The closing bracket each open one expects.
+    let mut open: Vec<char> = Vec::new();
+    let (mut in_string, mut escaped) = (false, false);
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.extend(std::iter::repeat_n("  ", depth));
+    };
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_string {
+            out.push(ch);
+            match ch {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        // Something after the outermost closing bracket: not one value.
+        if open.is_empty() && !out.is_empty() && !ch.is_whitespace() {
+            return None;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                out.push(ch);
+            }
+            '{' | '[' => {
+                out.push(ch);
+                while chars.next_if(|next| next.is_whitespace()).is_some() {}
+                let close = if ch == '{' { '}' } else { ']' };
+                if chars.next_if_eq(&close).is_some() {
+                    out.push(close);
+                } else {
+                    open.push(close);
+                    newline(&mut out, open.len());
+                }
+            }
+            '}' | ']' => {
+                if open.pop() != Some(ch) {
+                    return None;
+                }
+                newline(&mut out, open.len());
+                out.push(ch);
+            }
+            ',' => {
+                out.push(ch);
+                newline(&mut out, open.len());
+            }
+            ':' => out.push_str(": "),
+            ch if ch.is_whitespace() => {}
+            ch => out.push(ch),
+        }
+    }
+    (open.is_empty() && !in_string).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_is_laid_out_without_changing_its_tokens() {
+        assert_eq!(
+            pretty_json(r#"{"a":1.50,"b":[true, null,{}],"c":"x, \"y\": {z}"}"#).as_deref(),
+            Some(
+                "{\n  \"a\": 1.50,\n  \"b\": [\n    true,\n    null,\n    {}\n  ],\n  \"c\": \"x, \\\"y\\\": {z}\"\n}"
+            )
+        );
+        assert_eq!(pretty_json("[]").as_deref(), Some("[]"));
+        assert_eq!(pretty_json("plain text"), None);
+        assert_eq!(pretty_json("{\"a\": [1}"), None);
+        assert_eq!(pretty_json("[1}"), None);
+        assert_eq!(pretty_json("{} {}"), None);
+    }
 
     #[test]
     fn durations_read_in_their_own_scale() {
@@ -344,6 +454,16 @@ mod tests {
             result_csv(&result),
             "\"id\";\"no\"\"te\"\n\"1\";\n\"2\";\"a;\"\"b\"\"\nc\""
         );
+    }
+
+    #[test]
+    fn sizes_read_in_their_own_scale() {
+        assert_eq!(size(0), "0 B");
+        assert_eq!(size(1_023), "1023 B");
+        assert_eq!(size(1_536), "1 KB");
+        assert_eq!(size(13_002_342), "12.4 MB");
+        assert_eq!(size(1024 * 1024 - 1), "1023 KB");
+        assert_eq!(size(3 * 1024 * 1024 * 1024 / 2), "1.5 GB");
     }
 
     #[test]

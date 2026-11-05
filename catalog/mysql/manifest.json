@@ -1,0 +1,46 @@
+{
+  "dialect": "mysql",
+  "doc_base": "https://dev.mysql.com/doc/refman/{series}/en/",
+  "files": {
+    "functions": "functions.jsonl",
+    "keywords": "keywords.jsonl",
+    "types": "types.jsonl"
+  },
+  "generator": {
+    "name": "cargo xtask catalogs",
+    "version": "1"
+  },
+  "name": "MySQL",
+  "schema_version": 1,
+  "series_components": 2,
+  "sources": [
+    {
+      "id": "information_schema.keywords",
+      "license": "facts",
+      "redistributable": false,
+      "title": "INFORMATION_SCHEMA.KEYWORDS of the server",
+      "url": "https://dev.mysql.com/doc/refman/8.4/en/information-schema-keywords-table.html"
+    },
+    {
+      "id": "mysql.help_topic",
+      "license": "facts",
+      "redistributable": false,
+      "title": "Names of the server's help topics (never their text)",
+      "url": "https://dev.mysql.com/doc/refman/8.4/en/server-side-help-support.html"
+    },
+    {
+      "id": "curated",
+      "license": "CC0-1.0",
+      "redistributable": true,
+      "title": "Written by the project",
+      "url": "https://github.com/alandariva/jykre-studio"
+    }
+  ],
+  "updated_at": "2026-11-04",
+  "verified_through": "9.7.4",
+  "version_scheme": "numeric",
+  "versions": [
+    "8.4.13",
+    "9.7.4"
+  ]
+}
