@@ -1910,14 +1910,15 @@ impl AppView {
         let query = self.search.read(cx).value().to_lowercase();
         let expanded = connection.expanded || !query.is_empty();
         column().flex_none()
-            .child(row().id(("connection", index)).role(Role::Button).aria_label(connection.name.clone()).aria_expanded(expanded).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(38.)).px_3().gap_2().cursor_pointer().hover(|s| s.bg(rgb(SURFACE)))
+            .child(row().id(("connection", index)).role(Role::Button).aria_label(connection.name.clone()).aria_description(connection.detail.clone()).aria_expanded(expanded).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(38.)).px_3().gap_2().cursor_pointer().hover(|s| s.bg(rgb(SURFACE)))
                 .on_click(cx.listener(move |this, _, _, cx| { this.connections[index].expanded = !this.connections[index].expanded; cx.notify(); }))
+                // Where it connects, built only when shown.
+                .tooltip({ let detail = connection.detail.clone(); move |window, cx| gpui_kit::component::tooltip::Tooltip::new(detail.clone()).build(window, cx) })
                 .child(icon(if expanded { I::ChevronDown } else { I::ChevronRight }, FAINT))
                 .child(icon(I::Server, connection.color))
                 .child(div().text_size(px(14.)).flex_1().truncate().child(connection.name.clone()))
                 .child(dot(connection.color)))
             .when(expanded, |s| s
-                .child(div().pl(px(43.)).pb_2().child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(connection.detail.clone())))
                 .when(index == 0, |s| s
                     .child(row().px_3().pl(px(29.)).h(px(30.)).child(icon(I::ChevronDown, FAINT)).child(icon(I::Database, MUTED)).child(label("commerce")))
                     .child(row().id("schema-public").role(Role::Button).aria_label(tr!("Schema public")).aria_expanded(self.schema_open).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).pl(px(43.)).h(px(30.)).cursor_pointer()

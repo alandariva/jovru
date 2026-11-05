@@ -166,6 +166,31 @@ impl AppView {
         cx.notify();
     }
 
+    /// Reports how something done to a connection ended. A success, or a
+    /// note about what the user just did, goes to the notice above the
+    /// connections; only failures, warnings and work in progress stay under
+    /// the connection, where they keep saying what is wrong or running.
+    fn connection_outcome(&mut self, index: usize, feedback: Feedback) {
+        let Some(connection) = self.connections.get_mut(index) else {
+            return;
+        };
+        if matches!(feedback.tone, Tone::Success) {
+            connection.status = Feedback::new(Tone::Info, "");
+            self.app_notice = Some(feedback);
+        } else {
+            connection.status = feedback;
+        }
+    }
+
+    /// A note about what the user just did with a connection, for the
+    /// notice above the connections.
+    fn note_connection(&mut self, index: usize, text: String) {
+        if let Some(connection) = self.connections.get_mut(index) {
+            connection.status = Feedback::new(Tone::Info, "");
+        }
+        self.app_notice = Some(Feedback::new(Tone::Info, text));
+    }
+
     /// Takes a deleted connection out of the explorer. Its tabs stay in
     /// their group, now without a connection, as tabs whose connection was
     /// missing at start do; whatever pointed at a connection by its place in
@@ -935,9 +960,8 @@ impl AppView {
         if let Some(cache) = cache {
             Self::apply_cache(&mut connection, cache);
         }
-        if connection.scope.is_pending() {
-            connection.status = Feedback::new(Tone::Info, tr!("Nothing is introspected yet."));
-        } else if connection.tree.is_empty() {
+        // Nothing chosen yet: **Choose what to introspect** says it alone.
+        if !connection.scope.is_pending() && connection.tree.is_empty() {
             connection.status = Feedback::new(
                 Tone::Info,
                 tr!("No saved metadata. Use refresh to fetch it from the server."),
@@ -1166,7 +1190,7 @@ impl AppView {
                                 connection.metadata_statuses.clear();
                             }
                             connection.notice = loaded.warning.clone();
-                            connection.status = match loaded.warning {
+                            let saved = match loaded.warning.clone() {
                                 Some(warning) => Feedback::new(Tone::Warning, warning),
                                 None => Feedback::new(Tone::Success, tr!("Connection saved.")),
                             };
@@ -1193,6 +1217,7 @@ impl AppView {
                                     }
                                 });
                             }
+                            this.connection_outcome(index, saved);
                             index
                         } else {
                             this.insert_connection(loaded, cx)
@@ -1214,8 +1239,7 @@ impl AppView {
                         if apply {
                             this.refresh_selection(index, read, cx);
                         } else if selection.is_pending() {
-                            this.connections[index].status =
-                                Feedback::new(Tone::Info, tr!("Nothing is introspected yet."));
+                            this.connections[index].status = Feedback::new(Tone::Info, "");
                         }
                         cx.notify();
                     }
@@ -1289,7 +1313,7 @@ impl AppView {
                     }
                     Err(error) => Some(error),
                 };
-                connection.status = node_status(&scope_name, result, reloaded);
+                this.connection_outcome(index, node_status(&scope_name, result, reloaded));
                 if !this.search.read(cx).value().is_empty() {
                     this.search_cache(false, cx);
                 }
@@ -1331,19 +1355,15 @@ impl AppView {
             connection.refresh_queue.remove(&scope)
         };
         if removed {
-            connection.status = Feedback::new(
-                Tone::Info,
-                tr!("Refresh of {0} taken out of the queue.", scope_name(&scope)),
-            );
+            let text = tr!("Refresh of {0} taken out of the queue.", scope_name(&scope));
+            self.note_connection(index, text);
             cx.notify();
             return;
         }
         let job = if selection {
             if connection.scope.is_pending() {
-                connection.status = Feedback::new(
-                    Tone::Info,
-                    tr!("Choose what to introspect in the connection settings."),
-                );
+                let text = tr!("Choose what to introspect in the connection settings.").to_owned();
+                self.note_connection(index, text);
                 cx.notify();
                 return;
             }
@@ -1501,8 +1521,8 @@ impl AppView {
                     }
                     Err(error) => Some(error),
                 };
-                connection.status = if connection.scope.is_pending() && result.is_ok() {
-                    Feedback::new(Tone::Info, tr!("Nothing is introspected yet."))
+                let status = if connection.scope.is_pending() && result.is_ok() {
+                    Feedback::new(Tone::Info, "")
                 } else if removal_only && result.is_ok() && reloaded.is_none() {
                     Feedback::new(
                         Tone::Success,
@@ -1511,6 +1531,7 @@ impl AppView {
                 } else {
                     selection_status(result, reloaded)
                 };
+                this.connection_outcome(index, status);
                 if !this.search.read(cx).value().is_empty() {
                     this.search_cache(false, cx);
                 }
@@ -2472,9 +2493,17 @@ impl AppView {
                                 None => connection.name.clone().into(),
                             })
                             .aria_expanded(expanded)
+                            .aria_description(connection.detail.clone())
                             .flex_1()
                             .min_w_0()
                             .child(div().truncate().child(connection.name.clone()))
+                            // Where it connects, built only when shown.
+                            .when(!connection.detail.is_empty(), |s| {
+                                let detail = connection.detail.clone();
+                                s.tooltip(move |window, cx| {
+                                    Tooltip::new(detail.clone()).build(window, cx)
+                                })
+                            })
                             .when_some(connection.appearance.environment, |s, environment| {
                                 s.child(environment_badge(environment))
                             })
@@ -2616,12 +2645,6 @@ impl AppView {
                         .gap_1()
                         .pb_1()
                         .mt(px(-6.))
-                        .child(
-                            div()
-                                .text_size(px(12.))
-                                .text_color(rgb(FAINT))
-                                .child(connection.detail.clone()),
-                        )
                         .when_some(connection.notice.clone(), |s, notice| {
                             s.child(
                                 div()
