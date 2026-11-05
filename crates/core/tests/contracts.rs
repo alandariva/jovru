@@ -625,6 +625,28 @@ async fn the_metadata_extensions_default_to_todays_behaviour() {
     }
 }
 
+#[test]
+fn a_session_connection_defaults_to_the_connection_itself() {
+    let driver = TestDriver::new("defaults");
+    let mut input = connection();
+    input.config.options = json!({"host": "db", "database": "sales"});
+    let context = SessionContext {
+        catalog: Some("other".into()),
+        schema: Some("public".into()),
+    };
+    // A driver whose sessions switch on their own opens every session with
+    // the connection as it is, whatever the context.
+    let opened = driver.session_connection(&input, &context).unwrap();
+    assert_eq!(opened.config, input.config);
+    assert_eq!(
+        driver
+            .session_connection(&input, &SessionContext::default())
+            .unwrap()
+            .config,
+        input.config
+    );
+}
+
 fn parameter(name: &str, kind: ParameterKind, value: Option<&str>, sql: &str) -> QueryParameter {
     let marker = format!(":{name}");
     let markers = sql

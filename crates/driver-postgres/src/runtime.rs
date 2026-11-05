@@ -924,14 +924,28 @@ where
 /// The connection to read `database` with: the configured one, or another
 /// database of the server when the profile offers them all.
 fn database_input(input: &ResolvedConnection, database: &str) -> DriverResult<ResolvedConnection> {
+    database_connection(
+        input,
+        database,
+        "Metadata scope belongs to another database",
+    )
+}
+
+/// The connection to `database` on the same server, with the same user and
+/// credentials: `input` itself for its own database, a copy that names the
+/// other one when the profile offers the server's other databases, and a
+/// validation error with `refusal` otherwise.
+pub(crate) fn database_connection(
+    input: &ResolvedConnection,
+    database: &str,
+    refusal: &'static str,
+) -> DriverResult<ResolvedConnection> {
     let config = PostgresConfig::parse(&input.config.options)?;
     if database == config.database {
         return Ok(input.clone());
     }
     if !config.all_databases {
-        return Err(DriverError::validation(
-            "Metadata scope belongs to another database",
-        ));
+        return Err(DriverError::validation(refusal));
     }
     let mut other = input.clone();
     other.config.options["database"] = serde_json::Value::String(database.to_owned());

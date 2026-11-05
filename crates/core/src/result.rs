@@ -6,7 +6,7 @@ use std::time::Duration;
 /// catalog, the PostgreSQL database) and the schema (a PostgreSQL or
 /// Databricks schema, the MySQL database). `None` leaves that level as the
 /// session has it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct SessionContext {
     pub catalog: Option<String>,
     pub schema: Option<String>,

@@ -30,7 +30,9 @@ pub struct PostgresConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub search_path: Option<String>,
     /// Offers the server's other databases to introspect, each read through
-    /// a connection of its own. Sessions stay in `database`.
+    /// a connection of its own, and to report panels, whose sessions then
+    /// open there (`Driver::session_connection`). Query tabs stay in
+    /// `database`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub all_databases: bool,
 }

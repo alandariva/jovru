@@ -100,6 +100,24 @@ impl Driver for PostgresDriver {
         }
     }
 
+    /// A session is bound to one database: a context in another database of
+    /// the server opens its session there, when the profile offers the
+    /// server's other databases. The schema is applied by the session.
+    fn session_connection(
+        &self,
+        connection: &ResolvedConnection,
+        context: &SessionContext,
+    ) -> DriverResult<ResolvedConnection> {
+        match context.catalog.as_deref() {
+            None => Ok(connection.clone()),
+            Some(database) => runtime::database_connection(
+                connection,
+                database,
+                "This connection reads only its own database; turn on all databases in its settings",
+            ),
+        }
+    }
+
     async fn test(
         &self,
         connection: &ResolvedConnection,
@@ -184,5 +202,70 @@ impl Driver for PostgresDriver {
     ) -> DriverResult<String> {
         self.prepare(connection, &cancel)?;
         runtime::definition(connection, path, cancel).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secrecy::ExposeSecret as _;
+    use serde_json::json;
+
+    fn input(all_databases: bool) -> ResolvedConnection {
+        ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: json!({
+                    "host": "db",
+                    "database": "sales",
+                    "user": "reader",
+                    "sslMode": "require",
+                    "allDatabases": all_databases,
+                }),
+            },
+            credentials: Credentials {
+                password: Some(SecretString::from("synthetic".to_owned())),
+            },
+        }
+    }
+
+    fn context(catalog: Option<&str>) -> SessionContext {
+        SessionContext {
+            catalog: catalog.map(str::to_owned),
+            schema: Some("public".into()),
+        }
+    }
+
+    #[test]
+    fn a_session_opens_on_the_database_its_context_names() {
+        let driver = PostgresDriver;
+        for own in [None, Some("sales")] {
+            let opened = driver
+                .session_connection(&input(false), &context(own))
+                .unwrap();
+            assert_eq!(opened.config, input(false).config);
+        }
+        let other = driver
+            .session_connection(&input(true), &context(Some("archive")))
+            .unwrap();
+        let mut expected = input(true).config;
+        expected.options["database"] = json!("archive");
+        assert_eq!(other.config, expected);
+        assert_eq!(
+            other
+                .credentials
+                .password
+                .as_ref()
+                .map(|password| password.expose_secret().to_owned()),
+            Some("synthetic".to_owned())
+        );
+    }
+
+    #[test]
+    fn another_database_needs_a_profile_that_offers_them() {
+        let error = PostgresDriver
+            .session_connection(&input(false), &context(Some("archive")))
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Validation);
     }
 }

@@ -634,6 +634,65 @@ async fn live_the_tab_context_is_applied_once_and_reported() {
     .unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_a_report_session_opens_on_another_database() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let other = SessionContext {
+            catalog: Some("postgres".into()),
+            schema: Some("public".into()),
+        };
+        // Without the server's other databases, the context is refused.
+        assert_eq!(
+            driver
+                .session_connection(&input(), &other)
+                .unwrap_err()
+                .code,
+            ErrorCode::Validation
+        );
+        let mut every = input();
+        every.config.options["allDatabases"] = json!(true);
+        let connection = driver.session_connection(&every, &other).unwrap();
+        let mut session = driver
+            .open_session(&connection, CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            text_in(&mut session, "SELECT current_database()", &other).await,
+            "postgres"
+        );
+        let reported = session.context(CancellationToken::new()).await.unwrap();
+        assert_eq!(reported.catalog.as_deref(), Some("postgres"));
+        assert_eq!(reported.schema.as_deref(), Some("public"));
+        // The session stays in the database it opened on.
+        let home = SessionContext {
+            catalog: Some("jykre".into()),
+            schema: None,
+        };
+        assert!(
+            session
+                .execute(
+                    &QueryRequest {
+                        parameters: Vec::new(),
+                        sql: "SELECT 1".into(),
+                        options: ExecutionOptions {
+                            context: home,
+                            ..ExecutionOptions::default()
+                        },
+                    },
+                    &mut Sink::default(),
+                    CancellationToken::new(),
+                )
+                .await
+                .is_err()
+        );
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 /// The transaction state the session reports.
 async fn state(session: &mut Box<dyn Session>) -> Option<TransactionStatus> {
     session.transaction(CancellationToken::new()).await.unwrap()
