@@ -8,6 +8,8 @@ pub use jykre_driver_mysql as mysql;
 pub use jykre_driver_mysql::MySqlDriver;
 pub use jykre_driver_postgres as postgres;
 pub use jykre_driver_postgres::PostgresDriver;
+pub use jykre_driver_sqlserver as sqlserver;
+pub use jykre_driver_sqlserver::SqlServerDriver;
 
 use std::sync::Arc;
 
@@ -17,6 +19,7 @@ pub fn builtin_registry() -> DriverResult<DriverRegistry> {
     registry.register(Arc::new(PostgresDriver))?;
     registry.register(Arc::new(MySqlDriver))?;
     registry.register(Arc::new(DatabricksDriver))?;
+    registry.register(Arc::new(SqlServerDriver))?;
     Ok(registry)
 }
 
@@ -25,7 +28,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_registry_contains_three_ready_adapters() {
+    fn builtin_registry_contains_four_ready_adapters() {
         let registry = builtin_registry().unwrap();
         let descriptors = registry.descriptors();
         assert_eq!(
@@ -36,7 +39,8 @@ mod tests {
             vec![
                 DriverKind::Postgres,
                 DriverKind::MySql,
-                DriverKind::Databricks
+                DriverKind::Databricks,
+                DriverKind::SqlServer
             ]
         );
         for descriptor in descriptors {

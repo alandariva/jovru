@@ -453,12 +453,48 @@ fn combine(result: Result<(), String>, cleanup: Result<(), String>) -> Result<()
 
 /// Compose services in `docker-compose.test.yml`, their driver and the port
 /// they listen on inside the container.
-const FIXTURES: [(&str, &str, &str); 4] = [
+const FIXTURES: [(&str, &str, &str); 6] = [
     ("postgres-min", "postgres", "5432"),
     ("postgres-max", "postgres", "5432"),
     ("mysql-lts", "mysql", "3306"),
     ("mysql-current", "mysql", "3306"),
+    ("sqlserver-2019", "sqlserver", "1433"),
+    ("sqlserver-2022", "sqlserver", "1433"),
 ];
+
+/// The administrator password of the SQL Server fixtures, as
+/// `docker-compose.test.yml` sets it. Fixture-only.
+pub const SQLSERVER_ADMIN_PASSWORD: &str = "Jykre-Gate-2026";
+
+/// Runs `sql` on a SQL Server fixture as its administrator with sqlcmd and
+/// returns what it printed: tab-separated rows without headers.
+fn sqlcmd(root: &Path, project: &str, service: &str, args: &[&str]) -> Result<String, String> {
+    let mut all = vec![
+        "exec",
+        "-T",
+        service,
+        "/opt/mssql-tools18/bin/sqlcmd",
+        "-C",
+        "-S",
+        "localhost",
+        "-U",
+        "sa",
+        "-P",
+        SQLSERVER_ADMIN_PASSWORD,
+        "-b",
+    ];
+    all.extend_from_slice(args);
+    compose_output(root, project, &all)
+}
+
+/// SQL Server images have no init folder: the fixture's seed runs once the
+/// server is healthy.
+fn seed(root: &Path, project: &str, service: &str, driver: &str) -> Result<(), String> {
+    if driver != "sqlserver" {
+        return Ok(());
+    }
+    sqlcmd(root, project, service, &["-i", "/fixtures/sqlserver.sql"]).map(|_| ())
+}
 
 fn live(root: &Path, project: &str, data: &Path) -> Result<(), String> {
     // Check access before creating any resources. Each run owns its own
@@ -470,6 +506,9 @@ fn live(root: &Path, project: &str, data: &Path) -> Result<(), String> {
             project,
             &["up", "-d", "--wait", "--wait-timeout", "180"],
         )?;
+        for (service, driver, _) in FIXTURES {
+            seed(root, project, service, driver)?;
+        }
         for (service, driver, container_port) in FIXTURES {
             let output = compose_output(root, project, &["port", service, container_port])?;
             let port = published_port(&output)?.to_string();

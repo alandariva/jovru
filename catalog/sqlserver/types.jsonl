@@ -1,0 +1,33 @@
+{"display":"BIGINT","name":"bigint","source":"sys.types"}
+{"display":"BINARY","name":"binary","params":"(n | max)","source":"sys.types"}
+{"display":"BIT","name":"bit","source":"sys.types"}
+{"aliases":["character"],"display":"CHAR","name":"char","params":"(n | max)","source":"sys.types"}
+{"display":"DATE","name":"date","source":"sys.types"}
+{"display":"DATETIME","name":"datetime","source":"sys.types"}
+{"display":"DATETIME2","name":"datetime2","params":"(fractional seconds)","source":"sys.types"}
+{"display":"DATETIMEOFFSET","name":"datetimeoffset","params":"(fractional seconds)","source":"sys.types"}
+{"aliases":["dec"],"display":"DECIMAL","name":"decimal","params":"(precision, scale)","source":"sys.types"}
+{"aliases":["double precision"],"display":"FLOAT","name":"float","params":"(mantissa bits)","source":"sys.types"}
+{"display":"GEOGRAPHY","name":"geography","source":"sys.types"}
+{"display":"GEOMETRY","name":"geometry","source":"sys.types"}
+{"display":"HIERARCHYID","name":"hierarchyid","source":"sys.types"}
+{"display":"IMAGE","name":"image","source":"sys.types"}
+{"aliases":["integer"],"display":"INT","name":"int","source":"sys.types"}
+{"display":"MONEY","name":"money","source":"sys.types"}
+{"aliases":["national character"],"display":"NCHAR","name":"nchar","params":"(n | max)","source":"sys.types"}
+{"display":"NTEXT","name":"ntext","source":"sys.types"}
+{"display":"NUMERIC","name":"numeric","params":"(precision, scale)","source":"sys.types"}
+{"aliases":["national character varying"],"display":"NVARCHAR","name":"nvarchar","params":"(n | max)","source":"sys.types"}
+{"display":"REAL","name":"real","source":"sys.types"}
+{"display":"SMALLDATETIME","name":"smalldatetime","source":"sys.types"}
+{"display":"SMALLINT","name":"smallint","source":"sys.types"}
+{"display":"SMALLMONEY","name":"smallmoney","source":"sys.types"}
+{"display":"SQL_VARIANT","name":"sql_variant","source":"sys.types"}
+{"display":"TEXT","name":"text","source":"sys.types"}
+{"display":"TIME","name":"time","params":"(fractional seconds)","source":"sys.types"}
+{"display":"TIMESTAMP","name":"timestamp","source":"sys.types"}
+{"display":"TINYINT","name":"tinyint","source":"sys.types"}
+{"display":"UNIQUEIDENTIFIER","name":"uniqueidentifier","source":"sys.types"}
+{"display":"VARBINARY","name":"varbinary","params":"(n | max)","source":"sys.types"}
+{"aliases":["character varying"],"display":"VARCHAR","name":"varchar","params":"(n | max)","source":"sys.types"}
+{"display":"XML","name":"xml","source":"sys.types"}

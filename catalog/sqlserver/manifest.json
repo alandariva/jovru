@@ -1,0 +1,46 @@
+{
+  "dialect": "sqlserver",
+  "doc_base": "https://learn.microsoft.com/sql/t-sql/",
+  "files": {
+    "functions": "functions.jsonl",
+    "keywords": "keywords.jsonl",
+    "types": "types.jsonl"
+  },
+  "generator": {
+    "name": "cargo xtask catalogs",
+    "version": "1"
+  },
+  "name": "SQL Server",
+  "schema_version": 1,
+  "series_components": 1,
+  "sources": [
+    {
+      "id": "tsql-reserved-keywords",
+      "license": "facts",
+      "redistributable": false,
+      "title": "Transact-SQL reserved keywords (the list, not its text)",
+      "url": "https://learn.microsoft.com/sql/t-sql/language-elements/reserved-keywords-transact-sql"
+    },
+    {
+      "id": "sys.types",
+      "license": "facts",
+      "redistributable": false,
+      "title": "System types of the server (sys.types)",
+      "url": "https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-types-transact-sql"
+    },
+    {
+      "id": "curated",
+      "license": "CC0-1.0",
+      "redistributable": true,
+      "title": "Written by the project",
+      "url": "https://github.com/alandariva/jykre-studio"
+    }
+  ],
+  "updated_at": "2026-11-05",
+  "verified_through": "16.0.4305.5",
+  "version_scheme": "numeric",
+  "versions": [
+    "15.0.4500.2",
+    "16.0.4305.5"
+  ]
+}

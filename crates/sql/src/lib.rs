@@ -30,13 +30,15 @@ pub enum TokenKind {
     Executable,
     String,
     /// A name in the dialect's identifier quotes: `"x"` in PostgreSQL,
-    /// `` `x` `` in MySQL and Databricks, both without a dialect.
+    /// `` `x` `` in MySQL and Databricks, `[x]` and `"x"` in SQL Server,
+    /// `"x"` and `` `x` `` without a dialect.
     QuotedIdentifier,
     Number,
     /// A keyword, a function or a name.
     Word,
     /// A placeholder or a variable: `$1` (PostgreSQL), `?` (MySQL and
-    /// Databricks), `:name` (Databricks), `@var` and `@@var` (MySQL).
+    /// Databricks), `:name` (Databricks), `@var` and `@@var` (MySQL and SQL
+    /// Server).
     Parameter,
     Symbol,
 }
@@ -61,17 +63,23 @@ impl Rules {
         matches!(self.dialect, Some(SqlDialect::DatabricksSql))
     }
 
+    fn sqlserver(self) -> bool {
+        matches!(self.dialect, Some(SqlDialect::SqlServer))
+    }
+
     /// PostgreSQL quotes strings with `$$ … $$` and `$tag$ … $tag$`.
     fn dollar_quotes(self) -> bool {
-        !self.mysql() && !self.databricks()
+        !self.mysql() && !self.databricks() && !self.sqlserver()
     }
 
     /// Whether a backslash escapes the next character inside `quote`.
     /// PostgreSQL treats it as an escape only in `E'…'` strings
-    /// (`standard_conforming_strings`, on by default).
+    /// (`standard_conforming_strings`, on by default); SQL Server never does.
     fn backslash(self, quote: u8, escape_string: bool) -> bool {
         if self.postgres() {
             escape_string
+        } else if self.sqlserver() {
+            false
         } else {
             quote != b'`'
         }
@@ -87,9 +95,13 @@ impl Rules {
         !self.mysql()
     }
 
-    /// MySQL identifiers may contain `$`.
+    /// MySQL identifiers may contain `$`; SQL Server ones `$`, `#` and `@`,
+    /// and `#` starts the name of a temporary table (`#t`, `##t`).
     fn word_char(self, ch: char) -> bool {
-        ch.is_alphanumeric() || ch == '_' || (ch == '$' && self.mysql())
+        ch.is_alphanumeric()
+            || ch == '_'
+            || (ch == '$' && (self.mysql() || self.sqlserver()))
+            || (matches!(ch, '#' | '@') && self.sqlserver())
     }
 
     /// Whether `quote` opens a name rather than a string: `"` quotes strings
@@ -103,10 +115,17 @@ impl Rules {
         }
     }
 
+    /// Whether `ch` opens a quoted literal or name: SQL Server has no
+    /// backtick quotes (its names are `[x]`).
+    fn quote(self, ch: char) -> bool {
+        matches!(ch, '\'' | '"') || (ch == '`' && !self.sqlserver())
+    }
+
     /// `?` is a placeholder except in PostgreSQL, where it is an operator
-    /// (`jsonb ? 'key'`) and placeholders are `$1`.
+    /// (`jsonb ? 'key'`) and placeholders are `$1`, and in SQL Server, whose
+    /// parameters and variables are `@name`.
     fn question_placeholder(self) -> bool {
-        !self.postgres()
+        !self.postgres() && !self.sqlserver()
     }
 
     /// `:name` is a named parameter in Databricks (and without a dialect).
@@ -166,6 +185,24 @@ fn quoted_end(sql: &str, start: usize, quote: u8, backslash: bool) -> usize {
     sql.len()
 }
 
+/// The end of a SQL Server `[name]` opened at `start`; an unterminated one
+/// runs to the end of the text.
+fn bracketed_end(sql: &str, start: usize) -> usize {
+    let bytes = sql.as_bytes();
+    let mut pos = start + 1;
+    while pos < bytes.len() {
+        if bytes[pos] == b']' {
+            if bytes.get(pos + 1) == Some(&b']') {
+                pos += 2;
+                continue;
+            }
+            return pos + 1;
+        }
+        pos += sql[pos..].chars().next().map_or(1, char::len_utf8);
+    }
+    sql.len()
+}
+
 /// The end of a block comment opened at `start`, nested when the dialect
 /// nests them.
 fn block_comment_end(sql: &str, start: usize, nested: bool) -> usize {
@@ -212,7 +249,7 @@ fn next_token(sql: &str, mut pos: usize, rules: Rules) -> Option<(Range<usize>, 
             block_comment_end(sql, start, rules.nested_comments()),
             TokenKind::Comment,
         )
-    } else if matches!(ch, '\'' | '"' | '`') {
+    } else if rules.quote(ch) {
         let quote = ch as u8;
         let kind = if rules.identifier_quote(ch) {
             TokenKind::QuotedIdentifier
@@ -223,6 +260,12 @@ fn next_token(sql: &str, mut pos: usize, rules: Rules) -> Option<(Range<usize>, 
             quoted_end(sql, start, quote, rules.backslash(quote, false)),
             kind,
         )
+    } else if ch == '[' && rules.sqlserver() {
+        // A SQL Server name in brackets, where `]]` is a `]`.
+        (bracketed_end(sql, start), TokenKind::QuotedIdentifier)
+    } else if matches!(ch, 'n' | 'N') && next == Some(b'\'') && rules.sqlserver() {
+        // A SQL Server Unicode string.
+        (quoted_end(sql, start + 1, b'\'', false), TokenKind::String)
     } else if matches!(ch, 'e' | 'E') && next == Some(b'\'') && rules.postgres() {
         // A PostgreSQL escape string, where a backslash escapes.
         (
@@ -255,7 +298,7 @@ fn next_token(sql: &str, mut pos: usize, rules: Rules) -> Option<(Range<usize>, 
             .find(|c: char| !rules.word_char(c))
             .unwrap_or(rest.len() - 1);
         (start + 1 + len, TokenKind::Parameter)
-    } else if ch == '@' && rules.mysql() {
+    } else if ch == '@' && (rules.mysql() || rules.sqlserver()) {
         // A user variable (`@total`) or a system one (`@@autocommit`).
         let at = if rest.starts_with("@@") { 2 } else { 1 };
         let len = rest[at..]
@@ -383,12 +426,17 @@ struct Pending {
     /// The previous word was an `END` that the next word completes
     /// (`END CASE`, `END IF`), so that word opens nothing.
     ending: bool,
+    /// The first words, upper case, up to four.
+    words: Vec<String>,
 }
 
 impl Pending {
     /// Follows the blocks of a routine body, so its semicolons do not end
     /// the statement. `word` is upper case.
     fn track(&mut self, word: &str, sql: &str, end: usize, rules: Rules) {
+        if self.words.len() < 4 {
+            self.words.push(word.to_owned());
+        }
         if std::mem::take(&mut self.ending) {
             return;
         }
@@ -397,7 +445,20 @@ impl Pending {
             self.first = Some(word.to_owned());
         }
         let creating = self.first.as_deref() == Some("CREATE");
-        if creating
+        if rules.sqlserver() {
+            // `CREATE [OR ALTER] PROCEDURE|PROC|FUNCTION|TRIGGER` and `ALTER
+            // …`: the body runs to the end of the batch.
+            let routine = matches!(word, "PROCEDURE" | "PROC" | "FUNCTION" | "TRIGGER");
+            let head: Vec<&str> = self.words.iter().map(String::as_str).collect();
+            if routine
+                && matches!(
+                    head.as_slice(),
+                    ["CREATE" | "ALTER", _] | ["CREATE", "OR", "ALTER", _]
+                )
+            {
+                self.routine = true;
+            }
+        } else if creating
             && self.depth == 0
             && matches!(word, "PROCEDURE" | "FUNCTION" | "TRIGGER" | "EVENT")
         {
@@ -406,7 +467,14 @@ impl Pending {
         let following = || next_code(sql, end, rules).and_then(|token| self::word(sql, &token));
         match word {
             "BEGIN" => {
-                let opens = if self.depth > 0 {
+                let opens = if rules.sqlserver() {
+                    // A block (`BEGIN … END`, `BEGIN TRY`, `BEGIN CATCH`),
+                    // not a statement that starts with BEGIN.
+                    !matches!(
+                        following().as_deref(),
+                        Some("TRAN" | "TRANSACTION" | "DISTRIBUTED" | "DIALOG" | "CONVERSATION")
+                    ) && next_code(sql, end, rules).is_some_and(|token| &sql[token.0] != ";")
+                } else if self.depth > 0 {
                     !rules.postgres()
                 } else if rules.mysql() {
                     self.routine
@@ -427,7 +495,11 @@ impl Pending {
             "CASE" if self.depth > 0 => self.depth += 1,
             // `END IF`, `END LOOP` and the like close a control statement,
             // which never opened a block here.
-            "END" if self.depth > 0 => {
+            // `END CONVERSATION` is a SQL Server statement, not a block's end.
+            "END"
+                if self.depth > 0
+                    && !(rules.sqlserver() && following().as_deref() == Some("CONVERSATION")) =>
+            {
                 let next = following();
                 if !matches!(
                     next.as_deref(),
@@ -456,6 +528,11 @@ impl Pending {
 /// - MySQL: a `DELIMITER` line changes the delimiter and is not a statement
 ///   (the server never sees it); a custom delimiter is not part of the
 ///   statement. Executable comments (`/*! … */`) are code.
+/// - SQL Server: a line holding only `GO` (and an optional count) ends a
+///   statement and is not one (it is a command of the client tools); the
+///   body of a `CREATE PROCEDURE/FUNCTION/TRIGGER` runs to the next `GO`,
+///   and `BEGIN … END`, `BEGIN TRY`, `BEGIN CATCH` blocks keep their
+///   semicolons.
 pub fn statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<Range<usize>> {
     let rules = Rules { dialect };
     let mut ranges = Vec::new();
@@ -469,6 +546,15 @@ pub fn statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<Range<usize>> {
             continue;
         }
         let name = word(sql, &token);
+        if rules.sqlserver() && name.as_deref() == Some("GO") && batch_separator(sql, &range) {
+            if let Some(start) = pending.start {
+                let end = sql[..range.start].trim_end().len().max(start);
+                ranges.push(start..end);
+            }
+            pending = Pending::default();
+            pos = line_end(sql, range.end);
+            continue;
+        }
         if pending.start.is_none() && rules.mysql() && name.as_deref() == Some("DELIMITER") {
             let end = line_end(sql, range.end);
             if let Some(value) = sql[range.end..end].split_whitespace().next() {
@@ -490,8 +576,12 @@ pub fn statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<Range<usize>> {
                 .map(|at| range.start + at)
         };
         match found {
-            // Inside a routine body, `;` separates its statements.
-            Some(at) if !(delimiter == ";" && pending.depth > 0) => {
+            // Inside a routine body, `;` separates its statements; a SQL
+            // Server routine body runs to the end of the batch.
+            Some(at)
+                if !(delimiter == ";"
+                    && (pending.depth > 0 || (rules.sqlserver() && pending.routine))) =>
+            {
                 if at > range.start {
                     pending.start.get_or_insert(range.start);
                 }
@@ -520,6 +610,18 @@ pub fn statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<Range<usize>> {
         ranges.push(start..sql.trim_end().len().max(start));
     }
     ranges
+}
+
+/// Whether the `GO` word at `range` is SQL Server's batch separator: alone
+/// on its line, followed at most by a count and a comment.
+fn batch_separator(sql: &str, range: &Range<usize>) -> bool {
+    let line_start = sql[..range.start].rfind('\n').map_or(0, |at| at + 1);
+    if !sql[line_start..range.start].trim().is_empty() {
+        return false;
+    }
+    let rest = &sql[range.end..line_end(sql, range.end)];
+    let rest = rest.split("--").next().unwrap_or_default().trim();
+    rest.is_empty() || rest.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// The statement Ctrl+Enter runs with the cursor at byte `cursor`, as an
@@ -619,7 +721,9 @@ pub enum ExplainRefused {
 ///
 /// PostgreSQL, MySQL and Databricks all show the plan of `EXPLAIN
 /// <statement>` without running the statement (unlike `EXPLAIN ANALYZE`).
-/// Only queries and data changes are explained, so the words after
+/// SQL Server has no `EXPLAIN`: the text is `SET SHOWPLAN_ALL ON;` and the
+/// statement, which its driver runs as plan mode on, the statement, plan
+/// mode off. Only queries and data changes are explained, so the words after
 /// `EXPLAIN` can never be read as one of its options.
 pub fn explain(
     sql: &str,
@@ -667,6 +771,9 @@ pub fn explain(
         return Err(ExplainRefused::NotExplainable);
     }
     let body = statement.trim_end().trim_end_matches(';').trim_end();
+    if dialect == Some(SqlDialect::SqlServer) {
+        return Ok(format!("SET SHOWPLAN_ALL ON;\n{body}"));
+    }
     Ok(format!("EXPLAIN {body}"))
 }
 
@@ -729,6 +836,11 @@ pub fn reads_only(sql: &str, dialect: Option<SqlDialect>) -> bool {
         "NOTIFY",
         "LISTEN",
         "USE",
+        // SQL Server lock hints (`WITH (UPDLOCK)`).
+        "UPDLOCK",
+        "XLOCK",
+        "HOLDLOCK",
+        "TABLOCKX",
     ];
     if statements(sql, dialect).len() != 1 {
         return false;
@@ -780,10 +892,16 @@ pub fn map_offset(before: &str, after: &str, offset: usize) -> usize {
 /// writes from values (a copy as an `IN` list or as `INSERT`s). Where a
 /// backslash escapes inside strings (MySQL, Databricks and generic rules),
 /// backslashes and quotes are escaped with one, since Databricks reads two
-/// adjacent quotes as two literals; PostgreSQL doubles the quote.
+/// adjacent quotes as two literals; PostgreSQL and SQL Server double the
+/// quote. SQL Server literals are Unicode (`N'…'`), so no character is lost
+/// to the database's code page.
 pub fn string_literal(value: &str, dialect: Option<SqlDialect>) -> String {
-    let backslash = Rules { dialect }.backslash(b'\'', false);
-    let mut literal = String::with_capacity(value.len() + 2);
+    let rules = Rules { dialect };
+    let backslash = rules.backslash(b'\'', false);
+    let mut literal = String::with_capacity(value.len() + 3);
+    if rules.sqlserver() {
+        literal.push('N');
+    }
     literal.push('\'');
     for ch in value.chars() {
         match ch {
@@ -855,10 +973,11 @@ pub fn named_markers(sql: &str, dialect: Option<SqlDialect>) -> Vec<NamedMarker>
 mod named_marker_tests {
     use super::{SqlDialect, named_markers};
 
-    const DIALECTS: [Option<SqlDialect>; 4] = [
+    const DIALECTS: [Option<SqlDialect>; 5] = [
         Some(SqlDialect::Postgres),
         Some(SqlDialect::MySql),
         Some(SqlDialect::DatabricksSql),
+        Some(SqlDialect::SqlServer),
         None,
     ];
 
@@ -908,6 +1027,7 @@ mod named_marker_tests {
         assert!(names("SELECT \":a\"", Some(SqlDialect::Postgres)).is_empty());
         assert!(names("SELECT `:a`", Some(SqlDialect::MySql)).is_empty());
         assert!(names("SELECT 1 # :a", Some(SqlDialect::MySql)).is_empty());
+        assert!(names("SELECT [:a], N':b'", Some(SqlDialect::SqlServer)).is_empty());
     }
 
     #[test]
@@ -927,6 +1047,7 @@ mod tests {
     const MYSQL: Option<SqlDialect> = Some(SqlDialect::MySql);
     const POSTGRES: Option<SqlDialect> = Some(SqlDialect::Postgres);
     const DATABRICKS: Option<SqlDialect> = Some(SqlDialect::DatabricksSql);
+    const SQLSERVER: Option<SqlDialect> = Some(SqlDialect::SqlServer);
 
     fn split(sql: &str, dialect: Option<SqlDialect>) -> Vec<&str> {
         statements(sql, dialect)
@@ -941,8 +1062,9 @@ mod tests {
         assert_eq!(string_literal(value, POSTGRES), r"'it''s C:\temp'");
         assert_eq!(string_literal(value, MYSQL), r"'it\'s C:\\temp'");
         assert_eq!(string_literal(value, DATABRICKS), r"'it\'s C:\\temp'");
+        assert_eq!(string_literal(value, SQLSERVER), r"N'it''s C:\temp'");
         // Each literal is one string under its own dialect's rules.
-        for dialect in [POSTGRES, MYSQL, DATABRICKS, None] {
+        for dialect in [POSTGRES, MYSQL, DATABRICKS, SQLSERVER, None] {
             let sql = format!("SELECT {};", string_literal(value, dialect));
             assert_eq!(statements(&sql, dialect).len(), 1, "{sql}");
         }
@@ -1023,6 +1145,13 @@ mod tests {
         assert!(!reads_only("SELECT * FROM t LOCK IN SHARE MODE", MYSQL));
         assert!(reads_only("SELECT `delete` FROM t", MYSQL));
         assert!(reads_only("SELECT * FROM `cat`.`sch`.`t`", DATABRICKS));
+        assert!(reads_only(
+            "SELECT [delete] FROM [dbo].[t] WITH (NOLOCK)",
+            SQLSERVER
+        ));
+        assert!(!reads_only("SELECT * FROM t WITH (UPDLOCK)", SQLSERVER));
+        assert!(!reads_only("SELECT * INTO #copy FROM t", SQLSERVER));
+        assert!(!reads_only("SELECT 1\nGO\nDELETE FROM t", SQLSERVER));
     }
 
     #[test]
@@ -1044,6 +1173,11 @@ mod tests {
         assert_eq!(
             explain(sql, cursor("CREATE"), POSTGRES),
             Err(ExplainRefused::NotExplainable)
+        );
+        // SQL Server has no EXPLAIN: its driver turns plan mode on and off.
+        assert_eq!(
+            explain(sql, cursor("DELETE"), SQLSERVER).as_deref(),
+            Ok("SET SHOWPLAN_ALL ON;\nDELETE FROM t WHERE a = 1")
         );
         let blank = sql.find("\n\n").unwrap() + 1;
         assert_eq!(
@@ -1153,6 +1287,60 @@ mod tests {
         assert_eq!(
             split("BEGIN TRANSACTION; SELECT 1;", DATABRICKS),
             ["BEGIN TRANSACTION;", "SELECT 1;"]
+        );
+    }
+
+    #[test]
+    fn sqlserver_batches_routines_and_blocks() {
+        // `GO` ends a batch and is not a statement; a count may follow it.
+        assert_eq!(
+            split(
+                "SELECT 1\nGO\nSELECT 2\n  go 3 -- again\nSELECT 3",
+                SQLSERVER
+            ),
+            ["SELECT 1", "SELECT 2", "SELECT 3"]
+        );
+        // A word GO elsewhere on a line is not a separator.
+        assert_eq!(
+            split("SELECT go FROM t; SELECT 2;", SQLSERVER),
+            ["SELECT go FROM t;", "SELECT 2;"]
+        );
+        // A routine's body runs to the end of its batch.
+        let sql = "CREATE OR ALTER PROCEDURE p AS\n  SET NOCOUNT ON;\n  SELECT 1;\nGO\nEXEC p;";
+        assert_eq!(
+            split(sql, SQLSERVER),
+            [
+                "CREATE OR ALTER PROCEDURE p AS\n  SET NOCOUNT ON;\n  SELECT 1;",
+                "EXEC p;"
+            ]
+        );
+        assert_eq!(
+            split("ALTER PROC p AS SELECT 1; SELECT 2;", SQLSERVER).len(),
+            1
+        );
+        // A table with a column named like a routine is no routine.
+        assert_eq!(
+            split("CREATE TABLE t (function int); SELECT 2;", SQLSERVER).len(),
+            2
+        );
+        // Blocks keep their semicolons; BEGIN TRAN opens no block.
+        let sql = "BEGIN TRY\n  BEGIN TRAN;\n  UPDATE t SET a = 1;\n  COMMIT;\nEND TRY\nBEGIN CATCH\n  IF @@TRANCOUNT > 0 BEGIN ROLLBACK; END;\n  THROW;\nEND CATCH;\nSELECT 2;";
+        // TRY and CATCH are one statement.
+        let parts = split(sql, SQLSERVER);
+        assert_eq!(parts.len(), 2, "{parts:?}");
+        assert!(parts[0].starts_with("BEGIN TRY") && parts[0].ends_with("END CATCH;"));
+        assert_eq!(parts[1], "SELECT 2;");
+        assert_eq!(
+            split(
+                "BEGIN TRANSACTION; INSERT INTO t VALUES (1); COMMIT;",
+                SQLSERVER
+            ),
+            ["BEGIN TRANSACTION;", "INSERT INTO t VALUES (1);", "COMMIT;"]
+        );
+        // Names in brackets and Unicode strings hold no statement end.
+        assert_eq!(
+            split("SELECT [a;b], N'c;d' FROM [t]]x]; SELECT 2;", SQLSERVER).len(),
+            2
         );
     }
 
@@ -1276,9 +1464,11 @@ SELECT 'a;b' FROM t{index};
             "SELECT 'a;b', \"x\" FROM t -- c\nWHERE a >= $1 AND b::int = 2;\n/* x /* y */ */ SELECT $$a$$;",
             "SELECT `a`, \"s\", 'it\\'s', @v, @@autocommit # note\nFROM t WHERE x = ?;",
             "SELECT raw:owner, :id FROM t WHERE c = 'é' AND d = `q`;",
+            "SELECT [a b], N'x', @v, #t FROM [s].[t]\nGO\nSELECT 'C:\\';",
         ];
         let inserts = [
-            "'", "\"", "--", "/*", "*/", "$$", "x", " ", "\n", ";", "é", "`", "@", ":",
+            "'", "\"", "--", "/*", "*/", "$$", "x", " ", "\n", ";", "é", "`", "@", ":", "[", "]",
+            "N",
         ];
         // A small linear congruential generator keeps the test repeatable.
         let mut seed: u64 = 0x5eed;
@@ -1286,7 +1476,7 @@ SELECT 'a;b' FROM t{index};
             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
             (seed >> 33) as usize % bound.max(1)
         };
-        for (script, dialect) in scripts.iter().zip([POSTGRES, MYSQL, DATABRICKS]) {
+        for (script, dialect) in scripts.iter().zip([POSTGRES, MYSQL, DATABRICKS, SQLSERVER]) {
             let mut text = (*script).to_owned();
             let mut current = tokens(&text, dialect);
             for _ in 0..400 {
@@ -1344,6 +1534,29 @@ SELECT 'a;b' FROM t{index};
         assert!(databricks.contains(&(":id".into(), TokenKind::Parameter)));
         assert!(databricks.contains(&(":".into(), TokenKind::Symbol)));
         assert!(databricks.contains(&("::".into(), TokenKind::Symbol)));
+        let sqlserver = kinds(
+            "SELECT [a]]b], \"c\", N'é''x', @v, @@ROWCOUNT, #t, ##g, `x`, ?, $action, \\ FROM t",
+            SQLSERVER,
+        );
+        for (text, kind) in [
+            ("[a]]b]", TokenKind::QuotedIdentifier),
+            ("\"c\"", TokenKind::QuotedIdentifier),
+            ("N'é''x'", TokenKind::String),
+            ("@v", TokenKind::Parameter),
+            ("@@ROWCOUNT", TokenKind::Parameter),
+            ("#t", TokenKind::Word),
+            ("##g", TokenKind::Word),
+            ("`", TokenKind::Symbol),
+            ("?", TokenKind::Symbol),
+            ("$action", TokenKind::Word),
+        ] {
+            assert!(
+                sqlserver.contains(&(text.into(), kind)),
+                "{text}: {sqlserver:?}"
+            );
+        }
+        // A backslash escapes nothing in SQL Server strings.
+        assert_eq!(split("SELECT 'C:\\'; SELECT 2;", SQLSERVER).len(), 2);
         // A semicolon inside a quoted name does not end the statement.
         assert_eq!(split("SELECT \"a;b\" FROM t; SELECT 2;", POSTGRES).len(), 2);
         assert_eq!(split("SELECT `a;b` FROM t; SELECT 2;", MYSQL).len(), 2);

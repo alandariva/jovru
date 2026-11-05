@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const USAGE: &str = "cargo xtask catalogs check | catalogs postgresql <REL_14_0,REL_15_0,...> [--verified-through 18.6] | catalogs mysql | catalogs databricks <spark-tag> [--keywords <csv>] [--functions <csv>] [--observed YYYY-MM-DD]";
+pub const USAGE: &str = "cargo xtask catalogs check | catalogs postgresql <REL_14_0,REL_15_0,...> [--verified-through 18.6] | catalogs mysql | catalogs sqlserver | catalogs databricks <spark-tag> [--keywords <csv>] [--functions <csv>] [--observed YYYY-MM-DD]";
 
 /// What `cargo xtask catalogs` was asked to do.
 #[derive(Debug, PartialEq, Eq)]
@@ -25,6 +25,7 @@ pub enum Job {
         verified_through: Option<String>,
     },
     Mysql,
+    Sqlserver,
     Databricks {
         spark_tag: String,
         keywords: Option<PathBuf>,
@@ -63,6 +64,7 @@ pub fn options(args: &[&str]) -> Result<Job, String> {
             })
         }
         ["mysql"] => Ok(Job::Mysql),
+        ["sqlserver"] => Ok(Job::Sqlserver),
         ["databricks", tag, rest @ ..] => {
             known(rest, &["--keywords", "--functions", "--observed"])?;
             Ok(Job::Databricks {
@@ -85,6 +87,7 @@ pub fn run(root: &Path, job: Job) -> Result<(), String> {
             verified_through,
         } => postgresql(root, &dir, &tags, verified_through).map(|()| "postgresql"),
         Job::Mysql => mysql(root, &dir).map(|()| "mysql"),
+        Job::Sqlserver => sqlserver(root, &dir).map(|()| "sqlserver"),
         Job::Databricks {
             spark_tag,
             keywords,
@@ -107,7 +110,7 @@ pub fn run(root: &Path, job: Job) -> Result<(), String> {
 // --- Format ---------------------------------------------------------------
 
 /// The dialect directories and the name of the key of each kind of entry.
-const DIALECTS: [&str; 3] = ["postgresql", "mysql", "databricks"];
+const DIALECTS: [&str; 4] = ["postgresql", "mysql", "databricks", "sqlserver"];
 const KINDS: [(&str, &str); 3] = [
     ("keywords.jsonl", "word"),
     ("functions.jsonl", "id"),
@@ -1122,6 +1125,531 @@ fn mysql(root: &Path, dir: &Path) -> Result<(), String> {
             ],
         });
         write_dialect(&dir.join("mysql"), manifest, lines)
+    })();
+    let cleanup = super::compose(root, &project, &["down", "--volumes"]);
+    super::combine(result, cleanup)
+}
+
+// --- SQL Server ------------------------------------------------------------
+
+/// The reserved keywords of Transact-SQL, as Microsoft lists them (facts).
+/// SQL Server has no table of its keywords to read them from.
+const SQLSERVER_RESERVED: &[&str] = &[
+    "add",
+    "all",
+    "alter",
+    "and",
+    "any",
+    "as",
+    "asc",
+    "authorization",
+    "backup",
+    "begin",
+    "between",
+    "break",
+    "browse",
+    "bulk",
+    "by",
+    "cascade",
+    "case",
+    "check",
+    "checkpoint",
+    "close",
+    "clustered",
+    "coalesce",
+    "collate",
+    "column",
+    "commit",
+    "compute",
+    "constraint",
+    "contains",
+    "containstable",
+    "continue",
+    "convert",
+    "create",
+    "cross",
+    "current",
+    "current_date",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "cursor",
+    "database",
+    "dbcc",
+    "deallocate",
+    "declare",
+    "default",
+    "delete",
+    "deny",
+    "desc",
+    "disk",
+    "distinct",
+    "distributed",
+    "double",
+    "drop",
+    "dump",
+    "else",
+    "end",
+    "errlvl",
+    "escape",
+    "except",
+    "exec",
+    "execute",
+    "exists",
+    "exit",
+    "external",
+    "fetch",
+    "file",
+    "fillfactor",
+    "for",
+    "foreign",
+    "freetext",
+    "freetexttable",
+    "from",
+    "full",
+    "function",
+    "goto",
+    "grant",
+    "group",
+    "having",
+    "holdlock",
+    "identity",
+    "identity_insert",
+    "identitycol",
+    "if",
+    "in",
+    "index",
+    "inner",
+    "insert",
+    "intersect",
+    "into",
+    "is",
+    "join",
+    "key",
+    "kill",
+    "left",
+    "like",
+    "lineno",
+    "load",
+    "merge",
+    "national",
+    "nocheck",
+    "nonclustered",
+    "not",
+    "null",
+    "nullif",
+    "of",
+    "off",
+    "offsets",
+    "on",
+    "open",
+    "opendatasource",
+    "openquery",
+    "openrowset",
+    "openxml",
+    "option",
+    "or",
+    "order",
+    "outer",
+    "over",
+    "percent",
+    "pivot",
+    "plan",
+    "precision",
+    "primary",
+    "print",
+    "proc",
+    "procedure",
+    "public",
+    "raiserror",
+    "read",
+    "readtext",
+    "reconfigure",
+    "references",
+    "replication",
+    "restore",
+    "restrict",
+    "return",
+    "revert",
+    "revoke",
+    "right",
+    "rollback",
+    "rowcount",
+    "rowguidcol",
+    "rule",
+    "save",
+    "schema",
+    "securityaudit",
+    "select",
+    "semantickeyphrasetable",
+    "semanticsimilaritydetailstable",
+    "semanticsimilaritytable",
+    "session_user",
+    "set",
+    "setuser",
+    "shutdown",
+    "some",
+    "statistics",
+    "system_user",
+    "table",
+    "tablesample",
+    "textsize",
+    "then",
+    "to",
+    "top",
+    "tran",
+    "transaction",
+    "trigger",
+    "truncate",
+    "try_convert",
+    "tsequal",
+    "union",
+    "unique",
+    "unpivot",
+    "update",
+    "updatetext",
+    "use",
+    "user",
+    "values",
+    "varying",
+    "view",
+    "waitfor",
+    "when",
+    "where",
+    "while",
+    "with",
+    "within",
+    "writetext",
+];
+
+/// Words of Transact-SQL statements that are not reserved (curated).
+const SQLSERVER_KEYWORDS: &[&str] = &[
+    "after",
+    "apply",
+    "catch",
+    "cte",
+    "encryption",
+    "first",
+    "following",
+    "include",
+    "instead",
+    "last",
+    "login",
+    "matched",
+    "max",
+    "next",
+    "nocount",
+    "nolock",
+    "nowait",
+    "offset",
+    "only",
+    "output",
+    "partition",
+    "persisted",
+    "preceding",
+    "range",
+    "readonly",
+    "recompile",
+    "returns",
+    "role",
+    "rows",
+    "schemabinding",
+    "sequence",
+    "source",
+    "synonym",
+    "target",
+    "throw",
+    "ties",
+    "try",
+    "type",
+    "unbounded",
+    "xact_abort",
+];
+
+/// Built-in Transact-SQL functions (curated from Microsoft's reference),
+/// with their kind and the major version that brought them.
+const SQLSERVER_FUNCTIONS: &[(&str, &str, u32)] = &[
+    ("abs", "scalar", 0),
+    ("acos", "scalar", 0),
+    ("app_name", "scalar", 0),
+    ("approx_count_distinct", "aggregate", 15),
+    ("approx_percentile_cont", "aggregate", 16),
+    ("approx_percentile_disc", "aggregate", 16),
+    ("ascii", "scalar", 0),
+    ("asin", "scalar", 0),
+    ("atan", "scalar", 0),
+    ("atn2", "scalar", 0),
+    ("avg", "aggregate", 0),
+    ("binary_checksum", "scalar", 0),
+    ("bit_count", "scalar", 16),
+    ("cast", "scalar", 0),
+    ("ceiling", "scalar", 0),
+    ("char", "scalar", 0),
+    ("charindex", "scalar", 0),
+    ("checksum", "scalar", 0),
+    ("checksum_agg", "aggregate", 0),
+    ("choose", "scalar", 0),
+    ("compress", "scalar", 0),
+    ("concat", "scalar", 0),
+    ("concat_ws", "scalar", 0),
+    ("cos", "scalar", 0),
+    ("cot", "scalar", 0),
+    ("count", "aggregate", 0),
+    ("count_big", "aggregate", 0),
+    ("cume_dist", "window", 0),
+    ("datalength", "scalar", 0),
+    ("date_bucket", "scalar", 16),
+    ("dateadd", "scalar", 0),
+    ("datediff", "scalar", 0),
+    ("datediff_big", "scalar", 0),
+    ("datefromparts", "scalar", 0),
+    ("datename", "scalar", 0),
+    ("datepart", "scalar", 0),
+    ("datetime2fromparts", "scalar", 0),
+    ("datetimefromparts", "scalar", 0),
+    ("datetimeoffsetfromparts", "scalar", 0),
+    ("datetrunc", "scalar", 16),
+    ("day", "scalar", 0),
+    ("db_id", "scalar", 0),
+    ("db_name", "scalar", 0),
+    ("decompress", "scalar", 0),
+    ("degrees", "scalar", 0),
+    ("dense_rank", "window", 0),
+    ("difference", "scalar", 0),
+    ("eomonth", "scalar", 0),
+    ("error_line", "scalar", 0),
+    ("error_message", "scalar", 0),
+    ("error_number", "scalar", 0),
+    ("error_procedure", "scalar", 0),
+    ("error_severity", "scalar", 0),
+    ("error_state", "scalar", 0),
+    ("exp", "scalar", 0),
+    ("first_value", "window", 0),
+    ("floor", "scalar", 0),
+    ("format", "scalar", 0),
+    ("generate_series", "table", 16),
+    ("get_bit", "scalar", 16),
+    ("getdate", "scalar", 0),
+    ("getutcdate", "scalar", 0),
+    ("greatest", "scalar", 16),
+    ("grouping", "aggregate", 0),
+    ("grouping_id", "aggregate", 0),
+    ("hashbytes", "scalar", 0),
+    ("host_name", "scalar", 0),
+    ("ident_current", "scalar", 0),
+    ("iif", "scalar", 0),
+    ("isdate", "scalar", 0),
+    ("isjson", "scalar", 0),
+    ("isnull", "scalar", 0),
+    ("isnumeric", "scalar", 0),
+    ("json_array", "scalar", 16),
+    ("json_modify", "scalar", 0),
+    ("json_object", "scalar", 16),
+    ("json_path_exists", "scalar", 16),
+    ("json_query", "scalar", 0),
+    ("json_value", "scalar", 0),
+    ("lag", "window", 0),
+    ("last_value", "window", 0),
+    ("lead", "window", 0),
+    ("least", "scalar", 16),
+    ("left_shift", "scalar", 16),
+    ("len", "scalar", 0),
+    ("log", "scalar", 0),
+    ("log10", "scalar", 0),
+    ("lower", "scalar", 0),
+    ("ltrim", "scalar", 0),
+    ("max", "aggregate", 0),
+    ("min", "aggregate", 0),
+    ("month", "scalar", 0),
+    ("nchar", "scalar", 0),
+    ("newid", "scalar", 0),
+    ("newsequentialid", "scalar", 0),
+    ("ntile", "window", 0),
+    ("object_id", "scalar", 0),
+    ("object_name", "scalar", 0),
+    ("openjson", "table", 0),
+    ("parse", "scalar", 0),
+    ("patindex", "scalar", 0),
+    ("percent_rank", "window", 0),
+    ("percentile_cont", "window", 0),
+    ("percentile_disc", "window", 0),
+    ("pi", "scalar", 0),
+    ("power", "scalar", 0),
+    ("quotename", "scalar", 0),
+    ("radians", "scalar", 0),
+    ("rand", "scalar", 0),
+    ("rank", "window", 0),
+    ("replace", "scalar", 0),
+    ("replicate", "scalar", 0),
+    ("reverse", "scalar", 0),
+    ("right_shift", "scalar", 16),
+    ("round", "scalar", 0),
+    ("row_number", "window", 0),
+    ("rtrim", "scalar", 0),
+    ("schema_id", "scalar", 0),
+    ("schema_name", "scalar", 0),
+    ("scope_identity", "scalar", 0),
+    ("set_bit", "scalar", 16),
+    ("sign", "scalar", 0),
+    ("sin", "scalar", 0),
+    ("smalldatetimefromparts", "scalar", 0),
+    ("soundex", "scalar", 0),
+    ("space", "scalar", 0),
+    ("sqrt", "scalar", 0),
+    ("square", "scalar", 0),
+    ("stdev", "aggregate", 0),
+    ("stdevp", "aggregate", 0),
+    ("str", "scalar", 0),
+    ("string_agg", "aggregate", 0),
+    ("string_escape", "scalar", 0),
+    ("string_split", "table", 0),
+    ("stuff", "scalar", 0),
+    ("substring", "scalar", 0),
+    ("sum", "aggregate", 0),
+    ("suser_sname", "scalar", 0),
+    ("switchoffset", "scalar", 0),
+    ("sysdatetime", "scalar", 0),
+    ("sysdatetimeoffset", "scalar", 0),
+    ("sysutcdatetime", "scalar", 0),
+    ("tan", "scalar", 0),
+    ("timefromparts", "scalar", 0),
+    ("todatetimeoffset", "scalar", 0),
+    ("translate", "scalar", 0),
+    ("trim", "scalar", 0),
+    ("try_cast", "scalar", 0),
+    ("try_parse", "scalar", 0),
+    ("unicode", "scalar", 0),
+    ("upper", "scalar", 0),
+    ("user_name", "scalar", 0),
+    ("var", "aggregate", 0),
+    ("varp", "aggregate", 0),
+    ("xact_state", "scalar", 0),
+    ("year", "scalar", 0),
+];
+
+/// How SQL spells a SQL Server system type and its parameters (curated).
+fn sqlserver_type(name: &str) -> (String, Value) {
+    let params = match name {
+        "binary" | "char" | "nchar" | "nvarchar" | "varbinary" | "varchar" => Some("(n | max)"),
+        "decimal" | "numeric" => Some("(precision, scale)"),
+        "datetime2" | "datetimeoffset" | "time" => Some("(fractional seconds)"),
+        "float" => Some("(mantissa bits)"),
+        "vector" => Some("(dimensions)"),
+        _ => None,
+    };
+    let aliases: &[&str] = match name {
+        "int" => &["integer"],
+        "decimal" => &["dec"],
+        "float" => &["double precision"],
+        "nvarchar" => &["national character varying"],
+        "nchar" => &["national character"],
+        "varchar" => &["character varying"],
+        "char" => &["character"],
+        "rowversion" => &["timestamp"],
+        _ => &[],
+    };
+    let (name, mut line) = curated_type(name, &name.to_ascii_uppercase(), aliases, params);
+    line["source"] = json!("sys.types");
+    (name, line)
+}
+
+/// The keywords, functions and types of one SQL Server version: its major
+/// number and the names of its system types (`sys.types`).
+fn sqlserver_snapshot(major: u32, types: &str) -> [BTreeMap<String, Value>; 3] {
+    let mut keywords = BTreeMap::new();
+    for word in SQLSERVER_RESERVED {
+        keywords.insert(
+            (*word).to_owned(),
+            json!({"reserved": true, "source": "tsql-reserved-keywords"}),
+        );
+    }
+    for word in SQLSERVER_KEYWORDS {
+        keywords
+            .entry((*word).to_owned())
+            .or_insert_with(|| json!({"reserved": false, "source": "curated"}));
+    }
+    let functions = SQLSERVER_FUNCTIONS
+        .iter()
+        .filter(|(_, _, since)| *since <= major)
+        .map(|(name, kind, _)| {
+            (
+                format!("{name}(…)"),
+                json!({"name": name, "kind": kind, "signature": format!("{name}(…)"), "source": "curated"}),
+            )
+        })
+        .collect();
+    let types = types
+        .lines()
+        .map(str::trim)
+        .filter(|name| identifier(name) && *name != "sysname")
+        .map(|name| sqlserver_type(&name.to_ascii_lowercase()))
+        .collect();
+    [keywords, functions, types]
+}
+
+fn sqlserver(root: &Path, dir: &Path) -> Result<(), String> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let project = super::run_id(std::process::id(), nanos);
+    let services = ["sqlserver-2019", "sqlserver-2022"];
+    let result = (|| {
+        let mut up = vec!["up", "-d", "--wait"];
+        up.extend(services);
+        super::compose(root, &project, &up)?;
+        let query = |service: &str, sql: &str| {
+            let sql = format!("SET NOCOUNT ON; {sql}");
+            super::sqlcmd(root, &project, service, &["-h", "-1", "-W", "-Q", &sql])
+        };
+        let mut kinds: [Vec<(String, BTreeMap<String, Value>)>; 3] = Default::default();
+        for service in services {
+            let version = query(
+                service,
+                "SELECT CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(128))",
+            )?
+            .trim()
+            .to_owned();
+            let major = version
+                .split('.')
+                .next()
+                .and_then(|major| major.parse::<u32>().ok())
+                .ok_or_else(|| format!("Unexpected SQL Server version {version:?}"))?;
+            let types = query(
+                service,
+                "SELECT name FROM sys.types WHERE is_user_defined = 0 ORDER BY name",
+            )?;
+            let [keywords, functions, types] = sqlserver_snapshot(major, &types);
+            kinds[0].push((version.clone(), keywords));
+            kinds[1].push((version.clone(), functions));
+            kinds[2].push((version, types));
+        }
+        kinds.iter_mut().for_each(|kind| {
+            kind.sort_by(|a, b| compare(Scheme::Numeric, &a.0, &b.0).unwrap_or(Ordering::Equal));
+        });
+        let verified = kinds[0]
+            .last()
+            .map(|(version, _)| version.clone())
+            .unwrap_or_default();
+        let (lines, versions) = fold_kinds(kinds);
+        let manifest = json!({
+            "schema_version": 1,
+            "dialect": "sqlserver",
+            "name": "SQL Server",
+            "version_scheme": "numeric",
+            "versions": versions,
+            "verified_through": verified,
+            "series_components": 1,
+            "doc_base": "https://learn.microsoft.com/sql/t-sql/",
+            "files": files(),
+            "generator": generator(),
+            "sources": [
+                source("tsql-reserved-keywords", "Transact-SQL reserved keywords (the list, not its text)", "https://learn.microsoft.com/sql/t-sql/language-elements/reserved-keywords-transact-sql", "facts", false),
+                source("sys.types", "System types of the server (sys.types)", "https://learn.microsoft.com/sql/relational-databases/system-catalog-views/sys-types-transact-sql", "facts", false),
+                curated(),
+            ],
+        });
+        write_dialect(&dir.join("sqlserver"), manifest, lines)
     })();
     let cleanup = super::compose(root, &project, &["down", "--volumes"]);
     super::combine(result, cleanup)

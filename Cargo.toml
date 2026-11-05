@@ -1,8 +1,8 @@
 [package]
 name = "jykre"
-description = "Native Rust and GPUI desktop workspace for PostgreSQL, MySQL and Databricks"
+description = "Native Rust and GPUI desktop workspace for PostgreSQL, MySQL, SQL Server and Databricks"
 readme = "README.md"
-keywords = ["database", "sql", "gpui", "postgresql", "databricks"]
+keywords = ["database", "sql", "gpui", "postgresql", "sqlserver"]
 categories = ["database", "gui"]
 version.workspace = true
 edition.workspace = true
@@ -52,7 +52,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time",
 futures-util = "0.3"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "compat"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "json", "tracing-log"] }
@@ -61,6 +61,9 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # SQL formatting by dialect (N010), behind jykre-sql-language's `sqruff`
 # feature; it has no default features to turn off.
 sqruff-lib = "0.44.0"
+# SQL Server over TDS (approved 2026-11-05, ADR-0025): rustls and TDS 8.0
+# only; values are formatted by the driver, so no date or decimal crates.
+tiberius = { version = "0.13.0", default-features = false, features = ["tds80", "rustls"] }
 
 [dependencies]
 gpui-kit = "0.9.0"
@@ -70,6 +73,7 @@ jykre-core = { path = "crates/core" }
 jykre-driver-postgres = { path = "crates/driver-postgres" }
 jykre-driver-mysql = { path = "crates/driver-mysql" }
 jykre-driver-databricks = { path = "crates/driver-databricks" }
+jykre-driver-sqlserver = { path = "crates/driver-sqlserver" }
 jykre-storage = { path = "crates/storage" }
 jykre-secrets = { path = "crates/secrets" }
 jykre-sql = { path = "crates/sql" }

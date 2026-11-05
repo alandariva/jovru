@@ -16,10 +16,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// The directory each dialect has inside the catalog directory.
-pub const DIALECTS: [(SqlDialect, &str); 3] = [
+pub const DIALECTS: [(SqlDialect, &str); 4] = [
     (SqlDialect::Postgres, "postgresql"),
     (SqlDialect::MySql, "mysql"),
     (SqlDialect::DatabricksSql, "databricks"),
+    (SqlDialect::SqlServer, "sqlserver"),
 ];
 
 /// The files of a dialect directory, in the order of [`DialectFiles`].

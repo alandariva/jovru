@@ -57,3 +57,35 @@ services:
       interval: 2s
       timeout: 2s
       retries: 90
+  # SQL Server has no init folder: the gate seeds it with sqlcmd once it is
+  # healthy (xtask). The administrator password only serves these disposable
+  # fixtures and meets the server's complexity policy; the seeded `jykre`
+  # login keeps the public fixture password. Developer edition, x86-64 only.
+  sqlserver-2019:
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: Jykre-Gate-2026
+    ports: ["127.0.0.1::1433"]
+    volumes:
+      - ./tests/fixtures/sqlserver.sql:/fixtures/sqlserver.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Jykre-Gate-2026 -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+  sqlserver-2022:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Developer
+      MSSQL_SA_PASSWORD: Jykre-Gate-2026
+    ports: ["127.0.0.1::1433"]
+    volumes:
+      - ./tests/fixtures/sqlserver.sql:/fixtures/sqlserver.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Jykre-Gate-2026 -Q 'SELECT 1' -b -o /dev/null"]
+      interval: 2s
+      timeout: 5s
+      retries: 90

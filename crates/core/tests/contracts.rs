@@ -264,6 +264,27 @@ fn credentials_are_redacted_and_configuration_round_trips_without_them() {
 }
 
 #[test]
+fn driver_kinds_and_dialects_keep_their_stored_names() {
+    // Profiles store the kind as text; renaming a variant would orphan them.
+    for (kind, name) in [
+        (DriverKind::Postgres, "postgres"),
+        (DriverKind::MySql, "mysql"),
+        (DriverKind::Databricks, "databricks"),
+        (DriverKind::SqlServer, "sqlserver"),
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(name));
+        assert_eq!(
+            serde_json::from_value::<DriverKind>(json!(name)).unwrap(),
+            kind
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(SqlDialect::SqlServer).unwrap(),
+        json!("sql_server")
+    );
+}
+
+#[test]
 fn metadata_paths_preserve_exact_names_and_object_kinds() {
     let root = ObjectPath::default();
     let schema = root.child(ObjectKind::Schema, "a.b");

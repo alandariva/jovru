@@ -43,7 +43,8 @@ fn formatter(
 ) -> Option<&'static sqruff_lib::core::linter::core::Linter> {
     use sqruff_lib::core::{config::FluffConfig, linter::core::Linter};
     use std::sync::OnceLock;
-    static FORMATTERS: [OnceLock<Option<Linter>>; 4] = [
+    static FORMATTERS: [OnceLock<Option<Linter>>; 5] = [
+        OnceLock::new(),
         OnceLock::new(),
         OnceLock::new(),
         OnceLock::new(),
@@ -53,6 +54,7 @@ fn formatter(
         Some(SqlDialect::Postgres) => (0, "postgres"),
         Some(SqlDialect::MySql) => (1, "mysql"),
         Some(SqlDialect::DatabricksSql) => (2, "databricks"),
+        Some(SqlDialect::SqlServer) => (4, "tsql"),
         _ => (3, "ansi"),
     };
     FORMATTERS[slot]
@@ -81,6 +83,26 @@ fn same_text(before: &str, after: &str) -> bool {
     text(before) == text(after)
 }
 
+/// Whether `after` reads as the same tokens as `before` in `dialect`, but
+/// for whitespace and ASCII letter case: a space added inside a token (as
+/// in T-SQL's `N'x'` becoming `N 'x'`) would change what it means.
+fn same_tokens(before: &str, after: &str, dialect: Option<SqlDialect>) -> bool {
+    let read = |sql: &str| {
+        jykre_sql::tokens(sql, dialect)
+            .into_iter()
+            .map(|(range, kind)| {
+                let text: String = sql[range]
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .map(|ch| ch.to_ascii_lowercase())
+                    .collect();
+                (kind, text)
+            })
+            .collect::<Vec<_>>()
+    };
+    read(before) == read(after)
+}
+
 /// One statement laid out by sqruff, without the whitespace around it, or
 /// `None` when the formatter failed or changed more than layout and keyword
 /// case. The flag tells that part of it does not parse in the dialect.
@@ -96,7 +118,9 @@ fn format_statement(statement: &str, dialect: Option<SqlDialect>) -> Option<(Str
         Some((linted.fix_string().trim().to_owned(), partial))
     });
     match std::panic::catch_unwind(run) {
-        Ok(Some((formatted, partial))) if same_text(statement, &formatted) => {
+        Ok(Some((formatted, partial)))
+            if same_text(statement, &formatted) && same_tokens(statement, &formatted, dialect) =>
+        {
             Some((formatted, partial))
         }
         _ => None,
@@ -176,7 +200,8 @@ pub fn format_range(
 #[cfg(not(feature = "sqruff"))]
 fn format_statement(statement: &str, dialect: Option<SqlDialect>) -> Option<(String, bool)> {
     let formatted = builtin(statement, dialect);
-    same_text(statement, &formatted).then_some((formatted, false))
+    (same_text(statement, &formatted) && same_tokens(statement, &formatted, dialect))
+        .then_some((formatted, false))
 }
 
 /// Breaks lines before the main clauses and between the items of a select
@@ -260,6 +285,35 @@ mod tests {
     const MYSQL: Option<SqlDialect> = Some(SqlDialect::MySql);
     const POSTGRES: Option<SqlDialect> = Some(SqlDialect::Postgres);
     const DATABRICKS: Option<SqlDialect> = Some(SqlDialect::DatabricksSql);
+    const SQLSERVER: Option<SqlDialect> = Some(SqlDialect::SqlServer);
+
+    #[test]
+    fn sqlserver_names_strings_and_batches_survive_formatting() {
+        let sql = "select [order id], N'é''x', @total from [dbo].[t] where x = 1\ngo\nselect top (5) * from #t";
+        let formatted = formatted(sql, SQLSERVER);
+        for kept in [
+            "[order id]",
+            "N'é''x'",
+            "@total",
+            "[dbo].[t]",
+            "\ngo\n",
+            "#t",
+        ] {
+            assert!(
+                formatted.contains(kept) || formatted.contains(&kept.to_uppercase()),
+                "{kept:?} in {formatted:?}"
+            );
+        }
+        assert!(formatted.starts_with("SELECT"), "{formatted:?}");
+        assert_eq!(split(&formatted, SQLSERVER).len(), 2, "{formatted:?}");
+        // A layout that splits a token is refused: the statement stays.
+        let lower = "select n'é' from t";
+        let result = super::format(lower, SQLSERVER).unwrap();
+        assert!(
+            result.sql.contains("n'é'") || result.sql.contains("N'é'"),
+            "{result:?}"
+        );
+    }
 
     fn split(sql: &str, dialect: Option<SqlDialect>) -> Vec<&str> {
         statements(sql, dialect)

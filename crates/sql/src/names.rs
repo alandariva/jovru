@@ -32,12 +32,18 @@ pub fn parts(sql: &str, dialect: Option<SqlDialect>) -> Vec<Part> {
             match kind {
                 TokenKind::Word => Part::Word(text.to_ascii_uppercase(), text.to_owned()),
                 TokenKind::QuotedIdentifier => {
-                    let quote = &text[..1];
+                    // SQL Server's `[x]` closes with `]`; the others with the
+                    // quote they open with.
+                    let (open, close) = match text.get(..1) {
+                        Some("[") => ("[", "]"),
+                        Some(quote) => (quote, quote),
+                        None => ("", ""),
+                    };
                     let inner = text
-                        .strip_prefix(quote)
-                        .map(|rest| rest.strip_suffix(quote).unwrap_or(rest))
+                        .strip_prefix(open)
+                        .map(|rest| rest.strip_suffix(close).unwrap_or(rest))
                         .unwrap_or(text);
-                    Part::Quoted(inner.replace(&format!("{quote}{quote}"), quote))
+                    Part::Quoted(inner.replace(&format!("{close}{close}"), close))
                 }
                 TokenKind::Symbol => Part::Symbol(text.to_owned()),
                 _ => Part::Other,
@@ -72,14 +78,51 @@ pub fn name_at(parts: &[Part], mut at: usize) -> Option<(Vec<Name>, usize)> {
 }
 
 /// How the server stores a name: quoted as written; unquoted folded the way
-/// the dialect folds it (PostgreSQL and Unity Catalog to lower case, MySQL as
-/// written).
+/// the dialect folds it (PostgreSQL and Unity Catalog to lower case, MySQL
+/// and SQL Server as written).
 pub fn stored(name: &Name, dialect: SqlDialect) -> String {
     if name.quoted {
         return name.text.clone();
     }
     match dialect {
-        SqlDialect::MySql => name.text.clone(),
+        SqlDialect::MySql | SqlDialect::SqlServer => name.text.clone(),
         _ => name.text.to_lowercase(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlserver_names_in_brackets_keep_their_text_and_case() {
+        let parts = parts(
+            "SELECT * FROM [My]]Db].dbo.\"Order\"",
+            Some(SqlDialect::SqlServer),
+        );
+        let (name, _) = name_at(&parts, 3).unwrap();
+        assert_eq!(
+            name,
+            [
+                Name {
+                    text: "My]Db".into(),
+                    quoted: true
+                },
+                Name {
+                    text: "dbo".into(),
+                    quoted: false
+                },
+                Name {
+                    text: "Order".into(),
+                    quoted: true
+                },
+            ]
+        );
+        let unquoted = Name {
+            text: "Orders".into(),
+            quoted: false,
+        };
+        assert_eq!(stored(&unquoted, SqlDialect::SqlServer), "Orders");
+        assert_eq!(stored(&unquoted, SqlDialect::Postgres), "orders");
     }
 }
