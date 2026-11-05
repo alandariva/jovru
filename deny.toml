@@ -22,6 +22,11 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus_names via accesskit (GPUI) and keyring Secret Service; needs zbus 6 upstream" },
     { id = "RUSTSEC-2026-0370", reason = "zvariant via accesskit (GPUI) and keyring Secret Service; needs zbus 6 upstream" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive via accesskit (GPUI) and keyring Secret Service; needs zbus 6 upstream" },
+    # SQL formatting (sqruff-lib 0.44): sqruff-lib-dialects declares
+    # serde_yaml as a normal dependency, but its code never uses it, so
+    # unsafe-libyaml is compiled in without running. Accepted 2026-11-04;
+    # next review 2027-02-01, or when sqruff drops serde_yaml.
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml via serde_yaml in sqruff-lib-dialects; declared but unused at runtime" },
 ]
 
 [licenses]

@@ -12,7 +12,7 @@ pub const SOURCE_LOCALE: &str = "en";
 
 /// Embedded catalogs as `(BCP 47 tag, JSON)`. To ship a language, generate
 /// `locales/<tag>.json` and add `("<tag>", include_str!("../locales/<tag>.json"))`.
-const CATALOGS: &[(&str, &str)] = &[];
+const CATALOGS: &[(&str, &str)] = &[("pt-BR", include_str!("../locales/pt-BR.json"))];
 
 /// Translates a message, or formats it with positional arguments.
 #[macro_export]
@@ -33,10 +33,12 @@ struct Active {
 fn active() -> &'static Active {
     static ACTIVE: OnceLock<Active> = OnceLock::new();
     ACTIVE.get_or_init(|| {
+        // Unit tests assert source text, so they ignore the machine's language.
         let requested = std::env::var("JYKRE_LOCALE")
             .ok()
             .filter(|tag| !tag.trim().is_empty())
-            .or_else(sys_locale::get_locale);
+            .or_else(sys_locale::get_locale)
+            .filter(|_| !cfg!(test));
         let tags: Vec<_> = CATALOGS.iter().map(|(tag, _)| *tag).collect();
         let tag = resolve(requested.as_deref(), &tags);
         let messages = CATALOGS
@@ -152,7 +154,8 @@ mod tests {
     fn embedded_catalogs_parse_and_keep_placeholders() {
         for (tag, json) in CATALOGS {
             assert_ne!(*tag, SOURCE_LOCALE);
-            parse_catalog(json).unwrap_or_else(|error| panic!("{tag}: {error}"));
+            let parsed = parse_catalog(json);
+            assert!(parsed.is_ok(), "{tag}: {:?}", parsed.err());
         }
     }
 

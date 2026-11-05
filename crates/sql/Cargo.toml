@@ -1,0 +1,16 @@
+[package]
+name = "jykre-sql"
+description = "SQL tokens, statement splitting and position mapping by dialect, shared by query execution and the editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+jykre-core = { path = "../core" }

@@ -16,6 +16,20 @@ fn objects() -> Vec<MetadataObject> {
     let sibling = MetadataObject::new(ObjectKind::Table, &db.path, "target.more");
     vec![db, table, col, sibling]
 }
+/// The key versions 1 and 2 wrote: each segment's JSON in hex.
+fn hex_key(path: &ObjectPath) -> String {
+    path.0
+        .iter()
+        .map(|part| {
+            serde_json::to_vec(part)
+                .unwrap()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
 async fn seed(repository: &MetadataRepository) {
     let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
     run.batch(objects()).await.unwrap();
@@ -63,6 +77,15 @@ async fn partial_publication_is_atomic_does_not_rewrite_siblings_and_persists() 
             .find(|status| status.scope == table.path)
             .unwrap()
             .state,
+        RefreshState::Success
+    );
+    // The enum changes the type, not the text existing caches hold.
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT state FROM scope_status WHERE scope_key=?")
+            .bind(key(&table.path).unwrap())
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap(),
         "success"
     );
     repository.close().await;
@@ -87,6 +110,25 @@ async fn partial_publication_is_atomic_does_not_rewrite_siblings_and_persists() 
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+fn refresh_states_read_back_the_text_they_store() {
+    for state in [
+        RefreshState::Running,
+        RefreshState::Success,
+        RefreshState::Partial,
+        RefreshState::Warning,
+        RefreshState::Failed,
+        RefreshState::Cancelled,
+        RefreshState::Interrupted,
+    ] {
+        assert_eq!(RefreshState::parse(state.as_str()), state);
+    }
+    assert_eq!(
+        RefreshState::parse("written by a newer version"),
+        RefreshState::Unknown
+    );
+}
+
 #[tokio::test]
 async fn errors_cancellation_and_crash_never_publish_staged_data() {
     let dir = dir();
@@ -109,7 +151,12 @@ async fn errors_cancellation_and_crash_never_publish_staged_data() {
     assert_eq!(repository.version().await.unwrap(), 1);
     let mut run = repository.begin(&objects()[1].path).await.unwrap();
     run.batch(vec![objects()[1].clone()]).await.unwrap();
-    assert!(repository.begin(&ObjectPath::default()).await.is_err());
+    assert!(
+        repository
+            .begin_within(&ObjectPath::default(), std::time::Duration::ZERO)
+            .await
+            .is_err()
+    );
     // A second reader must not recover a refresh that still owns its OS lock.
     repository.recover_interrupted().await.unwrap();
     assert!(
@@ -118,7 +165,7 @@ async fn errors_cancellation_and_crash_never_publish_staged_data() {
             .await
             .unwrap()
             .iter()
-            .any(|status| status.state == "running")
+            .any(|status| status.state == RefreshState::Running)
     );
     drop(run);
     repository.close().await;
@@ -131,7 +178,7 @@ async fn errors_cancellation_and_crash_never_publish_staged_data() {
             .await
             .unwrap()
             .iter()
-            .any(|status| status.state == "interrupted")
+            .any(|status| status.state == RefreshState::Interrupted)
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM staging_objects")
@@ -141,6 +188,70 @@ async fn errors_cancellation_and_crash_never_publish_staged_data() {
         0
     );
     reopened.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_refresh_holds_the_writer_lock_only_to_publish() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let config = config();
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    seed(&repository).await;
+    let table = objects()[1].clone();
+    let mut run = repository.begin(&table.path).await.unwrap();
+    run.batch(vec![table.clone()]).await.unwrap();
+    // While the refresh reads, another writer gets the lock at once.
+    let held = writer_lock(&repository.lock_path).unwrap();
+    // Publishing waits for the writer to finish instead of failing.
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        drop(held);
+    });
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    release.await.unwrap();
+    drop(run);
+    assert!(!repository.all().await.unwrap().contains(&objects()[2]));
+    // A new refresh waits for one that is finishing.
+    let finishing = repository.begin(&table.path).await.unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        drop(finishing);
+    });
+    let next = repository.begin(&ObjectPath::default()).await;
+    release.await.unwrap();
+    assert!(next.is_ok());
+    drop(next);
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn saving_another_configuration_during_a_read_makes_the_read_stale() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let config = config();
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    seed(&repository).await;
+    let mut run = repository.begin(&objects()[1].path).await.unwrap();
+    let mut changed = config.clone();
+    changed.options["user"] = serde_json::json!("another-fixture-user");
+    // The read in progress does not keep the new configuration from being
+    // accepted, and what it read is never published.
+    let current = MetadataRepository::prepare(&dir, id, &changed)
+        .await
+        .unwrap();
+    assert!(
+        run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+            .await
+            .is_err()
+    );
+    drop(run);
+    assert!(current.all().await.unwrap().is_empty());
+    repository.close().await;
+    current.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -173,7 +284,9 @@ async fn permission_warnings_preserve_unreadable_subtrees_and_mark_them() {
             .await
             .unwrap()
             .iter()
-            .any(|status| status.state == "warning" && status.scope == objects()[1].path)
+            .any(
+                |status| status.state == RefreshState::Warning && status.scope == objects()[1].path
+            )
     );
     repository.close().await;
     std::fs::remove_dir_all(dir).unwrap();
@@ -268,6 +381,690 @@ async fn obsolete_readers_and_refresh_handles_cannot_revert_cache_identity() {
         .unwrap();
     assert_eq!(reopened.version().await.unwrap(), version);
     assert_eq!(reopened.all().await.unwrap(), expected);
+    reopened.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_scoped_refresh_into_an_empty_cache_publishes_its_namespace_ancestors() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = ObjectPath::default().child(ObjectKind::Database, "db.a/%_");
+    let schema = db.child(ObjectKind::Schema, "sales");
+    let table = MetadataObject::new(ObjectKind::Table, &schema, "orders");
+    let mut run = repository.begin(&schema).await.unwrap();
+    run.batch(vec![
+        MetadataObject::new(ObjectKind::Schema, &db, "sales"),
+        table.clone(),
+    ])
+    .await
+    .unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let root = repository
+        .children(&ObjectPath::default(), None, 10)
+        .await
+        .unwrap()
+        .objects;
+    assert_eq!(root.len(), 1);
+    assert_eq!(root[0].path, db);
+    assert_eq!(
+        repository
+            .children(&schema, None, 10)
+            .await
+            .unwrap()
+            .objects,
+        [table]
+    );
+    // A scope the server no longer has publishes nothing, not even ancestors.
+    let other = ObjectPath::default()
+        .child(ObjectKind::Database, "gone")
+        .child(ObjectKind::Schema, "x");
+    let mut run = repository.begin(&other).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        repository
+            .children(&ObjectPath::default(), None, 10)
+            .await
+            .unwrap()
+            .objects
+            .len(),
+        1
+    );
+    repository.close().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn pages_follow_kind_order_and_continue_from_their_cursor() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db");
+    let mut objects = vec![db.clone()];
+    // Stored text would put materialized views first and views last.
+    for (kind, prefix, count) in [
+        (ObjectKind::View, "v", 3),
+        (ObjectKind::MaterializedView, "m", 2),
+        (ObjectKind::Table, "t", 5),
+    ] {
+        for index in 0..count {
+            objects.push(MetadataObject::new(
+                kind,
+                &db.path,
+                format!("{prefix}{index}"),
+            ));
+        }
+    }
+    let table = objects.last().unwrap().path.clone();
+    for ordinal in [3, 1, 2] {
+        let mut column = MetadataObject::new(ObjectKind::Column, &table, format!("c{ordinal}"));
+        column.ordinal = Some(ordinal);
+        objects.push(column);
+    }
+    let mut key = MetadataObject::new(ObjectKind::ForeignKey, &table, "fk");
+    key.ordinal = None;
+    objects.push(key);
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(objects).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    // Pages of three cross from one kind to the next without repeating or
+    // skipping a child.
+    let mut names = Vec::new();
+    let mut after = None;
+    loop {
+        let page = repository
+            .children(&db.path, after.as_ref(), 3)
+            .await
+            .unwrap();
+        names.extend(page.objects.into_iter().map(|object| object.name));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(
+        names,
+        ["t0", "t1", "t2", "t3", "t4", "v0", "v1", "v2", "m0", "m1"]
+    );
+    // Columns follow their ordinal, then keys.
+    let (version, pages) = repository
+        .pages(&[
+            PageRequest {
+                parent: table.clone(),
+                after: None,
+                limit: 2,
+            },
+            PageRequest {
+                parent: ObjectPath::default(),
+                after: None,
+                limit: 10,
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(version, repository.version().await.unwrap());
+    let columns: Vec<_> = pages[0].objects.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(columns, ["c1", "c2"]);
+    let rest = repository
+        .children(&table, pages[0].next.as_ref(), 10)
+        .await
+        .unwrap();
+    let rest: Vec<_> = rest.objects.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(rest, ["c3", "fk"]);
+    assert_eq!(pages[1].objects, [db]);
+    assert!(pages[1].next.is_none());
+    repository.close().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn retain_keeps_the_selection_its_ancestors_and_named_nodes_only() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db.a/%_");
+    let kept = MetadataObject::new(ObjectKind::Schema, &db.path, "kept");
+    // A name that is a prefix of the kept one must not survive with it.
+    let dropped = MetadataObject::new(ObjectKind::Schema, &db.path, "kept.more");
+    let kept_table = MetadataObject::new(ObjectKind::Table, &kept.path, "orders");
+    let dropped_table = MetadataObject::new(ObjectKind::Table, &dropped.path, "orders");
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(vec![
+        db.clone(),
+        kept.clone(),
+        dropped.clone(),
+        kept_table.clone(),
+        dropped_table,
+    ])
+    .await
+    .unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    for scope in [&kept.path, &dropped.path] {
+        let mut run = repository.begin(scope).await.unwrap();
+        run.fail(&DriverError::cancelled()).await.unwrap();
+    }
+    let before = repository.version().await.unwrap();
+    // Keeping the root keeps everything.
+    assert_eq!(
+        repository
+            .retain(&[ObjectPath::default()], &[])
+            .await
+            .unwrap(),
+        before
+    );
+    assert_eq!(repository.all().await.unwrap().len(), 5);
+    let catalog = ObjectPath::default().child(ObjectKind::Database, "empty");
+    let version = repository
+        .retain(
+            std::slice::from_ref(&kept.path),
+            std::slice::from_ref(&catalog),
+        )
+        .await
+        .unwrap();
+    assert_eq!(version, before + 1);
+    assert_eq!(repository.version().await.unwrap(), version);
+    let paths: Vec<_> = repository
+        .all()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|object| object.path)
+        .collect();
+    assert_eq!(paths.len(), 4);
+    for path in [&db.path, &kept.path, &kept_table.path, &catalog] {
+        assert!(paths.contains(path), "{path:?} was removed");
+    }
+    let scopes: Vec<_> = repository
+        .statuses()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|status| status.scope)
+        .collect();
+    assert!(scopes.contains(&kept.path));
+    assert!(!scopes.contains(&dropped.path));
+    assert_eq!(
+        repository.paths(ObjectKind::Schema).await.unwrap(),
+        std::slice::from_ref(&kept.path)
+    );
+    // Nothing selected leaves an empty cache.
+    repository.retain(&[], &[]).await.unwrap();
+    assert!(repository.all().await.unwrap().is_empty());
+    repository.close().await;
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_version_1_cache_migrates_with_unicode_search_names() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let path = dir.join("metadata");
+    std::fs::create_dir_all(&path).unwrap();
+    // A file as version 1 left it: its schema and one object, no search name.
+    let pool = open_pool(&path.join(format!("{id}.db")), false)
+        .await
+        .unwrap();
+    sqlx::raw_sql(SCHEMA).execute(&pool).await.unwrap();
+    sqlx::raw_sql("PRAGMA user_version=1")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let table = MetadataObject::new(ObjectKind::Table, &ObjectPath::default(), "AÇÃO");
+    sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json) VALUES(?,NULL,?,?,?,NULL,?)")
+        .bind(hex_key(&table.path))
+        .bind(serde_json::to_string(&table.path).unwrap())
+        .bind(serde_json::to_string(&table.kind).unwrap())
+        .bind(&table.name)
+        .bind(serde_json::to_string(&table).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO scope_status(scope_key,scope_json,state,last_run,last_attempt_at,last_success_at,version) VALUES('','[]','success',1,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',1)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    pool.close().await;
+    let repository = MetadataRepository::open(&dir, id, &config()).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap(),
+        3
+    );
+    // The object written before the steps is found by its Unicode name.
+    assert_eq!(repository.search("ação", None, 10).await.unwrap(), [table]);
+    let status = &repository.statuses().await.unwrap()[0];
+    assert_eq!(
+        status.last_published_at.as_deref(),
+        Some("2026-01-01T00:00:00.000Z")
+    );
+    // Opening again runs no step twice.
+    repository.close().await;
+    let repository = MetadataRepository::open(&dir, id, &config()).await.unwrap();
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn keys_round_trip_and_a_node_s_range_holds_its_descendants_only() {
+    let root = ObjectPath::default();
+    let database = MetadataObject::new(ObjectKind::Database, &root, "a/b%2F%25");
+    let schema = MetadataObject::new(ObjectKind::Schema, &database.path, "ação");
+    let table = MetadataObject::new(ObjectKind::Table, &schema.path, "t");
+    // Names that are the database's name with the separator, the escape or
+    // the character after the separator appended.
+    let others: Vec<ObjectPath> = ["a/b%2F%25/x", "a/b%2F%250", "a/b%2F%25%", "a", "a/b"]
+        .into_iter()
+        .map(|name| MetadataObject::new(ObjectKind::Database, &root, name).path)
+        .collect();
+    for path in [&root, &database.path, &schema.path, &table.path]
+        .into_iter()
+        .chain(&others)
+    {
+        assert_eq!(&path_of(&key(path).unwrap()).unwrap(), path);
+    }
+    // The raw separator only ever separates segments.
+    assert_eq!(key(&schema.path).unwrap().matches('/').count(), 1);
+    let within = |inner: &ObjectPath, outer: &ObjectPath| {
+        let (inner, outer) = (key(inner).unwrap(), key(outer).unwrap());
+        inner >= format!("{outer}/") && inner < format!("{outer}0")
+    };
+    assert!(within(&schema.path, &database.path));
+    assert!(within(&table.path, &database.path));
+    assert!(within(&table.path, &schema.path));
+    assert!(!within(&database.path, &database.path));
+    for other in &others {
+        assert!(!within(other, &database.path), "{other:?}");
+        assert!(!within(&database.path, other), "{other:?}");
+    }
+    // A parent's key sorts before its children's.
+    assert!(key(&database.path).unwrap() < key(&schema.path).unwrap());
+}
+
+#[tokio::test]
+async fn a_version_2_cache_compacts_its_keys_and_reads_back_the_same() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let config = config();
+    let path = dir.join("metadata");
+    std::fs::create_dir_all(&path).unwrap();
+    // A file as version 2 left it: hex keys, paths in `path_json` and in
+    // every object, a status per scope and a refresh left running.
+    let pool = open_pool(&path.join(format!("{id}.db")), false)
+        .await
+        .unwrap();
+    for step in [SCHEMA, STEP_2, STEP_2_INDEX, "PRAGMA user_version=2"] {
+        sqlx::raw_sql(step).execute(&pool).await.unwrap();
+    }
+    sqlx::query("INSERT INTO metadata_info(singleton,identity,version) VALUES(1,?,1)")
+        .bind(identity(&config).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut written = objects();
+    let schema = MetadataObject::new(ObjectKind::Schema, &written[0].path, "sales/eu");
+    let column = {
+        let mut column = MetadataObject::new(ObjectKind::Column, &written[1].path, "new");
+        column.ordinal = Some(2);
+        column.data_type = Some("integer".into());
+        column
+    };
+    written.extend([schema.clone(), column]);
+    for object in &written {
+        sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name) VALUES(?,?,?,?,?,?,?,?)")
+            .bind(hex_key(&object.path))
+            .bind(object.path.parent().filter(|parent| !parent.0.is_empty()).map(|parent| hex_key(&parent)))
+            .bind(serde_json::to_string(&object.path).unwrap())
+            .bind(serde_json::to_string(&object.kind).unwrap())
+            .bind(&object.name)
+            .bind(object.ordinal)
+            .bind(serde_json::to_string(object).unwrap())
+            .bind(search_name(&object.name))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    for (scope, state) in [
+        (&ObjectPath::default(), "success"),
+        (&schema.path, "running"),
+    ] {
+        sqlx::query("INSERT INTO scope_status(scope_key,scope_json,state,last_run,last_attempt_at,last_success_at,last_published_at,version) VALUES(?,?,?,1,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z',1)")
+            .bind(hex_key(scope))
+            .bind(serde_json::to_string(scope).unwrap())
+            .bind(state)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO refresh_runs(scope_key,scope_json,base_version,state) VALUES(?,?,1,'running')",
+    )
+    .bind(hex_key(&schema.path))
+    .bind(serde_json::to_string(&schema.path).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
+    let repository = MetadataRepository::open(&dir, id, &config).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&repository.pool)
+            .await
+            .unwrap(),
+        3
+    );
+    let mut expected = written.clone();
+    expected.sort_by_key(|object| key(&object.path).unwrap());
+    assert_eq!(repository.all().await.unwrap(), expected);
+    // One copy of each path: the key. The vacuum gave the space back.
+    let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('objects')")
+        .fetch_all(&repository.pool)
+        .await
+        .unwrap();
+    assert!(!columns.iter().any(|column| column == "path_json"));
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name='objects' AND sql IS NOT NULL ORDER BY name",
+    )
+    .fetch_all(&repository.pool)
+    .await
+    .unwrap();
+    assert_eq!(indexes, ["objects_parent", "objects_search"]);
+    let (json, free): (String, i64) = sqlx::query_as(
+        "SELECT object_json,(SELECT freelist_count FROM pragma_freelist_count) FROM objects WHERE name='new'",
+    )
+    .fetch_one(&repository.pool)
+    .await
+    .unwrap();
+    assert!(!json.contains("target"), "{json}");
+    assert_eq!(free, 0);
+    // Pages, search, relations and statuses read what version 2 held.
+    let table = &written[1];
+    let page = repository.children(&table.path, None, 10).await.unwrap();
+    assert_eq!(page.objects, [written[2].clone(), written[5].clone()]);
+    assert_eq!(
+        repository.search("eu", None, 10).await.unwrap(),
+        [written[0].clone(), schema.clone()]
+    );
+    let (_, relations) = repository.relations().await.unwrap();
+    assert_eq!(
+        relations,
+        [
+            (written[1].path.clone(), ObjectKind::Table),
+            (written[3].path.clone(), ObjectKind::Table)
+        ]
+    );
+    let statuses = repository.statuses().await.unwrap();
+    assert_eq!(statuses.len(), 2);
+    let left = statuses
+        .iter()
+        .find(|status| status.scope == schema.path)
+        .unwrap();
+    assert_eq!(left.state, RefreshState::Interrupted);
+    // A refresh and a retain after the step find their ranges by the new keys.
+    let mut run = repository.begin(&written[1].path).await.unwrap();
+    run.batch(vec![table.clone()]).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let after = repository.all().await.unwrap();
+    assert!(
+        !after
+            .iter()
+            .any(|object| object.name == "old" || object.name == "new")
+    );
+    assert!(after.contains(&written[3]));
+    repository
+        .retain(std::slice::from_ref(&schema.path), &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.all().await.unwrap(),
+        [written[0].clone(), schema.clone()]
+    );
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_search_folds_unicode_and_filters_kinds_before_the_limit() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db");
+    let mut objects = vec![db.clone()];
+    let accented = MetadataObject::new(ObjectKind::Table, &db.path, "AÇÃO");
+    objects.push(accented.clone());
+    // More columns called id than the limit, then the table called orders_id.
+    for index in 0..210 {
+        let table = MetadataObject::new(ObjectKind::Table, &db.path, format!("t{index:03}"));
+        objects.push(MetadataObject::new(ObjectKind::Column, &table.path, "id"));
+        objects.push(table);
+    }
+    let orders = MetadataObject::new(ObjectKind::Table, &db.path, "orders_id");
+    objects.push(orders.clone());
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(objects).await.unwrap();
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let found = repository.search("ação", None, 200).await.unwrap();
+    assert!(found.contains(&accented));
+    // The database comes along as the match's ancestor.
+    assert!(found.contains(&db));
+    let all = repository.search("id", None, 200).await.unwrap();
+    assert!(!all.contains(&orders));
+    let tables = repository
+        .search("id", Some(&[ObjectKind::Table]), 200)
+        .await
+        .unwrap();
+    assert!(tables.contains(&orders));
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_partial_refresh_records_when_it_published() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    run.batch(objects()).await.unwrap();
+    let report = IntrospectionReport {
+        warnings: vec![IntrospectionWarning {
+            path: objects()[1].path.clone(),
+            message: "fixture denied".into(),
+        }],
+    };
+    run.activate(&report, &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    let root = repository
+        .statuses()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|status| status.scope.0.is_empty())
+        .unwrap();
+    assert_eq!(root.state, RefreshState::Partial);
+    assert!(root.last_success_at.is_none());
+    assert!(root.last_published_at.is_some());
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_cache_moves_to_a_new_identity_without_losing_its_objects() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let full = config();
+    let repository = MetadataRepository::open(&dir, id, &full).await.unwrap();
+    seed(&repository).await;
+    repository.close().await;
+    let narrower = ConnectionConfig {
+        driver: full.driver,
+        options: serde_json::json!({"host":"localhost","user":"fixture"}),
+    };
+    MetadataRepository::adopt(&dir, id, &full, &narrower)
+        .await
+        .unwrap();
+    let repository = MetadataRepository::open(&dir, id, &narrower).await.unwrap();
+    assert_eq!(repository.all().await.unwrap().len(), objects().len());
+    repository.close().await;
+    // A cache of another identity is left alone.
+    let other = ConnectionConfig {
+        driver: full.driver,
+        options: serde_json::json!({"host":"elsewhere","user":"fixture"}),
+    };
+    MetadataRepository::adopt(&dir, id, &full, &other)
+        .await
+        .unwrap();
+    assert!(MetadataRepository::open(&dir, id, &other).await.is_err());
+    // No cache, nothing created.
+    let missing = ConnectionId::new();
+    MetadataRepository::adopt(&dir, missing, &full, &narrower)
+        .await
+        .unwrap();
+    assert!(!dir.join("metadata").join(format!("{missing}.db")).exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_scope_denied_as_a_whole_keeps_its_read_and_says_no_access() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    seed(&repository).await;
+    let schema = objects()[0].path.clone();
+    let run = repository.begin(&schema).await.unwrap();
+    let report = IntrospectionReport {
+        warnings: vec![IntrospectionWarning {
+            path: schema.clone(),
+            message: "fixture denied".into(),
+        }],
+    };
+    let mut run = run;
+    run.activate(&report, &CancellationToken::new())
+        .await
+        .unwrap();
+    drop(run);
+    assert!(repository.all().await.unwrap().contains(&objects()[3]));
+    let status = repository
+        .statuses()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|status| status.scope == schema)
+        .unwrap();
+    assert_eq!(status.state, RefreshState::Warning);
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_step_that_breaks_a_reference_leaves_the_file_as_it_was() {
+    let dir = dir();
+    let id = ConnectionId::new();
+    let path = dir.join("metadata");
+    std::fs::create_dir_all(&path).unwrap();
+    let file = path.join(format!("{id}.db"));
+    let pool = open_pool(&file, false).await.unwrap();
+    for step in [SCHEMA, STEP_2, STEP_2_INDEX, "PRAGMA user_version=2"] {
+        sqlx::raw_sql(step).execute(&pool).await.unwrap();
+    }
+    // A column whose table is missing: a reference step 3 would carry over.
+    let table = MetadataObject::new(ObjectKind::Table, &ObjectPath::default(), "gone");
+    let column = MetadataObject::new(ObjectKind::Column, &table.path, "orphan");
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::raw_sql("PRAGMA foreign_keys=OFF")
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO objects(path_key,parent_key,path_json,kind,name,ordinal,object_json,search_name) VALUES(?,?,?,?,?,NULL,?,?)")
+        .bind(hex_key(&column.path))
+        .bind(hex_key(&table.path))
+        .bind(serde_json::to_string(&column.path).unwrap())
+        .bind(serde_json::to_string(&column.kind).unwrap())
+        .bind(&column.name)
+        .bind(serde_json::to_string(&column).unwrap())
+        .bind(search_name(&column.name))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    connection.detach().close().await.unwrap();
+    pool.close().await;
+    let refused = MetadataRepository::open(&dir, id, &config())
+        .await
+        .err()
+        .unwrap();
+    assert!(refused.message.contains("broken reference"), "{refused:?}");
+    let pool = open_pool(&file, false).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT path_key FROM objects")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        hex_key(&column.path)
+    );
+    pool.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn removing_a_deleted_connections_cache_leaves_the_others() {
+    let dir = dir();
+    let (gone, kept) = (ConnectionId::new(), ConnectionId::new());
+    for id in [gone, kept] {
+        let repository = MetadataRepository::open(&dir, id, &config()).await.unwrap();
+        seed(&repository).await;
+        repository.close().await;
+    }
+    MetadataRepository::remove(&dir, gone).await.unwrap();
+    let names: Vec<String> = std::fs::read_dir(dir.join("metadata"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.starts_with(&gone.to_string()))
+    );
+    assert!(names.contains(&format!("{kept}.db")));
+    // Nothing left to remove is fine.
+    MetadataRepository::remove(&dir, gone).await.unwrap();
+    let reopened = MetadataRepository::open(&dir, kept, &config())
+        .await
+        .unwrap();
+    assert!(!reopened.all().await.unwrap().is_empty());
     reopened.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }

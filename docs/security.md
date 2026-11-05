@@ -1,0 +1,180 @@
+# Security
+
+A SQL client holds the keys to its users' databases. Security mistakes here
+have a high impact and are hard to undo once a secret has reached a file or a
+log. How to report a vulnerability is in [SECURITY.md](../SECURITY.md); this
+document is the engineering standard.
+
+## Credentials
+
+### Where they live
+
+| Credential | Storage |
+| --- | --- |
+| PostgreSQL/MySQL password, with **Remember password** | OS vault through `jykre-secrets`: service `JykreStudio`, account `connection:<connection-id>:password` ([ADR-0004](adr/0004-os-vault-for-credentials.md)) |
+| PostgreSQL/MySQL password, without it | Memory only, for the session |
+| Databricks token | **Not stored by Jykre Studio.** Resolved by the Databricks CLI when needed and kept in memory ([ADR-0005](adr/0005-databricks-through-cli-and-rest.md)) |
+
+### Rules
+
+1. **Never in plain text** in SQLite, JSON, configuration, error messages,
+   logs, panic messages or `Debug` output. Driver configurations reject
+   password and token fields.
+2. **No home-made encryption.** A file encrypted with a key inside the binary
+   is plain text with extra steps.
+3. **Vault unavailable** (no Secret Service, a locked session): the password
+   is used only for the session, and the UI says why. **Remember password**
+   is saved as off, so the preference never claims a password the vault does
+   not hold; a remembered connection whose entry is missing says so when it
+   opens. There is never a fallback to a file.
+4. In Rust, passwords exist only as `SecretString`; `expose_secret()` is called
+   at the point of use. In the UI, a password exists only in the form field
+   while the dialog is open. The application never shows a stored password
+   back.
+5. Turning off **Remember password**, or deleting a connection, removes the
+   vault entry. A failure is reported to the user, without the secret.
+   Editing a connection with the password field empty keeps the previous
+   password only while the driver, host, port and user stay the same; any
+   other change sends no password and removes a remembered one.
+6. Connection URLs with an embedded password (`postgres://user:pass@host`) are
+   not accepted; drivers reject URLs in the host field.
+
+## Encrypted transport
+
+| Database | Modes | Notes |
+| --- | --- | --- |
+| PostgreSQL | `disable`, `prefer`, `require`, `verify-ca`, `verify-full` | The mode is always explicit in the configuration; the form starts at `prefer` |
+| MySQL | `disabled`, `preferred`, `required`, `verify-ca`, `verify-identity` | The form starts at `preferred`. Authentication methods that need RSA require TLS |
+| Databricks | HTTPS only | The workspace origin must be `https`; redirects are disabled and external result links are not followed |
+
+- The whole stack uses **rustls** with the operating system's root
+  certificates, so corporate CAs work and builds behave the same everywhere.
+- There is no "accept any certificate" option. Adding one needs an ADR.
+- The UI shows whether the active connection is **encrypted**, and warns when
+  `prefer`/`preferred` ended up without TLS.
+
+## Authentication and authorization
+
+- The application uses the database user's own permissions. It never tries to
+  elevate privileges or work around a permission error.
+- Introspection with partial permissions does not fail: unreadable subtrees
+  are kept from the last read and marked with a warning
+  ([Persistence](persistence.md#atomic-metadata-refresh)).
+- Databricks requests run with the token of the CLI profile; Unity Catalog
+  permissions are enforced by the server.
+- A report panel in another PostgreSQL database of the server opens its
+  session there with the profile's own user, credentials and TLS, and only
+  when the profile offers the server's other databases (`allDatabases`);
+  otherwise the panel fails with a validation error
+  ([ADR-0025](adr/0025-report-panels.md)). The server decides what that user
+  may read in it.
+- A report's panels may run on several connections: each connection that
+  needs a password asks for it before the run, one after another, and the
+  vault is read for each as for a query tab. On production connections the
+  risky statements of each are checked and one confirmation names those
+  connections before anything runs.
+
+## SQL sent to servers
+
+- The application runs the SQL the user wrote, as written. It never rewrites
+  it or appends to it, with one exception: in a report or a query tab, the
+  PostgreSQL and MySQL drivers replace each `:name` parameter marker with a
+  fixed reference to a value they bind, never with the value itself
+  ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)), and on a
+  classic Databricks cluster, which cannot bind, each marker becomes a typed
+  literal: text only as the hexadecimal of its bytes
+  (`decode(X'…', 'UTF-8')`), the other types only after checking that they
+  hold nothing but their own characters
+  ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)). SQL warehouses bind
+  the values themselves and get the SQL unchanged.
+- A query tab keeps the values typed in its parameter fields in `config.db`
+  with the tab, as it keeps the SQL (a report keeps only its defaults). They
+  are never logged nor written to the history. **Explain**
+  is an explicit action that sends `EXPLAIN` followed by the chosen query or
+  data change, never `EXPLAIN ANALYZE`, so the statement does not run
+  ([Architecture](architecture.md#run-a-query)). Opening a table runs
+  `SELECT * FROM` it, quoted by the driver, which is written in the editor
+  before it runs and only reads; the row limit bounds each page.
+- SQL generated by the application binds values as parameters and quotes
+  identifiers with the driver's rules ([Rust guidelines](rust-guidelines.md#sql-generated-by-the-application)).
+
+## Logs and diagnostics
+
+These rules apply to any output, including the logs ([Reliability](reliability.md#logs)):
+
+- Never log passwords, tokens, `Authorization` headers, connection URLs,
+  cell values or query parameters.
+- SQL text only at `trace`, which is off by default; at higher levels, log its
+  length.
+- No header logging in `reqwest`, and statement logging in SQLx turned off
+  (`disable_statement_logging()`) in every driver and in `jykre-storage`,
+  because SQLx logs SQL by default.
+
+## External processes (Databricks CLI)
+
+The authentication cache is scoped by CLI profile, canonical configuration
+file, executable and HTTPS workspace origin. It never mixes workspace tokens.
+Idle entries are pruned on cache access; token refreshes are serialized and
+expired/rejected tokens are discarded. The CLI receives the same explicit
+configuration file used to resolve the workspace. HTTP pools are shared within
+that identity. Compute names/IDs are non-sensitive profile options; tokens
+never reach connection options or the select's state.
+
+- The CLI runs with **arguments as a vector** (`Command::new(path).args(...)`),
+  never through a shell, so a profile name cannot inject a command.
+- The executable comes from the configuration (`cliPath`) or the `PATH`.
+- Its output contains the token: never log stdout. On failure, report the exit
+  status and a filtered message, not the raw output.
+- The process has a timeout (60 s) and `kill_on_drop(true)`.
+
+## Untrusted content
+
+Values from databases, error messages from servers and metadata names are
+rendered as **text**. They are never interpreted as markup, file paths or
+commands.
+
+### Exported files
+
+- An export writes only to the file the user chose in the system's save
+  dialog. A table or tab name only suggests the file's name: characters a
+  file name cannot hold become `_`, names Windows reserves (`CON`, `NUL`,
+  `COM1`) get a `_` in front, and no folder comes from it
+  (`jykre::export::suggested_file_name`).
+- Values are written as the database returned them. Nothing is changed to
+  stop a spreadsheet from reading a value that starts with `=`, `+`, `-` or
+  `@` as a formula, since changing values would break
+  [golden rule 9](README.md#golden-rules) (approved 2026-11-04). Quotes in a
+  CSV do not stop a spreadsheet from evaluating such a value: a file exported
+  from data others wrote is as untrusted as that data when opened in one. In
+  XLSX every value is a string, a number or a boolean cell, never a formula.
+- Messages about the file never name its folder, which may hold the user's
+  name; logs record the format, rows, bytes and duration, never the path.
+- Temporary files (the export being written and Excel's constant-memory
+  rows) live next to the chosen file and are removed when the export ends,
+  fails or is cancelled.
+
+## Dependencies
+
+`cargo deny --locked check` (in `cargo xtask check --full`, in CI and weekly)
+blocks advisories, unapproved licenses and unknown sources. A vulnerability is
+fixed, not ignored; only `unmaintained` notices may be accepted, with a reason
+and a review date in `deny.toml`.
+
+## Security review checklist
+
+- [ ] No new field holding a secret reached SQLite, JSON, an error message,
+      output or `Debug`.
+- [ ] No generated SQL builds values by concatenation; identifiers are quoted
+      by the driver.
+- [ ] External processes run without a shell and with a timeout.
+- [ ] New network calls use HTTPS/TLS as configured, with an explicit timeout.
+- [ ] Database content is rendered as text.
+- [ ] A new way to open a session (another database, another context) keeps
+      the profile's user, credentials and TLS, and the production check
+      covers every statement it runs.
+
+## Known deviations
+
+| Standard | Current code |
+| --- | --- |
+| The UI shows whether the connection is encrypted and warns on fallback to plain text | Not shown; the TLS mode is only visible in the connection form |

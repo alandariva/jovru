@@ -1,0 +1,44 @@
+{
+  "dialect": "databricks",
+  "doc_base": "https://docs.databricks.com/aws/en/sql/language-manual/",
+  "files": {
+    "functions": "functions.jsonl",
+    "keywords": "keywords.jsonl",
+    "types": "types.jsonl"
+  },
+  "generator": {
+    "name": "cargo xtask catalogs",
+    "version": "1"
+  },
+  "name": "Databricks SQL",
+  "schema_version": 1,
+  "sources": [
+    {
+      "id": "spark-keywords",
+      "license": "Apache-2.0",
+      "redistributable": true,
+      "title": "Keywords of Apache Spark v4.0.1 (ANSI mode)",
+      "url": "https://github.com/apache/spark/blob/v4.0.1/docs/sql-ref-ansi-compliance.md"
+    },
+    {
+      "id": "spark-functions",
+      "license": "Apache-2.0",
+      "redistributable": true,
+      "title": "Built-in functions of Apache Spark v4.0.1",
+      "url": "https://github.com/apache/spark/blob/v4.0.1/sql/core/src/test/resources/sql-functions/sql-expression-schema.md"
+    },
+    {
+      "id": "curated",
+      "license": "CC0-1.0",
+      "redistributable": true,
+      "title": "Written by the project",
+      "url": "https://github.com/alandariva/jykre-studio"
+    }
+  ],
+  "updated_at": "2026-11-04",
+  "verified_through": "2026-11-04",
+  "version_scheme": "date",
+  "versions": [
+    "2026-11-04"
+  ]
+}

@@ -44,8 +44,8 @@ fn add_counter(tabs: &Entity<GroupedTabs>, group: TabGroupId, cx: &mut App) {
         title: title.clone(),
         count: 0,
     });
-    tabs.update(cx, |tabs, cx| tabs.add_tab(group, title, content, cx))
-        .unwrap();
+    // Callers pass a group they just created, so adding cannot fail.
+    let _ = tabs.update(cx, |tabs, cx| tabs.add_tab(group, title, content, cx));
 }
 
 impl Example {
@@ -62,10 +62,11 @@ impl Example {
                 add_counter(&upper, group, cx);
             }
         }
-        let first = upper.read(cx).tab_ids().next().unwrap();
-        upper
-            .update(cx, |tabs, cx| tabs.select_tab(first, cx))
-            .unwrap();
+        let first = upper.read(cx).tab_ids().next();
+        if let Some(first) = first {
+            // The tab was just added, so selecting it cannot fail.
+            let _ = upper.update(cx, |tabs, cx| tabs.select_tab(first, cx));
+        }
         let group = lower.update(cx, |tabs, cx| {
             tabs.add_group("Another instance", rgb(0x9d77c7).into(), cx)
         });
@@ -131,6 +132,8 @@ fn main() {
             }),
             ..Default::default()
         };
-        open_window(options, cx, |_, cx| cx.new(Example::new)).unwrap();
+        if open_window(options, cx, |_, cx| cx.new(Example::new)).is_err() {
+            cx.quit();
+        }
     });
 }

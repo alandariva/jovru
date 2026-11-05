@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 use jykre_core::*;
 use jykre_driver_mysql::{MySqlConfig, MySqlDriver};
 use serde_json::{Value, json};

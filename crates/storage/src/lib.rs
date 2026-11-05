@@ -1,11 +1,18 @@
 //! Local persistence isolated from drivers and the GUI.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 mod config;
 mod metadata;
-pub use config::ConfigRepository;
-pub use metadata::{MetadataRepository, PendingRefresh, RefreshStatus};
+pub use config::{
+    CONFIG_BACKUPS_KEPT, ConfigRepository, UnreadableProfile, config_backup_time, config_backups,
+    metadata_scope_key, restore_config_backup, row_limit_key,
+};
+pub use metadata::{
+    ChildPage, MetadataRepository, PageCursor, PageRequest, PendingRefresh, RefreshState,
+    RefreshStatus,
+};
 
 use jykre_core::*;
-use sqlx::{SqlitePool, sqlite::*};
+use sqlx::{ConnectOptions, SqlitePool, sqlite::*};
 use std::{path::Path, time::Duration};
 
 pub(crate) fn error(message: &str) -> DriverError {
@@ -32,7 +39,9 @@ pub(crate) async fn open_pool(path: &Path, durable: bool) -> DriverResult<Sqlite
                     SqliteSynchronous::Normal
                 })
                 .foreign_keys(true)
-                .busy_timeout(Duration::from_secs(5)),
+                .busy_timeout(Duration::from_secs(5))
+                // SQLx logs SQL by default; local SQL never reaches the logs.
+                .disable_statement_logging(),
         )
         .await
         .map_err(sql_error)?;

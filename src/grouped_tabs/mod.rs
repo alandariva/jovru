@@ -11,7 +11,7 @@ mod picker;
 use std::fmt;
 
 use gpui_kit::component::{
-    ActiveTheme, Disableable, IconName, Sizable,
+    ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
     popover::Popover,
     scroll::ScrollableMask,
@@ -34,6 +34,36 @@ pub struct TabGroupId(u64);
 /// Stable tab identity within one [`GroupedTabs`] instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TabId(u64);
+
+/// What a tab's content is doing, shown before its title. The host decides
+/// what each state means for its content.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TabStatus {
+    /// Nothing to show.
+    #[default]
+    Idle,
+    /// Work in progress: a spinner.
+    Running,
+    /// The last work succeeded.
+    Succeeded,
+    /// The last work failed.
+    Failed,
+    /// The last work was stopped before it ended.
+    Cancelled,
+}
+
+impl TabStatus {
+    /// Its name for assistive technologies; empty when idle.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "",
+            Self::Running => tr!("running"),
+            Self::Succeeded => tr!("succeeded"),
+            Self::Failed => tr!("failed"),
+            Self::Cancelled => tr!("cancelled"),
+        }
+    }
+}
 
 /// Invalid IDs leave the component unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +90,16 @@ pub enum GroupedTabsEvent {
     NewTabRequested(TabGroupId),
     SelectionChanged(Option<TabId>),
     TabClosed(TabId),
+    /// With [`GroupedTabs::set_confirm_changes`], the user asked to close a
+    /// tab; the host confirms and calls [`GroupedTabs::close_tab`].
+    CloseRequested(TabId),
+    /// With [`GroupedTabs::set_confirm_changes`], the user dropped a tab in
+    /// another place; the host confirms and calls [`GroupedTabs::move_tab`].
+    MoveRequested {
+        tab: TabId,
+        group: TabGroupId,
+        index: usize,
+    },
     TabMoved {
         tab: TabId,
         from: TabGroupId,
@@ -111,6 +151,26 @@ impl Render for DragPreview {
     }
 }
 
+/// The icon before a tab's title for its status; none while idle.
+fn status_icon(status: TabStatus, tab: TabId, cx: &App) -> Option<AnyElement> {
+    let theme = cx.theme();
+    let icon =
+        |name: IconName, color: Hsla| Icon::new(name).size(px(14.)).flex_none().text_color(color);
+    Some(match status {
+        TabStatus::Idle => return None,
+        TabStatus::Running => icon(IconName::LoaderCircle, theme.foreground)
+            .with_animation(
+                ("tab-status-running", tab.0),
+                Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+            )
+            .into_any_element(),
+        TabStatus::Succeeded => icon(IconName::CircleCheck, theme.success).into_any_element(),
+        TabStatus::Failed => icon(IconName::CircleX, theme.danger).into_any_element(),
+        TabStatus::Cancelled => icon(IconName::Ban, theme.muted_foreground).into_any_element(),
+    })
+}
+
 /// A slot is a boundary in the destination's current, pre-removal tab list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DropTarget {
@@ -160,6 +220,8 @@ pub struct GroupedTabs {
     picker: Option<Entity<TabPicker>>,
     picker_open: bool,
     picker_subscription: Option<Subscription>,
+    /// Closing and moving tabs by hand ask the host first.
+    confirm_changes: bool,
 }
 
 impl EventEmitter<GroupedTabsEvent> for GroupedTabs {}
@@ -180,7 +242,23 @@ impl GroupedTabs {
             picker: None,
             picker_open: false,
             picker_subscription: None,
+            confirm_changes: false,
         }
+    }
+
+    /// Makes the close button and drag and drop emit
+    /// [`GroupedTabsEvent::CloseRequested`] and
+    /// [`GroupedTabsEvent::MoveRequested`] instead of acting, so the host can
+    /// ask the user first.
+    pub fn set_confirm_changes(&mut self, confirm: bool) {
+        self.confirm_changes = confirm;
+    }
+
+    /// An id that names no group, for a host that adds a group only once it
+    /// has a tab to show: until then the strip shows nothing for it, and
+    /// [`GroupedTabs::group_ids`] does not list it.
+    pub fn reserve_group(&mut self) -> TabGroupId {
+        self.model.reserve_group()
     }
 
     pub fn add_group(
@@ -209,6 +287,39 @@ impl GroupedTabs {
             .ok_or(TabsError::GroupNotFound)?;
         group.name = name.into();
         cx.notify();
+        Ok(())
+    }
+
+    /// Recolour a connection group, as when its connection's colour changes.
+    pub fn set_group_color(
+        &mut self,
+        group: TabGroupId,
+        color: Hsla,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        let group = self
+            .model
+            .groups
+            .iter_mut()
+            .find(|candidate| candidate.id == group)
+            .ok_or(TabsError::GroupNotFound)?;
+        group.color = color;
+        cx.notify();
+        Ok(())
+    }
+
+    /// Whether the group's header offers a button for a new tab, as every
+    /// group does by default. A group that holds one kind of content the
+    /// host does not create on request (a report) hides it.
+    pub fn set_group_new_tab(
+        &mut self,
+        group: TabGroupId,
+        new_tab: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        if self.model.set_new_tab(group, new_tab)? {
+            cx.notify();
+        }
         Ok(())
     }
 
@@ -248,6 +359,45 @@ impl GroupedTabs {
         Ok(id)
     }
 
+    /// Shows what the tab's content is doing before its title. Redraws only
+    /// when the status changed.
+    pub fn set_tab_status(
+        &mut self,
+        tab: TabId,
+        status: TabStatus,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        if self.model.set_status(tab, status)? {
+            cx.notify();
+        }
+        Ok(())
+    }
+
+    /// Renames a tab without recreating its content, as when the saved query
+    /// it edits is renamed. The tab picker shows the new title too.
+    pub fn set_tab_title(
+        &mut self,
+        tab: TabId,
+        title: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        if self.model.set_title(tab, title.into())? {
+            if let Some(picker) = &self.picker {
+                let items = self.picker_items();
+                picker.update(cx, |picker, cx| {
+                    picker.sync_items(items, self.model.active, cx)
+                });
+            }
+            cx.notify();
+        }
+        Ok(())
+    }
+
+    /// What the tab shows about its content's work.
+    pub fn tab_status(&self, tab: TabId) -> Option<TabStatus> {
+        self.model.tab(tab).map(|tab| tab.status)
+    }
+
     pub fn select_tab(&mut self, tab: TabId, cx: &mut Context<Self>) -> Result<(), TabsError> {
         let previous = self.model.active;
         self.model.select(tab)?;
@@ -275,7 +425,7 @@ impl GroupedTabs {
     ) -> Result<(), TabsError> {
         let previous = self.model.active;
         if let Some((from, _)) = self.model.move_tab(tab, group, index)? {
-            let (_, actual_index) = self.model.location(tab).expect("moved tab exists");
+            let (_, actual_index) = self.model.location(tab).ok_or(TabsError::TabNotFound)?;
             cx.emit(GroupedTabsEvent::TabMoved {
                 tab,
                 from,
@@ -290,6 +440,12 @@ impl GroupedTabs {
 
     pub fn active_tab(&self) -> Option<TabId> {
         self.model.active
+    }
+
+    /// The group `tab` is in.
+    pub fn group_of(&self, tab: TabId) -> Option<TabGroupId> {
+        let (group, _) = self.model.location(tab)?;
+        Some(self.model.groups[group].id)
     }
 
     pub fn group_ids(&self) -> impl Iterator<Item = TabGroupId> + '_ {
@@ -370,6 +526,14 @@ impl GroupedTabs {
         cx.notify();
     }
 
+    /// Moves keyboard focus to the selected tab, for example after the host
+    /// closed one from the keyboard.
+    pub fn focus_active(&self, window: &mut Window, cx: &mut App) {
+        if let Some(tab) = self.model.active {
+            self.focus_tab(tab, window, cx);
+        }
+    }
+
     fn focus_tab(&self, tab: TabId, window: &mut Window, cx: &mut App) {
         if let Some(tab) = self.model.tab(tab) {
             window.focus(&tab.content.focus, cx);
@@ -384,6 +548,21 @@ impl GroupedTabs {
             }
             Ok(None) => cx.emit(GroupedTabsEvent::NewTabRequested(group)),
             Err(_) => {}
+        }
+    }
+
+    /// The user closes a tab (its close button or a middle click): the host
+    /// is asked first when it confirms changes, otherwise the tab closes
+    /// and the keyboard stays in the bar.
+    fn close_from_user(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.confirm_changes {
+            cx.emit(GroupedTabsEvent::CloseRequested(tab_id));
+            return;
+        }
+        let focused = self.bar_focus.contains_focused(window, cx);
+        let _ = self.close_tab(tab_id, cx);
+        if focused && let Some(next) = self.model.active {
+            self.focus_tab(next, window, cx);
         }
     }
 
@@ -500,8 +679,16 @@ impl GroupedTabs {
         {
             let index =
                 final_drop_index((self.model.groups[source_group].id, source_index), target);
-            let _ = self.move_tab(drag.tab, target.group, index, cx);
-            self.focus_tab(drag.tab, window, cx);
+            if self.confirm_changes {
+                cx.emit(GroupedTabsEvent::MoveRequested {
+                    tab: drag.tab,
+                    group: target.group,
+                    index,
+                });
+            } else {
+                let _ = self.move_tab(drag.tab, target.group, index, cx);
+                self.focus_tab(drag.tab, window, cx);
+            }
         }
         self.drop_target = None;
         self.dragging = None;
@@ -585,7 +772,6 @@ impl GroupedTabs {
                             window.prevent_default();
                         }
                     }))
-                    .child(div().size(px(7.)).flex_none().rounded_full().bg(color))
                     .child(
                         div()
                             .min_w_0()
@@ -604,20 +790,22 @@ impl GroupedTabs {
                     ),
             )
             .child(div().flex_1().min_w_0())
-            .child(
-                Button::new(("add-tab", id.0))
-                    .ghost()
-                    .xsmall()
-                    .size(px(21.))
-                    .text_color(cx.theme().muted_foreground)
-                    .icon(IconName::Plus)
-                    .accessibility_label(tr!("New tab in {0}", group.name))
-                    .tooltip(tr!("New tab in {0}", group.name))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(GroupedTabsEvent::NewTabRequested(id));
-                    })),
-            );
+            .when(group.new_tab, |header| {
+                header.child(
+                    Button::new(("add-tab", id.0))
+                        .ghost()
+                        .xsmall()
+                        .size(px(21.))
+                        .text_color(cx.theme().muted_foreground)
+                        .icon(IconName::Plus)
+                        .accessibility_label(tr!("New tab in {0}", group.name))
+                        .tooltip(tr!("New tab in {0}", group.name))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(GroupedTabsEvent::NewTabRequested(id));
+                        })),
+                )
+            });
 
         let tabs = group.tabs.iter().enumerate().map(|(tab_index, tab)| {
             let tab_id = tab.id;
@@ -639,6 +827,15 @@ impl GroupedTabs {
             div()
                 .id(("tab-container", tab_id.0))
                 .group(hover_group.clone())
+                // A middle click closes the tab, as in browsers and IDEs,
+                // with the same confirmations as its close button.
+                .on_mouse_up(
+                    MouseButton::Middle,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_from_user(tab_id, window, cx);
+                    }),
+                )
                 .relative()
                 .w(px(TAB_WIDTH))
                 .h(px(TAB_HEIGHT))
@@ -647,7 +844,10 @@ impl GroupedTabs {
                 .child(
                     BaseTab::new((tr!("tab"), tab_id.0))
                         .selected(selected)
-                        .accessibility_label(format!("{}, {}", tab.title, group.name))
+                        .accessibility_label(match tab.status {
+                            TabStatus::Idle => format!("{}, {}", tab.title, group.name),
+                            status => format!("{}, {}, {}", tab.title, status.label(), group.name),
+                        })
                         .track_focus(&handle)
                         .tab_index(if selected { 0 } else { -1 })
                         .tab_stop(selected)
@@ -691,6 +891,10 @@ impl GroupedTabs {
                                 color: drag.color,
                             })
                         })
+                        .gap_1p5()
+                        .when_some(status_icon(tab.status, tab_id, cx), |this, icon| {
+                            this.child(icon)
+                        })
                         .child(div().min_w_0().truncate().child(tab.title.clone())),
                 )
                 .when(show_tab_separator, |this| {
@@ -704,29 +908,29 @@ impl GroupedTabs {
                             .bg(tab_separator_color),
                     )
                 })
+                // The selected tab always shows its close button and it is the
+                // next Tab stop after the tab; the others show it on hover.
                 .child(
                     div()
                         .absolute()
                         .right(px(4.))
                         .top(px(7.))
-                        .invisible()
-                        .group_hover(hover_group, |style| style.visible())
+                        .when(!selected, |this| {
+                            this.invisible()
+                                .group_hover(hover_group, |style| style.visible())
+                        })
                         .child(
                             Button::new(("close-tab", tab_id.0))
                                 .ghost()
                                 .xsmall()
                                 .size(px(24.))
-                                .tab_stop(false)
+                                .tab_stop(selected)
                                 .icon(IconName::Close)
                                 .accessibility_label(tr!("Close {0}", tab.title))
                                 .tooltip(tr!("Close {0}", tab.title))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     cx.stop_propagation();
-                                    let focused = this.bar_focus.contains_focused(window, cx);
-                                    let _ = this.close_tab(tab_id, cx);
-                                    if focused && let Some(next) = this.model.active {
-                                        this.focus_tab(next, window, cx);
-                                    }
+                                    this.close_from_user(tab_id, window, cx);
                                 })),
                         ),
                 )

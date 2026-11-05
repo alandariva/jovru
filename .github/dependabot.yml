@@ -8,6 +8,11 @@ updates:
       cargo-minor:
         update-types: [minor, patch]
     open-pull-requests-limit: 5
+    # keyring 4 replaces the per-platform features used by jykre-secrets with
+    # separate store crates, so the upgrade needs a manual migration.
+    ignore:
+      - dependency-name: keyring
+        update-types: [version-update:semver-major]
 
   - package-ecosystem: github-actions
     directory: /

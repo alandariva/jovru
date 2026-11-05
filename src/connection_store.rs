@@ -1,8 +1,11 @@
 //! Application connection service: validation, SQLite migration and vault policy.
+use crate::connection_appearance::{Appearance, appearance_key};
 use crate::tr;
 use crate::{
     backend::{self, MetadataSnapshot},
     drivers::*,
+    metadata_scope::MetadataScope,
+    result::{DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT},
 };
 use jykre_secrets::SecretStore;
 use jykre_storage::{ConfigRepository, MetadataRepository};
@@ -41,7 +44,18 @@ pub fn default_path() -> PathBuf {
 pub struct LoadedConnection {
     pub profile: ConnectionProfile,
     pub input: ResolvedConnection,
+    /// Rows kept per statement, between 1 and [`MAX_ROW_LIMIT`].
+    pub row_limit: u32,
+    /// What the user chose to introspect; pending when nothing was chosen.
+    pub scope: MetadataScope,
     pub cache: Option<MetadataSnapshot>,
+    /// Explorer nodes the previous session left expanded.
+    pub expanded: Vec<ObjectPath>,
+    /// Hours after which opening the connection reads its chosen namespaces
+    /// again; 0 never does.
+    pub revalidate_hours: u32,
+    /// Its colour and environment.
+    pub appearance: Appearance,
     pub warning: Option<String>,
 }
 
@@ -77,53 +91,115 @@ fn legacy_profiles(bytes: &[u8]) -> DriverResult<Vec<ConnectionProfile>> {
         .collect()
 }
 
-pub async fn load(dir: &Path, secrets: &dyn SecretStore) -> DriverResult<Vec<LoadedConnection>> {
+/// The saved connections that could be opened, and what was left out.
+#[derive(Default)]
+pub struct LoadedConnections {
+    pub connections: Vec<LoadedConnection>,
+    /// One message per connection (or migration step) that could not be
+    /// loaded; the others are loaded regardless.
+    pub problems: Vec<String>,
+}
+
+/// Loads every saved connection. A profile that cannot be read or is no
+/// longer valid is left out with a problem, so it never hides the others.
+/// A configuration that opened and was read is copied to `backups/` (the
+/// five most recent distinct copies are kept), so a start that finds it
+/// damaged can offer to restore it.
+pub async fn load(dir: &Path, secrets: &dyn SecretStore) -> DriverResult<LoadedConnections> {
     let repository = ConfigRepository::open(dir).await?;
-    let result = load_from(dir, secrets, &repository).await;
+    let mut result = load_from(dir, secrets, &repository).await;
+    if let Ok(loaded) = &mut result
+        && let Err(error) = repository.back_up(dir).await
+    {
+        tracing::warn!(error_code = ?error.code, "configuration backup failed");
+        loaded
+            .problems
+            .push(tr!("Could not back up the configuration: {0}", error));
+    }
     repository.close().await;
     result
+}
+
+/// The newest copy of the configuration and when it was taken, for a start
+/// whose `config.db` cannot be opened.
+pub async fn latest_backup(dir: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
+    jykre_storage::config_backups(dir)
+        .await
+        .into_iter()
+        .next()
+        .map(|path| {
+            let taken = jykre_storage::config_backup_time(&path);
+            (path, taken)
+        })
+}
+
+/// Puts the copy `backup` in place of the damaged `config.db`, which is
+/// kept next to it; returns where it went.
+pub async fn restore_backup(dir: &Path, backup: &Path) -> DriverResult<PathBuf> {
+    jykre_storage::restore_config_backup(dir, backup).await
 }
 
 async fn load_from(
     dir: &Path,
     secrets: &dyn SecretStore,
     repository: &ConfigRepository,
-) -> DriverResult<Vec<LoadedConnection>> {
+) -> DriverResult<LoadedConnections> {
+    let mut problems = Vec::new();
     let legacy = dir.join("connections.json");
     let bytes = match tokio::fs::read(&legacy).await {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => {
-            return Err(DriverError::new(
-                ErrorCode::Internal,
-                tr!("Could not read the legacy connections.json."),
-            ));
+            problems.push(tr!("Could not read the legacy connections.json.").to_owned());
+            None
         }
     };
-    if !repository.legacy_imported().await? {
-        let imported = bytes
-            .as_ref()
-            .map(|bytes| legacy_profiles(bytes))
-            .transpose()?
-            .unwrap_or_default();
-        repository.import_legacy(&imported).await?;
+    // A legacy file that cannot be read is kept and not imported, so the
+    // next start tries again; the connections already in SQLite still load.
+    let old = bytes.as_ref().map(|bytes| legacy_profiles(bytes));
+    if let Some(Err(error)) = &old {
+        problems.push(error.to_string());
     }
-    let profiles = repository.list().await?;
+    if !repository.legacy_imported().await? {
+        match &old {
+            Some(Err(_)) => {}
+            Some(Ok(imported)) => repository.import_legacy(imported).await?,
+            None => repository.import_legacy(&[]).await?,
+        }
+    }
+    let mut profiles = Vec::new();
+    for profile in repository.list_each().await? {
+        match profile {
+            Ok(profile) => profiles.push(profile),
+            Err(unreadable) => problems.push(match unreadable.name {
+                Some(name) => tr!(
+                    "The connection {0} could not be read and is not shown: {1}",
+                    name,
+                    unreadable.error
+                ),
+                None => tr!(
+                    "A saved connection could not be read and is not shown: {0}",
+                    unreadable.error
+                ),
+            }),
+        }
+    }
     let mut migration_warning = None;
-    if let Some(bytes) = bytes {
+    if let Some(Ok(old)) = old {
         // A previous crash may have committed SQLite before unlinking the JSON.
         // Delete only if every legacy profile is already represented identically.
-        let old = legacy_profiles(&bytes)?;
         if !old.iter().all(|old| {
             profiles
                 .iter()
                 .any(|new| new.name == old.name && new.config == old.config)
         }) {
-            return Err(DriverError::validation(tr!(
-                "The legacy JSON changed after the migration. It was preserved to avoid losing connections."
-            )));
-        }
-        if tokio::fs::remove_file(legacy).await.is_err() {
+            problems.push(
+                tr!(
+                    "The legacy JSON changed after the migration. It was preserved to avoid losing connections."
+                )
+                .to_owned(),
+            );
+        } else if tokio::fs::remove_file(legacy).await.is_err() {
             migration_warning = Some(
                 tr!("Migration completed; could not delete the legacy connections.json.")
                     .to_owned(),
@@ -133,26 +209,50 @@ async fn load_from(
     let registry = builtin_registry()?;
     let mut loaded = Vec::new();
     for profile in profiles {
-        registry
-            .get(profile.config.driver)?
-            .validate_connection(&profile.config)?;
+        if let Err(error) = registry
+            .get(profile.config.driver)
+            .and_then(|driver| driver.validate_connection(&profile.config))
+        {
+            problems.push(tr!(
+                "The connection {0} is not valid and is not shown: {1}",
+                profile.name,
+                error
+            ));
+            continue;
+        }
         let mut warning = migration_warning.clone();
-        let credentials =
-            if profile.remember_password && profile.config.driver != DriverKind::Databricks {
-                match secrets.get(profile.id).await {
-                    Ok(value) => value,
-                    Err(error) => {
-                        warning = Some(error.to_string());
-                        Credentials::default()
+        let credentials = if profile.remember_password
+            && profile.config.driver != DriverKind::Databricks
+        {
+            match vault(secrets.get(profile.id)).await {
+                Ok(value) => {
+                    if value.password.is_none() {
+                        add_warning(
+                            &mut warning,
+                            tr!(
+                                "Remember password is on, but the vault has no password for this connection. Enter it again to query the server."
+                            ),
+                        );
                     }
+                    value
                 }
-            } else {
-                Credentials::default()
-            };
+                Err(error) => {
+                    tracing::warn!(
+                        connection_id = %profile.id,
+                        error_code = ?error.code,
+                        "password unavailable from the vault"
+                    );
+                    add_warning(&mut warning, error.to_string());
+                    Credentials::default()
+                }
+            }
+        } else {
+            Credentials::default()
+        };
         let cache = match prepare_cache(dir, &profile, true).await {
             Ok(cache) => Some(cache),
             Err(error) => {
-                warning = Some(error.to_string());
+                add_warning(&mut warning, error.to_string());
                 None
             }
         };
@@ -160,69 +260,219 @@ async fn load_from(
             config: profile.config.clone(),
             credentials,
         };
+        let row_limit = match stored_row_limit(repository, profile.id).await {
+            Ok(limit) => limit,
+            Err(error) => {
+                add_warning(
+                    &mut warning,
+                    tr!(
+                        "The saved row limit could not be read; the default is used: {0}",
+                        error
+                    ),
+                );
+                DEFAULT_ROW_LIMIT
+            }
+        };
+        let scope = match stored_scope(dir, repository, &profile).await {
+            Ok((scope, derived)) => {
+                if derived {
+                    add_warning(
+                        &mut warning,
+                        tr!(
+                            "What to introspect was taken from the metadata already saved. Review it in the connection settings."
+                        ),
+                    );
+                }
+                scope
+            }
+            Err(error) => {
+                add_warning(
+                    &mut warning,
+                    tr!(
+                        "What to introspect could not be read; choose it again in the connection settings: {0}",
+                        error
+                    ),
+                );
+                MetadataScope::default()
+            }
+        };
+        let expanded = stored_expanded(repository, profile.id).await;
+        let revalidate_hours = repository
+            .setting(&revalidate_key(profile.id))
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.as_u64())
+            .and_then(|hours| u32::try_from(hours).ok())
+            .unwrap_or(0);
+        let appearance = Appearance::from_value(
+            repository
+                .setting(&appearance_key(profile.id))
+                .await
+                .ok()
+                .flatten()
+                .as_ref(),
+        );
         loaded.push(LoadedConnection {
             profile,
             input,
+            row_limit,
+            scope,
             cache,
+            expanded,
+            revalidate_hours,
+            appearance,
             warning,
         });
     }
-    Ok(loaded)
+    Ok(LoadedConnections {
+        connections: loaded,
+        problems,
+    })
 }
 
+/// What a saved connection keeps besides its profile and password.
+pub struct Preferences {
+    /// Rows kept per statement, between 1 and [`MAX_ROW_LIMIT`].
+    pub row_limit: u32,
+    /// What to introspect; pending (nothing chosen) is allowed, for example
+    /// when the server could not be reached to list its namespaces.
+    pub scope: MetadataScope,
+    /// Hours after which opening the connection reads its chosen namespaces
+    /// again; 0 never does.
+    pub revalidate_hours: u32,
+    /// Its colour and environment.
+    pub appearance: Appearance,
+}
+
+/// Saves a profile, its preferences and, when asked to remember it, its
+/// password.
 pub async fn save(
     dir: &Path,
     profile: ConnectionProfile,
     credentials: Credentials,
+    preferences: Preferences,
     secrets: &dyn SecretStore,
 ) -> DriverResult<LoadedConnection> {
     builtin_registry()?
         .get(profile.config.driver)?
         .validate_connection(&profile.config)?;
+    validate_row_limit(preferences.row_limit)?;
     let repository = ConfigRepository::open(dir).await?;
-    let result = save_to(dir, profile, credentials, secrets, &repository).await;
+    let result = save_to(dir, profile, credentials, preferences, secrets, &repository).await;
     repository.close().await;
     result
 }
 async fn save_to(
     dir: &Path,
-    profile: ConnectionProfile,
+    mut profile: ConnectionProfile,
     credentials: Credentials,
+    preferences: Preferences,
     secrets: &dyn SecretStore,
     repository: &ConfigRepository,
 ) -> DriverResult<LoadedConnection> {
+    let Preferences {
+        row_limit,
+        scope,
+        revalidate_hours,
+        appearance,
+    } = preferences;
+    // Another profile that cannot be read does not block this one.
     let previous = repository
-        .list()
+        .list_each()
         .await?
         .into_iter()
+        .flatten()
         .find(|value| value.id == profile.id);
-    let profile = repository.save(&profile).await?;
     let mut warning = None;
+    // The vault is written before the profile, so `remember_password` is
+    // saved only when the vault really holds the password.
+    let remembered_before = previous.as_ref().is_some_and(|previous| {
+        previous.remember_password && keeps_password(&previous.config, &profile.config)
+    });
+    let mut stored = false;
     if profile.config.driver != DriverKind::Databricks && profile.remember_password {
-        if let Some(password) = credentials.password.clone() {
-            if let Err(error) = secrets.set(profile.id, password).await {
-                warning = Some(tr!(
-                    "Connection saved. Could not store the password in the vault: {0}",
-                    error
-                ));
+        match credentials.password.clone() {
+            Some(password) => match vault(secrets.set(profile.id, password)).await {
+                Ok(()) => stored = true,
+                Err(error) => {
+                    profile.remember_password = false;
+                    add_warning(
+                        &mut warning,
+                        tr!(
+                            "Connection saved. Could not store the password in the vault, so Remember password was turned off: {0}",
+                            error
+                        ),
+                    );
+                }
+            },
+            // Nothing new to store: the vault may still hold the password,
+            // only for the same server and user.
+            None if remembered_before
+                && vault(secrets.get(profile.id))
+                    .await
+                    .is_ok_and(|stored| stored.password.is_some()) => {}
+            None => {
+                profile.remember_password = false;
+                add_warning(
+                    &mut warning,
+                    tr!(
+                        "Connection saved without an available password, so Remember password was turned off. Enter the password before querying the server."
+                    ),
+                );
             }
-        } else {
-            warning = Some(
-                tr!("Connection saved without an available password. Enter it before querying the server.")
-                    .into(),
-            );
         }
-    } else if previous
+    } else {
+        profile.remember_password = false;
+    }
+    // The profile and its preferences are written in one transaction, so a
+    // failure leaves neither half saved and a retry keeps its revision.
+    let settings = [
+        (
+            jykre_storage::row_limit_key(profile.id),
+            serde_json::json!(row_limit),
+        ),
+        (
+            jykre_storage::metadata_scope_key(profile.id),
+            scope.to_value(),
+        ),
+        (
+            revalidate_key(profile.id),
+            serde_json::json!(revalidate_hours),
+        ),
+        (appearance_key(profile.id), appearance.to_value()),
+    ];
+    let profile = match repository.save_with_settings(&profile, &settings).await {
+        Ok(profile) => profile,
+        Err(error) => {
+            // A new connection that was not saved must not leave its
+            // password behind.
+            if stored && previous.is_none() {
+                let _ = vault(secrets.delete(profile.id)).await;
+            }
+            return Err(error);
+        }
+    };
+    let had_entry = previous
         .as_ref()
-        .is_some_and(|profile| profile.remember_password)
-        && secrets.delete(profile.id).await.is_err()
-    {
-        warning = Some(tr!("Remember password was turned off, but the previous password could not be removed from the vault. It will not be used when reopening.").into());
+        .is_some_and(|previous| previous.remember_password);
+    // Remember turned off (by the user or above): the old entry goes, so a
+    // password for another server or user is never read back.
+    if had_entry && !profile.remember_password && vault(secrets.delete(profile.id)).await.is_err() {
+        add_warning(
+            &mut warning,
+            tr!(
+                "Remember password was turned off, but the previous password could not be removed from the vault. It will not be used when reopening."
+            ),
+        );
     }
     let cache = match prepare_cache(dir, &profile, false).await {
         Ok(value) => Some(value),
         Err(error) => {
-            warning = Some(tr!("Connection saved. Cache unavailable: {0}", error));
+            add_warning(
+                &mut warning,
+                tr!("Connection saved. Cache unavailable: {0}", error),
+            );
             None
         }
     };
@@ -230,25 +480,300 @@ async fn save_to(
         config: profile.config.clone(),
         credentials,
     };
+    // The explorer keeps its own expanded nodes while the connection is
+    // edited; nothing is read back here.
     Ok(LoadedConnection {
         profile,
         input,
+        row_limit,
+        scope,
         cache,
+        expanded: Vec::new(),
+        revalidate_hours,
+        appearance,
         warning,
     })
 }
 
+/// Deletes a saved connection: its profile and settings (in one
+/// transaction), then its vault entry and its metadata cache. The profile
+/// goes first, so a failure after it never leaves a connection that is
+/// half deleted; what could not be cleaned up afterwards is returned as a
+/// warning, never with the secret.
+pub async fn delete(
+    dir: &Path,
+    profile: &ConnectionProfile,
+    secrets: &dyn SecretStore,
+) -> DriverResult<Option<String>> {
+    let repository = ConfigRepository::open(dir).await?;
+    let result = repository.delete(profile.id, profile.revision).await;
+    repository.close().await;
+    result?;
+    let mut warning = None;
+    // Removed even when Remember password is off: an entry an earlier
+    // version left must not outlive its connection.
+    if let Err(error) = vault(secrets.delete(profile.id)).await {
+        add_warning(
+            &mut warning,
+            tr!(
+                "The connection was deleted, but its password could not be removed from the vault: {0}",
+                error
+            ),
+        );
+    }
+    if let Err(error) = backend::remove_cache(dir, profile.id).await {
+        tracing::warn!(connection_id = %profile.id, error_code = ?error.code, "metadata cache not removed");
+        add_warning(
+            &mut warning,
+            tr!(
+                "The connection was deleted, but its metadata cache could not be removed. It is safe to delete {0} and the files next to it that start with the same name.",
+                dir.join("metadata")
+                    .join(format!("{}.db", profile.id))
+                    .display()
+            ),
+        );
+    }
+    Ok(warning)
+}
+
+/// Writes of one preference where the last one asked for wins: a write that
+/// a newer one superseded is skipped, and writes never run at the same
+/// time, so an older value can never land after a newer one.
+pub struct LatestWrite {
+    asked: std::sync::atomic::AtomicU64,
+    running: tokio::sync::Mutex<()>,
+}
+
+impl LatestWrite {
+    pub const fn new() -> Self {
+        Self {
+            asked: std::sync::atomic::AtomicU64::new(0),
+            running: tokio::sync::Mutex::const_new(()),
+        }
+    }
+
+    /// Asks for a write, superseding the ones asked before; returns its
+    /// ticket for [`LatestWrite::run`].
+    pub fn ask(&self) -> u64 {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    /// Runs the write of `ticket` unless a newer one was asked for, after
+    /// any write in progress ends. `None` when it was skipped.
+    pub async fn run<T>(
+        &self,
+        ticket: u64,
+        write: impl Future<Output = DriverResult<T>>,
+    ) -> Option<DriverResult<T>> {
+        let _running = self.running.lock().await;
+        if self.asked.load(std::sync::atomic::Ordering::SeqCst) != ticket {
+            return None;
+        }
+        Some(write.await)
+    }
+}
+
+impl Default for LatestWrite {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The writes of the SQL font size (`editor.font_size`).
+pub static FONT_SIZE_WRITES: LatestWrite = LatestWrite::new();
+
+/// Saves the SQL font size for the write `ticket` of [`FONT_SIZE_WRITES`];
+/// a size superseded by a newer one is not written.
+pub async fn save_font_size(dir: &Path, size: f32, ticket: u64) -> DriverResult<()> {
+    FONT_SIZE_WRITES
+        .run(ticket, async {
+            let repository = ConfigRepository::open(dir).await?;
+            let result = repository
+                .set_setting("editor.font_size", &serde_json::json!(size))
+                .await;
+            repository.close().await;
+            result
+        })
+        .await
+        .unwrap_or(Ok(()))
+}
+
+/// How long a read, write or removal in the operating system vault may take
+/// ([Reliability](../docs/reliability.md#timeouts)). A vault that does not
+/// answer (a locked keyring waiting for an unlock nobody sees) is reported
+/// as unavailable, so the connection dialog is never stuck saving.
+pub const VAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Runs a vault operation within [`VAULT_TIMEOUT`].
+async fn vault<T>(operation: impl Future<Output = DriverResult<T>>) -> DriverResult<T> {
+    vault_within(VAULT_TIMEOUT, operation).await
+}
+
+/// Runs a vault operation within `limit`; past it the vault counts as
+/// unavailable, as when it refuses.
+async fn vault_within<T>(
+    limit: std::time::Duration,
+    operation: impl Future<Output = DriverResult<T>>,
+) -> DriverResult<T> {
+    tokio::time::timeout(limit, operation)
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                elapsed_ms = limit.as_millis() as u64,
+                "the system vault did not answer in time"
+            );
+            Err(DriverError::new(
+                ErrorCode::Timeout,
+                tr!(
+                    "The system vault did not answer in time. The password will be used only in this session."
+                ),
+            ))
+        })
+}
+
+/// Adds `text` to the warnings already collected, so a later one does not
+/// hide an earlier one.
+fn add_warning(warning: &mut Option<String>, text: impl Into<String>) {
+    let text = text.into();
+    *warning = Some(match warning.take() {
+        Some(previous) => format!("{previous} {text}"),
+        None => text,
+    });
+}
+
+/// Whether opening a session needs a password the application does not
+/// have: a driver that signs in with one (not Databricks, which uses the
+/// CLI) and no password in memory, because it was not remembered.
+pub fn needs_password(input: &ResolvedConnection) -> bool {
+    input.config.driver != DriverKind::Databricks && input.credentials.password.is_none()
+}
+
+/// Whether a password kept for `previous` may be sent to `next`: the same
+/// driver, host, port and user. Changing any of them points the credential
+/// at another identity, so an empty password field must not carry it over.
+pub fn keeps_password(previous: &ConnectionConfig, next: &ConnectionConfig) -> bool {
+    let text = |config: &ConnectionConfig, key: &str| -> String {
+        match &config.options[key] {
+            Value::String(value) => value.trim().to_owned(),
+            Value::Null => String::new(),
+            other => other.to_string(),
+        }
+    };
+    previous.driver == next.driver
+        && text(previous, "host").eq_ignore_ascii_case(&text(next, "host"))
+        && ["port", "user"]
+            .iter()
+            .all(|key| text(previous, key) == text(next, key))
+}
+
+/// Checks a row limit typed by the user.
+pub fn validate_row_limit(row_limit: u32) -> DriverResult<()> {
+    if (1..=MAX_ROW_LIMIT).contains(&row_limit) {
+        Ok(())
+    } else {
+        Err(DriverError::validation(tr!(
+            "Enter a row limit between 1 and {0}.",
+            crate::cell_format::count(MAX_ROW_LIMIT as usize)
+        )))
+    }
+}
+
+/// The saved row limit, or the default when none was saved or it is out of
+/// range (for example, written by a newer version with a higher maximum).
+async fn stored_row_limit(repository: &ConfigRepository, id: ConnectionId) -> DriverResult<u32> {
+    Ok(repository
+        .row_limit(id)
+        .await?
+        .filter(|limit| *limit <= MAX_ROW_LIMIT)
+        .unwrap_or(DEFAULT_ROW_LIMIT))
+}
+
+/// The saved choice of what to introspect, and whether it was just taken
+/// from a cache written before choosing existed: such a cache holds what the
+/// user had read, so its last-level namespaces become the choice, once. A
+/// connection with neither is pending.
+async fn stored_scope(
+    dir: &Path,
+    repository: &ConfigRepository,
+    profile: &ConnectionProfile,
+) -> DriverResult<(MetadataScope, bool)> {
+    if let Some(value) = repository.metadata_scope(profile.id).await? {
+        return MetadataScope::from_value(&value)
+            .map(|scope| (scope, false))
+            .ok_or_else(|| DriverError::validation(tr!("Invalid saved metadata choice.")));
+    }
+    let levels = builtin_registry()?
+        .get(profile.config.driver)?
+        .descriptor()
+        .capabilities
+        .namespace_levels();
+    let Some(last) = levels.last() else {
+        return Ok((MetadataScope::default(), false));
+    };
+    let cache =
+        MetadataRepository::open(dir, profile.id, &backend::cache_config(&profile.config)?).await?;
+    let paths = cache.paths(*last).await;
+    cache.close().await;
+    let scope = MetadataScope {
+        all: false,
+        include: paths?,
+    }
+    .normalized();
+    if scope.is_pending() {
+        return Ok((scope, false));
+    }
+    repository
+        .set_metadata_scope(profile.id, &scope.to_value())
+        .await?;
+    Ok((scope, true))
+}
+
+/// Opens the connection's cache once, reconciled with its saved profile,
+/// and reads its root; the cache stays open for the explorer.
 async fn prepare_cache(
     dir: &Path,
     profile: &ConnectionProfile,
     recover: bool,
 ) -> DriverResult<MetadataSnapshot> {
-    let repository = MetadataRepository::prepare(dir, profile.id, &profile.config).await?;
-    let recovered = repository.recovered;
-    repository.close().await;
+    let recovered = backend::prepare_cache(dir, profile.id, &profile.config).await?;
     let mut snapshot = backend::cached_metadata(dir, profile.id, &profile.config, recover).await?;
     snapshot.recovered |= recovered;
     Ok(snapshot)
+}
+
+/// The setting that holds a connection's revalidation age, in hours.
+fn revalidate_key(id: ConnectionId) -> String {
+    format!("connection.{id}.revalidate_hours")
+}
+
+/// The explorer nodes a connection left expanded. A missing or unreadable
+/// list only means starting collapsed.
+async fn stored_expanded(repository: &ConfigRepository, id: ConnectionId) -> Vec<ObjectPath> {
+    match repository.explorer_state(id).await {
+        Ok(Some(value)) => {
+            serde_json::from_value::<Vec<ObjectPath>>(value["expanded"].clone()).unwrap_or_default()
+        }
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!(connection_id = %id, error_code = ?error.code, "explorer state unavailable");
+            Vec::new()
+        }
+    }
+}
+
+/// Saves the explorer nodes a connection shows expanded, for the next
+/// session.
+pub async fn save_expanded(
+    dir: &Path,
+    id: ConnectionId,
+    expanded: &[ObjectPath],
+) -> DriverResult<()> {
+    let repository = ConfigRepository::open(dir).await?;
+    let result = repository
+        .set_explorer_state(id, &serde_json::json!({ "expanded": expanded }))
+        .await;
+    repository.close().await;
+    result
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 //! Configuration through JYKRE_CONNECTION (non-sensitive JSON) and
 //! JYKRE_PASSWORD; optionally JYKRE_SQL and JYKRE_METADATA=1.
+// A command-line example: printing what the driver returns is its output.
+#![allow(clippy::print_stdout)]
 use jykre::drivers::*;
 
 struct Output;
@@ -57,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let outcome = session
             .execute(
                 &QueryRequest {
+                    parameters: Vec::new(),
                     sql,
                     options: ExecutionOptions::default(),
                 },

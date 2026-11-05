@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 use jykre_core::*;
 use serde_json::json;
 use std::sync::{
@@ -44,6 +45,7 @@ impl Driver for TestDriver {
             dialect: SqlDialect::Postgres,
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
+                named_parameters: false,
                 sql: true,
                 metadata: true,
                 transactions: false,
@@ -202,6 +204,7 @@ fn connection() -> ResolvedConnection {
 
 fn request() -> QueryRequest {
     QueryRequest {
+        parameters: Vec::new(),
         sql: "SELECT value FROM sales".into(),
         options: ExecutionOptions {
             context: SessionContext {
@@ -448,5 +451,322 @@ fn scopes_are_structural_and_validate_driver_hierarchies() {
         path.child(ObjectKind::Schema, "wrong")
             .validate_scope(&hierarchy)
             .is_err()
+    );
+}
+
+#[test]
+fn generated_names_quote_every_structural_segment_with_the_driver_quote() {
+    let driver = TestDriver::new("test");
+    assert_eq!(driver.quote_identifier("a\"b.c"), "\"a\"\"b.c\"");
+    assert_eq!(driver.quote_identifier(""), "\"\"");
+    let path = ObjectPath::default()
+        .child(ObjectKind::Catalog, "c.1")
+        .child(ObjectKind::Schema, "s")
+        .child(ObjectKind::Table, "t")
+        .child(ObjectKind::Column, "ignored");
+    assert_eq!(driver.relation_name(&path), "\"c.1\".\"s\".\"t\"");
+}
+
+#[tokio::test]
+async fn namespace_levels_end_at_relations_and_discovery_defaults_to_not_implemented() {
+    let capabilities = |hierarchy: Vec<ObjectKind>| DriverCapabilities {
+        named_parameters: false,
+        sql: true,
+        metadata: true,
+        transactions: false,
+        hierarchy,
+        default_port: None,
+        identifier_quote: '"',
+    };
+    use ObjectKind::*;
+    assert_eq!(
+        capabilities(vec![Database, Schema, Table, View, Column]).namespace_levels(),
+        [Database, Schema]
+    );
+    assert_eq!(
+        capabilities(vec![Catalog, Schema, Table, View, Column]).namespace_levels(),
+        [Catalog, Schema]
+    );
+    assert_eq!(
+        capabilities(vec![Database, Table, View, Column]).namespace_levels(),
+        [Database]
+    );
+    assert!(
+        capabilities(vec![Table, Column])
+            .namespace_levels()
+            .is_empty()
+    );
+    let driver: Arc<dyn Driver> = Arc::new(TestDriver::new("Test"));
+    let error = driver
+        .discover_namespaces(
+            &connection(),
+            &ObjectPath::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotImplemented);
+}
+
+#[test]
+fn objects_cached_before_keys_existed_still_read_and_new_kinds_keep_their_level() {
+    let old = json!({
+        "kind": "column",
+        "path": [{"kind": "table", "name": "orders"}, {"kind": "column", "name": "id"}],
+        "name": "id", "ordinal": 1, "data_type": "integer", "nullable": false, "comment": null
+    });
+    let column: MetadataObject = serde_json::from_value(old).unwrap();
+    assert_eq!(column.primary_key, None);
+    assert_eq!(column.references, None);
+    // Empty additions are left out of the stored form.
+    let stored = serde_json::to_value(&column).unwrap();
+    assert!(stored.get("primary_key").is_none() && stored.get("references").is_none());
+    let hierarchy = [
+        ObjectKind::Database,
+        ObjectKind::Schema,
+        ObjectKind::Table,
+        ObjectKind::View,
+        ObjectKind::Column,
+    ];
+    let schema = ObjectPath::default()
+        .child(ObjectKind::Database, "db")
+        .child(ObjectKind::Schema, "sales");
+    let summary = schema.child(ObjectKind::MaterializedView, "summary");
+    summary.validate_scope(&hierarchy).unwrap();
+    assert_eq!(
+        serde_json::to_value(ObjectKind::MaterializedView).unwrap(),
+        "materialized_view"
+    );
+    assert_eq!(summary.relation(), Some("summary"));
+    // A column or key reads its table; a partition reads itself.
+    let events = schema.child(ObjectKind::Table, "events");
+    assert_eq!(
+        events.child(ObjectKind::ForeignKey, "fk").relation_path(),
+        Some(events.clone())
+    );
+    assert_eq!(
+        events
+            .child(ObjectKind::Partition, "events_2026")
+            .relation_path(),
+        Some(schema.child(ObjectKind::Table, "events_2026"))
+    );
+    assert_eq!(schema.relation_path(), None);
+    let driver = TestDriver::new("Test");
+    assert_eq!(
+        driver.relation_name(&events.child(ObjectKind::Partition, "events_2026")),
+        "\"db\".\"sales\".\"events_2026\""
+    );
+    assert!(driver.default_namespaces(&connection().config).is_empty());
+}
+
+#[tokio::test]
+async fn a_session_that_knows_no_context_reports_an_empty_one() {
+    let mut session: Box<dyn Session> = Box::new(TestSession {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        closed: Arc::new(AtomicBool::new(false)),
+    });
+    assert_eq!(
+        session.context(CancellationToken::new()).await.unwrap(),
+        SessionContext::default()
+    );
+    // Nor its transaction: the caller infers it.
+    assert_eq!(
+        session.transaction(CancellationToken::new()).await.unwrap(),
+        None
+    );
+}
+
+#[derive(Default)]
+struct Kept(Vec<MetadataObject>);
+
+#[async_trait]
+impl IntrospectionSink for Kept {
+    async fn batch(&mut self, objects: Vec<MetadataObject>) -> DriverResult<()> {
+        self.0.extend(objects);
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn the_metadata_extensions_default_to_todays_behaviour() {
+    let driver = TestDriver::new("defaults");
+    let mut config = connection().config;
+    config.options = json!({"host": "db", "sslMode": "require"});
+    // The whole configuration identifies the cache unless the driver says.
+    assert_eq!(driver.cache_identity(&config), config.options);
+    assert!(
+        !driver.left_out_of_everything(&ObjectPath::default().child(ObjectKind::Catalog, "system"))
+    );
+    // Names read everything when the driver cannot read less.
+    let mut names = Kept::default();
+    driver
+        .introspect_level(
+            &connection(),
+            &ObjectPath::default(),
+            IntrospectionLevel::Names,
+            &mut names,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(names.0.len(), 2);
+    let table = ObjectPath::default().child(ObjectKind::Table, "t");
+    for error in [
+        driver
+            .inspect(&connection(), &table, CancellationToken::new())
+            .await
+            .unwrap_err(),
+        driver
+            .definition(&connection(), &table, CancellationToken::new())
+            .await
+            .unwrap_err(),
+    ] {
+        assert_eq!(error.code, ErrorCode::NotImplemented);
+    }
+}
+
+#[test]
+fn a_session_connection_defaults_to_the_connection_itself() {
+    let driver = TestDriver::new("defaults");
+    let mut input = connection();
+    input.config.options = json!({"host": "db", "database": "sales"});
+    let context = SessionContext {
+        catalog: Some("other".into()),
+        schema: Some("public".into()),
+    };
+    // A driver whose sessions switch on their own opens every session with
+    // the connection as it is, whatever the context.
+    let opened = driver.session_connection(&input, &context).unwrap();
+    assert_eq!(opened.config, input.config);
+    assert_eq!(
+        driver
+            .session_connection(&input, &SessionContext::default())
+            .unwrap()
+            .config,
+        input.config
+    );
+}
+
+fn parameter(name: &str, kind: ParameterKind, value: Option<&str>, sql: &str) -> QueryParameter {
+    let marker = format!(":{name}");
+    let markers = sql
+        .match_indices(&marker)
+        .map(|(start, found)| start..start + found.len())
+        .collect();
+    QueryParameter {
+        name: name.into(),
+        kind,
+        value: value.map(Into::into),
+        markers,
+    }
+}
+
+fn with_parameters(sql: &str, parameters: Vec<QueryParameter>) -> QueryRequest {
+    QueryRequest {
+        parameters,
+        ..QueryRequest::new(sql, ExecutionOptions::default())
+    }
+}
+
+#[test]
+fn a_request_with_valid_parameters_passes_validation() {
+    let sql = "SELECT * FROM t WHERE a = :name AND b > :min AND c = :name";
+    let request = with_parameters(
+        sql,
+        vec![
+            parameter("name", ParameterKind::Text, Some("O'Brien; --"), sql),
+            parameter("min", ParameterKind::Number, Some("-1.5e3"), sql),
+        ],
+    );
+    assert_eq!(request.validate(), Ok(()));
+    assert_eq!(request.parameters[0].markers.len(), 2);
+}
+
+#[test]
+fn parameter_validation_rejects_bad_names_values_and_markers() {
+    let sql = "SELECT :a, :b";
+    let reject = |parameters: Vec<QueryParameter>| {
+        with_parameters(sql, parameters)
+            .validate()
+            .unwrap_err()
+            .code
+    };
+    let mut bad_name = parameter("a", ParameterKind::Text, None, sql);
+    bad_name.name = "1a".into();
+    assert_eq!(reject(vec![bad_name]), ErrorCode::Validation);
+    assert_eq!(
+        reject(vec![
+            parameter("a", ParameterKind::Text, None, sql),
+            parameter("a", ParameterKind::Text, None, sql),
+        ]),
+        ErrorCode::Validation
+    );
+    for (kind, value) in [
+        (ParameterKind::Number, "1,5"),
+        (ParameterKind::Number, "."),
+        (ParameterKind::Number, "1e"),
+        (ParameterKind::Boolean, "yes"),
+        (ParameterKind::Date, "2024-13-01"),
+        (ParameterKind::Date, "24-01-01"),
+        (ParameterKind::Timestamp, "2024-01-01"),
+        (ParameterKind::Timestamp, "2024-01-01 24:00"),
+        (ParameterKind::Timestamp, "2024-01-01 10:00."),
+        (ParameterKind::Text, "nul\0byte"),
+    ] {
+        assert_eq!(
+            reject(vec![parameter("a", kind, Some(value), sql)]),
+            ErrorCode::Validation,
+            "{kind:?} {value:?}"
+        );
+    }
+    let mut moved = parameter("a", ParameterKind::Text, None, sql);
+    moved.markers.clear();
+    moved.markers.push(10..12);
+    assert_eq!(reject(vec![moved]), ErrorCode::Validation);
+    let mut missing = parameter("a", ParameterKind::Text, None, sql);
+    missing.markers.clear();
+    assert_eq!(reject(vec![missing]), ErrorCode::Validation);
+    let mut outside = parameter("a", ParameterKind::Text, None, sql);
+    outside.markers.clear();
+    outside.markers.push(12..40);
+    assert_eq!(reject(vec![outside]), ErrorCode::Validation);
+}
+
+#[test]
+fn parameter_values_of_each_kind_are_accepted() {
+    for (kind, value) in [
+        (ParameterKind::Number, "42"),
+        (ParameterKind::Number, "+0.50"),
+        (ParameterKind::Number, ".5"),
+        (ParameterKind::Number, "1E-9"),
+        (ParameterKind::Boolean, "false"),
+        (ParameterKind::Date, "2024-02-29"),
+        (ParameterKind::Timestamp, "2024-02-29 23:59"),
+        (ParameterKind::Timestamp, "2024-02-29T23:59:59.123456"),
+        (ParameterKind::Text, ""),
+    ] {
+        assert!(is_parameter_value(kind, value), "{kind:?} {value:?}");
+    }
+}
+
+#[test]
+fn references_replace_every_marker_and_keep_the_rest_of_the_text() {
+    let sql = "SELECT :b, ':a', :a, :b";
+    let mut a = parameter("a", ParameterKind::Text, None, sql);
+    // The quoted ':a' is text: only the caller knows, so it sends one marker.
+    a.markers.remove(0);
+    let request = with_parameters(
+        sql,
+        vec![a, parameter("b", ParameterKind::Number, None, sql)],
+    );
+    assert_eq!(request.validate(), Ok(()));
+    assert_eq!(
+        request.with_references(|index, parameter| format!("${}<{}>", index + 1, parameter.name)),
+        "SELECT $2<b>, ':a', $1<a>, $2<b>"
+    );
+    assert_eq!(
+        QueryRequest::new("SELECT 1", ExecutionOptions::default())
+            .with_references(|_, _| String::new()),
+        "SELECT 1"
     );
 }

@@ -1,5 +1,6 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 use jykre_core::*;
-use jykre_driver_databricks::{DatabricksConfig, DatabricksDriver};
+use jykre_driver_databricks::{ComputeKind, DatabricksConfig, DatabricksDriver};
 use serde_json::{Value, json};
 
 #[derive(Default)]
@@ -55,6 +56,7 @@ fn metadata_configuration_does_not_require_a_warehouse() {
     let config = DatabricksConfig::parse(&json!({"profile": "DEV"})).unwrap();
     assert_eq!(config.warehouse_id, None);
     assert_eq!(config.cli_path, None);
+    assert_eq!(config.compute, ComputeKind::Warehouse);
     assert_eq!(
         config.validate_sql().unwrap_err().code,
         ErrorCode::Validation
@@ -91,6 +93,36 @@ fn invalid_configuration_and_credentials_are_rejected_without_echoing_input() {
         assert!(!format!("{error:?}").contains("private-sentinel"));
     }
     assert!(DatabricksConfig::parse(&json!({})).is_err());
+}
+
+#[test]
+fn classic_cluster_configuration_roundtrips_and_excludes_warehouse_ids() {
+    let input = json!({"profile":"DEV","compute":"cluster","clusterId":"1234-cluster","computeName":"Analytics",
+        "cliPath":"C:/tools/databricks.exe","defaultCatalog":"main","defaultSchema":"sales"});
+    let config = DatabricksConfig::parse(&input).unwrap();
+    config.validate_sql().unwrap();
+    assert_eq!(config.compute_id(), Some("1234-cluster"));
+    assert_eq!(
+        DatabricksConfig::parse(&serde_json::to_value(&config).unwrap()).unwrap(),
+        config
+    );
+    for invalid in [
+        json!({"profile":"DEV","clusterId":"cluster"}),
+        json!({"profile":"DEV","compute":"cluster","warehouseId":"warehouse"}),
+        json!({"profile":"DEV","compute":"cluster","clusterId":"cluster","warehouseId":"warehouse"}),
+        json!({"profile":"DEV","compute":"cluster","clusterId":"../private-sentinel"}),
+        json!({"profile":"DEV","compute":"unknown"}),
+    ] {
+        let failure = DatabricksConfig::parse(&invalid).unwrap_err();
+        assert_eq!(failure.code, ErrorCode::Validation);
+        assert!(!format!("{failure:?}").contains("private-sentinel"));
+    }
+    assert!(
+        DatabricksConfig::parse(&json!({"profile":"DEV","compute":"cluster"}))
+            .unwrap()
+            .validate_sql()
+            .is_err()
+    );
 }
 
 #[tokio::test]
