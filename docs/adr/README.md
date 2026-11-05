@@ -36,7 +36,7 @@ something is the way it is, and so a decision is not undone by accident.
 | [0011](0011-workspace-lints.md) | Workspace-wide lints for panics, output and async locks | Accepted (implemented) |
 | [0012](0012-result-grid-as-a-cached-entity.md) | Result grid as its own cached entity | Accepted (implemented) |
 | [0013](0013-thin-ancestors-of-frequently-notified-views.md) | Thin ancestors for frequently notified views | Proposed |
-| [0014](0014-a-session-per-tab.md) | A session per tab, kept between runs and after errors | Proposed |
+| [0014](0014-a-session-per-tab.md) | A session per tab, kept between runs and after errors | Proposed (amended for report tabs by 0025) |
 | [0015](0015-introspect-only-what-the-user-chooses.md) | Introspect only what the user chooses | Proposed |
 | [0016](0016-keys-defaults-and-relation-kinds.md) | Keys, defaults and relation kinds in the metadata model | Proposed |
 | [0017](0017-driver-metadata-contract-batch.md) | Cache identity, reading levels and on-demand inspection in the driver contract | Proposed |
@@ -46,4 +46,5 @@ something is the way it is, and so a decision is not undone by accident.
 | [0021](0021-sql-catalogs-read-at-run-time.md) | SQL dialect catalogs read at run time from a data directory | Proposed |
 | [0022](0022-result-pages-shared-across-threads.md) | Result pages shared across threads with `Arc` (supersedes in part 0012) | Proposed |
 | [0023](0023-named-parameters-bound-by-drivers.md) | Named parameters bound by the drivers (amends 0002 for report SQL) | Proposed |
-| [0024](0024-reports.md) | Reports, with stored definitions, tabs of their own and a print HTML the user saves | Proposed |
+| [0024](0024-reports.md) | Reports, with stored definitions, tabs of their own and a print HTML the user saves | Proposed (amended by 0025) |
+| [0025](0025-report-panels.md) | Report panels, each with its SQL, its database and its chart, run on a session per database (amends 0024 and, for reports, 0014) | Proposed |

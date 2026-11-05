@@ -62,6 +62,12 @@ document is the engineering standard.
   ([Persistence](persistence.md#atomic-metadata-refresh)).
 - Databricks requests run with the token of the CLI profile; Unity Catalog
   permissions are enforced by the server.
+- A report panel in another PostgreSQL database of the server opens its
+  session there with the profile's own user, credentials and TLS, and only
+  when the profile offers the server's other databases (`allDatabases`);
+  otherwise the panel fails with a validation error
+  ([ADR-0025](adr/0025-report-panels.md)). The server decides what that user
+  may read in it.
 
 ## SQL sent to servers
 
@@ -147,6 +153,9 @@ and a review date in `deny.toml`.
 - [ ] External processes run without a shell and with a timeout.
 - [ ] New network calls use HTTPS/TLS as configured, with an explicit timeout.
 - [ ] Database content is rendered as text.
+- [ ] A new way to open a session (another database, another context) keeps
+      the profile's user, credentials and TLS, and the production check
+      covers every statement it runs.
 
 ## Known deviations
 

@@ -18,6 +18,23 @@ pub fn names(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
     names
 }
 
+/// The parameter names of every SQL in `sqls`, once each, in the order they
+/// first appear: the panels of a report share them.
+pub fn names_all<'a>(
+    sqls: impl IntoIterator<Item = &'a str>,
+    dialect: Option<SqlDialect>,
+) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for sql in sqls {
+        for name in self::names(sql, dialect) {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 /// The specifications for `names`, in their order: a name keeps its
 /// specification, a new name gets a required text one, and a name no longer
 /// in the SQL loses its own.
@@ -40,6 +57,8 @@ pub enum ParameterProblem {
     Missing,
     /// The value does not have the shape of the parameter's kind.
     Invalid,
+    /// The parameter offers a list, and the value is not one of its choices.
+    NotAChoice,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,15 +67,21 @@ pub struct ParameterError {
     pub problem: ParameterProblem,
 }
 
-/// The value a run binds for `spec` from what the form holds: trimmed
-/// (except text), lowercased for booleans, `None` (NULL) when empty and
-/// optional.
-pub fn value(spec: &ParameterSpec, typed: &str) -> Result<Option<String>, ParameterProblem> {
-    let typed = match spec.kind {
+/// `typed` as a value of `kind`: trimmed (except text) and lowercased for
+/// booleans.
+fn normalize(kind: ParameterKind, typed: &str) -> String {
+    match kind {
         ParameterKind::Text => typed.to_owned(),
         ParameterKind::Boolean => typed.trim().to_ascii_lowercase(),
         _ => typed.trim().to_owned(),
-    };
+    }
+}
+
+/// The value a run binds for `spec` from what the form holds: trimmed
+/// (except text), lowercased for booleans, `None` (NULL) when empty and
+/// optional. A list parameter takes only one of its choices.
+pub fn value(spec: &ParameterSpec, typed: &str) -> Result<Option<String>, ParameterProblem> {
+    let typed = normalize(spec.kind, typed);
     if typed.is_empty() {
         return if spec.required {
             Err(ParameterProblem::Missing)
@@ -64,18 +89,40 @@ pub fn value(spec: &ParameterSpec, typed: &str) -> Result<Option<String>, Parame
             Ok(None)
         };
     }
-    if jykre_core::is_parameter_value(spec.kind, &typed) {
-        Ok(Some(typed))
-    } else {
-        Err(ParameterProblem::Invalid)
+    if !jykre_core::is_parameter_value(spec.kind, &typed) {
+        return Err(ParameterProblem::Invalid);
     }
+    if !spec.choices.is_empty()
+        && !spec
+            .choices
+            .iter()
+            .any(|choice| normalize(spec.kind, choice) == typed)
+    {
+        return Err(ParameterProblem::NotAChoice);
+    }
+    Ok(Some(typed))
+}
+
+/// The positions of `spec`'s choices that are not values of its kind, so
+/// the definition can point at them.
+pub fn invalid_choices(spec: &ParameterSpec) -> Vec<usize> {
+    spec.choices
+        .iter()
+        .enumerate()
+        .filter(|(_, choice)| {
+            let choice = normalize(spec.kind, choice);
+            choice.is_empty() || !jykre_core::is_parameter_value(spec.kind, &choice)
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// One request per statement of `sql`, each carrying the parameters its
 /// statement uses, with their markers in that statement's text. `values`
 /// holds what the form shows for each name; a name without one is empty.
-/// Every invalid or missing value is reported, so each field can show its
-/// own problem.
+/// Only the parameters `sql` uses are checked (a report's other panels may
+/// use the rest), and every invalid or missing value is reported, so each
+/// field can show its own problem.
 pub fn requests(
     sql: &str,
     dialect: Option<SqlDialect>,
@@ -83,9 +130,10 @@ pub fn requests(
     values: &HashMap<String, String>,
     options: &ExecutionOptions,
 ) -> Result<Vec<QueryRequest>, Vec<ParameterError>> {
+    let used = names(sql, dialect);
     let mut bound = HashMap::new();
     let mut errors = Vec::new();
-    for spec in specs {
+    for spec in specs.iter().filter(|spec| used.contains(&spec.name)) {
         let typed = values.get(&spec.name).map_or("", String::as_str);
         match value(spec, typed) {
             Ok(value) => {
@@ -165,6 +213,55 @@ mod tests {
     #[test]
     fn names_come_once_in_order_of_first_appearance() {
         assert_eq!(names("SELECT :b, :a, ':c', :b -- :d", POSTGRES), ["b", "a"]);
+    }
+
+    #[test]
+    fn names_of_several_panels_come_once_in_order() {
+        assert_eq!(
+            names_all(["SELECT :b, :a", "SELECT :c, :a", "SELECT 1"], POSTGRES),
+            ["b", "a", "c"]
+        );
+    }
+
+    #[test]
+    fn a_list_parameter_takes_only_one_of_its_choices() {
+        let region = ParameterSpec {
+            choices: vec!["North".into(), "South".into()],
+            ..spec("region", ParameterKind::Text, true)
+        };
+        assert_eq!(value(&region, "South"), Ok(Some("South".into())));
+        assert_eq!(value(&region, "East"), Err(ParameterProblem::NotAChoice));
+        assert_eq!(value(&region, ""), Err(ParameterProblem::Missing));
+        let level = ParameterSpec {
+            choices: vec![" 1 ".into(), "2".into(), "x".into(), "".into()],
+            ..spec("level", ParameterKind::Number, false)
+        };
+        assert_eq!(value(&level, "1"), Ok(Some("1".into())));
+        assert_eq!(value(&level, "3"), Err(ParameterProblem::NotAChoice));
+        assert_eq!(value(&level, ""), Ok(None));
+        assert_eq!(invalid_choices(&level), [2, 3]);
+        let flag = ParameterSpec {
+            choices: vec!["TRUE".into()],
+            ..spec("flag", ParameterKind::Boolean, true)
+        };
+        assert_eq!(value(&flag, "true"), Ok(Some("true".into())));
+    }
+
+    #[test]
+    fn only_the_parameters_a_panel_uses_are_checked() {
+        let requests = requests(
+            "SELECT :a",
+            POSTGRES,
+            &[
+                spec("a", ParameterKind::Text, true),
+                spec("other", ParameterKind::Date, true),
+            ],
+            &typed(&[("a", "x"), ("other", "not a date")]),
+            &ExecutionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].parameters.len(), 1);
     }
 
     #[test]

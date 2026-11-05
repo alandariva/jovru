@@ -1,13 +1,14 @@
 //! A report's print document: one self-contained HTML file with its title,
-//! description, parameters, chart and table, which the browser prints or
-//! saves as PDF (ADR-0024).
+//! description and parameters, then each panel with its chart or indicator
+//! and table, laid out in two columns like the report, which the browser
+//! prints or saves as PDF (ADR-0024, ADR-0025).
 //!
 //! It is the one place results reach the disk, and only at a path the user
 //! chose; nothing here picks a path or writes a temporary file. The page
 //! loads nothing (a content security policy forbids it) and every text from
 //! the database is escaped.
-use super::ChartKind;
-use super::chart::ChartData;
+use super::chart::{ChartData, Indicator, Visual};
+use super::{ChartKind, Width};
 use crate::result::ResultData;
 use std::path::{Path, PathBuf};
 
@@ -16,14 +17,30 @@ pub struct Document<'a> {
     pub title: &'a str,
     pub description: &'a str,
     pub connection: &'a str,
-    /// Each parameter's label and the value the run bound (`None` is NULL).
-    pub parameters: Vec<(String, Option<String>)>,
-    pub result: &'a ResultData,
-    /// The result stopped at the row limit or the memory ceiling.
-    pub limited: bool,
-    pub chart: Option<&'a ChartData>,
+    pub panels: Vec<PanelDocument<'a>>,
     /// When the report ran, as UTC text.
     pub generated: String,
+}
+
+/// One panel of the document.
+pub struct PanelDocument<'a> {
+    pub title: String,
+    /// Where the panel ran, as the report shows it.
+    pub context: String,
+    pub width: Width,
+    /// The last run's result; `None` when the panel did not run.
+    pub result: Option<&'a ResultData>,
+    /// The result stopped at the row limit or the memory ceiling.
+    pub limited: bool,
+    pub visual: Option<&'a Visual>,
+    /// The result's table is printed.
+    pub table: bool,
+    /// Why the panel shows less: its run's error, or a chart that cannot be
+    /// drawn.
+    pub note: Option<String>,
+    /// Each parameter the panel's run used: its label and the value bound
+    /// (`None` is NULL).
+    pub bound: Vec<(String, Option<String>)>,
 }
 
 /// Escapes text for HTML content and attribute values.
@@ -44,12 +61,17 @@ pub fn escape(text: &str) -> String {
 
 const STYLE: &str = "\
 body{font:13px/1.45 system-ui,-apple-system,'Segoe UI',sans-serif;color:#1d2127;margin:32px;background:#fff}\
-h1{font-size:22px;margin:0 0 4px}p.meta{color:#5d6670;margin:0 0 16px}\
+h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:0 0 2px}p.meta{color:#5d6670;margin:0 0 16px}\
+section p.meta{margin:0 0 8px;font-size:12px}\
 p.description{margin:0 0 16px;white-space:pre-wrap}\
 dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;margin:0 0 16px}dt{color:#5d6670}dd{margin:0}\
-figure{margin:0 0 20px;break-inside:avoid}figcaption{color:#5d6670;font-size:12px}svg text{font-size:11px;fill:#3a414a}\
+.panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px 20px}.full{grid-column:1/-1}\
+section{min-width:0}\
+figure{margin:0 0 12px;break-inside:avoid}figcaption{color:#5d6670;font-size:12px}svg text{font-size:11px;fill:#3a414a}\
+.number{break-inside:avoid;margin:4px 0 12px}.number .value{font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}\
+.number .value.null{color:#8a939c;font-style:italic}.number .label{display:block;color:#5d6670}\
 table{border-collapse:collapse;width:100%;font-size:12px}thead{display:table-header-group}\
-th,td{border:1px solid #d5dae0;padding:3px 6px;text-align:left;vertical-align:top}th{background:#f1f3f5}\
+th,td{border:1px solid #d5dae0;padding:3px 6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#f1f3f5}\
 tr{break-inside:avoid}td.null{color:#8a939c;font-style:italic}td.number{text-align:right;font-variant-numeric:tabular-nums}\
 .note{color:#8a5a00;margin:8px 0}.no-print{margin:0 0 16px}button{font:inherit;padding:6px 12px}\
 @page{size:A4;margin:14mm}@media print{.no-print{display:none}body{margin:0}}";
@@ -58,6 +80,33 @@ tr{break-inside:avoid}td.null{color:#8a939c;font-style:italic}td.number{text-ali
 const SERIES: [&str; 6] = [
     "#2f9e77", "#3b7dd8", "#8e5bd0", "#d9822b", "#d04f6c", "#3aa7b8",
 ];
+
+/// The parameters the panels ran with, each once, as the first panel that
+/// used it bound it.
+fn shared_parameters(panels: &[PanelDocument]) -> Vec<(String, Option<String>)> {
+    let mut shared: Vec<(String, Option<String>)> = Vec::new();
+    for (label, value) in panels.iter().flat_map(|panel| panel.bound.iter()) {
+        if !shared.iter().any(|(known, _)| known == label) {
+            shared.push((label.clone(), value.clone()));
+        }
+    }
+    shared
+}
+
+fn parameter_list(page: &mut String, parameters: &[(String, Option<String>)]) {
+    if parameters.is_empty() {
+        return;
+    }
+    page.push_str("<dl>");
+    for (label, value) in parameters {
+        page.push_str(&format!(
+            "<dt>{}</dt><dd>{}</dd>",
+            escape(label),
+            value.as_deref().map_or_else(|| "NULL".to_owned(), escape)
+        ));
+    }
+    page.push_str("</dl>");
+}
 
 /// The document as one HTML file.
 pub fn html(document: &Document) -> String {
@@ -89,44 +138,89 @@ pub fn html(document: &Document) -> String {
             escape(document.description)
         ));
     }
-    if !document.parameters.is_empty() {
-        page.push_str("<dl>");
-        for (label, value) in &document.parameters {
-            page.push_str(&format!(
-                "<dt>{}</dt><dd>{}</dd>",
-                escape(label),
-                value.as_deref().map_or_else(|| "NULL".to_owned(), escape)
-            ));
-        }
-        page.push_str("</dl>");
+    let shared = shared_parameters(&document.panels);
+    parameter_list(&mut page, &shared);
+    page.push_str("<main class=\"panels\">");
+    for panel in &document.panels {
+        section(&mut page, panel, &shared);
     }
-    if let Some(chart) = document.chart {
-        page.push_str("<figure>");
-        page.push_str(&svg(chart));
-        if chart.left_out() > 0 {
-            page.push_str(&format!(
-                "<figcaption>{}</figcaption>",
-                escape(&crate::tr!(
-                    "The chart shows the first {0} of {1} rows.",
-                    chart.points.len(),
-                    chart.total
-                ))
-            ));
-        }
-        page.push_str("</figure>");
+    page.push_str("</main></body></html>");
+    page
+}
+
+fn section(page: &mut String, panel: &PanelDocument, shared: &[(String, Option<String>)]) {
+    page.push_str(match panel.width {
+        Width::Half => "<section class=\"half\">",
+        Width::Full => "<section class=\"full\">",
+    });
+    page.push_str(&format!("<h2>{}</h2>", escape(&panel.title)));
+    if !panel.context.is_empty() {
+        page.push_str(&format!("<p class=\"meta\">{}</p>", escape(&panel.context)));
     }
-    table(&mut page, document.result);
-    if document.limited {
-        page.push_str(&format!(
+    // A panel run again with other values says which.
+    let own: Vec<(String, Option<String>)> = panel
+        .bound
+        .iter()
+        .filter(|bound| !shared.contains(bound))
+        .cloned()
+        .collect();
+    parameter_list(page, &own);
+    match panel.visual {
+        Some(Visual::Chart(chart)) => figure(page, chart),
+        Some(Visual::Number(number)) => indicator(page, number),
+        None => {}
+    }
+    if let Some(note) = &panel.note {
+        page.push_str(&format!("<p class=\"note\">{}</p>", escape(note)));
+    }
+    match panel.result {
+        Some(result) if panel.table && result.column_count() > 0 => {
+            table(page, result);
+            if panel.limited {
+                page.push_str(&format!(
+                    "<p class=\"note\">{}</p>",
+                    escape(&crate::tr!(
+                        "The result stopped at {0} rows; more rows exist.",
+                        result.row_count()
+                    ))
+                ));
+            }
+        }
+        Some(_) => {}
+        None if panel.note.is_none() => page.push_str(&format!(
             "<p class=\"note\">{}</p>",
+            escape(crate::tr!("This panel did not run."))
+        )),
+        None => {}
+    }
+    page.push_str("</section>");
+}
+
+fn figure(page: &mut String, chart: &ChartData) {
+    page.push_str("<figure>");
+    page.push_str(&svg(chart));
+    if chart.left_out() > 0 {
+        page.push_str(&format!(
+            "<figcaption>{}</figcaption>",
             escape(&crate::tr!(
-                "The result stopped at {0} rows; more rows exist.",
-                document.result.row_count()
+                "The chart shows the first {0} of {1} rows.",
+                chart.points.len(),
+                chart.total
             ))
         ));
     }
-    page.push_str("</body></html>");
-    page
+    page.push_str("</figure>");
+}
+
+fn indicator(page: &mut String, number: &Indicator) {
+    let value = match &number.text {
+        Some(text) => format!("<span class=\"value\">{}</span>", escape(text)),
+        None => "<span class=\"value null\">NULL</span>".to_owned(),
+    };
+    page.push_str(&format!(
+        "<div class=\"number\">{value}<span class=\"label\">{}</span></div>",
+        escape(&number.column)
+    ));
 }
 
 fn table(page: &mut String, result: &ResultData) {
@@ -172,7 +266,7 @@ pub fn svg(chart: &ChartData) -> String {
     );
     match chart.kind {
         ChartKind::Pie => pie(&mut svg, chart),
-        ChartKind::Bar | ChartKind::Line => axes(&mut svg, chart),
+        ChartKind::Bar | ChartKind::Line | ChartKind::Number => axes(&mut svg, chart),
     }
     legend(&mut svg, chart);
     svg.push_str("</svg>");
@@ -411,18 +505,29 @@ mod tests {
     use crate::reports::chart::ChartPoint;
     use crate::result::ResultColumn;
 
-    fn document<'a>(result: &'a ResultData, chart: Option<&'a ChartData>) -> Document<'a> {
+    fn panel<'a>(result: Option<&'a ResultData>, visual: Option<&'a Visual>) -> PanelDocument<'a> {
+        PanelDocument {
+            title: "Revenue <by region>".into(),
+            context: "shop".into(),
+            width: Width::Full,
+            result,
+            limited: true,
+            visual,
+            table: true,
+            note: None,
+            bound: vec![
+                ("Start".into(), Some("2024-01-01".into())),
+                ("End".into(), None),
+            ],
+        }
+    }
+
+    fn document<'a>(panels: Vec<PanelDocument<'a>>) -> Document<'a> {
         Document {
             title: "Sales <2024>",
             description: "By \"region\"",
             connection: "warehouse",
-            parameters: vec![
-                ("Start".into(), Some("2024-01-01".into())),
-                ("End".into(), None),
-            ],
-            result,
-            limited: true,
-            chart,
+            panels,
             generated: "2026-11-04 10:00:00".into(),
         }
     }
@@ -440,30 +545,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn the_document_escapes_every_text_and_loads_nothing() {
-        let result = sample();
-        let page = html(&document(&result, None));
-        assert!(!page.contains("<script>"));
-        assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
-        assert!(page.contains("North &amp; South"));
-        assert!(page.contains("<title>Sales &lt;2024&gt;</title>"));
-        assert!(page.contains("By &quot;region&quot;"));
-        assert!(page.contains("<td class=\"null\">NULL</td>"));
-        assert!(page.contains("<td class=\"number\">10.50</td>"));
-        assert!(page.contains("<dd>NULL</dd>"));
-        assert!(page.contains("default-src 'none'"));
-        assert!(page.contains("@page{size:A4"));
-        assert!(page.contains("thead{display:table-header-group}"));
-        assert!(page.contains("class=\"note\""));
-        assert!(!page.contains("http:") && !page.contains("https:"));
-        assert!(!page.contains("<svg"));
-    }
-
-    #[test]
-    fn a_chart_is_drawn_inline_with_escaped_labels() {
-        let result = sample();
-        let chart = ChartData {
+    fn chart() -> ChartData {
+        ChartData {
             kind: ChartKind::Bar,
             series: vec!["total".into()],
             points: vec![
@@ -480,20 +563,92 @@ mod tests {
             ],
             total: 5,
             other: None,
-        };
-        let page = html(&document(&result, Some(&chart)));
+        }
+    }
+
+    #[test]
+    fn the_document_escapes_every_text_and_loads_nothing() {
+        let result = sample();
+        let page = html(&document(vec![panel(Some(&result), None)]));
+        assert!(!page.contains("<script>"));
+        assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(page.contains("North &amp; South"));
+        assert!(page.contains("<title>Sales &lt;2024&gt;</title>"));
+        assert!(page.contains("By &quot;region&quot;"));
+        assert!(page.contains("<h2>Revenue &lt;by region&gt;</h2>"));
+        assert!(page.contains("<td class=\"null\">NULL</td>"));
+        assert!(page.contains("<td class=\"number\">10.50</td>"));
+        assert!(page.contains("<dd>NULL</dd>"));
+        assert!(page.contains("default-src 'none'"));
+        assert!(page.contains("@page{size:A4"));
+        assert!(page.contains("thead{display:table-header-group}"));
+        assert!(page.contains("class=\"note\""));
+        assert!(!page.contains("http:") && !page.contains("https:"));
+        assert!(!page.contains("<svg"));
+    }
+
+    #[test]
+    fn a_chart_is_drawn_inline_with_escaped_labels() {
+        let result = sample();
+        let chart = Visual::Chart(chart());
+        let page = html(&document(vec![panel(Some(&result), Some(&chart))]));
         assert_eq!(page.matches("<svg").count(), 1);
         assert!(page.contains("<title>&lt;b&gt;: 10.50</title>"));
         assert!(!page.contains("<b>"));
         assert!(page.contains("<figcaption>"));
         assert!(!page.contains("src=") && !page.contains("href="));
+        let Visual::Chart(data) = &chart else {
+            return;
+        };
         for kind in [ChartKind::Line, ChartKind::Pie] {
             let drawn = svg(&ChartData {
                 kind,
-                ..chart.clone()
+                ..data.clone()
             });
             assert!(drawn.starts_with("<svg") && drawn.ends_with("</svg>"));
         }
+    }
+
+    #[test]
+    fn every_panel_is_a_section_laid_out_by_its_width() {
+        let result = sample();
+        let number = Visual::Number(Indicator {
+            column: "total <eur>".into(),
+            text: Some("1234567890.123456789".into()),
+            rows: 1,
+        });
+        let empty = Visual::Number(Indicator {
+            column: "n".into(),
+            text: None,
+            rows: 1,
+        });
+        let mut half = panel(Some(&result), Some(&number));
+        half.width = Width::Half;
+        half.table = false;
+        // Run again with another value: it says which.
+        half.bound = vec![("Start".into(), Some("2025-01-01".into()))];
+        let mut failed = panel(None, None);
+        failed.note = Some("relation \"x\" does not exist".into());
+        let mut skipped = panel(None, Some(&empty));
+        skipped.bound.clear();
+        let page = html(&document(vec![
+            panel(Some(&result), None),
+            half,
+            failed,
+            skipped,
+        ]));
+        assert_eq!(page.matches("<section").count(), 4);
+        assert_eq!(page.matches("<section class=\"half\">").count(), 1);
+        assert!(page.contains(".full{grid-column:1/-1}"));
+        assert!(page.contains("<span class=\"value\">1234567890.123456789</span>"));
+        assert!(page.contains("<span class=\"label\">total &lt;eur&gt;</span>"));
+        assert!(page.contains("<span class=\"value null\">NULL</span>"));
+        assert!(page.contains("relation &quot;x&quot; does not exist"));
+        assert!(page.contains("<dd>2025-01-01</dd>"));
+        // The shared values show once, at the top.
+        assert_eq!(page.matches("<dd>2024-01-01</dd>").count(), 1);
+        // The table of the half panel is not printed: one table only.
+        assert_eq!(page.matches("<table>").count(), 1);
     }
 
     #[test]

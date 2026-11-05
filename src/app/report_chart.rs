@@ -1,13 +1,13 @@
-//! A report's chart, its own entity embedded with `.cached`, so the report
-//! around it redraws without laying the chart out again
-//! ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
-//! It draws what [`jykre::reports::chart::derive`] computed when the result
+//! A report panel's chart or indicator, its own entity embedded with
+//! `.cached`, so the panel around it redraws without laying the chart out
+//! again ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
+//! It draws what [`jykre::reports::chart::visual`] computed when the result
 //! or the chart changed, never while rendering.
 use super::ui::*;
 use gpui_kit::component::chart::{AreaChart, BarChart, PieChart};
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::reports::ChartKind;
-use jykre::reports::chart::{ChartData, ChartPoint};
+use jykre::reports::chart::{ChartData, ChartPoint, Indicator, Visual};
 use jykre::tr;
 use std::rc::Rc;
 
@@ -66,17 +66,50 @@ impl Datum {
 
 pub struct ReportChart {
     data: Option<Rc<ChartData>>,
+    number: Option<Indicator>,
 }
 
 impl ReportChart {
     pub fn new() -> Self {
-        Self { data: None }
+        Self {
+            data: None,
+            number: None,
+        }
     }
 
-    /// Draws `data` from now on; `None` draws nothing.
-    pub fn set_data(&mut self, data: Option<Rc<ChartData>>, cx: &mut Context<Self>) {
-        self.data = data;
+    /// Draws `visual` from now on; `None` draws nothing.
+    pub fn set_visual(&mut self, visual: Option<Visual>, cx: &mut Context<Self>) {
+        (self.data, self.number) = match visual {
+            Some(Visual::Chart(data)) => (Some(Rc::new(data)), None),
+            Some(Visual::Number(number)) => (None, Some(number)),
+            None => (None, None),
+        };
         cx.notify();
+    }
+
+    /// One value, large, as the database wrote it; NULL in the NULL style.
+    fn indicator(number: &Indicator) -> Stateful<Div> {
+        let (text, color) = match &number.text {
+            Some(text) => (text.clone(), TEXT),
+            None => ("NULL".to_owned(), VALUE_NULL),
+        };
+        column()
+            .id("report-number")
+            .role(Role::Status)
+            .aria_label(tr!("{0}: {1}", number.column, text))
+            .size_full()
+            .justify_center()
+            .px_2()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(34.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgb(color))
+                    .truncate()
+                    .child(text),
+            )
+            .child(label(number.column.clone()))
     }
 
     fn data(&self, data: &Rc<ChartData>) -> Vec<Datum> {
@@ -92,12 +125,18 @@ impl ReportChart {
 
 impl Render for ReportChart {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        if let Some(number) = &self.number {
+            return div()
+                .id("report-chart")
+                .size_full()
+                .child(Self::indicator(number));
+        }
         let Some(data) = self.data.clone() else {
             return div().id("report-chart");
         };
         let points = self.data(&data);
         let chart: AnyElement = match data.kind {
-            ChartKind::Bar => row()
+            ChartKind::Bar | ChartKind::Number => row()
                 .size_full()
                 .gap_3()
                 .children(data.series.iter().enumerate().map(|(serie, name)| {

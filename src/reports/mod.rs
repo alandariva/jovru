@@ -1,5 +1,6 @@
-//! Reports: saved SQL with named parameters and an optional chart
-//! (ADR-0024).
+//! Reports: panels of saved SQL with shared named parameters, each panel
+//! with its own database of the report's connection and its own chart
+//! (ADR-0024, ADR-0025).
 //!
 //! The library is one JSON value under its own `config.db` setting
 //! ([Persistence](../docs/persistence.md)). It holds definitions only: never
@@ -7,17 +8,24 @@
 //! default. Reading tolerates missing fields and keeps the ones it does not
 //! know, so a version that writes the value back loses nothing another
 //! version stored.
-use jykre_core::{ConnectionId, ParameterKind};
+use jykre_core::{ConnectionId, ParameterKind, SessionContext};
 use serde_json::{Map, Value, json};
 
 pub mod chart;
 pub mod export;
 pub mod params;
+pub mod run;
 
 /// The settings key the library is stored under.
 pub const SETTINGS_KEY: &str = "reports";
-/// The format written; a reader ignores what it does not know.
-const VERSION: u64 = 1;
+/// The format written; a reader ignores what it does not know. Version 1
+/// held one SQL and one chart per report; it is read as one panel.
+const VERSION: u64 = 2;
+/// The most panels a report holds. Each one keeps a result and a chart, so
+/// the bound keeps a report's memory and its frame small.
+pub const MAX_PANELS: usize = 12;
+/// The most choices a list parameter offers.
+pub const MAX_CHOICES: usize = 50;
 
 /// The stored value is not a report library (it is not a JSON object). The
 /// application keeps it untouched instead of writing an empty library over it.
@@ -32,6 +40,10 @@ impl std::fmt::Display for Unreadable {
 
 impl std::error::Error for Unreadable {}
 
+/// The report already holds [`MAX_PANELS`] panels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Full;
+
 /// The connection a report runs on: its identity, and its name for showing
 /// and for finding it when the identity is gone or was never stored.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,7 +52,8 @@ pub struct ConnectionRef {
     pub name: String,
 }
 
-/// A `:name` parameter of a report.
+/// A `:name` parameter of a report, shared by every panel whose SQL holds
+/// its marker.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParameterSpec {
     pub name: String,
@@ -51,6 +64,9 @@ pub struct ParameterSpec {
     pub default: Option<String>,
     /// An empty value is refused instead of running as NULL.
     pub required: bool,
+    /// The values the form offers in a list; empty means a free field.
+    pub choices: Vec<String>,
+    extra: Map<String, Value>,
 }
 
 impl ParameterSpec {
@@ -62,6 +78,8 @@ impl ParameterSpec {
             kind: ParameterKind::Text,
             default: None,
             required: true,
+            choices: Vec::new(),
+            extra: Map::new(),
         }
     }
 
@@ -73,6 +91,47 @@ impl ParameterSpec {
             &self.label
         }
     }
+
+    fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let name = object.get("name")?.as_str()?;
+        if !jykre_core::is_parameter_name(name) {
+            return None;
+        }
+        let known = ["name", "label", "kind", "default", "required", "choices"];
+        Some(Self {
+            name: name.to_owned(),
+            label: value["label"].as_str().unwrap_or_default().to_owned(),
+            kind: value["kind"]
+                .as_str()
+                .and_then(parse_kind)
+                .unwrap_or(ParameterKind::Text),
+            default: value["default"].as_str().map(str::to_owned),
+            required: value["required"].as_bool().unwrap_or(true),
+            choices: value["choices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|choice| choice.as_str().map(str::to_owned))
+                .take(MAX_CHOICES)
+                .collect(),
+            extra: unknown(object, &known),
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        with_extra(
+            &self.extra,
+            json!({
+                "name": self.name,
+                "label": self.label,
+                "kind": kind_str(self.kind),
+                "default": self.default,
+                "required": self.required,
+                "choices": self.choices,
+            }),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -80,32 +139,193 @@ pub enum ChartKind {
     Bar,
     Line,
     Pie,
+    /// One value shown large, as an indicator.
+    Number,
 }
 
 impl ChartKind {
-    pub const ALL: [ChartKind; 3] = [ChartKind::Bar, ChartKind::Line, ChartKind::Pie];
+    pub const ALL: [ChartKind; 4] = [
+        ChartKind::Bar,
+        ChartKind::Line,
+        ChartKind::Pie,
+        ChartKind::Number,
+    ];
 
     fn as_str(self) -> &'static str {
         match self {
             ChartKind::Bar => "bar",
             ChartKind::Line => "line",
             ChartKind::Pie => "pie",
+            ChartKind::Number => "number",
         }
     }
 
     fn parse(text: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == text)
     }
+
+    /// Whether the kind draws one column of values only.
+    pub fn single_value(self) -> bool {
+        matches!(self, ChartKind::Pie | ChartKind::Number)
+    }
+
+    /// Whether the kind needs a column that labels its points.
+    pub fn labelled(self) -> bool {
+        self != ChartKind::Number
+    }
 }
 
-/// A chart of the result: one column labels the points, the others give
-/// their values. Columns are named, so reordering the `SELECT` keeps the
-/// chart.
+/// A chart of a panel's result: one column labels the points, the others
+/// give their values. Columns are named, so reordering the `SELECT` keeps
+/// the chart. A [`ChartKind::Number`] has no label.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChartSpec {
     pub kind: ChartKind,
     pub label: String,
     pub values: Vec<String>,
+}
+
+impl ChartSpec {
+    fn from_value(value: &Value) -> Option<Self> {
+        let chart = value.as_object()?;
+        Some(Self {
+            kind: chart
+                .get("kind")
+                .and_then(Value::as_str)
+                .and_then(ChartKind::parse)?,
+            label: chart
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            values: chart
+                .get("values")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect(),
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "kind": self.kind.as_str(),
+            "label": self.label,
+            "values": self.values,
+        })
+    }
+}
+
+/// A panel's identity within its report: stable while the report is edited,
+/// whatever the panel's place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PanelId(pub u64);
+
+/// How much of the report's width a panel takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Width {
+    /// Half the width: two such panels share a row.
+    Half,
+    #[default]
+    Full,
+}
+
+impl Width {
+    fn as_str(self) -> &'static str {
+        match self {
+            Width::Half => "half",
+            Width::Full => "full",
+        }
+    }
+}
+
+/// Where a panel moves among the others.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+}
+
+/// One part of a report: its SQL, the database of the report's connection it
+/// runs in, and how its result is shown.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Panel {
+    pub id: PanelId,
+    /// Empty shows "Panel n".
+    pub title: String,
+    pub sql: String,
+    /// Where the panel's unqualified names resolve; the default leaves the
+    /// session as the connection opens it.
+    pub context: SessionContext,
+    pub chart: Option<ChartSpec>,
+    /// The result's table shows under the chart (always without one).
+    pub table: bool,
+    pub width: Width,
+    extra: Map<String, Value>,
+}
+
+impl Panel {
+    pub fn new(id: PanelId, sql: impl Into<String>, context: SessionContext) -> Self {
+        Self {
+            id,
+            sql: sql.into(),
+            context,
+            table: true,
+            ..Self::default()
+        }
+    }
+
+    /// The title shown for the panel at `index` (counted from zero).
+    pub fn shown_title(&self, index: usize) -> String {
+        if self.title.trim().is_empty() {
+            crate::tr!("Panel {0}", index + 1)
+        } else {
+            self.title.clone()
+        }
+    }
+
+    /// Whether the result's table shows: asked for, or there is no chart.
+    pub fn shows_table(&self) -> bool {
+        self.table || self.chart.is_none()
+    }
+
+    fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let chart = ChartSpec::from_value(&value["chart"]);
+        let known = ["id", "title", "sql", "context", "chart", "table", "width"];
+        Some(Self {
+            id: PanelId(value["id"].as_u64().unwrap_or(0)),
+            title: value["title"].as_str().unwrap_or_default().to_owned(),
+            sql: value["sql"].as_str().unwrap_or_default().to_owned(),
+            context: context_from(&value["context"]),
+            table: value["table"].as_bool().unwrap_or(chart.is_none()),
+            chart,
+            width: match value["width"].as_str() {
+                Some("half") => Width::Half,
+                _ => Width::Full,
+            },
+            extra: unknown(object, &known),
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        with_extra(
+            &self.extra,
+            json!({
+                "id": self.id.0,
+                "title": self.title,
+                "sql": self.sql,
+                "context": {
+                    "catalog": self.context.catalog,
+                    "schema": self.context.schema,
+                },
+                "chart": self.chart.as_ref().map(ChartSpec::to_value),
+                "table": self.table,
+                "width": self.width.as_str(),
+            }),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -115,10 +335,10 @@ pub struct Report {
     pub title: String,
     pub description: String,
     pub connection: ConnectionRef,
-    pub sql: String,
-    /// In the order their markers first appear in the SQL.
+    /// Shared by the panels, in the order their markers first appear.
     pub parameters: Vec<ParameterSpec>,
-    pub chart: Option<ChartSpec>,
+    /// In the order they show.
+    pub panels: Vec<Panel>,
     /// Seconds since the epoch.
     pub created_at: u64,
     pub updated_at: u64,
@@ -126,47 +346,135 @@ pub struct Report {
 }
 
 impl Report {
-    /// An unsaved report with this SQL; its parameters follow the SQL's
-    /// markers, by generic rules until the connection's dialect is known.
+    /// An unsaved report with one panel of this SQL, in `context`; its
+    /// parameters follow the SQL's markers, by generic rules until the
+    /// connection's dialect is known.
     pub fn draft(
         title: impl Into<String>,
         connection: ConnectionRef,
         sql: impl Into<String>,
+        context: SessionContext,
     ) -> Self {
         let sql = sql.into();
         Self {
             title: title.into(),
             connection,
             parameters: params::reconcile(&[], &params::names(&sql, None)),
-            sql,
+            panels: vec![Panel::new(PanelId(1), sql, context)],
             ..Self::default()
         }
     }
 
-    /// Whether the report's title, description, connection or SQL contains
-    /// `query`, ignoring case. An empty query matches everything.
+    /// The panel with identity `id`.
+    pub fn panel(&self, id: PanelId) -> Option<&Panel> {
+        self.panels.iter().find(|panel| panel.id == id)
+    }
+
+    /// The identity the next panel gets.
+    fn next_panel_id(&self) -> PanelId {
+        PanelId(
+            self.panels
+                .iter()
+                .map(|panel| panel.id.0)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1),
+        )
+    }
+
+    /// Adds a panel of `sql` in `context` at the end, with a new identity.
+    pub fn add_panel(
+        &mut self,
+        sql: impl Into<String>,
+        context: SessionContext,
+    ) -> Result<PanelId, Full> {
+        if self.panels.len() >= MAX_PANELS {
+            return Err(Full);
+        }
+        let id = self.next_panel_id();
+        self.panels.push(Panel::new(id, sql, context));
+        Ok(id)
+    }
+
+    /// A copy of the panel `id` right after it, with a new identity.
+    pub fn duplicate_panel(&mut self, id: PanelId) -> Result<Option<PanelId>, Full> {
+        if self.panels.len() >= MAX_PANELS {
+            return Err(Full);
+        }
+        let Some(index) = self.panels.iter().position(|panel| panel.id == id) else {
+            return Ok(None);
+        };
+        let copy = Panel {
+            id: self.next_panel_id(),
+            ..self.panels[index].clone()
+        };
+        let copy_id = copy.id;
+        self.panels.insert(index + 1, copy);
+        Ok(Some(copy_id))
+    }
+
+    /// Moves the panel `id` one place; `false` when it is already at that
+    /// end or does not exist.
+    pub fn move_panel(&mut self, id: PanelId, direction: Direction) -> bool {
+        let Some(index) = self.panels.iter().position(|panel| panel.id == id) else {
+            return false;
+        };
+        let other = match direction {
+            Direction::Up if index > 0 => index - 1,
+            Direction::Down if index + 1 < self.panels.len() => index + 1,
+            _ => return false,
+        };
+        self.panels.swap(index, other);
+        true
+    }
+
+    /// Removes the panel `id` and returns it.
+    pub fn remove_panel(&mut self, id: PanelId) -> Option<Panel> {
+        let index = self.panels.iter().position(|panel| panel.id == id)?;
+        Some(self.panels.remove(index))
+    }
+
+    /// The parameters follow the markers of every panel's SQL: a name keeps
+    /// its specification, a new one gets a required text one, and a name no
+    /// panel uses any more loses its own.
+    pub fn reconcile_parameters(&mut self, dialect: Option<jykre_core::SqlDialect>) {
+        let names = params::names_all(self.panels.iter().map(|panel| panel.sql.as_str()), dialect);
+        self.parameters = params::reconcile(&self.parameters, &names);
+    }
+
+    /// Whether the report's title, description, connection, or a panel's
+    /// title or SQL contains `query`, ignoring case. An empty query matches
+    /// everything.
     pub fn matches(&self, query: &str) -> bool {
         let query = query.trim().to_lowercase();
         query.is_empty()
-            || [
-                &self.title,
-                &self.description,
-                &self.connection.name,
-                &self.sql,
-            ]
-            .iter()
-            .any(|text| text.to_lowercase().contains(&query))
+            || [&self.title, &self.description, &self.connection.name]
+                .into_iter()
+                .chain(
+                    self.panels
+                        .iter()
+                        .flat_map(|panel| [&panel.title, &panel.sql]),
+                )
+                .any(|text| text.to_lowercase().contains(&query))
     }
 
-    /// The SQL's first `lines` non-empty lines, for a list row.
+    /// The first `lines` non-empty lines of the first panel with SQL, for a
+    /// list row.
     pub fn preview(&self, lines: usize) -> String {
-        self.sql
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .take(lines)
-            .collect::<Vec<_>>()
-            .join(" ")
+        self.panels
+            .iter()
+            .find(|panel| !panel.sql.trim().is_empty())
+            .map(|panel| {
+                panel
+                    .sql
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .take(lines)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
     }
 
     /// An unsaved copy with the same definition.
@@ -178,6 +486,17 @@ impl Report {
             updated_at: 0,
             ..self.clone()
         }
+    }
+
+    /// Whether `other` defines the same report: the same title, description,
+    /// connection name, parameters and panels. Identity and times are not
+    /// compared.
+    pub fn same_definition(&self, other: &Report) -> bool {
+        self.title == other.title
+            && self.description == other.description
+            && self.connection.name == other.connection.name
+            && self.parameters == other.parameters
+            && self.panels == other.panels
     }
 
     fn from_value(value: &Value) -> Option<Self> {
@@ -194,36 +513,36 @@ impl Report {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|parameter| {
-                let name = parameter["name"].as_str()?;
-                jykre_core::is_parameter_name(name).then(|| ParameterSpec {
-                    name: name.to_owned(),
-                    label: parameter["label"].as_str().unwrap_or_default().to_owned(),
-                    kind: parameter["kind"]
-                        .as_str()
-                        .and_then(parse_kind)
-                        .unwrap_or(ParameterKind::Text),
-                    default: parameter["default"].as_str().map(str::to_owned),
-                    required: parameter["required"].as_bool().unwrap_or(true),
-                })
-            })
+            .filter_map(ParameterSpec::from_value)
             .collect();
-        let chart = value["chart"].as_object().and_then(|chart| {
-            Some(ChartSpec {
-                kind: chart
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .and_then(ChartKind::parse)?,
-                label: chart.get("label").and_then(Value::as_str)?.to_owned(),
-                values: chart
-                    .get("values")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|value| value.as_str().map(str::to_owned))
-                    .collect(),
-            })
-        });
+        let mut panels: Vec<Panel> = match value["panels"].as_array() {
+            Some(panels) => panels.iter().filter_map(Panel::from_value).collect(),
+            // Version 1: the report's SQL and chart are its one panel.
+            None => {
+                let chart = ChartSpec::from_value(&value["chart"]);
+                vec![Panel {
+                    id: PanelId(1),
+                    sql: text("sql"),
+                    table: true,
+                    chart,
+                    ..Panel::default()
+                }]
+            }
+        };
+        let mut next = panels
+            .iter()
+            .map(|panel| panel.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut seen = std::collections::HashSet::new();
+        for panel in &mut panels {
+            if panel.id.0 == 0 || !seen.insert(panel.id) {
+                panel.id = PanelId(next);
+                seen.insert(panel.id);
+                next += 1;
+            }
+        }
         let known = [
             "id",
             "title",
@@ -232,6 +551,7 @@ impl Report {
             "sql",
             "parameters",
             "chart",
+            "panels",
             "created_at",
             "updated_at",
         ];
@@ -243,50 +563,65 @@ impl Report {
                 id: connection["id"].as_str().and_then(|id| id.parse().ok()),
                 name: connection["name"].as_str().unwrap_or_default().to_owned(),
             },
-            sql: text("sql"),
             parameters,
-            chart,
+            panels,
             created_at: value["created_at"].as_u64().unwrap_or(0),
             updated_at: value["updated_at"].as_u64().unwrap_or(0),
-            extra: object
-                .iter()
-                .filter(|(key, _)| !known.contains(&key.as_str()))
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect(),
+            extra: unknown(object, &known),
         })
     }
 
     fn to_value(&self) -> Value {
-        let mut object = self.extra.clone();
-        let known = json!({
-            "id": self.id,
-            "title": self.title,
-            "description": self.description,
-            "connection": {
-                "id": self.connection.id.map(|id| id.to_string()),
-                "name": self.connection.name,
-            },
-            "sql": self.sql,
-            "parameters": self.parameters.iter().map(|parameter| json!({
-                "name": parameter.name,
-                "label": parameter.label,
-                "kind": kind_str(parameter.kind),
-                "default": parameter.default,
-                "required": parameter.required,
-            })).collect::<Vec<_>>(),
-            "chart": self.chart.as_ref().map(|chart| json!({
-                "kind": chart.kind.as_str(),
-                "label": chart.label,
-                "values": chart.values,
-            })),
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        });
-        if let Value::Object(known) = known {
-            object.extend(known);
-        }
-        Value::Object(object)
+        with_extra(
+            &self.extra,
+            json!({
+                "id": self.id,
+                "title": self.title,
+                "description": self.description,
+                "connection": {
+                    "id": self.connection.id.map(|id| id.to_string()),
+                    "name": self.connection.name,
+                },
+                "parameters": self.parameters.iter().map(ParameterSpec::to_value).collect::<Vec<_>>(),
+                "panels": self.panels.iter().map(Panel::to_value).collect::<Vec<_>>(),
+                "created_at": self.created_at,
+                "updated_at": self.updated_at,
+            }),
+        )
     }
+}
+
+/// The context a stored `{"catalog", "schema"}` names; anything else is the
+/// default.
+fn context_from(value: &Value) -> SessionContext {
+    let level = |key: &str| {
+        value[key]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    };
+    SessionContext {
+        catalog: level("catalog"),
+        schema: level("schema"),
+    }
+}
+
+/// The entries of `object` whose keys are not in `known`.
+fn unknown(object: &Map<String, Value>, known: &[&str]) -> Map<String, Value> {
+    object
+        .iter()
+        .filter(|(key, _)| !known.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+/// `known` (an object) over the kept unknown entries.
+fn with_extra(extra: &Map<String, Value>, known: Value) -> Value {
+    let mut object = extra.clone();
+    if let Value::Object(known) = known {
+        object.extend(known);
+    }
+    Value::Object(object)
 }
 
 fn kind_str(kind: ParameterKind) -> &'static str {
@@ -428,26 +763,50 @@ mod tests {
     use super::*;
 
     fn sample() -> Report {
-        Report {
+        let mut report = Report {
             title: "Revenue".into(),
             description: "By month".into(),
             connection: ConnectionRef {
                 id: Some(ConnectionId::new()),
                 name: "warehouse".into(),
             },
-            sql: "SELECT month, total\nFROM sales\nWHERE day >= :start".into(),
             parameters: vec![ParameterSpec {
                 kind: ParameterKind::Date,
                 default: Some("2024-01-01".into()),
                 ..ParameterSpec::new("start")
             }],
-            chart: Some(ChartSpec {
-                kind: ChartKind::Line,
-                label: "month".into(),
-                values: vec!["total".into()],
-            }),
             ..Report::default()
-        }
+        };
+        report
+            .add_panel(
+                "SELECT month, total\nFROM sales\nWHERE day >= :start",
+                SessionContext::default(),
+            )
+            .unwrap();
+        report.panels[0].chart = Some(ChartSpec {
+            kind: ChartKind::Line,
+            label: "month".into(),
+            values: vec!["total".into()],
+        });
+        let other = report
+            .add_panel(
+                "SELECT count(*) FROM orders WHERE day >= :start",
+                SessionContext {
+                    catalog: None,
+                    schema: Some("shop".into()),
+                },
+            )
+            .unwrap();
+        let panel = report.panels.iter_mut().find(|p| p.id == other).unwrap();
+        panel.title = "Orders".into();
+        panel.width = Width::Half;
+        panel.table = false;
+        panel.chart = Some(ChartSpec {
+            kind: ChartKind::Number,
+            label: String::new(),
+            values: vec!["count".into()],
+        });
+        report
     }
 
     #[test]
@@ -457,7 +816,12 @@ mod tests {
         let read = ReportLibrary::from_value(Some(library.to_value())).unwrap();
         assert_eq!(read, library);
         assert_eq!(read.get(id).unwrap().created_at, 100);
-        assert_eq!(read.to_value()["version"], 1);
+        assert_eq!(read.to_value()["version"], 2);
+        let panels = &read.get(id).unwrap().panels;
+        assert_eq!(panels.len(), 2);
+        assert_eq!(panels[1].context.schema.as_deref(), Some("shop"));
+        assert_eq!(panels[1].width, Width::Half);
+        assert_eq!(panels[1].chart.as_ref().unwrap().kind, ChartKind::Number);
     }
 
     #[test]
@@ -475,15 +839,54 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_are_kept_and_missing_ones_take_defaults() {
+    fn a_first_version_report_is_read_as_one_panel() {
+        let stored = json!({
+            "version": 1,
+            "next_id": 2,
+            "reports": [{
+                "id": 1, "title": "Old", "sql": "SELECT a, b FROM t",
+                "chart": {"kind": "bar", "label": "a", "values": ["b"]},
+                "parameters": [],
+            }],
+        });
+        let library = ReportLibrary::from_value(Some(stored)).unwrap();
+        let report = &library.reports[0];
+        assert_eq!(report.panels.len(), 1);
+        let panel = &report.panels[0];
+        assert_eq!(panel.id, PanelId(1));
+        assert_eq!(panel.sql, "SELECT a, b FROM t");
+        assert_eq!(panel.chart.as_ref().unwrap().kind, ChartKind::Bar);
+        assert_eq!(panel.context, SessionContext::default());
+        assert!(panel.table);
+        // Written back in the new format, without the old fields.
+        let written = library.to_value();
+        assert_eq!(written["version"], 2);
+        assert!(written["reports"][0].get("sql").is_none());
+        assert_eq!(
+            written["reports"][0]["panels"][0]["sql"],
+            "SELECT a, b FROM t"
+        );
+    }
+
+    #[test]
+    fn unknown_fields_are_kept_at_every_level_and_missing_ones_take_defaults() {
         let stored = json!({
             "version": 9,
             "future": {"a": 1},
             "reports": [
-                {"title": "Old", "sql": "SELECT 1", "shared_with": ["x"],
+                {"title": "New", "shared_with": ["x"],
                  "connection": {"id": "not-a-uuid", "name": "db"},
-                 "parameters": [{"name": "n", "kind": "money"}, {"name": "1bad"}],
-                 "chart": {"kind": "radar", "label": "a", "values": ["b"]}},
+                 "parameters": [
+                     {"name": "n", "kind": "money", "choices": ["a", 1, "b"], "hint": "h"},
+                     {"name": "1bad"},
+                 ],
+                 "panels": [
+                     {"sql": "SELECT 1", "chart": {"kind": "radar", "label": "a", "values": ["b"]},
+                      "color": "red", "context": {"catalog": "", "schema": "s"}},
+                     "not a panel",
+                     {"id": 7, "sql": "SELECT 2", "width": "half"},
+                     {"id": 7, "sql": "SELECT 3"},
+                 ]},
                 "not a report",
             ],
         });
@@ -498,12 +901,27 @@ mod tests {
                 name: "db".into()
             }
         );
-        assert_eq!(report.parameters, vec![ParameterSpec::new("n")]);
-        assert_eq!(report.chart, None);
+        assert_eq!(report.parameters.len(), 1);
+        assert_eq!(report.parameters[0].kind, ParameterKind::Text);
+        assert_eq!(report.parameters[0].choices, ["a", "b"]);
+        let ids: Vec<_> = report.panels.iter().map(|panel| panel.id).collect();
+        assert_eq!(ids, [PanelId(8), PanelId(7), PanelId(9)]);
+        assert_eq!(report.panels[0].chart, None);
+        assert!(report.panels[0].table);
+        assert_eq!(
+            report.panels[0].context,
+            SessionContext {
+                catalog: None,
+                schema: Some("s".into())
+            }
+        );
+        assert_eq!(report.panels[1].width, Width::Half);
         let written = library.to_value();
         assert_eq!(written["future"], json!({"a": 1}));
         assert_eq!(written["reports"][0]["shared_with"], json!(["x"]));
-        assert_eq!(written["version"], 1);
+        assert_eq!(written["reports"][0]["panels"][0]["color"], "red");
+        assert_eq!(written["reports"][0]["parameters"][0]["hint"], "h");
+        assert_eq!(written["version"], 2);
     }
 
     #[test]
@@ -539,13 +957,70 @@ mod tests {
     }
 
     #[test]
-    fn matching_ignores_case_and_previews_skip_blank_lines() {
+    fn panels_are_added_moved_duplicated_and_removed_up_to_the_limit() {
+        let mut report = Report::draft(
+            "R",
+            ConnectionRef::default(),
+            "SELECT 1",
+            SessionContext::default(),
+        );
+        let first = report.panels[0].id;
+        let second = report
+            .add_panel("SELECT 2", SessionContext::default())
+            .unwrap();
+        assert!(report.move_panel(second, Direction::Up));
+        assert!(!report.move_panel(second, Direction::Up));
+        assert_eq!(report.panels[0].id, second);
+        let copy = report.duplicate_panel(second).unwrap().unwrap();
+        assert_eq!(report.panels[1].id, copy);
+        assert_eq!(report.panels[1].sql, "SELECT 2");
+        assert_eq!(
+            report.remove_panel(first).map(|panel| panel.sql),
+            Some("SELECT 1".into())
+        );
+        while report.panels.len() < MAX_PANELS {
+            report
+                .add_panel("SELECT", SessionContext::default())
+                .unwrap();
+        }
+        assert_eq!(
+            report.add_panel("SELECT", SessionContext::default()),
+            Err(Full)
+        );
+        assert_eq!(report.duplicate_panel(copy), Err(Full));
+        let mut ids: Vec<_> = report.panels.iter().map(|panel| panel.id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), MAX_PANELS, "every panel keeps its own identity");
+    }
+
+    #[test]
+    fn parameters_follow_the_markers_of_every_panel() {
+        let mut report = sample();
+        report.panels[1].sql = "SELECT count(*) FROM orders WHERE region = :region".into();
+        report.reconcile_parameters(None);
+        let names: Vec<_> = report.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["start", "region"]);
+        assert_eq!(report.parameters[0].kind, ParameterKind::Date);
+        report.panels[0].sql = "SELECT 1".into();
+        report.reconcile_parameters(None);
+        let names: Vec<_> = report.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["region"]);
+    }
+
+    #[test]
+    fn matching_covers_every_panel_and_previews_skip_blank_lines() {
         let report = sample();
         assert!(report.matches(""));
         assert!(report.matches("REVENUE"));
         assert!(report.matches("warehouse"));
         assert!(report.matches(":start"));
+        assert!(report.matches("orders"));
         assert!(!report.matches("inventory"));
         assert_eq!(report.preview(2), "SELECT month, total FROM sales");
+        let mut same = report.clone();
+        assert!(same.same_definition(&report));
+        same.panels[1].width = Width::Full;
+        assert!(!same.same_definition(&report));
     }
 }

@@ -19,7 +19,7 @@ own, across areas.
 | ID | Severity | Area | Debt | Status |
 | --- | --- | --- | --- | --- |
 | TD-001 | Critical | Transactions, drivers | The transaction state is not read from the database protocol, and the probes that replace it can change what the session's statements see | Mitigated; fix open |
-| TD-002 | Low | Reports, PostgreSQL driver | Binding a report's parameters runs a `SELECT set_config(...)` before the statement, which can take the snapshot of a transaction the report opened | Open |
+| TD-002 | Low | Reports, PostgreSQL driver | Binding a report panel's parameters runs a `SELECT set_config(...)` before the statement, which can take the snapshot of a transaction the panel's SQL opened | Open |
 
 ## TD-001 — Transaction state is not read from the protocol
 
@@ -121,7 +121,8 @@ that has no snapshot yet, that query takes the snapshot just before the
 statement would. It runs only for statements that carry parameters, which
 are queries that take a snapshot anyway, so what they read does not change;
 but a parameterized statement that must come first in a transaction cannot
-have parameters. The values also stay in the report tab's session until its
+have parameters. The values also stay in the report's sessions (one per
+database its panels use, [ADR-0025](adr/0025-report-panels.md)) until their
 next run.
 
 ### Way out

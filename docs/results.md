@@ -323,22 +323,31 @@ system's save dialog (`jykre::export`, `backend::export`).
 
 ## Reports
 
-A report ([ADR-0024](adr/0024-reports.md)) shows the last result of its SQL
-up to the connection's row limit, without paging, in the same grid.
+A report ([ADR-0024](adr/0024-reports.md),
+[ADR-0025](adr/0025-report-panels.md)) shows, in each panel, the last result
+of the panel's SQL up to the connection's row limit, without paging, in the
+same grid. A panel's result may also take the memory ceiling divided by the
+report's number of panels (`jykre::reports::run::memory_ceiling`), so a
+report holds no more than one query tab.
 
-- Its chart (`jykre::reports::chart`) finds its columns by name and draws at
-  most 50 bars, 1,000 line points or 10 pie slices plus an "Other" slice that
-  sums the rest. Numbers become floating point only for the drawing: the
-  tooltips, the table and the print document keep the database's text, and
-  the "Other" slice is summed exactly (`jykre::decimal::Sum`).
-- **Copy as CSV** and **Copy for a spreadsheet** copy the result with the
-  rules above, asking first above 50 MiB.
+- A panel's chart (`jykre::reports::chart`) finds its columns by name and
+  draws at most 50 bars, 1,000 line points or 10 pie slices plus an "Other"
+  slice that sums the rest. Numbers become floating point only for the
+  drawing: the tooltips, the table and the print document keep the
+  database's text, and the "Other" slice is summed exactly
+  (`jykre::decimal::Sum`). A **number** panel shows the first row's value of
+  one column exactly as the database wrote it, NULL in the NULL style.
+- What a panel draws is computed off the UI thread, with its result, and
+  again when its chart changes.
+- **Copy as CSV** and **Copy for a spreadsheet**, in a panel's menu, copy its
+  result with the rules above, asking first above 50 MiB.
 - **Export for printing or PDF…** (`jykre::reports::export`) writes one HTML
-  file where the user chooses: the title, description, parameters, chart (as
-  SVG) and table, with every text escaped, nothing loaded from elsewhere and
-  print styles (A4, the header repeated on each page). Like an export, it
-  reaches the disk only at the user's request, at the path they chose
-  ([Persistence](persistence.md)).
+  file where the user chooses: the title, description, the values the panels
+  ran with, and each panel with its chart (as SVG) or number and, when it
+  shows one, its table, in two columns like the report, with every text
+  escaped, nothing loaded from elsewhere and print styles (A4, the header
+  repeated on each page). Like an export, it reaches the disk only at the
+  user's request, at the path they chose ([Persistence](persistence.md)).
 
 ## Footer
 

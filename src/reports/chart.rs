@@ -77,6 +77,81 @@ pub enum ChartProblem {
     NotNumeric(String),
     /// A pie shows a single value column.
     PieNeedsOneValue,
+    /// An indicator shows a single value column.
+    NumberNeedsOneValue,
+    /// An indicator shows the first row, and the result has none.
+    NoRows,
+}
+
+impl ChartProblem {
+    /// What the panel says instead of its chart.
+    pub fn message(&self) -> String {
+        match self {
+            ChartProblem::NoValues => {
+                crate::tr!("Choose a column of values for the chart.").to_owned()
+            }
+            ChartProblem::MissingColumn(name) => {
+                crate::tr!("The result has no column {0} for the chart.", name)
+            }
+            ChartProblem::NotNumeric(name) => {
+                crate::tr!("The column {0} does not hold numbers.", name)
+            }
+            ChartProblem::PieNeedsOneValue => {
+                crate::tr!("A pie shows a single column of values.").to_owned()
+            }
+            ChartProblem::NumberNeedsOneValue => {
+                crate::tr!("An indicator shows a single column.").to_owned()
+            }
+            ChartProblem::NoRows => crate::tr!("The result has no rows to show.").to_owned(),
+        }
+    }
+}
+
+/// One value shown large: the first row's value of a column, as the
+/// database wrote it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Indicator {
+    pub column: String,
+    /// `None` when the value is NULL.
+    pub text: Option<String>,
+    /// The result's rows, of which the indicator shows the first.
+    pub rows: usize,
+}
+
+/// What a panel shows of its result.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Visual {
+    Chart(ChartData),
+    Number(Indicator),
+}
+
+/// What `spec` shows of `result`: an indicator for [`ChartKind::Number`],
+/// a chart otherwise.
+pub fn visual(result: &ResultData, spec: &ChartSpec) -> Result<Visual, ChartProblem> {
+    if spec.kind == ChartKind::Number {
+        indicator(result, spec).map(Visual::Number)
+    } else {
+        derive(result, spec).map(Visual::Chart)
+    }
+}
+
+/// The first row's value of the column `spec` names. Any column may be
+/// shown; its text is never reinterpreted.
+pub fn indicator(result: &ResultData, spec: &ChartSpec) -> Result<Indicator, ChartProblem> {
+    let name = match spec.values.as_slice() {
+        [] => return Err(ChartProblem::NoValues),
+        [name] => name,
+        _ => return Err(ChartProblem::NumberNeedsOneValue),
+    };
+    let index = column(result, name)?;
+    if result.row_count() == 0 {
+        return Err(ChartProblem::NoRows);
+    }
+    Ok(Indicator {
+        column: name.clone(),
+        text: result.value(0, index).map(str::to_owned),
+        rows: result.row_count(),
+    })
 }
 
 fn column(result: &ResultData, name: &str) -> Result<usize, ChartProblem> {
@@ -121,6 +196,9 @@ pub fn derive(result: &ResultData, spec: &ChartSpec) -> Result<ChartData, ChartP
     if spec.kind == ChartKind::Pie && spec.values.len() > 1 {
         return Err(ChartProblem::PieNeedsOneValue);
     }
+    if spec.kind == ChartKind::Number && spec.values.len() > 1 {
+        return Err(ChartProblem::NumberNeedsOneValue);
+    }
     let label = column(result, &spec.label)?;
     let values = spec
         .values
@@ -138,6 +216,8 @@ pub fn derive(result: &ResultData, spec: &ChartSpec) -> Result<ChartData, ChartP
         ChartKind::Bar => MAX_BARS,
         ChartKind::Line => MAX_POINTS,
         ChartKind::Pie => MAX_SLICES,
+        // An indicator reads [`indicator`]; drawn as a chart, it is one bar.
+        ChartKind::Number => 1,
     };
     let point = |row: usize| ChartPoint {
         label: result.value(row, label).unwrap_or("NULL").to_owned(),
@@ -177,13 +257,21 @@ pub fn derive(result: &ResultData, spec: &ChartSpec) -> Result<ChartData, ChartP
     })
 }
 
-/// A chart that fits `result`: the first column that is not a number labels
-/// the points and up to three number columns give values; a date or time
-/// label draws a line, anything else bars. `None` without a number column
-/// beside the label.
+/// A chart that fits `result`: a single number (one row, one column) is an
+/// indicator; otherwise the first column that is not a number labels
+/// the points and up to three number columns give values, a date or time
+/// label drawing a line and anything else bars. `None` without a number
+/// column beside the label.
 pub fn suggest(result: &ResultData) -> Option<ChartSpec> {
     let columns = result.columns();
     let numbers = numeric_columns(result);
+    if result.row_count() == 1 && columns.len() == 1 && numbers.len() == 1 {
+        return Some(ChartSpec {
+            kind: ChartKind::Number,
+            label: String::new(),
+            values: numbers,
+        });
+    }
     let label = columns
         .iter()
         .find(|column| !numbers.contains(&column.name))
@@ -297,6 +385,48 @@ mod tests {
     }
 
     #[test]
+    fn an_indicator_shows_the_first_row_as_the_database_wrote_it() {
+        let data = result(
+            &[("total", "numeric"), ("note", "text")],
+            &[
+                vec![Some("1234567890.123456789"), None],
+                vec![Some("1"), Some("x")],
+            ],
+        );
+        let spec = |values: &[&str]| ChartSpec {
+            kind: ChartKind::Number,
+            label: String::new(),
+            values: values.iter().map(|name| (*name).to_owned()).collect(),
+        };
+        assert_eq!(
+            visual(&data, &spec(&["total"])),
+            Ok(Visual::Number(Indicator {
+                column: "total".into(),
+                text: Some("1234567890.123456789".into()),
+                rows: 2,
+            }))
+        );
+        assert_eq!(
+            indicator(&data, &spec(&["note"])).map(|number| number.text),
+            Ok(None)
+        );
+        assert_eq!(indicator(&data, &spec(&[])), Err(ChartProblem::NoValues));
+        assert_eq!(
+            indicator(&data, &spec(&["total", "note"])),
+            Err(ChartProblem::NumberNeedsOneValue)
+        );
+        assert_eq!(
+            indicator(&data, &spec(&["gone"])),
+            Err(ChartProblem::MissingColumn("gone".into()))
+        );
+        let empty = result(&[("total", "numeric")], &[]);
+        assert_eq!(
+            indicator(&empty, &spec(&["total"])),
+            Err(ChartProblem::NoRows)
+        );
+    }
+
+    #[test]
     fn suggestions_pick_a_label_and_up_to_three_numbers() {
         let data = result(
             &[
@@ -322,6 +452,11 @@ mod tests {
         );
         let words = result(&[("name", "text")], &[vec![Some("x")]]);
         assert_eq!(suggest(&words), None);
+        let single = result(&[("total", "numeric")], &[vec![Some("1")]]);
+        assert_eq!(
+            suggest(&single),
+            Some(spec(ChartKind::Number, "", &["total"]))
+        );
         let numbers = result(
             &[("n", "text"), ("m", "text")],
             &[vec![Some("1"), Some("2")]],

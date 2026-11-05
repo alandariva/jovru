@@ -303,6 +303,21 @@ pub fn stale_namespaces(
     found
 }
 
+/// Where `context` makes unqualified names resolve, as the application
+/// shows it: its levels joined by dots, or "Session default" without any.
+pub fn context_label(context: &SessionContext) -> String {
+    let parts: Vec<&str> = [&context.catalog, &context.schema]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    if parts.is_empty() {
+        crate::tr!("Session default").into()
+    } else {
+        parts.join(".")
+    }
+}
+
 /// The session context a last-level namespace stands for: with one level
 /// (a MySQL database) its name is the schema; with two (a PostgreSQL
 /// database and schema, a Databricks catalog and schema) they are the
@@ -391,6 +406,25 @@ mod tests {
         ] {
             assert!(targets(nothing).is_empty(), "{nothing}");
         }
+    }
+
+    #[test]
+    fn a_context_shows_its_levels_or_the_session_default() {
+        assert_eq!(context_label(&SessionContext::default()), "Session default");
+        assert_eq!(
+            context_label(&SessionContext {
+                catalog: None,
+                schema: Some("shop".into())
+            }),
+            "shop"
+        );
+        assert_eq!(
+            context_label(&SessionContext {
+                catalog: Some("main".into()),
+                schema: Some("sales".into())
+            }),
+            "main.sales"
+        );
     }
 
     #[test]

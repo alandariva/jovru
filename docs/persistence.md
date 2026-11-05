@@ -96,16 +96,20 @@ exists reopens in a group of its own, without a connection. A value that
 cannot be read starts an empty workspace. Results are never stored.
 
 `reports` keeps the report definitions ([ADR-0024](adr/0024-reports.md),
-`jykre::reports`): `{"version": 1, "next_id": n, "reports": [...]}`, each
-report with a stable numeric `id`, its title, description, connection
-(`{"id": …, "name": …}`), SQL, parameters (name, label, kind, default,
-required), optional chart and when it was created and last changed. Keys
-this version does not know are kept. It stores definitions only: never
-results, and never the values typed for a run, only each parameter's
-default. It lives apart from `workspace.state`, whose writer keeps only the
-fields it knows, so an older version cannot erase reports. A missing value is
-an empty library; a value that cannot be read is reported and never written
-over. It is written half a second after changes settle and when the
+[ADR-0025](adr/0025-report-panels.md), `jykre::reports`):
+`{"version": 2, "next_id": n, "reports": [...]}`, each report with a stable
+numeric `id`, its title, description, connection (`{"id": …, "name": …}`),
+parameters (name, label, kind, default, required, choices), panels (`id`,
+title, SQL, context as `{"catalog": …, "schema": …}`, optional chart,
+`table`, `width`) and when it was created and last changed. A version 1
+report (one top-level SQL and chart) is read as one panel and written back as
+version 2. Keys this version does not know are kept in the library, each
+report, parameter and panel. It stores definitions only: never results, and
+never the values typed for a run, only each parameter's default and the
+choices of a list. It lives apart from `workspace.state`, whose writer keeps
+only the fields it knows, so an older version cannot erase reports. A missing
+value is an empty library; a value that cannot be read is reported and never
+written over. It is written half a second after changes settle and when the
 application quits; the demo writes nothing.
 
 `connection.<connection-id>.explorer` keeps what the explorer shows expanded

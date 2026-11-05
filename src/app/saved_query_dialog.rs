@@ -26,7 +26,7 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.details_open() || self.password_prompt.is_some() || self.connection_open {
+        if self.dialog_open() || self.password_prompt.is_some() || self.connection_open {
             return;
         }
         self.command_open = false;
@@ -43,6 +43,12 @@ impl AppView {
 
     pub(super) fn details_open(&self) -> bool {
         self.query_details.is_some()
+    }
+
+    /// A modal dialog of the library is open: the query details or the
+    /// report picker.
+    pub(super) fn dialog_open(&self) -> bool {
+        self.details_open() || self.report_picker.is_some()
     }
 
     /// Opens the dialog for the saved query `id`, to rename it or change its
@@ -125,7 +131,7 @@ impl AppView {
         }
     }
 
-    fn focus_active_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn focus_active_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(panel) = self
             .tabs
             .read(cx)

@@ -108,7 +108,8 @@ checked in review.
 ├── src/
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
-│   │                       # drivers, grouped_tabs, i18n, query, reports, sql (jykre-sql)
+│   │                       # drivers, grouped_tabs, i18n, query, reports (definitions,
+│   │                       # parameters, charts, runs, print), sql (jykre-sql)
 │   └── app/                # the application's GPUI views; demo/ holds the demo data,
 │                           # sql_editor/ the editor's language features adapter
 ├── crates/
@@ -263,23 +264,41 @@ sequenceDiagram
 
 ### Run a report
 
-1. `ReportView` (`src/app/report_view.rs`) reads the form and builds one
-   `QueryRequest` per statement with `jykre::reports::params::requests`. The
-   library finds the `:name` markers with `jykre_sql::named_markers`, checks
-   each value against its kind and puts the parameters a statement uses in
-   its request, with the byte ranges of their markers. The values never go
-   into the SQL text ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)).
-2. As in a query tab, a missing password is asked for first, and a run on a
-   production connection with risky statements is confirmed first.
-3. `backend::query` runs the requests on the report tab's own session. Each
+A report is a set of panels, each with its SQL, its context (the database,
+schema or catalog of the report's connection) and its chart
+([ADR-0025](adr/0025-report-panels.md)).
+
+1. `ReportView` (`src/app/report_view.rs`) reads the form and asks
+   `jykre::reports::run::plan` for the panels to run (all, or the one whose
+   editor has the keyboard): one `QueryRequest` per statement, built with
+   `jykre::reports::params::requests`, which finds the `:name` markers with
+   `jykre_sql::named_markers`, checks only the values the panel's SQL uses
+   (a list parameter takes one of its choices) and puts them in the request
+   with the byte ranges of their markers. The values never go into the SQL
+   text ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)). The jobs
+   are grouped by context, in the report's order.
+2. As in a query tab, a missing password is asked for first (panels asked for
+   meanwhile join the waiting run), and a run on a production connection with
+   risky statements in any panel is confirmed first; exactly the plan
+   confirmed runs.
+3. `run::Scheduler` starts at most four groups at once; a group's panels run
+   one after the other on the session of its context, lent by `run::Sessions`
+   (one per context, at most four kept idle). For each panel,
+   `backend::query_in_context` opens or reopens the session with the
+   connection the driver gives for the context
+   (`Driver::session_connection`: another database's for PostgreSQL), runs
+   the requests and always asks the session its context afterwards. Each
    driver binds the values (PostgreSQL with `set_config`, MySQL with a
    prepared `SET`, Databricks warehouses with the Statement API's
-   `parameters`) and replaces each marker with a fixed reference to its
-   value (`QueryRequest::with_references`). Classic Databricks clusters
-   refuse parameters.
-4. The last statement's result goes to the report's `ResultGrid`, and
-   `jykre::reports::chart::derive` computes the chart's data once per result
-   or chart change; the `ReportChart` entity draws it.
+   `parameters`) and replaces each marker with a fixed reference to its value
+   (`QueryRequest::with_references`). Classic Databricks clusters refuse
+   parameters.
+4. Inside the same runtime task, `run::settle` keeps the last statement's
+   result, drops the others, and computes the number columns, the suggested
+   chart and what the panel draws (`jykre::reports::chart::visual`), so the
+   UI thread only publishes. An outcome of a run stopped, removed or voided
+   meanwhile is dropped. The panel's `ResultGrid` and `ReportChart` entities
+   show it; a chart change is derived again off the UI thread.
 
 ### Refresh metadata
 
@@ -355,6 +374,9 @@ holds one value per operation, for example:
 - Query run: `Idle | Running { started_at } | Cancelling | Done | Failed { error } | Cancelled`
   (`jykre::query::RunState`, owned by `QueryRun` together with the status of
   each statement).
+- Report panel: `Idle | Queued | Running | Succeeded | Failed | Cancelled`
+  (`jykre::reports::run::PanelPhase`, owned by the report's `Scheduler`; the
+  tab's status is derived from the panels').
 - Metadata scope: `Idle { last_success_at } | Refreshing | Failed { error, last_success_at }`
   (stored as `RefreshStatus` in the metadata file, its state read as
   `jykre_storage::RefreshState`).

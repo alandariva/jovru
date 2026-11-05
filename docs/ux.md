@@ -33,17 +33,29 @@ last: the tab strip never shows a group without tabs, at start or later.
 The rail holds, from the top: Explorer, Saved queries, Reports, History and,
 at the bottom, Preferences.
 
-A **report** ([ADR-0024](adr/0024-reports.md)) opens in a tab of its own in
-its connection's group: a toolbar (title, connection, **Edit**, save, copy,
-**Export for printing or PDF…**, **Run**), the definition while editing
-(description, SQL, one row per `:name` parameter with its label, type,
-default and whether it is required), the parameter form, the chart settings
-(none, bars, lines or pie; the column that labels it and the number columns
-it shows), the chart, the result grid and a footer with the rows, the time
-and **Show the SQL that ran**. A report is created with **+** in the Reports
-section or with **Save as report** in a query tab's toolbar, which takes the
-selection, the statement at the cursor or the whole script; nothing is
-stored until **Save report**. Report tabs are not reopened after a restart.
+A **report** ([ADR-0024](adr/0024-reports.md),
+[ADR-0025](adr/0025-report-panels.md)) opens in a tab of its own in its
+connection's group: a toolbar (title, connection, **Edit**, **Add a panel**,
+save, **Export for printing or PDF…**, **Run**), the definition while editing
+(description and one row per `:name` parameter the panels share, with its
+label, type, default, whether it is required and its **List of choices**),
+the parameter form, its **panels** in two columns and a footer that counts
+the panels, those running and those that failed. Each panel has a header
+(title, its database as a badge, its state, run or stop, the edit button
+while the report is edited, and a menu to copy its result, move it, make it
+half or full width, duplicate or remove it), its chart, number or table, and
+a footer with its rows, time and **Show the SQL that ran**. One panel's
+definition is open at a time, at full width and scrolled into view: its
+title, its **database** (the session default or a namespace of the
+connection), its SQL, with the same completion, hover and go to definition
+as a query tab, and **Show as** (table, bars, lines, pie or number), the
+column that labels a chart, its values and **Table too**. A report is created
+with **+** in the Reports section or from a query tab's report menu: **Save
+as a new report** takes the selection, the statement at the cursor or the
+whole script, and **Add to a report…** adds it as a new panel of a saved
+report of the same connection, chosen in a dialog with a search; both keep
+the tab's database. Nothing is stored until **Save report**. Report tabs are
+not reopened after a restart.
 
 Dividers are adjustable with the mouse and the arrow keys. The assistant panel (simulated today)
 opens to the right of the query area, and says at its top that it is pending
@@ -124,10 +136,11 @@ Each state has one consistent representation.
 | Tags of saved queries | Library, under the search | Each tag once, as `#tag`; choosing one lists only the queries with it, choosing it again lists them all. The search finds tags too, and `#word` asks for a tag that starts with `word` |
 | Saved queries in the palette | **Ctrl+Shift+P** | Saved queries that match the text (name, tags, SQL, connection; `#tag` filters) are listed above the tables and views; Enter or a click opens the one highlighted. A search of tags alone lists no tables |
 | History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
-| Saved report | Report toolbar, Reports list | The save icon is a filled bookmark while the tab holds the stored definition; the list shows each report's title, connection and the start of its SQL, with its chart type as icon; a search filters by title, description, connection or SQL |
-| Report parameters | The report's form | One field per `:name` of the SQL, labelled as the definition says (`*` when required) with a placeholder for its type; a missing or malformed value is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)) |
-| Run of a report | Report toolbar, footer, tab bar | **Run** turns into **Stop** while it runs; the tab shows the run's outcome like a query tab; the footer shows the rows, the time and "Stopped at the row limit" when more rows exist |
-| Report chart | Above the report's grid | Bars (one small chart per value column), lines (one per value column on a shared scale) or a pie; at most 50 bars, 1,000 points or 10 slices plus "Other", and a line says how many rows it shows when it leaves some out. A chart that cannot be drawn says why (a column missing, a column without numbers) |
+| Saved report | Report toolbar, Reports list | The save icon is a filled bookmark while the tab holds the stored definition; the list shows each report's title, connection, its number of panels and the start of its SQL, with its chart type as icon (a dashboard for several panels); a search filters by title, description, connection, or a panel's title or SQL |
+| Report parameters | The report's form | One field per `:name` of any panel, labelled as the definition says (`*` when required) with a placeholder for its type; a list parameter shows a menu of its choices (and **No value** when optional). A missing, malformed or unlisted value of a panel that runs is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)) |
+| Run of a report | Report toolbar, panel headers, footer, tab bar | **Run** turns into **Stop** while any panel runs; each panel shows **Waiting** (for its database's session or a free place: at most four databases run at once), a spinner while it runs, **Failed** or **Stopped**, and its error in place of its result; the tab shows the worst outcome; a panel's footer shows its rows, its time and "Stopped at the row limit" when more rows exist, and a panel whose session was lost says it was opened again |
+| Report panel's database | Panel header, panel definition | A badge with the database (schema, catalog) the panel runs in, absent for the session default; the definition's menu lists the connection's namespaces, and one the connection no longer lists shows a warning icon |
+| Report chart | Above a panel's table | Bars (one small chart per value column), lines (one per value column on a shared scale), a pie or a number (the first row's value of one column, large, as the database wrote it); at most 50 bars, 1,000 points or 10 slices plus "Other", and a line says how many rows it shows when it leaves some out. A chart that cannot be drawn says why (a column missing, a column without numbers, no rows). A new panel takes the chart its first result suggests |
 | Connection test | Connection dialog footer | **Test connection** turns into **Cancel test** while it runs and shows the elapsed time after 2 s |
 | Export of a result | The export bar, under the result toolbar | Its options and where the rows come from (the rows held, the rest from the server, or a statement run again); while writing, a spinner, the rows and bytes written (of the total when known), the elapsed time after 2 s and **Cancel export**; at the end, how many rows went to which file, its size and time, with **Show in folder**, or why nothing was written. The toolbar's export button stays highlighted while the bar is open ([Results](results.md#export)) |
 | Plan of a statement | **Explain** in the editor toolbar | The dialect's `EXPLAIN` of the statement at the cursor (or of the one selected) runs into a new result tab; the statement itself does not run. Only queries and data changes are explained |
@@ -189,7 +202,7 @@ Rules:
   that has it open keeps its SQL, which closing then asks about. The
   editor's save button only saves or updates.
 - Copying a selection or a page estimated above 50 MiB asks first. So does
-  copying a report's result.
+  copying a report panel's result.
 - Exporting a result the tab no longer holds whole runs its statement again
   only after asking (**Run and export**), and only for a statement that
   only reads. Closing a tab while it exports asks first: closing cancels the
@@ -215,7 +228,8 @@ Rules:
 | Run the selection, or the statement at the cursor, in place of the result tab on screen (asks before cancelling while a run is active) | `Ctrl Enter` |
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
-| Run the report on screen (all of its SQL), from anywhere in its tab | `Ctrl Enter` (or `Enter` in a parameter field) |
+| Run the panel whose SQL has the keyboard; elsewhere in a report tab, every panel | `Ctrl Enter` (or `Enter` in a parameter field, which runs every panel) |
+| Run every panel of the report on screen | `Ctrl Alt Enter` |
 | Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
 | Open or close the export bar of the result on screen | `Ctrl Shift E` |
 | Search tables in the local cache | `Ctrl Shift P` |

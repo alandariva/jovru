@@ -2049,6 +2049,16 @@ impl AppView {
                 }
             });
         }
+        // Report panels pick their database and complete names the same way.
+        let reports: Vec<_> = self
+            .report_tabs
+            .values()
+            .map(|tab| tab.view.clone())
+            .filter(|view| self.report_connection(&view.read(cx).connection()) == Some(index))
+            .collect();
+        for view in reports {
+            self.push_report_language(&view, index, cx);
+        }
     }
 
     /// Reads, in one go, the children of the nodes that are expanded but

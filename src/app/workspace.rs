@@ -649,9 +649,10 @@ impl Workspace {
         });
     }
 
-    /// **Save as report**: the selection, else the statement at the cursor,
-    /// else the whole script becomes a draft report.
-    fn save_as_report(&mut self, cx: &mut Context<Self>) {
+    /// The SQL a report takes from this tab: the selection, else the
+    /// statement at the cursor, else the whole script. `None` (and a notice)
+    /// without any.
+    fn report_sql(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let sql = self.editor.read(cx).text().to_string();
         let chosen = self
             .run
@@ -668,13 +669,35 @@ impl Workspace {
                 tr!("Write the SQL the report runs first."),
             ));
             cx.notify();
-            return;
+            return None;
         }
-        cx.emit(WorkspaceEvent::SaveAsReport {
-            title: self.title.to_string(),
-            connection: self.connection.to_string(),
-            sql,
-        });
+        Some(sql)
+    }
+
+    /// **Save as report**: the tab's SQL, in the tab's database, becomes the
+    /// first panel of a draft report.
+    fn save_as_report(&mut self, cx: &mut Context<Self>) {
+        if let Some(sql) = self.report_sql(cx) {
+            cx.emit(WorkspaceEvent::SaveAsReport {
+                title: self.title.to_string(),
+                connection: self.connection.to_string(),
+                sql,
+                context: self.context.clone(),
+            });
+        }
+    }
+
+    /// **Add to a report**: the tab's SQL, in the tab's database, becomes a
+    /// new panel of a saved report of the same connection, chosen in a
+    /// dialog.
+    fn add_to_report(&mut self, cx: &mut Context<Self>) {
+        if let Some(sql) = self.report_sql(cx) {
+            cx.emit(WorkspaceEvent::AddToReport {
+                connection: self.connection.to_string(),
+                sql,
+                context: self.context.clone(),
+            });
+        }
     }
 
     /// The library saved this tab's SQL as the query `id`.
@@ -1569,16 +1592,7 @@ impl Workspace {
 
     /// Where unqualified names resolve, as the header shows it.
     fn context_label(&self) -> String {
-        let parts: Vec<&str> = [&self.context.catalog, &self.context.schema]
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .collect();
-        if parts.is_empty() {
-            tr!("Session default").into()
-        } else {
-            parts.join(".")
-        }
+        jykre::ddl::context_label(&self.context)
     }
 
     /// The header's context selector: the schema (PostgreSQL), database
@@ -1604,13 +1618,8 @@ impl Workspace {
                 for choice in &choices {
                     let workspace = workspace.clone();
                     let chosen = choice.clone();
-                    let text: Vec<&str> = [&choice.catalog, &choice.schema]
-                        .into_iter()
-                        .flatten()
-                        .map(String::as_str)
-                        .collect();
                     menu = menu.item(
-                        PopupMenuItem::new(text.join("."))
+                        PopupMenuItem::new(jykre::ddl::context_label(choice))
                             .checked(*choice == current)
                             .on_click(move |_, _, cx| {
                                 let _ = workspace.update(cx, |this, cx| {
@@ -1772,10 +1781,32 @@ impl Workspace {
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.save_query(cx))),
                     )
-                    .child(
-                        icon_button("save-report", I::FileChartColumn, tr!("Save as report"))
-                            .on_click(cx.listener(|this, _, _, cx| this.save_as_report(cx))),
-                    )
+                    .child({
+                        let workspace = cx.entity().downgrade();
+                        Button::new("save-report")
+                            .ghost()
+                            .small()
+                            .icon(I::FileChartColumn)
+                            .dropdown_caret(true)
+                            .accessibility_label(tr!("Make a report from this query"))
+                            .tooltip(tr!("Make a report from this query"))
+                            .dropdown_menu(move |menu, _, _| {
+                                let new_report = workspace.clone();
+                                let existing = workspace.clone();
+                                menu.item(PopupMenuItem::new(tr!("Save as a new report")).on_click(
+                                    move |_, _, cx| {
+                                        let _ = new_report
+                                            .update(cx, |this, cx| this.save_as_report(cx));
+                                    },
+                                ))
+                                .item(PopupMenuItem::new(tr!("Add to a report…")).on_click(
+                                    move |_, _, cx| {
+                                        let _ =
+                                            existing.update(cx, |this, cx| this.add_to_report(cx));
+                                    },
+                                ))
+                            })
+                    })
                     .child(divider())
                     .child(
                         icon_button(
@@ -3142,6 +3173,15 @@ pub enum WorkspaceEvent {
         title: String,
         connection: String,
         sql: String,
+        /// The tab's database, where the report's panel runs.
+        context: SessionContext,
+    },
+    /// Add this SQL as a panel of a saved report of the same connection,
+    /// chosen by the user.
+    AddToReport {
+        connection: String,
+        sql: String,
+        context: SessionContext,
     },
     /// Statements that ran changed the structure of these last-level
     /// namespaces (`CREATE`, `ALTER`, `DROP`, ...), so their metadata is

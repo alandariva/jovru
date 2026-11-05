@@ -239,6 +239,15 @@ fresh token.
   `search_path` (`"schema", "$user", public`) and refuses another database;
   MySQL runs `USE`; Databricks sends the catalog and schema with each
   statement (warehouses) or switches the cluster's SQL context.
+- `Driver::session_connection` ([ADR-0025](adr/0025-report-panels.md))
+  gives the connection a session opens with so that names resolve in a
+  context from its first statement; report panels open their sessions with
+  it, one per context. The default returns the connection unchanged, since
+  MySQL and Databricks switch within a session. PostgreSQL, whose sessions
+  are bound to one database, returns the profile's connection with the
+  context's database when the profile offers the server's databases
+  (`allDatabases`), with the same user and credentials, and a validation
+  error otherwise.
 - `Session::context` reports where unqualified names resolve now:
   `current_database()` and `current_schema()` in PostgreSQL, `DATABASE()` in
   MySQL (as the schema), the followed catalog and schema in Databricks.
@@ -299,7 +308,8 @@ fresh token.
 - PostgreSQL options: `searchPath` (the `search_path` sessions start with;
   its first schema is the suggested choice) and `allDatabases` (the root of
   discovery lists every database that accepts connections, each read
-  through a connection of its own; sessions stay in `database`). A partition
+  through a connection of its own; query tabs' sessions stay in `database`,
+  and a report panel's session opens in its context's database). A partition
   kept in another schema than its root table is listed under the root, with
   `stored_at` naming where it is read.
 - Databricks reads one schema with its table listing alone (no GET of its

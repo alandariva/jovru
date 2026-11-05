@@ -8,6 +8,8 @@ mod password;
 pub mod performance;
 mod probe;
 mod report_chart;
+mod report_panel;
+mod report_picker;
 mod report_view;
 mod reports;
 mod result_grid;
@@ -361,6 +363,8 @@ struct AppView {
     details_focus: FocusHandle,
     /// The dialog just opened: its name field takes the keyboard.
     details_needs_focus: bool,
+    /// The dialog that adds a query tab's SQL to a saved report, while open.
+    report_picker: Option<report_picker::ReportPicker>,
     /// The tag chosen under the library search; only saved queries with it
     /// are listed.
     library_tag: Option<String>,
@@ -608,6 +612,7 @@ impl AppView {
             details_error: None,
             details_focus: cx.focus_handle(),
             details_needs_focus: false,
+            report_picker: None,
             library_tag: None,
             persist_state: false,
             state_revision: 0,
@@ -1003,7 +1008,7 @@ impl AppView {
         if self.connection_open
             || self.command_open
             || self.password_prompt.is_some()
-            || self.details_open()
+            || self.dialog_open()
         {
             return;
         }
@@ -1135,10 +1140,32 @@ impl AppView {
                         title,
                         connection,
                         sql,
+                        context,
                     } => {
                         let (title, connection, sql) =
                             (title.clone(), connection.clone(), sql.clone());
-                        this.report_from_query(&title, &connection, &sql, window, cx);
+                        this.report_from_query(
+                            &title,
+                            &connection,
+                            &sql,
+                            context.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                    WorkspaceEvent::AddToReport {
+                        connection,
+                        sql,
+                        context,
+                    } => {
+                        let connection = connection.clone();
+                        this.open_report_picker(
+                            &connection,
+                            sql.clone(),
+                            context.clone(),
+                            window,
+                            cx,
+                        );
                     }
                     WorkspaceEvent::ConfirmRisk {
                         connection,
@@ -1499,14 +1526,21 @@ impl AppView {
         if self.connection_open
             || self.command_open
             || self.password_prompt.is_some()
-            || self.details_open()
+            || self.dialog_open()
         {
             return;
         }
         let active = self.tabs.read(cx).active_tab();
         if let Some(report) = active.and_then(|tab| self.report_tabs.get(&tab)) {
-            // A report runs all of its SQL with whichever run shortcut.
-            report.view.update(cx, |view, cx| view.run(cx));
+            // A report runs the panel whose SQL has the keyboard, or all of
+            // them; Ctrl+Alt+Enter always runs all of them.
+            report.view.update(cx, |view, cx| {
+                if all {
+                    view.run(jykre::reports::run::RunScope::All, cx);
+                } else {
+                    view.run_shortcut(window, cx);
+                }
+            });
             return;
         }
         let Some(panel) = active.and_then(|tab| self.panels.get(&tab)).cloned() else {
@@ -2595,6 +2629,12 @@ impl Render for AppView {
             self.details_name
                 .update(cx, |input, cx| input.focus(window, cx));
         }
+        if let Some(picker) = self.report_picker.as_mut()
+            && std::mem::take(&mut picker.needs_focus)
+        {
+            let search = picker.search().clone();
+            search.update(cx, |input, cx| input.focus(window, cx));
+        }
         if std::mem::take(&mut self.password_needs_focus) {
             self.password_input
                 .update(cx, |input, cx| input.focus(window, cx));
@@ -2627,7 +2667,7 @@ impl Render for AppView {
                 if this.connection_open
                     || this.command_open
                     || this.password_prompt.is_some()
-                    || this.details_open()
+                    || this.dialog_open()
                 {
                     return;
                 }
@@ -2639,7 +2679,7 @@ impl Render for AppView {
                 if this.connection_open
                     || this.command_open
                     || this.password_prompt.is_some()
-                    || this.details_open()
+                    || this.dialog_open()
                 {
                     return;
                 }
@@ -2659,6 +2699,8 @@ impl Render for AppView {
                         this.cancel_password(window, cx);
                     } else if this.details_open() {
                         this.cancel_details(window, cx);
+                    } else if this.report_picker.is_some() {
+                        this.close_report_picker(window, cx);
                     } else if this.inspection.take().is_some() {
                         cx.notify();
                     } else if this.command_open {
@@ -2685,7 +2727,7 @@ impl Render for AppView {
                     cx.stop_propagation();
                 } else if this.connection_open
                     || this.password_prompt.is_some()
-                    || this.details_open()
+                    || this.dialog_open()
                 {
                     // Workspace shortcuts would act behind the modal form.
                 } else if event.keystroke.modifiers.control
@@ -2833,6 +2875,9 @@ impl Render for AppView {
                 s.child(self.password_dialog(cx))
             })
             .when(self.details_open(), |s| s.child(self.details_dialog(cx)))
+            .when(self.report_picker.is_some(), |s| {
+                s.child(self.report_picker_dialog(cx))
+            })
             // Painted last, so it closes the frame for the probe.
             .child(probe::frame_end())
     }
