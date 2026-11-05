@@ -2238,6 +2238,8 @@ impl AppView {
             self.command_searching = false;
             self.command_matches
                 .retain(|item| matches!(item, super::PaletteItem::Saved(_)));
+            let more = jykre::palette::truncate(&mut self.command_matches, &typed);
+            self.command_more |= more;
             self.command_selected = self
                 .command_selected
                 .min(self.command_matches.len().saturating_sub(1));
@@ -2386,6 +2388,10 @@ impl AppView {
                     ));
                 }
                 if palette {
+                    // The saved queries were already cut to the limit as the
+                    // text changed, so what that left out still counts.
+                    let more = jykre::palette::truncate(&mut this.command_matches, &typed);
+                    this.command_more |= more;
                     this.command_selected =
                         jykre::palette::keep(chosen.as_ref(), &this.command_matches);
                     this.command_scroll.scroll_to_item(this.command_selected);

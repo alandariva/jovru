@@ -298,6 +298,8 @@ struct AppView {
     search: Entity<InputState>,
     command: Entity<InputState>,
     command_open: bool,
+    /// The palette found more rows than it lists.
+    command_more: bool,
     connection_open: bool,
     connection_section: ConnectionSection,
     connection_focus: FocusHandle,
@@ -551,6 +553,7 @@ impl AppView {
             search,
             command,
             command_open: false,
+            command_more: false,
             connection_open: false,
             connection_section: ConnectionSection::Connection,
             connection_focus: cx.focus_handle(),
@@ -888,6 +891,7 @@ impl AppView {
             .take(PALETTE_SAVED_LIMIT)
             .map(|entry| PaletteItem::Saved(entry.id));
         self.command_matches = saved.chain(relations).collect::<Vec<_>>();
+        self.command_more = jykre::palette::truncate(&mut self.command_matches, &query);
         self.command_selected = jykre::palette::keep(chosen.as_ref(), &self.command_matches);
         self.command_scroll.scroll_to_item(self.command_selected);
     }
@@ -2459,6 +2463,18 @@ impl AppView {
                                 self.palette_row(index, item, cx)
                             })),
                     )
+                    .when(self.command_more, |s| {
+                        s.child(div().px_4().pb_2().child(label(
+                            if self.command.read(cx).value().trim().is_empty() {
+                                tr!("Type to search every table, view and saved query.").to_string()
+                            } else {
+                                tr!(
+                                    "Showing the first {0}. Type more to narrow the search.",
+                                    matches.len()
+                                )
+                            },
+                        )))
+                    })
                     .child(
                         row()
                             .h(px(40.))
@@ -2587,11 +2603,14 @@ impl AppView {
                     .on_click(open)
             }
         };
+        // Rows keep their height and the list scrolls; shrinking them to fit
+        // piles them on top of each other.
         column()
+            .flex_none()
             .when_some(heading, |s, heading| {
                 s.child(div().px_3().pt_2().pb_1().child(label(heading)))
             })
-            .child(row_element)
+            .child(row_element.flex_none())
     }
 
     fn overlay(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
