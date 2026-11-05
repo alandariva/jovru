@@ -15,7 +15,7 @@ is visible, and the keyboard reaches everything.
 │◷ │     ▸ schema │ │ SQL editor, status per statement in the gutter   │ │
 │⚙ │              │ │                                                  │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
-│  │              │ Results · Chart · Messages ⚙·filter·copy ▾·CSV·⤓     │
+│  │              │ Results · Statistics · Messages ⚙·filter·copy ▾·CSV·⤓│
 │  │              │ Export bar (when open): format, options, progress    │
 │  │              │ ┌──────────────────────────────────────────────────┐ │
 │  │              │ │ Result grid                                      │ │
@@ -133,7 +133,7 @@ Each state has one consistent representation.
 | Transaction of the tab's session | Editor toolbar, for drivers with transactions | **Auto-commit**, **Transaction open** (or **Manual commit** after MySQL's `SET autocommit = 0`), **Uncommitted changes** (amber) or **Transaction failed** (red, PostgreSQL), with **Commit** and **Rollback** while one is open. Reported by the driver after each run, inferred from the statements the tab ran when it cannot tell (`jykre::transaction`) |
 | Pinned result | Result tab | Its pin icon is mint; no run replaces it |
 | Selection statistics | Footer, after the selected count | Sum, average, median, minimum and maximum of the numbers selected, exact; "Calculating…" while a large selection is read |
-| Full value, column statistics | Side panel of the grid | The focused cell's full value (JSON laid out), or its column's statistics over the rows the filter shows; a spinner while they are computed |
+| Full value, statistics | Side panel of the grid; the toolbar's **Statistics** button opens it on its Statistics tab | The focused cell's full value (JSON laid out), or the statistics of the selection, of the rows the filter shows, or of one column (a column's line in the first two opens it); a spinner while they are computed |
 | Records | Result grid | The selected rows side by side, one line per column; the toolbar's records button is highlighted |
 | A connection's colour and environment | Explorer entry (a stripe on its left), its tab group and the editor header | The colour chosen in the connection dialog, or the driver's; a `DEV`, `STAGING` or `PROD` badge after the name |
 | What ran in the tab | Messages | A log of every statement that ended, independent of the result tabs |

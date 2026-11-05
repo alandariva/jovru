@@ -100,7 +100,7 @@ pub struct ResultTab {
     pub elapsed_ms: u128,
     /// The limit that ended the last page read, if any.
     pub limit: Option<ResultLimit>,
-    /// The demo's result has a chart.
+    /// The demo's result has an analysis.
     pub sales: bool,
     /// No run replaces a pinned tab; only closing it removes it.
     pub pinned: bool,

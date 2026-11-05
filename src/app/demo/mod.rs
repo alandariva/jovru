@@ -13,7 +13,6 @@ pub struct SalesRow {
     pub revenue: &'static str,
     pub ticket: &'static str,
     pub share: &'static str,
-    pub amount: f32,
 }
 
 pub const SALES: [SalesRow; 8] = [
@@ -23,7 +22,6 @@ pub const SALES: [SalesRow; 8] = [
         revenue: "R$ 248.760,00",
         ticket: "R$ 193,74",
         share: "32,4%",
-        amount: 248760.,
     },
     SalesRow {
         category: "Home and decor",
@@ -31,7 +29,6 @@ pub const SALES: [SalesRow; 8] = [
         revenue: "R$ 156.420,00",
         ticket: "R$ 158,64",
         share: "20,4%",
-        amount: 156420.,
     },
     SalesRow {
         category: "Fashion and accessories",
@@ -39,7 +36,6 @@ pub const SALES: [SalesRow; 8] = [
         revenue: "R$ 124.680,00",
         ticket: "R$ 108,23",
         share: "16,2%",
-        amount: 124680.,
     },
     SalesRow {
         category: "Sports and leisure",
@@ -47,7 +43,6 @@ pub const SALES: [SalesRow; 8] = [
         revenue: "R$ 89.340,00",
         ticket: "R$ 139,16",
         share: "11,6%",
-        amount: 89340.,
     },
     SalesRow {
         category: "Health and beauty",
@@ -55,7 +50,6 @@ pub const SALES: [SalesRow; 8] = [
         revenue: "R$ 67.920,00",
         ticket: "R$ 77,71",
         share: "8,8%",
-        amount: 67920.,
     },
     SalesRow {
         category: "Books and stationery",
@@ -63,7 +57,6 @@ pub const SALES: [SalesRow; 8] = [
         revenue: "R$ 38.550,00",
         ticket: "R$ 73,99",
         share: "5,0%",
-        amount: 38550.,
     },
     SalesRow {
         category: "Food",
@@ -71,7 +64,6 @@ pub const SALES: [SalesRow; 8] = [
         revenue: "R$ 28.470,00",
         ticket: "R$ 65,00",
         share: "3,7%",
-        amount: 28470.,
     },
     SalesRow {
         category: "Other",
@@ -79,7 +71,6 @@ pub const SALES: [SalesRow; 8] = [
         revenue: "R$ 14.860,00",
         ticket: "R$ 68,80",
         share: "1,9%",
-        amount: 14860.,
     },
 ];
 
@@ -139,8 +130,8 @@ fn fixture<const N: usize>(
     )
 }
 
-/// Whether `sql` is the revenue-by-category demo, which has a chart and an
-/// assistant analysis.
+/// Whether `sql` is the revenue-by-category demo, which has an assistant
+/// analysis.
 pub fn is_sales(sql: &str) -> bool {
     let sql = sql.to_lowercase();
     sql.contains("group by") && (sql.contains("categories") || sql.contains("category"))

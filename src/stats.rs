@@ -1,15 +1,17 @@
-//! Statistics of the selected cells and of a column, computed without a
-//! window and off the UI thread.
+//! Statistics of the selected cells, of a page and of a column, computed
+//! without a window and off the UI thread.
 //!
-//! The grid copies the values it needs into a [`Sample`] (a few cells at a
-//! time, so no frame waits for it) and hands the sample to another thread,
-//! where [`selection`] and [`column`] compute their summaries. Numbers are
-//! added, averaged and ordered exactly ([`crate::decimal`]), never as
-//! floats.
+//! [`block`] reads a block of a result in place: the pages are shared across
+//! threads ([ADR-0022](../docs/adr/0022-result-pages-shared-across-threads.md)),
+//! so the grid hands it the page and the positions to read. For a column the
+//! grid copies the values into a [`Sample`] a few cells at a time, and
+//! [`column`] summarizes it on another thread. Numbers are added, averaged
+//! and ordered exactly ([`crate::decimal`]), never as floats.
 use crate::cell_format::ValueFamily;
 use crate::decimal::{self, Sum, compare_numbers};
+use crate::result::ResultData;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Decimals an average or a median keeps beyond those of the values.
 pub const EXTRA_DECIMALS: u32 = 6;
@@ -138,6 +140,113 @@ pub fn selection(numbers: &Sample, values: usize) -> SelectionSummary {
         values,
         numbers: self::numbers(numbers.values()),
     }
+}
+
+/// One column of a block of cells ([`block`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockColumn {
+    /// The column's position in the result.
+    pub column: usize,
+    /// Cells that are not NULL.
+    pub values: usize,
+    pub nulls: usize,
+    /// Distinct values that are not NULL, numbers by value; `None` when the
+    /// block was summarized without its details.
+    pub distinct: Option<usize>,
+    /// The numbers of a number column; `None` without details.
+    pub numbers: Option<NumberSummary>,
+}
+
+/// What the statistics panel shows about a block of cells: the selection,
+/// or every row the filter shows of the page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockSummary {
+    pub rows: usize,
+    /// Cells that are not NULL.
+    pub values: usize,
+    pub nulls: usize,
+    /// The numbers among the cells of number columns.
+    pub numbers: Option<NumberSummary>,
+    /// One entry per column of the block, in its order.
+    pub columns: Vec<BlockColumn>,
+}
+
+impl BlockSummary {
+    pub fn cells(&self) -> usize {
+        self.values + self.nulls
+    }
+
+    /// What the footer says about it.
+    pub fn selection(&self) -> SelectionSummary {
+        SelectionSummary {
+            values: self.values,
+            numbers: self.numbers.clone(),
+        }
+    }
+}
+
+/// The cells of `rows` × `columns` (each with its family) of `result`:
+/// their values, NULLs and the numbers of all number columns together,
+/// summed exactly. `detail` also summarizes each column's numbers and counts
+/// its distinct values, which the statistics panel shows and the footer does
+/// not need. Values are read in place, never copied.
+pub fn block(
+    result: &ResultData,
+    rows: &[usize],
+    columns: &[(usize, ValueFamily)],
+    detail: bool,
+) -> BlockSummary {
+    let mut all_numbers: Vec<&str> = Vec::new();
+    let mut summary = BlockSummary {
+        rows: rows.len(),
+        values: 0,
+        nulls: 0,
+        numbers: None,
+        columns: Vec::with_capacity(columns.len()),
+    };
+    for (column, family) in columns {
+        let number = *family == ValueFamily::Number;
+        let mut values: Vec<&str> = Vec::new();
+        let mut nulls = 0;
+        for row in rows {
+            match result.value(*row, *column) {
+                Some(value) => values.push(value),
+                None => nulls += 1,
+            }
+        }
+        let distinct = detail.then(|| {
+            if number {
+                values
+                    .iter()
+                    .map(|value| decimal::canonical(value))
+                    .collect::<HashSet<_>>()
+                    .len()
+            } else {
+                values.iter().copied().collect::<HashSet<_>>().len()
+            }
+        });
+        summary.values += values.len();
+        summary.nulls += nulls;
+        let numbers = if number {
+            all_numbers.extend(values.iter().copied());
+            if detail {
+                numbers(values.iter().copied())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        summary.columns.push(BlockColumn {
+            column: *column,
+            values: values.len(),
+            nulls,
+            distinct,
+            numbers,
+        });
+    }
+    summary.numbers = numbers(all_numbers);
+    summary
 }
 
 /// What a column's statistics show.
@@ -271,6 +380,55 @@ mod tests {
         let numbers = summary.numbers.expect("numbers");
         assert_eq!(numbers.sum.as_deref(), Some("3.5"));
         assert_eq!(selection(&Sample::default(), 2).numbers, None);
+    }
+
+    #[test]
+    fn a_block_sums_each_number_column_and_all_of_them() {
+        let result = ResultData::from_rows(
+            vec![
+                crate::result::ResultColumn::new("id", "int4"),
+                crate::result::ResultColumn::new("name", "text"),
+                crate::result::ResultColumn::new("amount", "numeric"),
+            ],
+            [
+                [Some("1"), Some("a"), Some("1.50")],
+                [Some("2"), None, Some("1.5")],
+                [Some("3"), Some("a"), None],
+            ],
+        );
+        let columns = [
+            (0, ValueFamily::Number),
+            (1, ValueFamily::Text),
+            (2, ValueFamily::Number),
+        ];
+        let summary = block(&result, &[0, 1, 2], &columns, true);
+        assert_eq!((summary.rows, summary.values, summary.nulls), (3, 7, 2));
+        assert_eq!(summary.cells(), 9);
+        let all = summary.numbers.as_ref().expect("numbers");
+        assert_eq!((all.count, all.sum.as_deref()), (5, Some("9.00")));
+        let name = &summary.columns[1];
+        assert_eq!((name.column, name.values, name.nulls), (1, 2, 1));
+        assert_eq!((name.distinct, name.numbers.as_ref()), (Some(1), None));
+        // Numbers count by value: 1.50 and 1.5 are one.
+        let amount = &summary.columns[2];
+        assert_eq!(amount.distinct, Some(1));
+        assert_eq!(
+            amount
+                .numbers
+                .as_ref()
+                .and_then(|numbers| numbers.sum.as_deref()),
+            Some("3.00")
+        );
+        // The footer's part, and a block read without distinct counts.
+        assert_eq!(summary.selection().values, 7);
+        let plain = block(&result, &[1], &columns[1..], false);
+        assert_eq!(plain.columns[0].distinct, None);
+        assert_eq!(plain.columns[1].numbers, None);
+        assert_eq!((plain.values, plain.nulls), (1, 1));
+        assert_eq!(
+            plain.numbers.and_then(|numbers| numbers.sum).as_deref(),
+            Some("1.5")
+        );
     }
 
     #[test]

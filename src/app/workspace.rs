@@ -1,4 +1,4 @@
-use super::demo::{self, OPTIMIZED_SQL, SALES, SALES_SQL, sample_result};
+use super::demo::{self, OPTIMIZED_SQL, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
 use super::result_grid::{GridSql, ResultGrid, ResultGridEvent, Summary};
 use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
@@ -40,7 +40,6 @@ pub const SQL_EDITOR_CONTEXT: &str = "SqlEditor";
 #[derive(Clone, Copy, PartialEq)]
 enum ResultView {
     Table,
-    Chart,
     Messages,
 }
 
@@ -251,7 +250,7 @@ impl Workspace {
                     this.selection_summary = summary.clone();
                     cx.notify();
                 }
-                ResultGridEvent::RecordsShown => cx.notify(),
+                ResultGridEvent::RecordsShown | ResultGridEvent::PanelChanged => cx.notify(),
             });
         // The copy button names the format Ctrl+C copies in, which any tab's
         // menu can change.
@@ -746,6 +745,26 @@ impl Workspace {
             cx.emit(WorkspaceEvent::Changed);
             cx.notify();
         }
+    }
+
+    /// The toolbar's Statistics button: shows the table with the statistics
+    /// panel (`show`), or closes the panel.
+    fn show_statistics(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.result_view = ResultView::Table;
+        self.grid.update(cx, |grid, cx| {
+            if grid.statistics_shown() != show {
+                grid.toggle_statistics(cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// The demo's "distribution": the revenue column's statistics.
+    fn show_revenue_statistics(&mut self, cx: &mut Context<Self>) {
+        self.result_view = ResultView::Table;
+        self.grid
+            .update(cx, |grid, cx| grid.show_column_statistics(2, cx));
+        cx.notify();
     }
 
     /// The gear of the result toolbar: how the grid shows values. Its
@@ -1481,10 +1500,10 @@ impl Workspace {
                 None,
             )
         } else if lower.contains("chart") || lower.contains("graph") {
-            self.result_view = ResultView::Chart;
+            self.show_revenue_statistics(cx);
             (
                 tr!(
-                    "I opened the bar chart. Electronics leads with R$ 248,760.00. Compare the bar lengths to see how revenue is concentrated by category."
+                    "I opened the statistics of the revenue column. Electronics leads with R$ 248,760.00; the sum, average and median show how revenue is spread across the categories."
                 ),
                 None,
             )
@@ -2100,7 +2119,6 @@ impl Workspace {
     fn result_panel(&self, cx: &mut Context<Self>) -> Div {
         let views = [
             (ResultView::Table, I::Table2, tr!("Results")),
-            (ResultView::Chart, I::ChartColumn, tr!("Chart")),
             (ResultView::Messages, I::Terminal, tr!("Messages")),
         ];
         let active = self.results.active_index();
@@ -2251,9 +2269,9 @@ impl Workspace {
                         row()
                             .flex_none()
                             .gap_1()
-                            .children(views.into_iter().enumerate().map(
+                            .children(views.into_iter().enumerate().flat_map(
                                 |(i, (view, symbol, title))| {
-                                    icon_button(("result-mode", i), symbol, title)
+                                    let mode = icon_button(("result-mode", i), symbol, title)
                                         .aria_selected(self.result_view == view)
                                         .when(self.result_view == view, |s| {
                                             s.bg(rgb(SURFACE)).text_color(rgb(TEXT))
@@ -2261,7 +2279,26 @@ impl Workspace {
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.result_view = view;
                                             cx.notify();
-                                        }))
+                                        }));
+                                    // Beside Results: the side panel's statistics
+                                    // of the selection, else of the whole page.
+                                    let statistics = (view == ResultView::Table).then(|| {
+                                        let shown = self.result_view == ResultView::Table
+                                            && self.grid.read(cx).statistics_shown();
+                                        icon_button(
+                                            "result-statistics",
+                                            I::ChartColumn,
+                                            tr!("Statistics"),
+                                        )
+                                        .aria_selected(shown)
+                                        .when(shown, |s| s.bg(rgb(SURFACE)).text_color(rgb(MINT)))
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.show_statistics(!shown, cx)
+                                            }),
+                                        )
+                                    });
+                                    std::iter::once(mode).chain(statistics)
                                 },
                             ))
                             .child(divider())
@@ -2399,7 +2436,6 @@ impl Workspace {
                 .child(label(tr!("Execution cancelled")))
                 .into_any_element(),
             ResultState::Done => match self.result_view {
-                ResultView::Chart => self.result_chart(cx),
                 ResultView::Messages => self.result_messages(cx),
                 ResultView::Table
                     if self
@@ -2736,89 +2772,11 @@ impl Workspace {
         }
     }
 
-    /// The result on screen is the demo's, with a chart and an analysis.
+    /// The result on screen is the demo's, with an analysis.
     fn sales(&self) -> bool {
         self.results.active().is_some_and(|tab| tab.sales)
     }
 
-    fn result_chart(&self, _: &mut Context<Self>) -> AnyElement {
-        if !self.sales() {
-            return column()
-                .size_full()
-                .items_center()
-                .justify_center()
-                .gap_3()
-                .p_5()
-                .child(icon(I::ChartColumn, MINT))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .child(tr!("Give your results a view")),
-                )
-                .child(label(tr!(
-                    "Chart available only in the Revenue by category demo."
-                )))
-                .into_any_element();
-        }
-        column()
-            .id("revenue-chart")
-            .size_full()
-            .overflow_y_scroll()
-            .p_5()
-            .gap_3()
-            .child(
-                row()
-                    .justify_between()
-                    .child(
-                        column()
-                            .gap_1()
-                            .child(div().text_size(px(14.)).child(tr!("Revenue by category")))
-                            .child(label(tr!("July — September 2026 · BRL"))),
-                    )
-                    .child(badge("R$ 769.000,00", MINT)),
-            )
-            .children(SALES.iter().enumerate().map(|(index, data)| {
-                row()
-                    .h(px(24.))
-                    .flex_none()
-                    .gap_3()
-                    .child(
-                        div()
-                            .w(px(125.))
-                            .flex_none()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child(data.category),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .h(px(16.))
-                            .rounded(px(3.))
-                            .bg(rgb(SURFACE))
-                            .child(
-                                div()
-                                    .w(relative(data.amount / SALES[0].amount))
-                                    .h_full()
-                                    .rounded(px(3.))
-                                    .bg(rgb(if index == 0 { MINT } else { 0x4c8274 })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w(px(94.))
-                            .text_right()
-                            .font_family("Cascadia Mono")
-                            .text_size(px(12.))
-                            .child(data.revenue),
-                    )
-            }))
-            .into_any_element()
-    }
-
-    /// The log of what ran in this tab, newest first, with when each
-    /// statement ended, how and how long it took. It outlives the result
-    /// tabs, so a replaced tab does not take an `UPDATE`'s outcome with it.
     fn result_messages(&self, cx: &mut Context<Self>) -> AnyElement {
         column()
             .id("result-messages")
@@ -3100,7 +3058,7 @@ impl Workspace {
                     .child(row().child(icon(I::Lightbulb, MINT)).child(div().text_size(px(14.)).text_color(rgb(MINT)).font_weight(FontWeight::MEDIUM).child(tr!("A look at the data"))))
                     .child(div().text_size(px(14.)).line_height(relative(1.55)).text_color(rgb(0xb8c8c1)).child(tr!("Electronics and Home account for 52.7% of the quarter's revenue.")))
                     .child(button("ai-show-chart", I::ChartColumn, tr!("View distribution")).px_0().text_color(rgb(MINT))
-                        .on_click(cx.listener(|this, _, _, cx| { this.result_view = ResultView::Chart; cx.notify(); }))))))
+                        .on_click(cx.listener(|this, _, _, cx| this.show_revenue_statistics(cx)))))))
             .child(column().flex_none().p_3().gap_2().border_t_1().border_color(rgb(BORDER))
                 .child(row().gap_1().children([("explain-chip", tr!("Explain SQL")), ("optimize-chip", tr!("Optimize")), ("chart-chip", tr!("Create chart"))].into_iter().map(|(id, text)| {
                     div().id(id).role(Role::Button).aria_label(text).focusable().tab_index(0).focus_visible(|s| s.border_color(rgb(MINT))).px_2().py(px(5.)).rounded(px(5.)).border_1().border_color(rgb(BORDER))

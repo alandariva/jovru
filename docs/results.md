@@ -174,8 +174,10 @@ alignment only; the value itself is never converted.
   Text such as `NaN` is skipped, NULL is not a value, and a number too far
   from the decimal point to add (`1e500`) shows the sum and average as `—`.
   Up to 20,000 cells are summarized at once; a larger selection shows
-  "Calculating…" while it is read 40,000 cells per frame and summarized off
-  the UI thread. A drag is summarized when it ends.
+  "Calculating…" while it is summarized off the UI thread, which reads the
+  shared page in place
+  ([ADR-0022](adr/0022-result-pages-shared-across-threads.md)). A drag is
+  summarized when it ends.
 - A header's right edge resizes its column (48 to 1,600 px); a double click on
   it, or **Fit the column to its values** in the menu, fits the column to its
   header and the values of the first 5,000 displayed rows. **Reset column
@@ -185,12 +187,32 @@ alignment only; the value itself is never converted.
   **full value**: read-only text that can be selected, JSON laid out with
   indentation without changing any token, up to the first 1 MB (**Copy**
   copies all of it), NULL shown as NULL. The panel follows the focused cell.
-  Its other tab, **Column statistics** (also in the menu), shows for the
-  focused column, over the rows of the page the filter shows: NULLs,
-  distinct values (numbers by value), empty texts, minimum and maximum in the
-  order the header sorts by, sum, average and median for numbers, the shortest
-  and longest text, and the five most frequent values. They are read a chunk
-  per frame and computed off the UI thread. `Esc` closes the panel.
+  Its other tab, **Statistics**, summarizes one of three things, chosen at
+  its top:
+  - **Selection**: the selected cells (two or more): how many rows and
+    columns, values and NULLs, the sum, average, median, minimum and maximum
+    of the numbers of number columns together (as the footer shows), and one
+    line per selected column.
+  - **Result**: every row of the page the filter shows, with one line per
+    column. Numbers of different columns are not added together.
+  - **Column**: the focused column (or the one a line or the menu chose),
+    over the rows of the page the filter shows: NULLs, distinct values
+    (numbers by value), empty texts, minimum and maximum in the order the
+    header sorts by, sum, average and median for numbers, the shortest and
+    longest text, and the five most frequent values.
+
+  A column's line shows its type and, for numbers, the sum and average,
+  otherwise its distinct values, and its NULLs; a click (or `Enter`) opens
+  that column's statistics. Up to 100 columns are listed; a line says how
+  many more there are. The selection's and the page's statistics are
+  computed off the UI thread, reading the shared page in place; a column's
+  are read a chunk per frame and computed off the UI thread. `Esc` closes the
+  panel.
+- The toolbar's **Statistics** button (beside **Results**) shows the table
+  with this tab open: on the selection when two or more cells are selected,
+  otherwise on the result. It stays highlighted while the tab is open, and a
+  second click closes the panel. The menu has **Statistics** and **Column
+  statistics** too.
 - **Show the selected rows as records** (toolbar or menu) shows the rows of
   the selection side by side: one line per column, one column per row, up to
   50 rows. A click on a value shows it in the side panel. `Esc` goes back to

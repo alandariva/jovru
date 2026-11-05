@@ -21,7 +21,7 @@ use jykre::grid::{
 };
 use jykre::result::ResultData;
 use jykre::result_tabs::ResultId;
-use jykre::stats::{self, ColumnSummary, Sample, SelectionSummary};
+use jykre::stats::{self, BlockSummary, ColumnSummary, Sample, SelectionSummary};
 use jykre::tr;
 use jykre_core::SqlDialect;
 use std::collections::HashMap;
@@ -40,6 +40,9 @@ pub enum ResultGridEvent {
     Summary(Summary),
     /// The records view was turned on or off.
     RecordsShown,
+    /// The side panel opened, closed or changed tab, for the toolbar's
+    /// Statistics button.
+    PanelChanged,
 }
 
 /// The statistics of the selected cells, for the footer.
@@ -114,8 +117,27 @@ enum Gesture {
 pub enum Inspector {
     /// The full value of the inspected cell.
     Value,
-    /// The statistics of the inspected column.
+    /// Statistics of the selection, the page or a column ([`StatsScope`]).
+    Statistics,
+}
+
+/// What the Statistics tab of the side panel summarizes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatsScope {
+    /// The selected cells.
+    Selection,
+    /// Every row of the page the filter shows, all columns.
+    Result,
+    /// One column, over the rows the filter shows.
     Column,
+}
+
+/// The statistics of the page, for the rows the filter shows.
+struct ResultStats {
+    /// The result version and the filter they were read for.
+    key: (u64, String),
+    /// `None` while they are being computed.
+    summary: Option<BlockSummary>,
 }
 
 /// A column's statistics, for the rows the filter shows.
@@ -184,6 +206,14 @@ pub struct ResultGrid {
     /// The column a right click last landed on, for the header's menu.
     menu_column: Option<usize>,
     inspector: Option<Inspector>,
+    stats_scope: StatsScope,
+    /// The selection's statistics and the summary generation they are for.
+    selection_block: Option<(u64, BlockSummary)>,
+    /// Whether `selection_block` holds each column's numbers and distinct
+    /// values, which only the panel shows.
+    selection_detail: bool,
+    result_stats: Option<ResultStats>,
+    result_task: Option<Task<()>>,
     /// The cell the value viewer shows, as (data row, column): the focused
     /// cell, or the one double-clicked in the records view.
     inspected: Option<(usize, usize)>,
@@ -256,6 +286,11 @@ impl ResultGrid {
             autoscroll: None,
             menu_column: None,
             inspector: None,
+            stats_scope: StatsScope::Result,
+            selection_block: None,
+            selection_detail: false,
+            result_stats: None,
+            result_task: None,
             inspected: None,
             value_input: None,
             value_shown: None,
@@ -427,6 +462,7 @@ impl ResultGrid {
         }
         self.summarize(cx);
         self.refresh_column_stats(cx);
+        self.refresh_result_stats(cx);
         cx.notify();
     }
 
@@ -590,9 +626,11 @@ impl ResultGrid {
         cx.notify();
     }
 
-    /// Reports what the footer says about the selection: at once for a
-    /// small one, after reading it a chunk per frame for a large one. A
-    /// drag is summarized when it ends.
+    /// Summarizes the selection for the footer and the statistics panel:
+    /// at once for a small one, off the UI thread for a large one, reading
+    /// the shared page in place. Each column's numbers and distinct values
+    /// are summarized only while the panel shows the selection. A drag is
+    /// summarized when it ends.
     fn summarize(&mut self, cx: &mut Context<Self>) {
         self.summary_generation += 1;
         self.summary_task = None;
@@ -604,61 +642,106 @@ impl ResultGrid {
             .selection
             .and_then(|selection| selection_block(selection, &view.rows))
         else {
+            self.selection_block = None;
             self.report_summary(Summary::None, cx);
             return;
         };
-        let columns: Vec<usize> = cols.collect();
-        let numeric: Vec<usize> = columns
-            .iter()
-            .copied()
-            .filter(|column| view.families.get(*column) == Some(&ValueFamily::Number))
+        let columns: Vec<(usize, ValueFamily)> = cols
+            .map(|column| {
+                let family = view
+                    .families
+                    .get(column)
+                    .copied()
+                    .unwrap_or(ValueFamily::Text);
+                (column, family)
+            })
             .collect();
         let data_rows: Vec<usize> = view.rows[rows].to_vec();
         let cells = data_rows.len() * columns.len();
         if cells < 2 {
+            self.selection_block = None;
             self.report_summary(Summary::None, cx);
             return;
         }
-        if cells <= SYNC_CELLS {
-            let mut sample = Sample::default();
-            let mut values = 0;
-            read_cells(
-                &self.result,
-                &data_rows,
-                &columns,
-                &numeric,
-                &mut sample,
-                &mut values,
-            );
-            self.report_summary(Summary::Ready(stats::selection(&sample, values)), cx);
+        let detail = self.shows_stats(StatsScope::Selection);
+        self.selection_detail = detail;
+        let generation = self.summary_generation;
+        // The details cost about twice as much, so fewer cells are read at
+        // once for them.
+        let sync = if detail { SYNC_CELLS / 4 } else { SYNC_CELLS };
+        if cells <= sync {
+            let block = stats::block(&self.result, &data_rows, &columns, detail);
+            self.report_summary(Summary::Ready(block.selection()), cx);
+            self.selection_block = Some((generation, block));
             return;
         }
         self.report_summary(Summary::Computing, cx);
-        let generation = self.summary_generation;
-        // A weak handle: the task never keeps a result alive, so a released
-        // result is still freed off the UI thread.
-        let result = Arc::downgrade(&self.result);
-        let chunk = (CHUNK_CELLS / columns.len().max(1)).max(1);
+        // The task shares the page; if it holds the last handle, the page is
+        // freed off the UI thread.
+        let result = self.result.clone();
         self.summary_task = Some(cx.spawn(async move |this, cx| {
-            let mut sample = Sample::default();
-            let mut values = 0;
-            for rows in data_rows.chunks(chunk) {
-                let Some(result) = result.upgrade() else {
-                    return;
-                };
-                read_cells(&result, rows, &columns, &numeric, &mut sample, &mut values);
-                drop(result);
-                cx.background_executor()
-                    .timer(Duration::from_millis(1))
-                    .await;
-            }
-            let summary = cx
+            let block = cx
                 .background_executor()
-                .spawn(async move { stats::selection(&sample, values) })
+                .spawn(async move { stats::block(&result, &data_rows, &columns, detail) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 if this.summary_generation == generation {
-                    this.report_summary(Summary::Ready(summary), cx);
+                    this.report_summary(Summary::Ready(block.selection()), cx);
+                    this.selection_block = Some((generation, block));
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Whether the side panel shows the statistics of `scope`.
+    fn shows_stats(&self, scope: StatsScope) -> bool {
+        self.inspector == Some(Inspector::Statistics) && self.stats_scope == scope
+    }
+
+    /// The statistics of every row the filter shows, all columns, while the
+    /// panel shows them; computed off the UI thread once per result and
+    /// filter.
+    fn refresh_result_stats(&mut self, cx: &mut Context<Self>) {
+        if !self.shows_stats(StatsScope::Result) {
+            return;
+        }
+        let key = (self.version, self.filter.clone());
+        if self
+            .result_stats
+            .as_ref()
+            .is_some_and(|stats| stats.key == key)
+        {
+            return;
+        }
+        self.result_stats = Some(ResultStats {
+            key: key.clone(),
+            summary: None,
+        });
+        let view = self.view();
+        let rows = view.rows.clone();
+        let columns: Vec<(usize, ValueFamily)> = (0..self.result.column_count())
+            .map(|column| {
+                let family = view
+                    .families
+                    .get(column)
+                    .copied()
+                    .unwrap_or(ValueFamily::Text);
+                (column, family)
+            })
+            .collect();
+        let result = self.result.clone();
+        self.result_task = Some(cx.spawn(async move |this, cx| {
+            let block = cx
+                .background_executor()
+                .spawn(async move { stats::block(&result, &rows, &columns, true) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(stats) = &mut this.result_stats
+                    && stats.key == key
+                {
+                    stats.summary = Some(block);
+                    cx.notify();
                 }
             });
         }));
@@ -671,21 +754,80 @@ impl ResultGrid {
         }
     }
 
-    /// Opens the side panel on `inspector`, or closes it when it already
-    /// shows that.
-    fn toggle_inspector(&mut self, inspector: Inspector, cx: &mut Context<Self>) {
-        self.inspector = (self.inspector != Some(inspector)).then_some(inspector);
-        if self.inspector == Some(Inspector::Column) && self.menu_column.is_none() {
-            self.menu_column = self.inspected.map(|(_, column)| column);
+    /// Shows `inspector` in the side panel, or closes it with `None`, and
+    /// computes what it shows.
+    fn set_inspector(&mut self, inspector: Option<Inspector>, cx: &mut Context<Self>) {
+        if self.inspector != inspector {
+            self.inspector = inspector;
+            cx.emit(ResultGridEvent::PanelChanged);
         }
-        self.refresh_column_stats(cx);
+        self.refresh_stats(cx);
         cx.notify();
     }
 
-    fn open_inspector(&mut self, inspector: Inspector, cx: &mut Context<Self>) {
-        self.inspector = Some(inspector);
+    /// Computes what the Statistics tab shows for its scope: the column's
+    /// statistics, the page's, or the selection's with its distinct values.
+    fn refresh_stats(&mut self, cx: &mut Context<Self>) {
         self.refresh_column_stats(cx);
-        cx.notify();
+        self.refresh_result_stats(cx);
+        if self.shows_stats(StatsScope::Selection) && !self.selection_detail {
+            self.summarize(cx);
+        }
+    }
+
+    fn open_inspector(&mut self, inspector: Inspector, cx: &mut Context<Self>) {
+        self.set_inspector(Some(inspector), cx);
+    }
+
+    /// Shows the statistics of `scope` in the side panel.
+    fn open_statistics(&mut self, scope: StatsScope, cx: &mut Context<Self>) {
+        if self.stats_scope != scope {
+            self.stats_scope = scope;
+            cx.emit(ResultGridEvent::PanelChanged);
+        }
+        self.set_inspector(Some(Inspector::Statistics), cx);
+    }
+
+    /// Whether the side panel shows statistics, for the toolbar's button.
+    pub fn statistics_shown(&self) -> bool {
+        self.inspector == Some(Inspector::Statistics)
+    }
+
+    /// The toolbar's Statistics button: opens the panel on the selection's
+    /// statistics when two or more cells are selected, otherwise on the
+    /// page's; closes it when it already shows statistics.
+    pub fn toggle_statistics(&mut self, cx: &mut Context<Self>) {
+        if self.statistics_shown() {
+            self.set_inspector(None, cx);
+            return;
+        }
+        let selected = grid::selected_cells(self.selection, &self.view().rows);
+        let scope = if selected >= 2 {
+            StatsScope::Selection
+        } else {
+            StatsScope::Result
+        };
+        self.open_statistics(scope, cx);
+    }
+
+    /// Shows the statistics of `column`.
+    pub fn show_column_statistics(&mut self, column: usize, cx: &mut Context<Self>) {
+        self.menu_column = Some(column);
+        self.column_stats = None;
+        self.open_statistics(StatsScope::Column, cx);
+    }
+
+    /// **Column statistics** in the menu: the column right-clicked or
+    /// focused, or closes the panel when it already shows them.
+    fn toggle_column_statistics(&mut self, cx: &mut Context<Self>) {
+        if self.shows_stats(StatsScope::Column) {
+            self.set_inspector(None, cx);
+            return;
+        }
+        if self.menu_column.is_none() {
+            self.menu_column = self.inspected.map(|(_, column)| column);
+        }
+        self.open_statistics(StatsScope::Column, cx);
     }
 
     /// The column whose statistics the panel shows: the focused one, or
@@ -699,7 +841,7 @@ impl ResultGrid {
     /// Reads the statistics of the panel's column for the rows the filter
     /// shows, a chunk per frame, and computes them off the UI thread.
     fn refresh_column_stats(&mut self, cx: &mut Context<Self>) {
-        if self.inspector != Some(Inspector::Column) {
+        if !self.shows_stats(StatsScope::Column) {
             return;
         }
         let Some(column) = self.stats_column() else {
@@ -940,10 +1082,7 @@ impl ResultGrid {
                 "enter" if self.inspected.is_some() => self.open_inspector(Inspector::Value, cx),
                 // Esc closes what is on top first: the panel, the records
                 // view, then the selection.
-                "escape" if self.inspector.is_some() => {
-                    self.inspector = None;
-                    cx.notify();
-                }
+                "escape" if self.inspector.is_some() => self.set_inspector(None, cx),
                 "escape" if self.records => self.set_records(false, cx),
                 "escape" if self.selection.is_some() => self.select(None, cx),
                 _ => return,
@@ -1659,24 +1798,270 @@ impl ResultGrid {
                             .gap_1()
                             .child(tab("inspect-value", Inspector::Value, tr!("Value")))
                             .child(tab(
-                                "inspect-column",
-                                Inspector::Column,
-                                tr!("Column statistics"),
+                                "inspect-statistics",
+                                Inspector::Statistics,
+                                tr!("Statistics"),
                             )),
                     )
                     .child(
                         icon_button("close-inspector", I::X, tr!("Close the panel"))
                             .size(px(24.))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.inspector = None;
+                                this.set_inspector(None, cx);
                                 window.focus(&this.focus, cx);
-                                cx.notify();
                             })),
                     ),
             )
             .child(match inspector {
                 Inspector::Value => self.value_body(cx),
-                Inspector::Column => self.column_body(),
+                Inspector::Statistics => self.statistics_body(cx),
+            })
+    }
+
+    /// The Statistics tab: what it summarizes, then that summary.
+    fn statistics_body(&self, cx: &mut Context<Self>) -> Div {
+        let scope = |id: &'static str, this: StatsScope, title: &'static str| {
+            let chosen = self.stats_scope == this;
+            div()
+                .id(id)
+                .role(Role::Tab)
+                .aria_selected(chosen)
+                .focusable()
+                .tab_index(0)
+                .focus_visible(|s| s.border_color(rgb(MINT)))
+                .flex_1()
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.))
+                .border_1()
+                .border_color(transparent_black())
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(rgb(if chosen { TEXT } else { MUTED }))
+                .when(chosen, |s| s.bg(rgb(HOVER)))
+                .hover(|s| s.text_color(rgb(TEXT)))
+                .child(title)
+                .on_click(cx.listener(move |grid, _, _, cx| grid.open_statistics(this, cx)))
+        };
+        column()
+            .flex_1()
+            .min_h_0()
+            .child(
+                row()
+                    .id("stats-scopes")
+                    .role(Role::TabList)
+                    .aria_label(tr!("Statistics of"))
+                    .flex_none()
+                    .m_3()
+                    .mb_0()
+                    .p(px(2.))
+                    .gap(px(2.))
+                    .rounded(px(6.))
+                    .bg(rgb(SURFACE))
+                    .child(scope(
+                        "stats-selection",
+                        StatsScope::Selection,
+                        tr!("Selection"),
+                    ))
+                    .child(scope("stats-result", StatsScope::Result, tr!("Result")))
+                    .child(scope("stats-column", StatsScope::Column, tr!("Column"))),
+            )
+            // A block, not a flex column: what it holds keeps its height and
+            // scrolls, instead of shrinking to fit.
+            .child(
+                div()
+                    .id("stats-body")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(match self.stats_scope {
+                        StatsScope::Selection => self.selection_stats_body(cx),
+                        StatsScope::Result => self.result_stats_body(cx),
+                        StatsScope::Column => self.column_body(),
+                    }),
+            )
+    }
+
+    fn selection_stats_body(&self, cx: &mut Context<Self>) -> Div {
+        let summary = self
+            .selection_block
+            .as_ref()
+            .filter(|(generation, _)| *generation == self.summary_generation)
+            .map(|(_, block)| block);
+        let selected = grid::selected_cells(self.selection, &self.view().rows);
+        if selected < 2 {
+            return column()
+                .p_3()
+                .gap_2()
+                .child(label(tr!(
+                    "Select two or more cells to see their statistics."
+                )))
+                .child(
+                    button(
+                        "stats-show-result",
+                        I::Table2,
+                        tr!("Statistics of the result"),
+                    )
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.open_statistics(StatsScope::Result, cx)),
+                    ),
+                );
+        }
+        let Some(summary) = summary else {
+            return calculating("selection-stats-status");
+        };
+        let caption = tr!(
+            "{0} rows × {1} columns selected.",
+            cell_format::count(summary.rows),
+            cell_format::count(summary.columns.len())
+        );
+        self.block_body(summary, caption, true, cx)
+    }
+
+    fn result_stats_body(&self, cx: &mut Context<Self>) -> Div {
+        let summary = self
+            .result_stats
+            .as_ref()
+            .filter(|stats| stats.key == (self.version, self.filter.clone()))
+            .and_then(|stats| stats.summary.as_ref());
+        let Some(summary) = summary else {
+            return calculating("result-stats-status");
+        };
+        let count = cell_format::count;
+        let rows = if self.filter.is_empty() {
+            tr!("The {0} rows of this page.", count(summary.rows))
+        } else {
+            tr!(
+                "The {0} rows of this page the filter shows.",
+                count(summary.rows)
+            )
+        };
+        let caption = tr!("{0} {1} columns.", rows, count(summary.columns.len()));
+        self.block_body(summary, caption, false, cx)
+    }
+
+    /// The statistics of a block of cells: its counts, its numbers, then one
+    /// line per column that opens that column's statistics.
+    /// `totals` also sums the numbers of all its columns together, which
+    /// means something for cells chosen together, not for a whole page.
+    fn block_body(
+        &self,
+        summary: &BlockSummary,
+        caption: String,
+        totals: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let count = cell_format::count;
+        let number =
+            |text: &str| cell_format::display(Some(text), ValueFamily::Number, self.numbers_pt_br);
+        let or_dash = |text: Option<&str>| text.map_or_else(|| "—".to_owned(), number);
+        let view = self.view();
+        let families = &view.families;
+        let shown = summary.columns.len().min(STATS_COLUMNS);
+        column()
+            .p_3()
+            .gap_2()
+            .child(label(caption))
+            .child(stat_line(tr!("Values"), count(summary.values)))
+            .child(stat_line(tr!("NULL"), count(summary.nulls)))
+            .when_some(summary.numbers.as_ref().filter(|_| totals), |s, numbers| {
+                s.child(
+                    div()
+                        .pt_2()
+                        .child(label(tr!("{0} numbers", count(numbers.count)))),
+                )
+                .child(stat_line(tr!("Sum"), or_dash(numbers.sum.as_deref())))
+                .child(stat_line(
+                    tr!("Average"),
+                    or_dash(numbers.average.as_deref()),
+                ))
+                .child(stat_line(tr!("Median"), or_dash(numbers.median.as_deref())))
+                .child(stat_line(tr!("Minimum"), number(&numbers.min)))
+                .child(stat_line(tr!("Maximum"), number(&numbers.max)))
+            })
+            .child(div().pt_2().child(label(tr!("Columns"))))
+            .children(summary.columns[..shown].iter().map(|entry| {
+                let col = entry.column;
+                let info = &self.result.columns()[col];
+                let family = families.get(col).copied().unwrap_or(ValueFamily::Text);
+                let mut details = Vec::new();
+                match (&entry.numbers, family) {
+                    (Some(numbers), ValueFamily::Number) => {
+                        details.push(tr!("sum {0}", or_dash(numbers.sum.as_deref())));
+                        details.push(tr!("average {0}", or_dash(numbers.average.as_deref())));
+                    }
+                    _ => {
+                        if let Some(distinct) = entry.distinct {
+                            details.push(tr!("{0} distinct", count(distinct)));
+                        }
+                    }
+                }
+                if entry.nulls > 0 {
+                    details.push(tr!("{0} NULL", count(entry.nulls)));
+                }
+                if details.is_empty() {
+                    details.push(tr!("{0} values", count(entry.values)));
+                }
+                row()
+                    .id(("stats-column-entry", col))
+                    .role(Role::Button)
+                    .aria_label(tr!("Statistics of the column {0}", info.name.as_str()))
+                    .focusable()
+                    .tab_index(0)
+                    .focus_visible(|s| s.border_color(rgb(MINT)))
+                    .flex_none()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(transparent_black())
+                    .cursor_pointer()
+                    .hover(|s| s.bg(rgb(HOVER)))
+                    .child(
+                        column()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                row()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(13.))
+                                            .text_color(rgb(TEXT))
+                                            .child(info.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(FAINT))
+                                            .child(info.data_type.to_lowercase()),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child(details.join(" · ")),
+                            ),
+                    )
+                    .child(icon(I::ChevronRight, FAINT))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.show_column_statistics(col, cx)),
+                    )
+            }))
+            .when(summary.columns.len() > shown, |s| {
+                s.child(label(tr!(
+                    "And {0} more columns; their header's menu shows their statistics.",
+                    count(summary.columns.len() - shown)
+                )))
             })
     }
 
@@ -1762,17 +2147,7 @@ impl ResultGrid {
         let number =
             |text: &str| cell_format::display(Some(text), ValueFamily::Number, self.numbers_pt_br);
         let value = |text: &str| cell_format::display(Some(text), family, self.numbers_pt_br);
-        let line = |name: &'static str, value: String| {
-            row().justify_between().gap_3().child(label(name)).child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .font_family("Cascadia Mono")
-                    .text_size(px(13.))
-                    .text_color(rgb(TEXT))
-                    .child(value),
-            )
-        };
+        let line = stat_line;
         let body = column()
             .flex_1()
             .min_h_0()
@@ -1789,18 +2164,7 @@ impl ResultGrid {
             .filter(|stats| stats.key.2 == col)
             .and_then(|stats| stats.summary.as_ref());
         let Some(summary) = summary else {
-            return body.child(
-                row()
-                    .id("column-stats-status")
-                    .role(Role::Status)
-                    .gap_2()
-                    .child(spinning_icon(
-                        "column-stats-spinner",
-                        I::LoaderCircle,
-                        AMBER,
-                    ))
-                    .child(label(tr!("Calculating…"))),
-            );
+            return body.child(calculating("column-stats-status").p_0());
         };
         let count = cell_format::count;
         body.child(label(if self.filter.is_empty() {
@@ -1866,7 +2230,7 @@ impl ResultGrid {
         window: &mut Window,
         cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
-        let (has_selection, records, inspector, has_column) = weak
+        let (has_selection, records, inspector, has_column, column_stats) = weak
             .upgrade()
             .map(|this| {
                 let this = this.read(cx);
@@ -1875,6 +2239,7 @@ impl ResultGrid {
                     this.records,
                     this.inspector,
                     this.stats_column().is_some(),
+                    this.shows_stats(StatsScope::Column),
                 )
             })
             .unwrap_or_default();
@@ -1923,15 +2288,30 @@ impl ResultGrid {
                 .checked(inspector == Some(Inspector::Value))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, _, cx| {
-                    this.toggle_inspector(Inspector::Value, cx)
+                    if this.inspector == Some(Inspector::Value) {
+                        this.set_inspector(None, cx)
+                    } else {
+                        this.open_inspector(Inspector::Value, cx)
+                    }
+                })),
+        )
+        .item(
+            PopupMenuItem::new(tr!("Statistics"))
+                .checked(inspector == Some(Inspector::Statistics) && !column_stats)
+                .on_click(action(weak.clone(), |this, _, cx| {
+                    if this.shows_stats(StatsScope::Column) {
+                        // From a column's statistics to the selection's or the page's.
+                        this.set_inspector(None, cx);
+                    }
+                    this.toggle_statistics(cx)
                 })),
         )
         .item(
             PopupMenuItem::new(tr!("Column statistics"))
-                .checked(inspector == Some(Inspector::Column))
+                .checked(column_stats)
                 .disabled(!has_column)
                 .on_click(action(weak.clone(), |this, _, cx| {
-                    this.toggle_inspector(Inspector::Column, cx)
+                    this.toggle_column_statistics(cx)
                 })),
         )
         .item(
@@ -1996,24 +2376,36 @@ fn viewer_text(value: &str) -> String {
 
 /// Counts the cells of `rows` × `columns` that are not NULL and copies the
 /// values of the `numeric` columns into `sample`.
-fn read_cells(
-    result: &ResultData,
-    rows: &[usize],
-    columns: &[usize],
-    numeric: &[usize],
-    sample: &mut Sample,
-    values: &mut usize,
-) {
-    for row in rows {
-        for column in columns {
-            if result.value(*row, *column).is_some() {
-                *values += 1;
-            }
-        }
-        for column in numeric {
-            sample.push(result.value(*row, *column));
-        }
-    }
+/// Columns the statistics of a block list; the others say how many more.
+const STATS_COLUMNS: usize = 100;
+
+/// A statistic: its name, then its value in the values' font.
+fn stat_line(name: &'static str, value: String) -> Div {
+    row().justify_between().gap_3().child(label(name)).child(
+        div()
+            .min_w_0()
+            .truncate()
+            .font_family("Cascadia Mono")
+            .text_size(px(13.))
+            .text_color(rgb(TEXT))
+            .child(value),
+    )
+}
+
+/// What the panel shows while its statistics are computed.
+fn calculating(id: &'static str) -> Div {
+    column().p_3().child(
+        row()
+            .id(id)
+            .role(Role::Status)
+            .gap_2()
+            .child(spinning_icon(
+                SharedString::from(format!("{id}-spinner")),
+                I::LoaderCircle,
+                AMBER,
+            ))
+            .child(label(tr!("Calculating…"))),
+    )
 }
 
 impl Render for ResultGrid {
