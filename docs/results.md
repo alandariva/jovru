@@ -212,26 +212,49 @@ alignment only; the value itself is never converted.
 
 ## Copying
 
-- `Ctrl C` copies the selection as tab-separated text that pastes into
-  spreadsheets. `Ctrl Shift C`, or **Copy with headers** in the context menu,
-  adds the column names first.
-- A single cell copies its exact value. Fields with tabs, line breaks or
-  quotes are quoted with doubled quotes; NULL becomes an empty field.
+- `Ctrl C` copies the selection in the format chosen in the **copy menu**
+  (the copy button of the result toolbar, labelled with that format);
+  `Ctrl Shift C`, or **Copy with headers** in the context menu, adds the
+  column names first when the format can leave them out. The format starts
+  as tab-separated text, which pastes into spreadsheets.
+- The copy menu copies the selection (with or without the column names),
+  chooses the format `Ctrl C` copies in, and holds the **Copy settings**:
+  **Column names first** (text and CSV; off to start), **Quote every CSV
+  value** (on to start; off quotes only values holding the separator, a
+  quote or a line break, and empty text), the **CSV separator** (`;` to
+  start, `,` or tab) and how text and CSV write **NULL** (an empty field to
+  start, or the word `NULL`, never quoted). The choices apply to every tab
+  and are remembered ([Persistence](persistence.md)).
+- **Copy as**, in the context menu, copies the selection once in any
+  format, with the same settings, without changing the format of `Ctrl C`.
+- **Formats** (`jykre::copy_as`):
+  - **Text (tab-separated)**: a single cell copies its exact value. Fields
+    with tabs, line breaks or quotes are quoted with doubled quotes.
+  - **CSV**: fields as the CSV export writes them with the same options,
+    one line per row and no line break after the last.
+  - **JSON** (an array with an object per row; repeated names get `_2`,
+    `_3`) and **JSON Lines** (one object per line), as the export writes
+    them.
+  - **Markdown table** (`|` escaped, line breaks as `<br>`, NULL as `NULL`)
+    and **HTML table** (`<table>` with the names in `<thead>`, every text
+    escaped, line breaks as `<br>`, NULL as `NULL`, numbers aligned to the
+    right). The clipboard holds text, so the HTML pastes as code.
+  - **INSERT statements** (one per row) and **One INSERT for all rows**
+    (`INSERT INTO … VALUES` with one line per row), into the table the tab
+    was opened for, otherwise `table_name`.
+  - **IN list** (its distinct values in parentheses, without NULLs) and
+    **Values separated by commas** (every value, NULL included, row by row).
+  - **Column names**, separated by commas.
+- Values are never reinterpreted: a number of a number column is written
+  as the database wrote it (in JSON only when it is a valid JSON number),
+  booleans as `TRUE`/`FALSE` (`true`/`false`), NULL as `NULL` (`null`),
+  anything else as a string escaped as the connection's dialect reads
+  strings (`jykre::sql::string_literal`: PostgreSQL doubles the quote, MySQL
+  and Databricks escape with a backslash). Names are quoted only when the
+  dialect needs it, as the editor's suggestions quote them.
 - **Copy this page as CSV** copies the page on screen with headers, `;` as the
   separator and every value quoted, using the original values regardless of
-  presentation; NULL becomes an empty field.
-- **Copy as** (`jykre::copy_as`) copies the selection as an `IN` list (its
-  distinct values, without NULLs), `INSERT` statements (one per row, into the
-  table the tab was opened for, otherwise `table_name`), JSON (an array with
-  an object per row; repeated names get `_2`, `_3`), a Markdown table (`|`
-  escaped, line breaks as `<br>`, NULL as `NULL`) or the column names. Values
-  are never reinterpreted: a number of a number column is written as the
-  database wrote it (in JSON only when it is a valid JSON number), booleans as
-  `TRUE`/`FALSE` (`true`/`false`), NULL as `NULL` (`null`), anything else as a
-  string escaped as the connection's dialect reads strings
-  (`jykre::sql::string_literal`: PostgreSQL doubles the quote, MySQL and
-  Databricks escape with a backslash). Names are quoted only when the
-  dialect needs it, as the editor's suggestions quote them.
+  presentation; NULL becomes an empty field. The copy settings do not apply.
 - Copies estimated above 50 MiB (from the length of the cells, before they
   are built) ask for confirmation, and copying runs off the UI thread
   when it would exceed a frame.

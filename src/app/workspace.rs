@@ -30,6 +30,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+mod copy_menu;
 mod export;
 use export::{ExportBar, ExportState};
 
@@ -252,6 +253,10 @@ impl Workspace {
                 }
                 ResultGridEvent::RecordsShown => cx.notify(),
             });
+        // The copy button names the format Ctrl+C copies in, which any tab's
+        // menu can change.
+        let copy_observation =
+            cx.observe_global::<super::copying::CopyPreferences>(|_, cx| cx.notify());
         let resize_subscription = cx.observe(&assistant_split, |_, _, cx| cx.notify());
         let query_split = cx.new(|_| ResizableState::default());
         let query_resize = cx.observe(&query_split, |_, _, cx| cx.notify());
@@ -375,6 +380,7 @@ impl Workspace {
                 query_resize,
                 editor_observation,
                 sql_editor_subscription,
+                copy_observation,
             ],
         }
     }
@@ -2249,11 +2255,16 @@ impl Workspace {
                                         cx.notify();
                                     })),
                             )
+                            .child(self.copy_menu(cx))
                             .child(
-                                icon_button("copy-page-csv", I::Copy, tr!("Copy this page as CSV"))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.copy_page_csv(false, window, cx)
-                                    })),
+                                icon_button(
+                                    "copy-page-csv",
+                                    I::Sheet,
+                                    tr!("Copy this page as CSV"),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| this.copy_page_csv(false, window, cx),
+                                )),
                             )
                             .child({
                                 let open = !matches!(self.export.state, ExportState::Closed);

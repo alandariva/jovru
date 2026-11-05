@@ -1,6 +1,6 @@
 use super::*;
 use crate::cell_format::result_csv;
-use crate::copy_as::{Block, CopyFormat, SqlStyle, copy_as};
+use crate::copy_as::{Block, CopyFormat, CopyOptions, SqlStyle, copy_as};
 use crate::grid::CellSelection;
 use std::time::{Duration, Instant};
 
@@ -79,7 +79,7 @@ fn copied(format: CopyFormat, data: &ResultData) -> String {
         quote_name: &quote,
         table: "public.people",
     };
-    copy_as(format, &block, &style)
+    copy_as(&CopyOptions::default().with(format, true), &block, &style)
 }
 
 #[test]
@@ -170,6 +170,56 @@ fn inserts_and_markdown_are_what_copy_as_writes() {
     assert_eq!(
         encode(&options(ExportFormat::Markdown), &data),
         format!("{}\n", copied(CopyFormat::Markdown, &data))
+    );
+}
+
+#[test]
+fn csv_and_json_lines_copies_are_what_the_export_writes() {
+    let data = data();
+    // The default CSV copy with column names is the default CSV export.
+    assert_eq!(
+        format!("{}\n", copied(CopyFormat::Csv, &data)),
+        encode(&ExportOptions::default(), &data)
+    );
+    assert_eq!(
+        format!("{}\n", copied(CopyFormat::JsonLines, &data)),
+        encode(&options(ExportFormat::JsonLines), &data)
+    );
+    // And so is one with the export's other options.
+    let families: Vec<_> = data
+        .columns()
+        .iter()
+        .map(|column| family(&column.data_type))
+        .collect();
+    let visible: Vec<usize> = (0..data.row_count()).collect();
+    let block = Block::new(
+        &data,
+        &visible,
+        CellSelection::all(&visible, data.column_count()),
+        &families,
+    )
+    .unwrap();
+    let quote = |name: &str| name.to_owned();
+    let style = SqlStyle {
+        dialect: None,
+        quote_name: &quote,
+        table: "t",
+    };
+    let copy = CopyOptions {
+        format: CopyFormat::Csv,
+        separator: Separator::Tab,
+        quoting: Quoting::Needed,
+        ..CopyOptions::default()
+    };
+    let export = ExportOptions {
+        separator: Separator::Tab,
+        quoting: Quoting::Needed,
+        header: false,
+        ..ExportOptions::default()
+    };
+    assert_eq!(
+        format!("{}\n", copy_as(&copy, &block, &style)),
+        encode(&export, &data)
     );
 }
 

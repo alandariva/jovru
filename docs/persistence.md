@@ -65,6 +65,18 @@ tab opens its export bar and written when an export starts, the last write
 asked for winning across tabs. A missing or unknown value takes its default
 (CSV with `;`, every value quoted, headers, no BOM, the Downloads folder).
 
+`copy.preferences` keeps the choices of the copy menu
+(`jykre::copy_as::CopyOptions`): `{"format": "text", "header": false,
+"separator": ";", "quoting": "all", "null": "empty"}`, the format being the
+one `Ctrl C` copies in (`text`, `csv`, `json`, `jsonl`, `markdown`, `html`,
+`insert`, `insert_values`, `in_list`, `value_list`, `column_names`) and
+`null` either `empty` or `null`. It is read once at start, with the
+connections, and written each time a choice changes, the last write asked
+for winning across tabs. A missing or unknown value takes its default
+(tab-separated text without the column names, `;`, every CSV value quoted,
+NULL as an empty field); a value that cannot be read is reported and the
+defaults are used.
+
 `workspace.state` keeps the workspace between sessions
 (`jykre::workspace_state`): the open query tabs in order (title, connection
 name, SQL, the SQL last saved to the library and the identity of that saved

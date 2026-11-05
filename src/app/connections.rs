@@ -618,9 +618,9 @@ impl AppView {
         cx.notify();
     }
 
-    /// Loads the connections, the editor font size and the last session's
-    /// tabs. Each is read on its own: a problem with one never hides the
-    /// others, and every problem is reported.
+    /// Loads the connections, the editor font size, the copy settings and
+    /// the last session's tabs. Each is read on its own: a problem with one
+    /// never hides the others, and every problem is reported.
     pub(super) fn load_connections(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = connection_store::data_dir();
         cx.spawn_in(window, async move |weak, cx| {
@@ -632,24 +632,31 @@ impl AppView {
                     Err(_) => connection_store::latest_backup(&dir).await,
                     Ok(_) => None,
                 };
-                let (font_size, state, reports) = match ConfigRepository::open(&dir).await {
+                let (font_size, copy, state, reports) = match ConfigRepository::open(&dir).await {
                     Ok(repository) => {
                         let font_size = repository.setting("editor.font_size").await;
+                        let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
                         let state = super::state::read_state(&repository).await;
                         let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
                         repository.close().await;
-                        (font_size, state, reports)
+                        (font_size, copy, state, reports)
                     }
-                    Err(error) => (Err(error.clone()), Err(error.clone()), Err(error)),
+                    Err(error) => (
+                        Err(error.clone()),
+                        Err(error.clone()),
+                        Err(error.clone()),
+                        Err(error),
+                    ),
                 };
-                Ok((connections, font_size, state, reports, backup))
+                Ok((connections, font_size, copy, state, reports, backup))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connections_loading = false;
-                let (connections, font_size, state, reports, backup) = match result {
+                let (connections, font_size, copy, state, reports, backup) = match result {
                     Ok(parts) => parts,
                     Err(error) => (
+                        Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
@@ -670,6 +677,15 @@ impl AppView {
                     }
                     Err(error) => problems.push(tr!(
                         "Could not read the editor font size; the default is used: {0}",
+                        error
+                    )),
+                }
+                match copy {
+                    Ok(value) => cx.set_global(super::copying::CopyPreferences(
+                        jykre::copy_as::CopyOptions::from_value(value.as_ref()),
+                    )),
+                    Err(error) => problems.push(tr!(
+                        "Could not read the copy settings; the defaults are used: {0}",
                         error
                     )),
                 }

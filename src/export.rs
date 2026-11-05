@@ -107,7 +107,7 @@ impl Separator {
         }
     }
 
-    fn from_char(text: &str) -> Option<Self> {
+    pub(crate) fn from_char(text: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
             .find(|separator| text.chars().eq([separator.char()]))
@@ -360,7 +360,12 @@ impl Encoder {
 
 /// One CSV field. NULL is an empty field; a quote inside a value is
 /// doubled.
-fn push_csv_field(out: &mut String, value: Option<&str>, separator: char, quoting: Quoting) {
+pub(crate) fn push_csv_field(
+    out: &mut String,
+    value: Option<&str>,
+    separator: char,
+    quoting: Quoting,
+) {
     let Some(value) = value else {
         return;
     };

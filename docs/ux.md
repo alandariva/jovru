@@ -15,7 +15,7 @@ is visible, and the keyboard reaches everything.
 │◷ │     ▸ schema │ │ SQL editor, status per statement in the gutter   │ │
 │⚙ │              │ │                                                  │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
-│  │              │ Results · Chart · Messages  pt-BR · filter · CSV · ⤓ │
+│  │              │ Results · Chart · Messages pt-BR·filter·copy ▾·CSV·⤓ │
 │  │              │ Export bar (when open): format, options, progress    │
 │  │              │ ┌──────────────────────────────────────────────────┐ │
 │  │              │ │ Result grid                                      │ │
@@ -232,7 +232,7 @@ Rules:
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
 | Grid: first or last cell of the row, first or last cell of the page, a screen up or down (`Shift` extends) | `Home`, `End`, `Ctrl Home`, `Ctrl End`, `Page Up`, `Page Down` |
 | Grid: select all, clear | `Ctrl A`, `Esc` |
-| Grid: copy, copy with headers | `Ctrl C`, `Ctrl Shift C` |
+| Grid: copy in the format of the copy menu, the same with the column names | `Ctrl C`, `Ctrl Shift C` |
 | Grid: show the focused cell's full value in the side panel | `Enter` (or a double click) |
 | Grid: close the side panel, then the records view, then clear the selection | `Esc` |
 | Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |

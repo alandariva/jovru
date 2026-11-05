@@ -6,6 +6,7 @@
 //! statistics, notices) through [`ResultGridEvent`]. What the grid derives
 //! from a result lives in [`jykre::grid`], [`jykre::stats`] and
 //! [`jykre::copy_as`].
+use super::copying::format_name;
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{Textarea, TextareaState};
@@ -14,7 +15,7 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
-use jykre::copy_as::{self, Block, CopyFormat, SqlStyle};
+use jykre::copy_as::{self, Block, CopyFormat, CopyOptions, SqlStyle};
 use jykre::grid::{
     self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, selection_block,
 };
@@ -780,47 +781,37 @@ impl ResultGrid {
         input.update(cx, |state, cx| state.set_value(text, window, cx));
     }
 
-    /// Copies the selected block as tab-separated text (a single cell as its
-    /// exact value), optionally with the column names first. A copy
-    /// estimated above 50 MiB asks first, unless `confirmed`.
-    fn copy_selection(
+    /// Copies the selected block in the format of the copy menu
+    /// (`Ctrl C`), with the column names first when `headers`
+    /// (`Ctrl Shift C`) or when the menu says so. A copy estimated above
+    /// 50 MiB asks first, unless `confirmed`.
+    pub(super) fn copy_selection(
         &mut self,
         headers: bool,
         confirmed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let view = self.view();
-        let bytes = grid::selection_bytes(&self.result, &view.rows, self.selection, headers);
-        if !confirmed && bytes > grid::COPY_CONFIRM_BYTES {
-            self.confirm_copy(bytes, window, cx, move |this, window, cx| {
-                this.copy_selection(headers, true, window, cx)
-            });
-            return;
-        }
-        let _timer = jykre::logging::UiTimer::start("copy selection");
-        let notice = match grid::copy_selection(&self.result, &view.rows, self.selection, headers) {
-            None => Feedback::new(Tone::Info, tr!("Select cells to copy.")),
-            Some((text, count)) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                Feedback::new(
-                    Tone::Success,
-                    if count == 1 {
-                        tr!("Cell copied.").to_string()
-                    } else {
-                        tr!("{0} cells copied.", count)
-                    },
-                )
-            }
-        };
-        cx.emit(ResultGridEvent::Notice(notice));
+        let options = super::copying::options(cx);
+        self.copy(options.with(options.format, headers), confirmed, window, cx);
     }
 
-    /// Copies the selected block in `format`. Like any copy, one estimated
-    /// above 50 MiB asks first.
+    /// Copies the selected block in `format` (**Copy as**), with the other
+    /// choices of the copy menu.
     fn copy_as(
         &mut self,
         format: CopyFormat,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let options = super::copying::options(cx);
+        self.copy(options.with(format, false), confirmed, window, cx);
+    }
+
+    fn copy(
+        &mut self,
+        options: CopyOptions,
         confirmed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -829,14 +820,15 @@ impl ResultGrid {
         let bytes = grid::selection_bytes(&self.result, &view.rows, self.selection, true);
         if !confirmed && bytes > grid::COPY_CONFIRM_BYTES {
             self.confirm_copy(bytes, window, cx, move |this, window, cx| {
-                this.copy_as(format, true, window, cx)
+                this.copy(options, true, window, cx)
             });
             return;
         }
-        let _timer = jykre::logging::UiTimer::start("copy as");
+        let _timer = jykre::logging::UiTimer::start("copy selection");
         let notice = match Block::new(&self.result, &view.rows, self.selection, &view.families) {
             None => Feedback::new(Tone::Info, tr!("Select cells to copy.")),
             Some(block) => {
+                let count = block.cells();
                 let table = self
                     .sql
                     .table
@@ -847,9 +839,15 @@ impl ResultGrid {
                     quote_name: &*self.sql.quote_name,
                     table: &table,
                 };
-                let text = copy_as::copy_as(format, &block, &style);
+                let text = copy_as::copy_as(&options, &block, &style);
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
-                Feedback::new(Tone::Success, tr!("Copied as {0}.", format_name(format)))
+                let message = match (options.format, count) {
+                    (CopyFormat::Text, 1) => tr!("Cell copied.").to_string(),
+                    (CopyFormat::Text, count) => tr!("{0} cells copied.", count),
+                    (format, 1) => tr!("Cell copied as {0}.", format_name(format)),
+                    (format, count) => tr!("{0} cells copied as {1}.", count, format_name(format)),
+                };
+                Feedback::new(Tone::Success, message)
             }
         };
         cx.emit(ResultGridEvent::Notice(notice));
@@ -1891,15 +1889,16 @@ impl ResultGrid {
                 }
             };
         let copy_as_weak = weak.clone();
+        let format = super::copying::options(cx).format;
         menu.item(
-            PopupMenuItem::new(tr!("Copy"))
+            PopupMenuItem::new(tr!("Copy as {0} (Ctrl+C)", format_name(format)))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, window, cx| {
                     this.copy_selection(false, false, window, cx)
                 })),
         )
         .item(
-            PopupMenuItem::new(tr!("Copy with headers"))
+            PopupMenuItem::new(tr!("Copy with headers (Ctrl+Shift+C)"))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, window, cx| {
                     this.copy_selection(true, false, window, cx)
@@ -1978,17 +1977,6 @@ fn value_color(raw: Option<&str>, family: ValueFamily) -> u32 {
         VALUE_BINARY
     } else {
         VALUE_TEXT
-    }
-}
-
-/// What **Copy as** calls a format.
-fn format_name(format: CopyFormat) -> &'static str {
-    match format {
-        CopyFormat::InList => tr!("IN list"),
-        CopyFormat::Insert => tr!("INSERT statements"),
-        CopyFormat::Json => tr!("JSON"),
-        CopyFormat::Markdown => tr!("Markdown table"),
-        CopyFormat::ColumnNames => tr!("Column names"),
     }
 }
 
