@@ -19,6 +19,92 @@ pub const EXTRA_DECIMALS: u32 = 6;
 /// How many of the most frequent values a column summary lists.
 pub const FREQUENT: usize = 5;
 
+/// How many bars a number column's distribution has at most.
+pub const HISTOGRAM_BINS: usize = 20;
+
+/// One bar of a distribution: the values in an equal slice of the range
+/// from the smallest to the largest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bin {
+    pub count: usize,
+    /// The smallest and largest values in it, as the database wrote them;
+    /// `None` for an empty bar.
+    pub min: Option<String>,
+    pub max: Option<String>,
+}
+
+/// A value as its float, for ordering, and its text, which is reported.
+type End<'a> = (f64, &'a str);
+
+/// The distribution of the numbers among `values` in up to `bins` equal
+/// slices of their range, for drawing. Only the slice a value falls in is
+/// found through floating point; what a bar reports (its smallest and
+/// largest values) stays the database's text. Empty when there is no
+/// finite number; one bar when every number is the same.
+pub fn histogram<'a>(values: impl IntoIterator<Item = &'a str>, bins: usize) -> Vec<Bin> {
+    let numbers: Vec<(f64, &str)> = values
+        .into_iter()
+        .filter(|value| decimal::is_number(value))
+        .filter_map(|value| {
+            let float = value.trim().parse::<f64>().ok()?;
+            float.is_finite().then_some((float, value.trim()))
+        })
+        .collect();
+    let (Some(low), Some(high)) = (
+        numbers.iter().map(|(float, _)| *float).reduce(f64::min),
+        numbers.iter().map(|(float, _)| *float).reduce(f64::max),
+    ) else {
+        return Vec::new();
+    };
+    let count = if high > low { bins.max(1) } else { 1 };
+    // Each bar's ends as (float, text). Rounding to a float keeps order, so
+    // floats that differ order their texts; only equal floats need the
+    // exact comparison.
+    let order = |left: End, right: End| {
+        left.0
+            .partial_cmp(&right.0)
+            .filter(|order| *order != Ordering::Equal)
+            .unwrap_or_else(|| compare_numbers(left.1, right.1))
+    };
+    let mut ends: Vec<Option<(End, End)>> = vec![None; count];
+    let mut counts = vec![0; count];
+    let width = (high - low) / count as f64;
+    for (float, text) in numbers {
+        let index = if width > 0.0 {
+            (((float - low) / width) as usize).min(count - 1)
+        } else {
+            0
+        };
+        counts[index] += 1;
+        let value = (float, text);
+        ends[index] = Some(match ends[index] {
+            None => (value, value),
+            Some((min, max)) => (
+                if order(value, min) == Ordering::Less {
+                    value
+                } else {
+                    min
+                },
+                if order(value, max) == Ordering::Greater {
+                    value
+                } else {
+                    max
+                },
+            ),
+        });
+    }
+    let out: Vec<Bin> = counts
+        .into_iter()
+        .zip(ends)
+        .map(|(count, ends)| Bin {
+            count,
+            min: ends.map(|(min, _)| min.1.to_owned()),
+            max: ends.map(|(_, max)| max.1.to_owned()),
+        })
+        .collect();
+    out
+}
+
 /// Values copied out of a result, so their statistics can be computed on
 /// another thread: the text of each value in one buffer and the NULLs
 /// counted apart.
@@ -270,6 +356,8 @@ pub struct ColumnSummary {
     /// The most frequent values with how often they occur, most frequent
     /// first; ties keep the order they first appear in.
     pub frequent: Vec<(String, usize)>,
+    /// A number column's distribution ([`histogram`]); empty otherwise.
+    pub histogram: Vec<Bin>,
 }
 
 /// A summary of one column's values, compared as its family sorts them.
@@ -319,6 +407,11 @@ pub fn column(sample: &Sample, family: ValueFamily) -> ColumnSummary {
             .take(FREQUENT)
             .map(|(count, _, value)| (value.to_owned(), count))
             .collect(),
+        histogram: if number {
+            histogram(sample.values(), HISTOGRAM_BINS)
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -463,6 +556,41 @@ mod tests {
         );
         let nothing = column(&sample(&[None, None]), ValueFamily::Number);
         assert_eq!((nothing.rows, nothing.distinct, nothing.min), (2, 0, None));
+    }
+
+    #[test]
+    fn a_histogram_slices_the_range_and_keeps_each_bars_exact_ends() {
+        let bins = histogram(["0", "1", "1.0", "9.99", "10", "abc", "NaN", "1e500"], 4);
+        assert_eq!(bins.len(), 4);
+        assert_eq!(
+            bins.iter().map(|bin| bin.count).collect::<Vec<_>>(),
+            [3, 0, 0, 2]
+        );
+        assert_eq!(
+            (bins[0].min.as_deref(), bins[0].max.as_deref()),
+            (Some("0"), Some("1"))
+        );
+        assert_eq!((bins[1].min.as_deref(), bins[1].count), (None, 0));
+        // The largest value falls in the last bar, not past it.
+        assert_eq!(bins[3].max.as_deref(), Some("10"));
+        // One value repeated: one bar; nothing numeric: no bars.
+        let same = histogram(["2.50", "2.5"], 4);
+        assert_eq!((same.len(), same[0].count), (1, 2));
+        assert!(histogram(["x"], 4).is_empty());
+        // Equal as floats, apart as decimals: the exact text decides.
+        let close = histogram(["0.1000000000000000001", "0.1", "5"], 2);
+        assert_eq!(
+            (close[0].min.as_deref(), close[0].max.as_deref()),
+            (Some("0.1"), Some("0.1000000000000000001"))
+        );
+        // A column summary of numbers carries it; of text, not.
+        let amounts = column(&sample(&[Some("1"), Some("3"), None]), ValueFamily::Number);
+        assert_eq!(
+            amounts.histogram.iter().map(|bin| bin.count).sum::<usize>(),
+            2
+        );
+        let names = column(&sample(&[Some("1")]), ValueFamily::Text);
+        assert!(names.histogram.is_empty());
     }
 
     #[test]

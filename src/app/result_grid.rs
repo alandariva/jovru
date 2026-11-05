@@ -1872,7 +1872,8 @@ impl ResultGrid {
             // scrolls, instead of shrinking to fit.
             .child(
                 div()
-                    .id("stats-body")
+                    // Each scope keeps its own scroll.
+                    .id(("stats-body", self.stats_scope as usize))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1964,8 +1965,21 @@ impl ResultGrid {
             .p_3()
             .gap_2()
             .child(label(caption))
-            .child(stat_line(tr!("Values"), count(summary.values)))
-            .child(stat_line(tr!("NULL"), count(summary.nulls)))
+            .child(split_bar(
+                "block-split",
+                &[(summary.values, CHART_FILL), (summary.nulls, CHART_NULL)],
+                tr!(
+                    "{0} values, {1} NULL",
+                    count(summary.values),
+                    count(summary.nulls)
+                ),
+            ))
+            .child(swatch_line(
+                tr!("Values"),
+                count(summary.values),
+                CHART_FILL,
+            ))
+            .child(swatch_line(tr!("NULL"), count(summary.nulls), CHART_NULL))
             .when_some(summary.numbers.as_ref().filter(|_| totals), |s, numbers| {
                 s.child(
                     div()
@@ -2007,7 +2021,11 @@ impl ResultGrid {
                 row()
                     .id(("stats-column-entry", col))
                     .role(Role::Button)
-                    .aria_label(tr!("Statistics of the column {0}", info.name.as_str()))
+                    .aria_label(tr!(
+                        "Statistics of the column {0}, {1} filled",
+                        info.name.as_str(),
+                        percent(entry.values, entry.values + entry.nulls)
+                    ))
                     .focusable()
                     .tab_index(0)
                     .focus_visible(|s| s.border_color(rgb(MINT)))
@@ -2050,7 +2068,11 @@ impl ResultGrid {
                                     .text_size(px(12.))
                                     .text_color(rgb(MUTED))
                                     .child(details.join(" · ")),
-                            ),
+                            )
+                            // How much of the column holds a value.
+                            .child(div().pt_1().child(meter(
+                                entry.values as f32 / (entry.values + entry.nulls).max(1) as f32,
+                            ))),
                     )
                     .child(icon(I::ChevronRight, FAINT))
                     .on_click(
@@ -2131,6 +2153,92 @@ impl ResultGrid {
             )
     }
 
+    /// A number column's distribution: one bar per equal slice of its range,
+    /// the smallest and largest value under it, and on hover how many
+    /// values a bar holds and its own smallest and largest.
+    fn histogram_chart(&self, bins: &[stats::Bin]) -> Div {
+        let tallest = bins.iter().map(|bin| bin.count).max().unwrap_or(0).max(1);
+        let total: usize = bins.iter().map(|bin| bin.count).sum();
+        let pt_br = self.numbers_pt_br;
+        let number = move |text: &str| cell_format::display(Some(text), ValueFamily::Number, pt_br);
+        let low = bins
+            .iter()
+            .find_map(|bin| bin.min.clone())
+            .unwrap_or_default();
+        let high = bins
+            .iter()
+            .rev()
+            .find_map(|bin| bin.max.clone())
+            .unwrap_or_default();
+        column()
+            .flex_none()
+            .gap_1()
+            .child(
+                row()
+                    .id("column-histogram")
+                    .role(Role::Image)
+                    .aria_label(tr!(
+                        "Distribution of {0} numbers from {1} to {2}",
+                        cell_format::count(total),
+                        number(&low),
+                        number(&high)
+                    ))
+                    .h(px(56.))
+                    .items_end()
+                    .gap(px(2.))
+                    .border_b_1()
+                    .border_color(rgb(GRID_LINE))
+                    .children(bins.iter().enumerate().map(|(index, bin)| {
+                        let bin = bin.clone();
+                        let share = bin.count as f32 / tallest as f32;
+                        div()
+                            .id(("histogram-bin", index))
+                            .flex_1()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .justify_end()
+                            .rounded_t(px(4.))
+                            .hover(|s| s.bg(rgb(HOVER)))
+                            .when(bin.count > 0, |s| {
+                                s.child(
+                                    div()
+                                        .w_full()
+                                        .h(relative(share))
+                                        .min_h(px(2.))
+                                        .rounded_t(px(4.))
+                                        .bg(rgb(CHART_FILL)),
+                                )
+                            })
+                            // Built only when shown.
+                            .tooltip(move |window, cx| {
+                                let text = match (&bin.min, &bin.max) {
+                                    (Some(min), Some(max)) if min == max => tr!(
+                                        "{0} values of {1}",
+                                        cell_format::count(bin.count),
+                                        number(min)
+                                    ),
+                                    (Some(min), Some(max)) => tr!(
+                                        "{0} values from {1} to {2}",
+                                        cell_format::count(bin.count),
+                                        number(min),
+                                        number(max)
+                                    ),
+                                    _ => tr!("No values in this range").to_string(),
+                                };
+                                Tooltip::new(text).build(window, cx)
+                            })
+                    })),
+            )
+            .child(
+                row()
+                    .justify_between()
+                    .gap_3()
+                    .child(label(number(&low)))
+                    .child(label(number(&high))),
+            )
+    }
+
     fn column_body(&self) -> Div {
         let Some(col) = self.stats_column() else {
             return column()
@@ -2167,6 +2275,8 @@ impl ResultGrid {
             return body.child(calculating("column-stats-status").p_0());
         };
         let count = cell_format::count;
+        let text = family == ValueFamily::Text;
+        let filled = summary.rows - summary.nulls - if text { summary.empty } else { 0 };
         body.child(label(if self.filter.is_empty() {
             tr!("The {0} rows of this page.", count(summary.rows))
         } else {
@@ -2175,11 +2285,26 @@ impl ResultGrid {
                 count(summary.rows)
             )
         }))
-        .child(line(tr!("NULL"), count(summary.nulls)))
-        .child(line(tr!("Distinct values"), count(summary.distinct)))
-        .when(family == ValueFamily::Text, |s| {
-            s.child(line(tr!("Empty"), count(summary.empty)))
+        .child(split_bar(
+            "column-split",
+            &[
+                (filled, CHART_FILL),
+                (summary.nulls, CHART_NULL),
+                (if text { summary.empty } else { 0 }, CHART_EMPTY),
+            ],
+            tr!(
+                "{0} values, {1} NULL, {2} empty",
+                count(filled),
+                count(summary.nulls),
+                count(if text { summary.empty } else { 0 })
+            ),
+        ))
+        .child(swatch_line(tr!("Values"), count(filled), CHART_FILL))
+        .child(swatch_line(tr!("NULL"), count(summary.nulls), CHART_NULL))
+        .when(text, |s| {
+            s.child(swatch_line(tr!("Empty"), count(summary.empty), CHART_EMPTY))
         })
+        .child(line(tr!("Distinct values"), count(summary.distinct)))
         .when_some(summary.min.as_deref(), |s, min| {
             s.child(line(tr!("Minimum"), value(min)))
         })
@@ -2191,6 +2316,10 @@ impl ResultGrid {
             s.child(line(tr!("Sum"), or_dash(numbers.sum.as_deref())))
                 .child(line(tr!("Average"), or_dash(numbers.average.as_deref())))
                 .child(line(tr!("Median"), or_dash(numbers.median.as_deref())))
+        })
+        .when(summary.histogram.len() > 1, |s| {
+            s.child(div().pt_2().child(label(tr!("Distribution"))))
+                .child(self.histogram_chart(&summary.histogram))
         })
         .when(family == ValueFamily::Text, |s| {
             s.when_some(
@@ -2206,19 +2335,30 @@ impl ResultGrid {
         .when(!summary.frequent.is_empty(), |s| {
             s.child(div().pt_2().child(label(tr!("Most frequent"))))
                 .children(summary.frequent.iter().map(|(text, times)| {
-                    row()
-                        .justify_between()
-                        .gap_3()
+                    // Each value's share of the rows, on one scale.
+                    column()
+                        .flex_none()
+                        .gap_1()
                         .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .font_family("Cascadia Mono")
-                                .text_size(px(13.))
-                                .text_color(rgb(value_color(Some(text), family)))
-                                .child(value(text).replace(['\n', '\r'], "↵")),
+                            row()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family("Cascadia Mono")
+                                        .text_size(px(13.))
+                                        .text_color(rgb(value_color(Some(text), family)))
+                                        .child(value(text).replace(['\n', '\r'], "↵")),
+                                )
+                                .child(label(tr!(
+                                    "{0} · {1}",
+                                    count(*times),
+                                    percent(*times, summary.rows)
+                                ))),
                         )
-                        .child(label(count(*times)))
+                        .child(meter(*times as f32 / summary.rows.max(1) as f32))
                 }))
         })
     }
@@ -2390,6 +2530,101 @@ fn stat_line(name: &'static str, value: String) -> Div {
             .text_color(rgb(TEXT))
             .child(value),
     )
+}
+
+/// A statistic with the swatch of its part in the bar above it, which
+/// stands for that bar's legend.
+fn swatch_line(name: &'static str, value: String, color: u32) -> Div {
+    row()
+        .justify_between()
+        .gap_3()
+        .child(
+            row()
+                .gap_2()
+                .child(
+                    div()
+                        .size(px(8.))
+                        .flex_none()
+                        .rounded(px(2.))
+                        .bg(rgb(color)),
+                )
+                .child(label(name)),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_family("Cascadia Mono")
+                .text_size(px(13.))
+                .text_color(rgb(TEXT))
+                .child(value),
+        )
+}
+
+/// A thin bar split into `parts` (count, colour): widths in proportion,
+/// a 2px gap between parts, rounded ends, and nothing for a part of zero.
+/// `name` says the whole split to assistive technologies.
+fn split_bar(id: &'static str, parts: &[(usize, u32)], name: String) -> Stateful<Div> {
+    let shown: Vec<(usize, u32)> = parts.iter().copied().filter(|(n, _)| *n > 0).collect();
+    let last = shown.len().saturating_sub(1);
+    row()
+        .id(id)
+        .role(Role::Image)
+        .aria_label(name)
+        .flex_none()
+        .w_full()
+        .h(px(8.))
+        .gap(px(2.))
+        .children(
+            shown
+                .into_iter()
+                .enumerate()
+                .map(move |(index, (n, color))| {
+                    div()
+                        .h_full()
+                        // Widths share what the gaps leave, in proportion.
+                        .flex_basis(px(0.))
+                        .flex_grow(n as f32)
+                        .min_w(px(2.))
+                        .bg(rgb(color))
+                        .when(index == 0, |s| s.rounded_l(px(4.)))
+                        .when(index == last, |s| s.rounded_r(px(4.)))
+                }),
+        )
+}
+
+/// A thin meter: `share` (0 to 1) of its track filled.
+fn meter(share: f32) -> Div {
+    div()
+        .flex_none()
+        .w_full()
+        .h(px(4.))
+        .rounded(px(2.))
+        .bg(rgb(CHART_TRACK))
+        .child(
+            div()
+                .h_full()
+                .w(relative(share.clamp(0., 1.)))
+                .rounded(px(2.))
+                .bg(rgb(CHART_FILL)),
+        )
+}
+
+/// `part` of `whole` as a whole percentage, for the meters' text.
+fn percent(part: usize, whole: usize) -> String {
+    if whole == 0 {
+        return "0%".to_owned();
+    }
+    let share = part as f64 * 100. / whole as f64;
+    // Never 0% for some, nor 100% for not all.
+    let shown = if part > 0 && share < 1. {
+        "<1".to_owned()
+    } else if part < whole && share > 99. {
+        ">99".to_owned()
+    } else {
+        format!("{}", share.round() as u64)
+    };
+    format!("{shown}%")
 }
 
 /// What the panel shows while its statistics are computed.

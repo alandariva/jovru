@@ -202,8 +202,19 @@ alignment only; the value itself is never converted.
     longest text, and the five most frequent values.
 
   A column's line shows its type and, for numbers, the sum and average,
-  otherwise its distinct values, and its NULLs; a click (or `Enter`) opens
-  that column's statistics. Up to 100 columns are listed; a line says how
+  otherwise its distinct values, its NULLs, and a thin meter of how much of
+  it holds a value; a click (or `Enter`) opens that column's statistics.
+- **Small charts** in the Statistics tab, each with its figures written
+  beside it, so no value is shown by colour alone: a thin bar splits values
+  from NULLs (and, for a text column, from empty texts), with a swatch on
+  each of those lines; a number column's **Distribution** draws up to 20
+  equal slices of its range between its smallest and largest value, whose
+  tooltip says how many values a bar holds and its own smallest and
+  largest, as the database wrote them (the value is turned into floating
+  point only to choose its bar); each of the most frequent values has a
+  meter of its share of the rows, with the percentage. The colours are the
+  `CHART_*` tokens: the accent for values, neutrals for NULL and empty
+  text. Up to 100 columns are listed; a line says how
   many more there are. The selection's and the page's statistics are
   computed off the UI thread, reading the shared page in place; a column's
   are read a chunk per frame and computed off the UI thread. `Esc` closes the

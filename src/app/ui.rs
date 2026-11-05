@@ -18,6 +18,15 @@ pub const AMBER: u32 = 0xe6bb78;
 pub const TEAL: u32 = 0x7fd0d6;
 pub const PINK: u32 = 0xd995a7;
 pub const SLATE: u32 = 0x8f9bb0;
+/// The statistics panel's small charts: one hue for the data, a dim step
+/// of it for a meter's track, and neutrals for what holds no value (NULL,
+/// then empty text), in that order where they touch. Validated against
+/// `PANEL` for contrast and colour-blind separation.
+pub const CHART_FILL: u32 = MINT;
+pub const CHART_TRACK: u32 = 0x24352f;
+pub const CHART_NULL: u32 = 0x6a7381;
+pub const CHART_EMPTY: u32 = 0xb4bcc8;
+
 /// A search match inside a result's text: brighter text on a faint mint
 /// wash, visible without shouting (`rgba`).
 pub const MATCH_TEXT: u32 = TEXT;
