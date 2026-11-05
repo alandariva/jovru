@@ -2419,8 +2419,13 @@ impl AppView {
             .as_ref()
             .is_some_and(|(scope, _)| scope.0.is_empty());
         let queued_all = connection.refresh_queue.waits_for_selection();
+        // As wide as the explorer, never wider: a long line inside must not
+        // push the connection's buttons past its right edge.
         column()
             .flex_none()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
             // A neutral line between connections, so where one's tree ends
             // and the next begins is plain.
             .when(index > 0, |s| {
@@ -2429,6 +2434,8 @@ impl AppView {
             .child(
                 row()
                     .id(("live-connection-row", index))
+                    .w_full()
+                    .min_w_0()
                     .px_2()
                     .h(px(38.))
                     // The colour its tab group shows.
@@ -2466,6 +2473,7 @@ impl AppView {
                             })
                             .aria_expanded(expanded)
                             .flex_1()
+                            .min_w_0()
                             .child(div().truncate().child(connection.name.clone()))
                             .when_some(connection.appearance.environment, |s, environment| {
                                 s.child(environment_badge(environment))
@@ -2604,6 +2612,7 @@ impl AppView {
                         // connection, it is not a node of its tree.
                         .pl(px(CONNECTION_TEXT_INDENT))
                         .pr_3()
+                        .min_w_0()
                         .gap_1()
                         .pb_1()
                         .mt(px(-6.))
@@ -2651,6 +2660,8 @@ impl AppView {
                                         I::ListFilter,
                                         tr!("Choose what to introspect"),
                                     )
+                                    .min_w_0()
+                                    .overflow_hidden()
                                     .on_click(cx.listener(
                                         move |this, _, window, cx| {
                                             this.open_connection(Some(index), window, cx)
