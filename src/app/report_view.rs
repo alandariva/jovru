@@ -23,6 +23,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::drivers::*;
+use jykre::parameters::KINDS;
 use jykre::reports::params::{self, ParameterProblem};
 use jykre::reports::run::{
     self, PanelOutcome, PanelPhase, Plan, PlanPanel, RunScope, Scheduler, SessionKey, Sessions,
@@ -1840,15 +1841,7 @@ impl Drop for ReportView {
     }
 }
 
-const KINDS: [ParameterKind; 5] = [
-    ParameterKind::Text,
-    ParameterKind::Number,
-    ParameterKind::Boolean,
-    ParameterKind::Date,
-    ParameterKind::Timestamp,
-];
-
-fn kind_name(kind: ParameterKind) -> &'static str {
+pub(super) fn kind_name(kind: ParameterKind) -> &'static str {
     match kind {
         ParameterKind::Text => tr!("Text"),
         ParameterKind::Number => tr!("Number"),
@@ -1858,7 +1851,7 @@ fn kind_name(kind: ParameterKind) -> &'static str {
     }
 }
 
-fn placeholder(kind: ParameterKind) -> &'static str {
+pub(super) fn placeholder(kind: ParameterKind) -> &'static str {
     match kind {
         ParameterKind::Text => tr!("Text"),
         ParameterKind::Number => tr!("e.g. 1250.50"),
@@ -1868,7 +1861,7 @@ fn placeholder(kind: ParameterKind) -> &'static str {
     }
 }
 
-fn invalid_hint(kind: ParameterKind) -> &'static str {
+pub(super) fn invalid_hint(kind: ParameterKind) -> &'static str {
     match kind {
         ParameterKind::Text => tr!("Invalid text"),
         ParameterKind::Number => tr!("A number, with a dot for decimals"),

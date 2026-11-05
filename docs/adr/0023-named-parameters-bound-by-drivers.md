@@ -6,6 +6,9 @@
 - **Amends:** [ADR-0002](0002-sqlx-for-postgres-and-mysql.md), for report SQL
   only: user SQL keeps the text protocol, but a report's `:name` markers are
   replaced by fixed references before it is sent
+- **Amended by:** [ADR-0026](0026-named-parameters-in-sql-tabs.md): query tabs
+  send parameters too, and classic Databricks clusters bind them as typed
+  literals instead of refusing them
 
 ## Context
 

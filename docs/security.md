@@ -77,10 +77,19 @@ document is the engineering standard.
 ## SQL sent to servers
 
 - The application runs the SQL the user wrote, as written. It never rewrites
-  it or appends to it, with one exception: in a report, the PostgreSQL and
-  MySQL drivers replace each `:name` parameter marker with a fixed reference
-  to a value they bind, never with the value itself
-  ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)). **Explain**
+  it or appends to it, with one exception: in a report or a query tab, the
+  PostgreSQL and MySQL drivers replace each `:name` parameter marker with a
+  fixed reference to a value they bind, never with the value itself
+  ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)), and on a
+  classic Databricks cluster, which cannot bind, each marker becomes a typed
+  literal: text only as the hexadecimal of its bytes
+  (`decode(X'…', 'UTF-8')`), the other types only after checking that they
+  hold nothing but their own characters
+  ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)). SQL warehouses bind
+  the values themselves and get the SQL unchanged.
+- A query tab keeps the values typed in its parameter fields in `config.db`
+  with the tab, as it keeps the SQL (a report keeps only its defaults). They
+  are never logged nor written to the history. **Explain**
   is an explicit action that sends `EXPLAIN` followed by the chosen query or
   data change, never `EXPLAIN ANALYZE`, so the statement does not run
   ([Architecture](architecture.md#run-a-query)).

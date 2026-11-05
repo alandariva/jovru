@@ -66,7 +66,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view; use the editor's language features |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
@@ -108,7 +108,7 @@ checked in review.
 ├── src/
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
-│   │                       # drivers, grouped_tabs, i18n, query, reports (definitions,
+│   │                       # drivers, grouped_tabs, i18n, parameters, query, reports (definitions,
 │   │                       # parameters, charts, runs, print), sql (jykre-sql)
 │   └── app/                # the application's GPUI views; demo/ holds the demo data,
 │                           # sql_editor/ the editor's language features adapter
@@ -167,6 +167,7 @@ sequenceDiagram
     participant W as Workspace (UI thread)
     participant R as backend::run (Tokio)
     participant D as Driver session
+    W->>W: bind each statement's :name markers from the fields (parameters::tab_request)
     W->>W: QueryRun::start splits statements; queue_all marks them Pending
     W->>R: backend::query(connection, tab session, requests, cancel, progress)
     R->>D: ping the kept session (or open one), execute each statement
@@ -217,6 +218,14 @@ sequenceDiagram
   `SqlDialect`). Only queries and data changes are explained, so the
   statement itself never runs and its words are never read as `EXPLAIN`
   options such as `ANALYZE`.
+- `:name` markers of the SQL (`jykre::parameters::names`, read again when
+  the SQL or its dialect changes) get one field each above the editor
+  (`src/app/workspace/parameters.rs`). Before a run, each statement it runs
+  becomes a request with the parameters its markers use
+  (`jykre::parameters::tab_request`); a missing or malformed value stops the
+  run before anything is sent. The drivers bind the values as for a report
+  ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)), and the result tab
+  keeps them for an export that runs the statement again.
 - Each tab keeps one session between runs ([ADR-0014](adr/0014-a-session-per-tab.md)).
   Databricks warehouses keep logical catalog/schema state; classic clusters keep
   a server SQL context. CLI authentication and HTTP pools are shared across
@@ -300,8 +309,9 @@ its panels and closes its sessions.
    driver binds the values (PostgreSQL with `set_config`, MySQL with a
    prepared `SET`, Databricks warehouses with the Statement API's
    `parameters`) and replaces each marker with a fixed reference to its value
-   (`QueryRequest::with_references`). Classic Databricks clusters refuse
-   parameters.
+   (`QueryRequest::with_references`). Classic Databricks clusters, which
+   cannot bind, replace each marker with a typed literal that never holds
+   the value's text ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)).
 4. Inside the same runtime task, `run::settle` keeps the last statement's
    result, drops the others, and computes the number columns, the suggested
    chart and what the panel draws (`jykre::reports::chart::visual`), so the

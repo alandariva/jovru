@@ -1,22 +1,12 @@
 //! A report's `:name` parameters: which ones its SQL holds, and the bound
 //! values for a run (ADR-0023). Values never go into the SQL text; each
 //! request carries them with the place of their markers, and the driver
-//! binds them.
+//! binds them. The rules shared with SQL tabs live in [`crate::parameters`].
 use super::ParameterSpec;
+pub use crate::parameters::{ParameterError, ParameterProblem, names};
 use crate::sql::{self, SqlDialect};
-use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+use jykre_core::{ExecutionOptions, ParameterKind, QueryRequest};
 use std::collections::HashMap;
-
-/// The parameter names of `sql`, once each, in the order they first appear.
-pub fn names(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
-    let mut names: Vec<String> = Vec::new();
-    for marker in sql::named_markers(sql, dialect) {
-        if !names.contains(&marker.name) {
-            names.push(marker.name);
-        }
-    }
-    names
-}
 
 /// The parameter names of every SQL in `sqls`, each read by its own dialect
 /// (panels of a report may run on different connections), once each, in the
@@ -47,22 +37,6 @@ pub fn reconcile(specs: &[ParameterSpec], names: &[String]) -> Vec<ParameterSpec
                 .unwrap_or_else(|| ParameterSpec::new(name.clone()))
         })
         .collect()
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ParameterProblem {
-    /// A required parameter has no value.
-    Missing,
-    /// The value does not have the shape of the parameter's kind.
-    Invalid,
-    /// The parameter offers a list, and the value is not one of its choices.
-    NotAChoice,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ParameterError {
-    pub name: String,
-    pub problem: ParameterProblem,
 }
 
 /// `typed` as a value of `kind`: trimmed (except text) and lowercased for
@@ -143,47 +117,25 @@ pub fn requests(
             }),
         }
     }
-    let mut requests = Vec::new();
-    for range in sql::statements(sql, dialect) {
-        let Some(text) = sql.get(range) else {
-            continue;
-        };
-        if text.trim().is_empty() {
-            continue;
-        }
-        let mut parameters: Vec<QueryParameter> = Vec::new();
-        for marker in sql::named_markers(text, dialect) {
-            if let Some(parameter) = parameters.iter_mut().find(|p| p.name == marker.name) {
-                parameter.markers.push(marker.range);
-                continue;
-            }
-            match bound.get(marker.name.as_str()) {
-                Some((kind, value)) => parameters.push(QueryParameter {
-                    name: marker.name,
-                    kind: *kind,
-                    value: value.clone(),
-                    markers: vec![marker.range],
-                }),
-                // A marker without a specification (the SQL changed and the
-                // form was not updated) cannot run.
-                None if !errors.iter().any(|error| error.name == marker.name) => {
-                    errors.push(ParameterError {
-                        name: marker.name,
-                        problem: ParameterProblem::Missing,
-                    });
+    let statements = sql::statements(sql, dialect)
+        .into_iter()
+        .filter_map(|range| sql.get(range));
+    // A marker without a specification (the SQL changed and the form was not
+    // updated) cannot run.
+    let bound = crate::parameters::bind(statements, dialect, options, |name| {
+        bound.get(name).cloned().ok_or(ParameterProblem::Missing)
+    });
+    match bound {
+        Ok(requests) if errors.is_empty() => Ok(requests),
+        Ok(_) => Err(errors),
+        Err(more) => {
+            for error in more {
+                if !errors.iter().any(|known| known.name == error.name) {
+                    errors.push(error);
                 }
-                None => {}
             }
+            Err(errors)
         }
-        requests.push(QueryRequest {
-            parameters,
-            ..QueryRequest::new(text, options.clone())
-        });
-    }
-    if errors.is_empty() {
-        Ok(requests)
-    } else {
-        Err(errors)
     }
 }
 

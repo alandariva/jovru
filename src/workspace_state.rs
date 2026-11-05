@@ -5,6 +5,8 @@
 //! ([Persistence](../docs/persistence.md)). Reading tolerates missing or
 //! unknown fields, so a file written by another version still opens.
 use crate::drivers::ObjectPath;
+use crate::parameters::{KindChoice, TabParameter};
+use jykre_core::is_parameter_name;
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime};
 
@@ -50,6 +52,8 @@ pub struct TabState {
     /// The table or view the tab was opened for, so opening it again shows
     /// this tab instead of a copy.
     pub object: Option<ObjectPath>,
+    /// What the tab's `:name` fields hold, kept with the tab (ADR-0026).
+    pub parameters: Vec<TabParameter>,
 }
 
 impl TabState {
@@ -279,6 +283,27 @@ impl QueryEntry {
     }
 }
 
+/// A tab's parameter fields; a field without a valid name is dropped, and an
+/// unknown kind reads as automatic.
+fn read_parameters(value: &Value) -> Vec<TabParameter> {
+    let mut parameters: Vec<TabParameter> = Vec::new();
+    for item in value.as_array().into_iter().flatten() {
+        let Some(name) = item["name"].as_str().filter(|name| is_parameter_name(name)) else {
+            continue;
+        };
+        if parameters.iter().any(|known| known.name == name) {
+            continue;
+        }
+        parameters.push(TabParameter {
+            name: name.to_owned(),
+            kind: KindChoice::parse(item["kind"].as_str().unwrap_or_default()),
+            text: item["text"].as_str().unwrap_or_default().to_owned(),
+            null: item["null"].as_bool().unwrap_or(false),
+        });
+    }
+    parameters
+}
+
 impl WorkspaceState {
     /// Reads a stored value; anything unreadable starts from an empty state
     /// rather than failing the application, and missing fields take their
@@ -309,6 +334,7 @@ impl WorkspaceState {
                 catalog: tab["catalog"].as_str().map(str::to_owned),
                 schema: tab["schema"].as_str().map(str::to_owned),
                 object: serde_json::from_value(tab["object"].clone()).ok(),
+                parameters: read_parameters(&tab["parameters"]),
             })
             .collect();
         let mut history = entries("history");
@@ -389,6 +415,12 @@ impl WorkspaceState {
                 "catalog": tab.catalog,
                 "schema": tab.schema,
                 "object": tab.object,
+                "parameters": tab.parameters.iter().map(|parameter| json!({
+                    "name": parameter.name,
+                    "kind": parameter.kind.as_str(),
+                    "text": parameter.text,
+                    "null": parameter.null,
+                })).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
             "active": self.active,
             "saved_queries": entries(&self.saved_queries),
@@ -475,6 +507,20 @@ mod tests {
                         name: "orders".into(),
                     },
                 ])),
+                parameters: vec![
+                    TabParameter {
+                        name: "id".into(),
+                        kind: KindChoice::Auto,
+                        text: "42".into(),
+                        null: false,
+                    },
+                    TabParameter {
+                        name: "day".into(),
+                        kind: KindChoice::Fixed(jykre_core::ParameterKind::Date),
+                        text: "kept while NULL".into(),
+                        null: true,
+                    },
+                ],
             }],
             active: Some(0),
             saved_queries: vec![QueryEntry {
@@ -509,6 +555,23 @@ mod tests {
         );
         assert_eq!(read.active, None);
         assert_eq!(read.next_query, 1);
+        assert!(read.tabs[0].parameters.is_empty());
+        let fields = serde_json::json!({"tabs": [{"parameters": [
+            {"name": "a", "kind": "money", "text": "1"},
+            {"name": "not valid", "text": "x"},
+            {"name": "a", "kind": "date"},
+            "broken",
+        ]}]});
+        let read = WorkspaceState::from_value(Some(fields));
+        assert_eq!(
+            read.tabs[0].parameters,
+            vec![TabParameter {
+                name: "a".into(),
+                kind: KindChoice::Auto,
+                text: "1".into(),
+                null: false,
+            }]
+        );
         assert_eq!(
             WorkspaceState::from_value(Some(serde_json::json!("broken"))),
             WorkspaceState {

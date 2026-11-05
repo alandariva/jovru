@@ -362,6 +362,7 @@ impl Workspace {
         };
         let total = (mode == Mode::Held).then(|| tab.held_rows() as u64);
         let statement = tab.sql.clone();
+        let parameters = tab.parameters.clone();
         let sql = self.export_sql(&columns, cx);
         let options = self.export.preferences.options;
         self.export.preferences.directory = path.parent().map(PathBuf::from);
@@ -404,6 +405,7 @@ impl Workspace {
                         input,
                         session,
                         sql: statement.clone(),
+                        parameters: parameters.clone(),
                         options: self.options(),
                     },
                     Some(lease),

@@ -47,6 +47,8 @@ pub enum ExportRead {
         input: ResolvedConnection,
         session: Option<Box<dyn Session>>,
         sql: String,
+        /// The `:name` values bound when the result ran, bound again.
+        parameters: Vec<QueryParameter>,
         options: ExecutionOptions,
     },
 }
@@ -227,6 +229,7 @@ async fn write(
             input,
             session,
             sql,
+            parameters,
             options,
         } => {
             drop(pages);
@@ -243,7 +246,9 @@ async fn write(
             let (session, reopened) = session_for_run(&*driver, &input, session, cancel).await;
             run.reopened = reopened;
             let session = run.session.insert(session?);
-            let read = parts.again(&mut **session, &sql, &options).await;
+            let read = parts
+                .again(&mut **session, &sql, parameters, &options)
+                .await;
             finish_session(run, read.is_ok(), cancel).await;
             read?
         }
@@ -331,13 +336,14 @@ impl Parts<'_> {
         &mut self,
         session: &mut dyn Session,
         sql: &str,
+        parameters: Vec<QueryParameter>,
         options: &ExecutionOptions,
     ) -> DriverResult<bool> {
         if self.cancel.is_cancelled() {
             return Err(DriverError::cancelled());
         }
         let request = QueryRequest {
-            parameters: Vec::new(),
+            parameters,
             sql: sql.to_owned(),
             options: ExecutionOptions {
                 max_rows: FIRST_PART_ROWS,

@@ -32,7 +32,9 @@ use std::time::{Duration, SystemTime};
 
 mod copy_menu;
 mod export;
+mod parameters;
 use export::{ExportBar, ExportState};
+use parameters::ParameterForm;
 
 /// Key context of the SQL editor, for the run shortcuts.
 pub const SQL_EDITOR_CONTEXT: &str = "SqlEditor";
@@ -92,6 +94,8 @@ pub struct Workspace {
     fetching: bool,
     /// The export bar and the export it runs ([Results](../../docs/results.md#export)).
     export: ExportBar,
+    /// The fields of the SQL's `:name` parameters, above the editor.
+    parameters: ParameterForm,
     cancellation: CancellationToken,
     numbers_pt_br: bool,
     editor: Entity<EditorState>,
@@ -268,12 +272,13 @@ impl Workspace {
                 this.statement_lines = jykre::sql::statement_lines(&sql, this.run.dialect()).into();
                 this.line_count = sql.split('\n').count();
                 this.editor_sql = sql;
+                this.sync_parameters();
                 cx.emit(WorkspaceEvent::Changed);
             }
             cx.notify();
         });
         let demo = demo::enabled();
-        Self {
+        let mut workspace = Self {
             input: None,
             demo,
             stale_session: false,
@@ -292,6 +297,7 @@ impl Workspace {
             next_lease: 0,
             fetching: false,
             export: ExportBar::default(),
+            parameters: ParameterForm::default(),
             cancellation: CancellationToken::new(),
             numbers_pt_br: false,
             editor,
@@ -381,7 +387,9 @@ impl Workspace {
                 sql_editor_subscription,
                 copy_observation,
             ],
-        }
+        };
+        workspace.sync_parameters();
+        workspace
     }
 
     /// Ctrl+Enter: the selected text when there is a selection, otherwise the
@@ -1113,10 +1121,16 @@ impl Workspace {
         }
         let sql = self.editor.read(cx).text().to_string();
         let confirmed = std::mem::take(&mut self.risk_confirmed);
+        // The values of the statements' `:name` markers, bound by the driver
+        // (ADR-0026). A missing or malformed one runs nothing.
+        let options = self.options();
+        let statements = self.run.statements_for(&sql, &scope);
+        let Some(requests) = self.parameter_requests(&statements, &options, cx) else {
+            return;
+        };
         if self.environment == Some(jykre::connection_appearance::Environment::Production)
             && !confirmed
         {
-            let statements = self.run.statements_for(&sql, &scope);
             let risks = jykre::guard::risks(&statements, self.run.dialect());
             if !risks.is_empty() {
                 self.risky_run = Some((scope, placement));
@@ -1149,6 +1163,10 @@ impl Workspace {
         for (tab, start) in tabs.iter().zip(&plan.starts) {
             self.results.set_origin(*tab, *start);
         }
+        for (tab, request) in tabs.iter().zip(&requests) {
+            self.results
+                .set_parameters(*tab, request.parameters.clone());
+        }
         if placement != Placement::Hidden {
             self.result_view = ResultView::Table;
         }
@@ -1162,7 +1180,6 @@ impl Workspace {
             // The previous run has ended (a stopping one blocks new runs), so
             // its session is back unless it was lost.
             let (session, lease) = self.lease_session(true);
-            let options = self.options();
             let before = options.context.clone();
             // COMMIT and ROLLBACK from the toolbar are logged in Messages,
             // not in the history of what the user ran.
@@ -1187,14 +1204,6 @@ impl Workspace {
             })
             .detach();
             cx.spawn(async move |weak, cx| {
-                let requests = queries
-                    .iter()
-                    .map(|(_, sql)| QueryRequest {
-                        parameters: Vec::new(),
-                        sql: sql.clone(),
-                        options: options.clone(),
-                    })
-                    .collect();
                 // Rows become compact display text on the database runtime, row
                 // by row, and the driver cells are dropped there.
                 let result = backend::run(backend::query(
@@ -2055,6 +2064,7 @@ impl Workspace {
                     )
                     .child(self.session_status(cx)),
             )
+            .children(self.parameter_form(cx))
             .child(
                 div()
                     .flex()
@@ -3203,6 +3213,7 @@ impl Workspace {
             catalog: self.context.catalog.clone(),
             schema: self.context.schema.clone(),
             object: self.object.clone(),
+            parameters: self.parameters.fields.clone(),
         }
     }
 
@@ -3221,6 +3232,7 @@ impl Workspace {
         self.saved_id = state.saved_id;
         self.object = state.object.clone();
         self.opened_sql = state.opened_sql.clone();
+        self.restore_parameters(&state.parameters);
         self.update_grid_sql(cx);
         self.timeout = state.timeout(self.timeout);
         // Applied to the session the next run opens.
@@ -3451,6 +3463,8 @@ impl Workspace {
         if dialect != self.run.dialect() {
             self.run.set_dialect(dialect);
             self.statement_lines = jykre::sql::statement_lines(&self.editor_sql, dialect).into();
+            // A colon means another thing in each dialect.
+            self.sync_parameters();
         }
         self.update_grid_sql(cx);
     }
@@ -3805,8 +3819,9 @@ fn run_button(
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         super::probe::rendered("Workspace");
+        self.ensure_parameter_inputs(window, cx);
         let query = self.query_area(cx);
         let content = if self.assistant_open {
             h_resizable("assistant-layout")

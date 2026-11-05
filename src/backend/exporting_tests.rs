@@ -26,6 +26,8 @@ fn page(from: u32, to: u32) -> Arc<ResultData> {
 #[derive(Debug, Default)]
 struct Calls {
     executed: usize,
+    /// The parameter names and values of each statement run.
+    parameters: Vec<Vec<(String, Option<String>)>>,
     /// The row limit of each fetch.
     fetches: Vec<u32>,
     contexts: usize,
@@ -88,7 +90,17 @@ impl Session for PagedSession {
         sink: &mut dyn RowSink,
         _: CancellationToken,
     ) -> DriverResult<DriverOutcome> {
-        self.calls.lock().unwrap().executed += 1;
+        {
+            let mut calls = self.calls.lock().unwrap();
+            calls.executed += 1;
+            calls.parameters.push(
+                request
+                    .parameters
+                    .iter()
+                    .map(|parameter| (parameter.name.clone(), parameter.value.clone()))
+                    .collect(),
+            );
+        }
         self.sent = 0;
         sink.columns(vec![
             ColumnInfo {
@@ -405,7 +417,13 @@ async fn a_statement_run_again_sends_everything_it_returns_to_the_file() {
         ExportRead::Again {
             input: input(),
             session: None,
-            sql: "SELECT n, note FROM synthetic".into(),
+            sql: "SELECT n, note FROM synthetic WHERE n >= :low".into(),
+            parameters: vec![QueryParameter {
+                name: "low".into(),
+                kind: ParameterKind::Number,
+                value: Some("0".into()),
+                markers: std::iter::once(41..45).collect(),
+            }],
             options: ExecutionOptions::default(),
         },
     );
@@ -422,6 +440,11 @@ async fn a_statement_run_again_sends_everything_it_returns_to_the_file() {
     assert_eq!(exported.rows, 30_000);
     assert!(std::fs::read(&target).unwrap().starts_with(b"PK"));
     assert_eq!(calls.lock().unwrap().executed, 1);
+    // The values bound when the result ran are bound again.
+    assert_eq!(
+        calls.lock().unwrap().parameters[0],
+        [("low".to_owned(), Some("0".to_owned()))]
+    );
     assert!(run.session.is_some() && !run.reopened);
 
     // Other columns than when it ran: nothing is written.
@@ -432,6 +455,7 @@ async fn a_statement_run_again_sends_everything_it_returns_to_the_file() {
             input: input(),
             session: run.session,
             sql: "SELECT n, note FROM synthetic".into(),
+            parameters: Vec::new(),
             options: ExecutionOptions::default(),
         },
     );

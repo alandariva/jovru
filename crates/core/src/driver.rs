@@ -18,8 +18,8 @@ pub struct DriverCapabilities {
     pub hierarchy: Vec<ObjectKind>,
     pub default_port: Option<u16>,
     pub identifier_quote: char,
-    /// Binds [`crate::QueryParameter`]s (ADR-0023). A driver may still reject
-    /// them for some connections, such as Databricks classic clusters.
+    /// Binds [`crate::QueryParameter`]s (ADR-0023, ADR-0026). A driver may
+    /// still reject them for some connections.
     #[serde(default)]
     pub named_parameters: bool,
 }

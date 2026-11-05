@@ -11,7 +11,8 @@ is visible, and the keyboard reaches everything.
 ├──┬──────────────┬──────────────────────────────────────────────────────┤
 │▣ │ Explorer     │ Tab groups, per connection or report: [PG · Local]   │
 │☆ │ ▾ connection │ Toolbar: Run · Explain · Format        save · panel  │
-│▤ │   ▾ database │ ┌──────────────────────────────────────────────────┐ │
+│▤ │   ▾ database │ Parameters (when the SQL has :name): :id [42] …      │
+│  │              │ ┌──────────────────────────────────────────────────┐ │
 │◷ │     ▸ schema │ │ SQL editor, status per statement in the gutter   │ │
 │⚙ │              │ │                                                  │ │
 │  │              │ └──────────────────────────────────────────────────┘ │
@@ -144,6 +145,7 @@ Each state has one consistent representation.
 | Tags of saved queries | Library, under the search | Each tag once, as `#tag`; choosing one lists only the queries with it, choosing it again lists them all. The search finds tags too, and `#word` asks for a tag that starts with `word` |
 | Saved queries in the palette | **Ctrl+Shift+P** | Saved queries that match the text (name, tags, SQL, connection; `#tag` filters) are listed above the tables and views; Enter or a click opens the one highlighted. A search of tags alone lists no tables. Without text it lists at most 10 rows, and a search at most 50; when more matched, a line under the list says to type to search or to narrow it. In each row, the text typed (and each `#tag` filter, in the tags) is marked where it appears, ignoring case: brighter text on a faint mint wash (`MATCH_TEXT`, `MATCH_BG`) |
 | History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
+| Query parameters | Above a query tab's editor, under its header | One field per `:name` of the SQL (none without markers): the name, its type (**Automatic**, which shows the type it reads from the value, or one chosen) and **NULL**, which disables the field. A missing or malformed value of a statement being run is outlined in red with what is expected, and nothing runs. **Run again** binds the current values; an export that runs a statement again binds those its result ran with. The fields come back with the tab after a restart. The values are bound by the driver ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)) |
 | Saved report | Report toolbar, Reports list, tab group | The save icon is a filled bookmark while the tab holds the stored definition, and saving renames the report's tab group; the list shows each report's title, its connections (by name, or "N connections" past two), its number of panels and the start of its SQL, with its chart type as icon (a dashboard for several panels); a search filters by title, description, or a panel's title, connection or SQL |
 | Report parameters | The report's form | One field per `:name` of any panel, labelled as the definition says (`*` when required) with a placeholder for its type; a list parameter shows a menu of its choices (and **No value** when optional). A missing, malformed or unlisted value of a panel that runs is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)) |
 | Run of a report | Report toolbar, panel headers, footer, tab bar | **Run** turns into **Stop** while any panel runs; a connection without its password asks for it first, one after another; each panel shows **Waiting** (for its connection and database's session or a free place: at most four run at once), a spinner while it runs, **Failed** or **Stopped**, and its error in place of its result (a panel whose connection is gone says so and the others run); the tab shows the worst outcome; a panel's footer shows its rows, its time and "Stopped at the row limit" when more rows exist, and a panel whose session was lost says it was opened again |
@@ -239,6 +241,7 @@ Rules:
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Run the panel whose SQL has the keyboard; elsewhere in a report tab, every panel | `Ctrl Enter` (or `Enter` in a parameter field, which runs every panel) |
 | Run every panel of the report on screen | `Ctrl Alt Enter` |
+| In a query tab's parameter field: run what `Ctrl Enter` runs (the selection or the statement at the cursor) | `Enter` |
 | Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
 | Open or close the export bar of the result on screen | `Ctrl Shift E` |
 | Search tables in the local cache | `Ctrl Shift P` |

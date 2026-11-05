@@ -191,7 +191,13 @@ The token comes through the CLI and is kept only in memory. The driver does not 
 Warehouse, or Command Execution API 1.2 on a running classic all-purpose
 cluster. A classic session creates and reuses a SQL context per tab, confirms
 readiness and destroys it on close. Context defaults are applied using quoted
-`USE` commands; user statements are sent unchanged. Metadata uses Unity
+`USE` commands; user statements are sent unchanged, except that the
+`:name` markers of a statement with parameters become typed literals, since
+the command API cannot bind values: text as `decode(X'<hex>', 'UTF-8')`,
+numbers as `CAST('…' AS DECIMAL(p,s))` (or `DOUBLE` with an exponent),
+`TRUE`/`FALSE`, `DATE'…'`, `TIMESTAMP'…'` and a typed `CAST(NULL AS …)`
+([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)). Warehouses send the
+statement unchanged with the Statement API's typed `parameters`. Metadata uses Unity
 Catalog REST without opening a SQL session or starting compute. Jobs clusters,
 non-warehouse serverless compute and OAuth implemented inside the app remain
 out of scope. A stopped classic cluster reports an actionable error.

@@ -86,7 +86,7 @@ pub struct QueryParameter {
 pub struct QueryRequest {
     pub sql: String,
     pub options: ExecutionOptions,
-    /// Empty for SQL run as written. Drivers whose
+    /// Empty for SQL without `:name` markers. Drivers whose
     /// [`crate::DriverCapabilities::named_parameters`] is false reject a
     /// request that carries any.
     pub parameters: Vec<QueryParameter>,

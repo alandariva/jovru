@@ -235,6 +235,7 @@ async fn a_statement_run_again_goes_to_an_excel_file() {
                 input: fixture.input.clone(),
                 session: Some(session),
                 sql: fixture.sql.clone(),
+                parameters: Vec::new(),
                 options: options(1_000),
             },
         ),

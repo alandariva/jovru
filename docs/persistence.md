@@ -80,8 +80,10 @@ defaults are used.
 `workspace.state` keeps the workspace between sessions
 (`jykre::workspace_state`): the open query tabs in order (title, connection
 name, SQL, the SQL last saved to the library and the identity of that saved
-query, the table or view the tab was opened for, its context and the
-statement timeout), the tab on screen, the saved queries, each with a stable
+query, the table or view the tab was opened for, its context, the
+statement timeout and its `:name` parameter fields: name, type chosen
+(`auto` or a type), the text typed and whether it binds NULL,
+[ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)), the tab on screen, the saved queries, each with a stable
 numeric `id` (its title is only a label; `next_id` is the next one) and its
 `tags` (labels without `#`, each once ignoring case), and the
 last 200 history entries, each with when it ended, how (`succeeded`,

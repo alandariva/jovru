@@ -8,6 +8,7 @@
 //! are read from the result the session keeps open.
 use crate::error_report::ErrorReport;
 use crate::result::{ResultColumn, ResultData, ResultLimit};
+use jykre_core::QueryParameter;
 use std::sync::Arc;
 
 /// Where the results of a run go.
@@ -95,6 +96,9 @@ pub struct ResultTab {
     /// Byte offset of the statement in the editor when it ran, to mark an
     /// error's position there.
     pub origin: Option<usize>,
+    /// The `:name` values bound for the statement, so running it again for
+    /// an export reads the result shown (ADR-0026).
+    pub parameters: Vec<QueryParameter>,
     pub state: ResultState,
     pub rows_affected: Option<u64>,
     pub elapsed_ms: u128,
@@ -123,6 +127,7 @@ impl ResultTab {
             number,
             sql,
             origin: None,
+            parameters: Vec::new(),
             state: ResultState::Running,
             rows_affected: None,
             elapsed_ms: 0,
@@ -457,6 +462,13 @@ impl ResultTabs {
     pub fn set_origin(&mut self, id: ResultId, origin: usize) {
         if let Some(tab) = self.get_mut(id) {
             tab.origin = Some(origin);
+        }
+    }
+
+    /// Records the values bound for the tab's statement.
+    pub fn set_parameters(&mut self, id: ResultId, parameters: Vec<QueryParameter>) {
+        if let Some(tab) = self.get_mut(id) {
+            tab.parameters = parameters;
         }
     }
 

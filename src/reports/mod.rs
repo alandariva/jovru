@@ -7,6 +7,7 @@
 //! default. Reading tolerates missing fields and keeps the ones it does not
 //! know, so a version that writes the value back loses nothing another
 //! version stored.
+use crate::parameters::{kind_str, parse_kind};
 use jykre_core::{ConnectionId, ParameterKind, SessionContext};
 use serde_json::{Map, Value, json};
 
@@ -746,28 +747,6 @@ fn with_extra(extra: &Map<String, Value>, known: Value) -> Value {
         object.extend(known);
     }
     Value::Object(object)
-}
-
-fn kind_str(kind: ParameterKind) -> &'static str {
-    match kind {
-        ParameterKind::Text => "text",
-        ParameterKind::Number => "number",
-        ParameterKind::Boolean => "boolean",
-        ParameterKind::Date => "date",
-        ParameterKind::Timestamp => "timestamp",
-    }
-}
-
-fn parse_kind(text: &str) -> Option<ParameterKind> {
-    [
-        ParameterKind::Text,
-        ParameterKind::Number,
-        ParameterKind::Boolean,
-        ParameterKind::Date,
-        ParameterKind::Timestamp,
-    ]
-    .into_iter()
-    .find(|kind| kind_str(*kind) == text)
 }
 
 /// The saved reports.

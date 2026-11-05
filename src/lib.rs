@@ -21,6 +21,7 @@ pub mod i18n;
 pub mod logging;
 pub mod metadata_scope;
 pub mod palette;
+pub mod parameters;
 pub mod performance;
 pub mod probe;
 pub mod query;
