@@ -143,7 +143,10 @@ actions!(
         PreviousTab,
         /// Ctrl+Shift+E: opens or closes the export bar of the result on
         /// screen.
-        ExportResult
+        ExportResult,
+        /// Ctrl+/ in the SQL editor: comments the selected lines (or the
+        /// caret's line) with `--`, or uncomments them.
+        ToggleComment
     ]
 );
 
@@ -911,7 +914,7 @@ impl AppView {
                 found.connection,
                 &found.path,
                 &found.stored_at,
-                false,
+                connections::OpenTable::Data,
                 window,
                 cx,
             ),
@@ -2483,7 +2486,7 @@ impl AppView {
                             .border_t_1()
                             .border_color(rgb(BORDER))
                             .child(label(tr!(
-                                "↑ ↓ choose · Enter opens the saved query or a new one for the table · #tag filters"
+                                "↑ ↓ choose · Enter opens the saved query or the table's data · #tag filters"
                             )))
                             .child(row().child(shortcut("Esc")).child(label(tr!("close")))),
                     )
@@ -2615,7 +2618,7 @@ impl AppView {
                     .unwrap_or_default();
                 option(("command-table", index))
                     .aria_label(tr!(
-                        "New query for table {0} in {1}, {2}",
+                        "View data of table {0} in {1}, {2}",
                         name,
                         location,
                         connection
@@ -2961,6 +2964,7 @@ pub fn run() {
             KeyBinding::new("ctrl-pageup", PreviousTab, Some(&editor)),
             KeyBinding::new("ctrl-shift-e", ExportResult, None),
             KeyBinding::new("ctrl-shift-e", ExportResult, Some(&editor)),
+            KeyBinding::new("ctrl-/", ToggleComment, Some(&editor)),
         ]);
         Theme::change(ThemeMode::Dark, None, cx);
         Theme::update(cx, |theme| {

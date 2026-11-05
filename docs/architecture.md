@@ -72,7 +72,7 @@ flowchart TB
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
 | **Drivers** | `crates/driver-*` | Validate configuration, connect, execute, cancel, introspect and classify errors for one database | Persist; talk to the UI; know another driver |
 | **SQL text** | `crates/sql` (`jykre-sql`) | Tokens by dialect, statement splitting, `EXPLAIN`, position mapping and qualified names: what execution and the editor share | I/O; depend on an editor engine |
-| **Language features** | `crates/sql-language` (`jykre-sql-language`) | What the editor suggests and explains (`completion`, which reads each statement's queries and the relations they bind from its tokens) and Format (`format`, sqruff-lib behind the `sqruff` feature) | I/O, GPUI, `lsp-types` or translations; be used by the library |
+| **Language features** | `crates/sql-language` (`jykre-sql-language`) | What the editor suggests and explains (`completion`, which reads each statement's queries and the relations they bind from its tokens), Format (`format`, sqruff-lib behind the `sqruff` feature) and the line comments **Ctrl+/** toggles (`comment`) | I/O, GPUI, `lsp-types` or translations; be used by the library |
 | **Tooling** | `xtask` | Local gate, architecture check, translation catalogs | Ship in the application |
 
 ## Dependency rules
@@ -213,6 +213,16 @@ sequenceDiagram
   text between statements (blank lines, comments, `DELIMITER` lines) is kept,
   so every statement keeps a line of its own; with a selection, only the
   selection is formatted (`format::format_range`).
+- Opening a table in the explorer or the search opens its **Data** view: a
+  query tab with `SELECT * FROM` the table (`backend::data_sql`, quoted by
+  the driver, without a `LIMIT`) that runs it at once, as `↻` would, into a
+  result tab called Data. Its pages are read like any result's: the first
+  with the run, up to the row limit, the next with `backend::fetch` from the
+  session. Only a statement the editor holds runs, so the SQL is always on
+  screen.
+- **Ctrl+/** comments or uncomments the lines of the selection with `--`
+  (`jykre_sql_language::comment`, applied by `src/app/sql_editor`),
+  replacing only those lines in one undo step.
 - **Explain** runs `EXPLAIN` followed by the statement at the cursor (or the
   one selected) into a new result tab (`sql::explain`, by the connection's
   `SqlDialect`). Only queries and data changes are explained, so the

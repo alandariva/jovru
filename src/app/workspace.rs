@@ -21,7 +21,7 @@ use jykre::{
     error_report::ErrorReport,
     query::{Outcome, QueryRun, RunState, Scope, ShortcutAction, StatementStatus},
     result::{DEFAULT_MEMORY_CEILING, DEFAULT_ROW_LIMIT, ResultData, ResultLimit},
-    result_tabs::{Completed, Placement, ResultId, ResultState, ResultTab, ResultTabs},
+    result_tabs::{Completed, DataView, Placement, ResultId, ResultState, ResultTab, ResultTabs},
     run_log::{LogEntry, LogOutcome, RunLog},
     transaction::Transaction,
 };
@@ -148,6 +148,10 @@ pub struct Workspace {
     /// The table or view the tab was opened for: opening it again shows
     /// this tab.
     object: Option<ObjectPath>,
+    /// The statement the tab reads its table's rows with, when it was opened
+    /// as the table's Data view: `SELECT * FROM` it, without a `LIMIT`. The
+    /// result tab of that statement is called Data.
+    data_sql: Option<String>,
     /// Rows the open filter shows on the page, while a filter is open.
     filtered_rows: Option<usize>,
     /// A task redraws the footer every second while a run is active, so it
@@ -371,6 +375,7 @@ impl Workspace {
             saved_sql: None,
             saved_id: None,
             object: None,
+            data_sql: None,
             filtered_rows: None,
             clock: false,
             opened_sql: Some(sql.to_string()),
@@ -858,6 +863,62 @@ impl Workspace {
     pub fn set_object(&mut self, object: Option<ObjectPath>, cx: &mut Context<Self>) {
         self.object = object;
         self.update_grid_sql(cx);
+    }
+
+    /// The statement the tab reads its table's rows with, when it is the
+    /// table's Data view.
+    pub fn data_sql(&self) -> Option<&str> {
+        self.data_sql.as_deref()
+    }
+
+    /// The table's **Data** view: the tab reads its table's rows with `sql`
+    /// (every row, without a `LIMIT`), page by page: the first page has the
+    /// connection's row limit and the next ones are read from the result the
+    /// session keeps open. Opened again, a tab that holds the rows, or is
+    /// reading them, shows them; otherwise they are read again.
+    pub fn view_data(&mut self, sql: String, cx: &mut Context<Self>) {
+        if self.data_sql.as_deref() != Some(sql.as_str()) {
+            self.data_sql = Some(sql);
+            cx.emit(WorkspaceEvent::Changed);
+        }
+        self.read_data(cx);
+    }
+
+    /// Shows the Data result, or reads it. Only a statement the editor
+    /// holds runs, so what reads the rows is always on screen and its
+    /// statement's status shows in the gutter.
+    fn read_data(&mut self, cx: &mut Context<Self>) {
+        let Some(sql) = self.data_sql.clone() else {
+            return;
+        };
+        self.result_view = ResultView::Table;
+        let placement = match self.results.data_view(&sql) {
+            DataView::Show(index) => {
+                self.results.select(index);
+                self.show_active(cx);
+                return;
+            }
+            DataView::Read(placement) => placement,
+        };
+        let origin = jykre::sql::statements(&self.editor_sql, self.run.dialect())
+            .into_iter()
+            .find(|range| self.editor_sql.get(range.clone()) == Some(sql.as_str()))
+            .map(|range| range.start);
+        let Some(origin) = origin else {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!(
+                    "The editor no longer holds the query that reads this table, so nothing was read. Run the SQL in the editor."
+                ),
+            ));
+            cx.notify();
+            return;
+        };
+        let scope = Scope::Again {
+            sql,
+            origin: Some(origin),
+        };
+        self.execute_queries(scope, placement, cx);
     }
 
     /// Tells the grid how copies as SQL write names, strings and the table
@@ -2079,6 +2140,10 @@ impl Workspace {
                         // Ctrl+Enter binding inside this context.
                         div()
                             .key_context(SQL_EDITOR_CONTEXT)
+                            .on_action(cx.listener(|this, _: &super::ToggleComment, window, cx| {
+                                this.sql_editor
+                                    .update(cx, |editor, cx| editor.toggle_comment(window, cx));
+                            }))
                             .flex_1()
                             .min_w_0()
                             .h_full()
@@ -2161,9 +2226,10 @@ impl Workspace {
                                 |(index, tab)| {
                                     let (symbol, color, status) = result_status(tab);
                                     let running = tab.state == ResultState::Running;
+                                    let title = tab.title(self.data_sql.as_deref());
                                     let drag = ResultTabDrag {
                                         id: tab.id,
-                                        title: tr!("Result {0}", tab.number).into(),
+                                        title: title.clone().into(),
                                     };
                                     row()
                                         // Follows the tab when it moves, so
@@ -2171,7 +2237,7 @@ impl Workspace {
                                         .id(("result-tab", tab.id.get() as usize))
                                         .role(Role::Tab)
                                         .aria_selected(index == active)
-                                        .aria_label(tr!("Result {0}: {1}", tab.number, status))
+                                        .aria_label(tr!("{0}: {1}", title, status))
                                         .focusable()
                                         .tab_index(0)
                                         .focus_visible(|s| s.bg(rgb(HOVER)))
@@ -2247,7 +2313,7 @@ impl Workspace {
                                                 s.child(icon(symbol, color))
                                             }
                                         })
-                                        .child(tr!("Result {0}", tab.number))
+                                        .child(title)
                                         .when(!running, |s| {
                                             s.child(pin_button(index, tab.pinned).on_click(
                                                 cx.listener(move |this, _, _, cx| {
@@ -2421,6 +2487,21 @@ impl Workspace {
             return self.connection_chooser(cx);
         }
         let Some(tab) = self.results.active() else {
+            // A table's Data view not read yet (reopened after a restart)
+            // offers to read its rows.
+            if self.data_sql.is_some() {
+                return centered()
+                    .child(icon(I::Table2, FAINT))
+                    .child(div().text_size(px(14.)).child(tr!("Ready to explore")))
+                    .child(label(tr!(
+                        "Read the table's rows, a page at a time, with the query above."
+                    )))
+                    .child(
+                        button("empty-view-data", I::Play, tr!("View data"))
+                            .on_click(cx.listener(|this, _, _, cx| this.read_data(cx))),
+                    )
+                    .into_any_element();
+            }
             return centered()
                 .child(icon(I::Terminal, FAINT))
                 .child(div().text_size(px(14.)).child(tr!("Ready to explore")))
@@ -3178,6 +3259,7 @@ impl Workspace {
         self.pending_run = None;
         // The table it was opened for belongs to the previous connection.
         self.object = None;
+        self.data_sql = None;
         if let Some(input) = input {
             self.set_connection(input, row_limit, cx);
         } else {
@@ -3214,6 +3296,7 @@ impl Workspace {
             schema: self.context.schema.clone(),
             object: self.object.clone(),
             parameters: self.parameters.fields.clone(),
+            data_sql: self.data_sql.clone(),
         }
     }
 
@@ -3231,6 +3314,7 @@ impl Workspace {
         self.saved_sql = state.saved_sql.clone();
         self.saved_id = state.saved_id;
         self.object = state.object.clone();
+        self.data_sql = state.data_sql.clone();
         self.opened_sql = state.opened_sql.clone();
         self.restore_parameters(&state.parameters);
         self.update_grid_sql(cx);

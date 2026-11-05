@@ -25,6 +25,16 @@ enum InspectionState {
     Failed(String),
 }
 
+/// How a table or view opens from the explorer or the palette.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum OpenTable {
+    /// Its Data view, which reads its rows (a double click, `Enter`, **View
+    /// data**, the palette).
+    Data,
+    /// **New query for table**: a new tab with a query for it, not run.
+    Query,
+}
+
 /// One entry of the explorer list: a connection with its details, or a row
 /// of its tree.
 #[derive(Clone, Debug)]
@@ -2165,17 +2175,19 @@ impl AppView {
         .detach();
     }
 
-    /// **New query for table**: a tab with `SELECT * … LIMIT` the row limit
-    /// for the relation at `path` (read where it is stored, `stored_at`),
-    /// titled with its schema so objects of the same name tell apart. A tab
-    /// already opened for the same object is shown instead of a copy,
-    /// unless `another` asks for a new one.
+    /// Opens the relation at `path` (read where it is stored, `stored_at`)
+    /// in a tab titled with its schema, so objects of the same name tell
+    /// apart. Its **Data** view (`OpenTable::Data`) reads its rows with
+    /// `SELECT * FROM` it, without a `LIMIT`, page by page, and a Data view
+    /// already open for it is shown instead of a copy. **New query for
+    /// table** opens a new tab with `SELECT * … LIMIT` the row limit, not
+    /// run.
     pub(super) fn open_relation(
         &mut self,
         index: usize,
         path: &ObjectPath,
         stored_at: &ObjectPath,
-        another: bool,
+        open: OpenTable,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2185,34 +2197,44 @@ impl AppView {
         let Some(input) = connection.input.as_ref() else {
             return;
         };
-        let name = connection.name.clone();
-        if !another {
-            let open = self
-                .panels
-                .iter()
-                .find(|(_, panel)| {
-                    let panel = panel.read(cx);
-                    panel.connection_name() == name && panel.object() == Some(path)
-                })
-                .map(|(tab, _)| *tab);
-            if let Some(tab) = open {
-                self.show_tab(tab, window, cx);
-                return;
-            }
-        }
         let Ok(driver) = builtin_registry().and_then(|registry| registry.get(input.config.driver))
         else {
             return;
         };
-        let sql = backend::preview_sql(&*driver, stored_at, connection.row_limit);
+        let data = backend::data_sql(&*driver, stored_at);
+        if open == OpenTable::Data {
+            let name = connection.name.clone();
+            let shown = self
+                .panels
+                .iter()
+                .find(|(_, panel)| {
+                    let panel = panel.read(cx);
+                    panel.connection_name() == name
+                        && panel.object() == Some(path)
+                        && panel.data_sql().is_some()
+                })
+                .map(|(tab, panel)| (*tab, panel.clone()));
+            if let Some((tab, panel)) = shown {
+                self.show_tab(tab, window, cx);
+                panel.update(cx, |panel, cx| panel.view_data(data, cx));
+                return;
+            }
+        }
+        let sql = match open {
+            OpenTable::Data => data.clone(),
+            OpenTable::Query => backend::preview_sql(&*driver, stored_at, connection.row_limit),
+        };
         let title = jykre::explorer::qualified_title(path);
         let group = connection.group;
         if let Some(tab) = self.add_query(group, &title, &sql, window, cx)
-            && let Some(panel) = self.panels.get(&tab)
+            && let Some(panel) = self.panels.get(&tab).cloned()
         {
             let object = path.clone();
             panel.update(cx, |panel, cx| {
                 panel.set_object(Some(object), cx);
+                if open == OpenTable::Data {
+                    panel.view_data(data, cx);
+                }
                 panel.focus_editor(window, cx);
             });
         }
@@ -2993,7 +3015,7 @@ impl AppView {
                                 index,
                                 &click_path,
                                 &click_preview,
-                                false,
+                                OpenTable::Data,
                                 window,
                                 cx,
                             );
@@ -3064,18 +3086,18 @@ impl AppView {
                             .map(|connection| connection.node_freshness(&path))
                     })
                     .unwrap_or_default();
-                let another_path = path.clone();
-                let another_preview = preview.clone();
+                let query_path = path.clone();
+                let query_preview = preview.clone();
                 let relation_path = path.clone();
                 menu.item(if opens {
-                    PopupMenuItem::new(tr!("New query for table"))
-                        .icon(I::SquareTerminal)
+                    PopupMenuItem::new(tr!("View data"))
+                        .icon(I::Table2)
                         .on_click(run(Box::new(move |this, window, cx| {
                             this.open_relation(
                                 index,
                                 &relation_path,
                                 &open_preview,
-                                false,
+                                OpenTable::Data,
                                 window,
                                 cx,
                             )
@@ -3095,18 +3117,18 @@ impl AppView {
                         this.toggle_node(index, &open_path, cx)
                     })))
                 })
-                // Opening a table again shows its tab; a second one is asked
-                // for explicitly.
+                // Opening a table again shows its Data view; a query of
+                // its own always opens another tab.
                 .when(opens, |menu| {
                     menu.item(
-                        PopupMenuItem::new(tr!("New query for table in another tab"))
-                            .icon(I::Plus)
+                        PopupMenuItem::new(tr!("New query for table"))
+                            .icon(I::SquareTerminal)
                             .on_click(run(Box::new(move |this, window, cx| {
                                 this.open_relation(
                                     index,
-                                    &another_path,
-                                    &another_preview,
-                                    true,
+                                    &query_path,
+                                    &query_preview,
+                                    OpenTable::Query,
                                     window,
                                     cx,
                                 )

@@ -30,6 +30,19 @@ pub enum Placement {
     Hidden,
 }
 
+/// What opening a table's Data view does with its query tab's results
+/// ([`ResultTabs::data_view`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataView {
+    /// The tab at this index holds the table's rows, or is reading them:
+    /// it is shown, and nothing runs.
+    Show(usize),
+    /// The rows are read with this placement: into the tab where reading
+    /// them failed or was cancelled, or into a new tab, so no other result
+    /// is replaced.
+    Read(Placement),
+}
+
 /// Where an export of a result tab reads its rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExportSource {
@@ -139,6 +152,18 @@ impl ResultTab {
             page: 0,
             has_more: false,
             rest_closed: false,
+        }
+    }
+
+    /// What the tab is called: **Data** when its statement is `data`, the
+    /// statement its query tab reads a table's rows with (the table's Data
+    /// view), otherwise "Result n" by its number.
+    pub fn title(&self, data: Option<&str>) -> String {
+        use crate::tr;
+        if data.is_some_and(|data| data == self.sql) {
+            tr!("Data").to_owned()
+        } else {
+            tr!("Result {0}", self.number)
         }
     }
 
@@ -302,6 +327,26 @@ impl ResultTabs {
     pub fn select(&mut self, index: usize) {
         if index < self.tabs.len() {
             self.active = index;
+        }
+    }
+
+    /// How the Data view that reads its table with `sql` comes back: the
+    /// last tab created for that statement is shown when it holds its rows
+    /// or is reading them, and read again in its place when the read failed
+    /// or was cancelled; without one, the rows go to a new tab.
+    pub fn data_view(&self, sql: &str) -> DataView {
+        let found = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, tab)| tab.sql == sql)
+            .max_by_key(|(_, tab)| tab.id);
+        match found {
+            Some((index, tab)) if matches!(tab.state, ResultState::Done | ResultState::Running) => {
+                DataView::Show(index)
+            }
+            Some((_, tab)) => DataView::Read(Placement::Replace(tab.id)),
+            None => DataView::Read(Placement::New),
         }
     }
 
@@ -648,6 +693,42 @@ mod tests {
         tabs.begin(&["d".into()], Placement::ReplaceActive);
         assert_eq!(tabs.active_index(), 0);
         assert_eq!(tabs.tabs()[0].number, 2);
+    }
+
+    #[test]
+    fn the_data_view_shows_its_rows_or_reads_them_without_replacing_others() {
+        let data = "SELECT * FROM \"sales\".\"orders\";";
+        let mut tabs = ResultTabs::new(usize::MAX);
+        // Nothing yet: the rows go to a new tab, named Data.
+        assert_eq!(tabs.data_view(data), DataView::Read(Placement::New));
+        let id = tabs.begin(&[data.to_owned()], Placement::New)[0];
+        assert_eq!(tabs.data_view(data), DataView::Show(0), "reading");
+        tabs.complete(
+            id,
+            Completed {
+                data: rows(2),
+                ..Completed::default()
+            },
+        );
+        assert_eq!(tabs.tabs()[0].title(Some(data)), "Data");
+        assert_eq!(tabs.tabs()[0].title(None), "Result 1");
+        // Another statement's result keeps its number, and opening the
+        // table again shows the Data tab, wherever it is.
+        tabs.begin(&sql(&["SELECT 1;"]), Placement::New);
+        assert_eq!(tabs.tabs()[1].title(Some(data)), "Result 2");
+        assert_eq!(tabs.data_view(data), DataView::Show(0));
+        // A read that failed or was cancelled is read again in its place.
+        let again = tabs.begin(&[data.to_owned()], Placement::Replace(id))[0];
+        tabs.cancel(again);
+        assert_eq!(
+            tabs.data_view(data),
+            DataView::Read(Placement::Replace(again))
+        );
+        // Once its tab is replaced by another statement, the rows are read
+        // into a new tab, never over another result.
+        tabs.select(0);
+        tabs.begin(&sql(&["SELECT 2;"]), Placement::ReplaceActive);
+        assert_eq!(tabs.data_view(data), DataView::Read(Placement::New));
     }
 
     #[test]

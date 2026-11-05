@@ -92,7 +92,7 @@ alignment only; the value itself is never converted.
 
 | Limit | Value |
 | --- | --- |
-| Rows per page | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`). The driver reads one row ahead, so a result with exactly the limit has no further page. **New query for table** writes the same limit into its `LIMIT` (`backend::preview_sql`) |
+| Rows per page | Per connection, 1 to 100,000, default 1,000 (`ExecutionOptions.max_rows`). The driver reads one row ahead, so a result with exactly the limit has no further page. A table's **Data** view reads `SELECT * FROM` the table without a `LIMIT` (`backend::data_sql`), so its pages are these; **New query for table** writes the same limit into its `LIMIT` (`backend::preview_sql`) |
 | Memory per page | 256 MB (`DEFAULT_MEMORY_CEILING`); `ResultBuilder` stops reading even below the row limit, and the rest of the result is not read |
 | Memory per result tab | 256 MB of pages; the oldest pages are released first and can no longer be shown |
 | Statement timeout | Chosen per tab in the editor toolbar: 30 s, 1 min, 5 min (default), 15 min, 1 h or none (`ExecutionOptions.timeout`) |
@@ -120,6 +120,11 @@ alignment only; the value itself is never converted.
   `Ctrl Enter` with a pinned tab on screen replaces the last unpinned tab
   created, or opens one, and `Ctrl Alt Enter` keeps pinned tabs and numbers
   the new ones after them. Result tabs can be closed.
+- A table's Data view ([User experience](ux.md#always-visible-states))
+  calls the result tab of its `SELECT * FROM` the table **Data**
+  (`result_tabs::ResultTab::title`), wherever that statement ran from;
+  opening the table again shows it, or reads it into a new tab, never over
+  another result (`ResultTabs::data_view`).
 - **Run this result's statement again** (`↻`) runs the statement stored in
   the tab on screen, as it ran, into that same tab; the editor's cursor plays
   no part.

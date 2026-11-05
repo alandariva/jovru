@@ -126,7 +126,7 @@ See [Performance](performance.md) for budgets and how to measure.
 
 | Standard | Current code |
 | --- | --- |
-| Shortcuts are actions in one keymap | Only the run shortcuts, closing a tab, moving between tabs and the export bar are actions (`ExecuteCurrentQuery`, `ExecuteCurrentQueryInNewResult`, `ExecuteAllQueries`, `CloseActiveTab`, `NextTab`, `PreviousTab`, `ExportResult`). The others are matched by hand in `on_key_down`/`capture_key_down` handlers in `src/app/mod.rs`, `workspace.rs`, `connections.rs`, `result_grid.rs` (the grid's navigation keys) and `grouped_tabs` |
+| Shortcuts are actions in one keymap | Only the run shortcuts, closing a tab, moving between tabs, the export bar and commenting lines are actions (`ExecuteCurrentQuery`, `ExecuteCurrentQueryInNewResult`, `ExecuteAllQueries`, `CloseActiveTab`, `NextTab`, `PreviousTab`, `ExportResult`, `ToggleComment`). The others are matched by hand in `on_key_down`/`capture_key_down` handlers in `src/app/mod.rs`, `workspace.rs`, `connections.rs`, `result_grid.rs` (the grid's navigation keys) and `grouped_tabs` |
 | Frequently changing regions are their own cached entities | The result grid is its own cached entity (`src/app/result_grid.rs`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); the editor and the assistant still render inside `Workspace` |
 | Colours come from named tokens | A few views still use inline hex values (the gutter's running and error icons, the assistant panel) |
 | Long collections are virtualized | The result grid, the explorer tree, Messages and the saved queries and history are. The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`) |

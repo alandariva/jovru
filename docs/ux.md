@@ -153,6 +153,7 @@ Each state has one consistent representation.
 | Report chart | Above a panel's table | Bars (one small chart per value column), lines (one per value column on a shared scale), a pie or a number (the first row's value of one column, large, as the database wrote it); at most 50 bars, 1,000 points or 10 slices plus "Other", and a line says how many rows it shows when it leaves some out. A chart that cannot be drawn says why (a column missing, a column without numbers, no rows). A new panel takes the chart its first result suggests |
 | Connection test | Connection dialog footer | **Test connection** turns into **Cancel test** while it runs and shows the elapsed time after 2 s |
 | Export of a result | The export bar, under the result toolbar | Its options and where the rows come from (the rows held, the rest from the server, or a statement run again); while writing, a spinner, the rows and bytes written (of the total when known), the elapsed time after 2 s and **Cancel export**; at the end, how many rows went to which file, its size and time, with **Show in folder**, or why nothing was written. The toolbar's export button stays highlighted while the bar is open ([Results](results.md#export)) |
+| Data of a table | A query tab opened for the table (a double click or `Enter` in the explorer, **View data** in its menu, `Enter` in the search) | The editor holds `SELECT * FROM` the table, without a `LIMIT`, and the tab reads it at once into a result tab called **Data**: the first page has the connection's row limit and the footer's arrows read the next ones from the session, never running the statement again. Opening the table again shows that tab, and reads the rows again only when none of its result tabs holds them: in place of a read that failed or was cancelled, otherwise in a new result tab, never over another result (a restored tab offers **View data**). Running something else in the tab closes the open result, as for any query; `↻` reads the table again |
 | Plan of a statement | **Explain** in the editor toolbar | The dialect's `EXPLAIN` of the statement at the cursor (or of the one selected) runs into a new result tab; the statement itself does not run. Only queries and data changes are explained |
 
 Rules:
@@ -243,6 +244,7 @@ Rules:
 | Run every panel of the report on screen | `Ctrl Alt Enter` |
 | In a query tab's parameter field: run what `Ctrl Enter` runs (the selection or the statement at the cursor) | `Enter` |
 | Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
+| SQL editor (a query's or a report's): comment the selected lines, or the cursor's line, with `--`, or take the comment out when all of them are comments (one step for `Ctrl Z`) | `Ctrl /` |
 | Open or close the export bar of the result on screen | `Ctrl Shift E` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |
@@ -257,7 +259,7 @@ Rules:
 | Delete the focused connection (asks first) | `Delete` |
 | Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
 | Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
-| Explorer: new query for the table, `SELECT * … LIMIT` the row limit, not run; a tab already opened for the table is shown instead (**New query for table in another tab** in its menu opens another). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` |
+| Explorer: the table's Data view, which reads its rows at once (`SELECT * FROM` it, without a `LIMIT`, page by page); a Data view already open for the table is shown instead (**New query for table** in its menu opens another tab with `SELECT * … LIMIT` the row limit, not run). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` |
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
 | Grid: first or last cell of the row, first or last cell of the page, a screen up or down (`Shift` extends) | `Home`, `End`, `Ctrl Home`, `Ctrl End`, `Page Up`, `Page Down` |
 | Grid: select all, clear | `Ctrl A`, `Esc` |
@@ -320,4 +322,4 @@ interactive elements expose a role, a label and their state. Details are in
 | --- | --- |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Elapsed time and cancel for work over 2 s | **Format** runs off the UI thread and the editor stays usable, but the first format per dialect (building its grammar) or a long script can take seconds, and it cannot be cancelled; a result for SQL edited meanwhile is dropped |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, moving to the next or previous tab and the export bar are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, moving to the next or previous tab, the export bar and commenting lines are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |

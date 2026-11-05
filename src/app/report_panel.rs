@@ -933,6 +933,13 @@ impl ReportPanel {
                     .border_1()
                     .border_color(rgb(BORDER))
                     .key_context(SQL_EDITOR_CONTEXT)
+                    .on_action(cx.listener(|this, _: &super::ToggleComment, window, cx| {
+                        if let Some(editor) = &this.editor {
+                            editor
+                                .sql_editor
+                                .update(cx, |editor, cx| editor.toggle_comment(window, cx));
+                        }
+                    }))
                     .child(Editor::new(&editor.editor).h_full()),
             )
             .child(self.visual_controls(cx))

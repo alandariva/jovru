@@ -54,6 +54,10 @@ pub struct TabState {
     pub object: Option<ObjectPath>,
     /// What the tab's `:name` fields hold, kept with the tab (ADR-0026).
     pub parameters: Vec<TabParameter>,
+    /// The statement the tab reads its table's rows with, when it was opened
+    /// as the table's Data view; its result tab is called Data. `None` for
+    /// other tabs and tabs from older versions.
+    pub data_sql: Option<String>,
 }
 
 impl TabState {
@@ -335,6 +339,7 @@ impl WorkspaceState {
                 schema: tab["schema"].as_str().map(str::to_owned),
                 object: serde_json::from_value(tab["object"].clone()).ok(),
                 parameters: read_parameters(&tab["parameters"]),
+                data_sql: tab["data_sql"].as_str().map(str::to_owned),
             })
             .collect();
         let mut history = entries("history");
@@ -421,6 +426,7 @@ impl WorkspaceState {
                     "text": parameter.text,
                     "null": parameter.null,
                 })).collect::<Vec<_>>(),
+                "data_sql": tab.data_sql,
             })).collect::<Vec<_>>(),
             "active": self.active,
             "saved_queries": entries(&self.saved_queries),
@@ -521,6 +527,7 @@ mod tests {
                         null: true,
                     },
                 ],
+                data_sql: Some("SELECT * FROM \"sales\".\"orders\";".into()),
             }],
             active: Some(0),
             saved_queries: vec![QueryEntry {
@@ -549,6 +556,7 @@ mod tests {
         assert_eq!(read.tabs[0].title, "Old");
         assert_eq!(read.tabs[0].schema, None);
         assert_eq!(read.tabs[0].object, None);
+        assert_eq!(read.tabs[0].data_sql, None);
         assert_eq!(
             read.tabs[0].timeout(Some(Duration::from_secs(300))),
             Some(Duration::from_secs(300))

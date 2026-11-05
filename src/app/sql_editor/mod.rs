@@ -432,6 +432,27 @@ impl SqlEditor {
         .detach();
     }
 
+    /// Ctrl+/: comments the lines the selection touches (or the caret's
+    /// line) with `--`, or takes the comment out when all of them are
+    /// comments already. Only those lines are replaced, in one step that
+    /// Ctrl+Z undoes, and the same text stays selected.
+    pub fn toggle_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.editor.upgrade() else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            let sql = editor.text().to_string();
+            let reversed = editor.is_selection_reversed();
+            let toggled =
+                jykre_sql_language::comment::toggle_line_comments(&sql, editor.selected_range());
+            // Replacing the selection, made the lines first, is one undo step
+            // and leaves every other cursor out.
+            editor.set_selected_range(toggled.range, cx);
+            editor.replace(toggled.text, window, cx);
+            editor.set_selected_range_with_direction(toggled.selection, reversed, cx);
+        });
+    }
+
     /// Puts the formatted SQL in the editor, when the editor still holds the
     /// SQL it was made from, and says how it went.
     fn apply_format(

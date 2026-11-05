@@ -65,7 +65,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 ### N003 — Abrir uma tabela não mostra os dados
 - **Prioridade:** Alta
 - **Aprovação:** Aprovada (3 de novembro de 2026)
-- **Status:** Implementada (3 de novembro de 2026; `f18136c`).
+- **Status:** Implementada (3 de novembro de 2026; `f18136c`). Atualização (5 de novembro de 2026): substituída a pedido do mantenedor pela vista **Dados** (“Visualizador de dados da tabela”): duplo clique, Enter, a palette e **View data** abrem uma aba com `SELECT * FROM …;`, sem `LIMIT`, que executa a leitura na hora num result tab chamado Data e pagina pelo cursor da sessão, com o SQL visível no editor. **New query for table** continua no menu, abrindo outra aba com o SQL e o `LIMIT`, sem executar.
 - **Funcionalidade:** Explorer / navegação
 - **Comportamento atual:** Duplo clique, Enter, “Open preview” ou Enter na palette chamam `add_query` com `SELECT * FROM … LIMIT 100;`. Abre uma aba de consulta com o SQL e o estado vazio “Ready to explore — Run the query”. Nada é executado.
 - **Comportamento de referência:** Nas três ferramentas, abrir a tabela leva aos dados ou ao editor do objeto:
@@ -197,7 +197,7 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 - **Diferença identificada:** Um limite embutido no SQL anula o mecanismo de páginas do próprio produto.
 - **Por que o comportamento atual é inferior:** Para ver a linha 101, o usuário precisa editar o SQL; a configuração “Row limit” parece não funcionar.
 - **Comportamento recomendado:** Gerar `SELECT * FROM x` e deixar o limite de linhas e a paginação controlarem o volume.
-- **Decisão:** A consulta gerada mantém um `LIMIT` por padrão, com o valor do limite de linhas da conexão em vez do 100 fixo.
+- **Decisão:** A consulta gerada mantém um `LIMIT` por padrão, com o valor do limite de linhas da conexão em vez do 100 fixo. Atualização (5 de novembro de 2026): vale só para **New query for table**; a vista Dados não escreve `LIMIT` no texto e lê as páginas seguintes pela sessão (ver N003).
 - **Evidência no projeto:** `src/backend.rs` — `preview_sql`; `docs/results.md` (Limits).
 - **Confiança:** Confirmado no projeto; referência documentada em A e C.
 

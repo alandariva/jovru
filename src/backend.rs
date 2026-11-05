@@ -1396,14 +1396,23 @@ pub fn release<T: Send + 'static>(value: T) {
     }
 }
 
-/// A query for the relation at `path`, quoted by the driver's rules, that
-/// reads at most `row_limit` rows: the connection's row limit, so the first
-/// page holds what the limit allows and the next pages follow it.
+/// **New query for table**: a query for the relation at `path`, quoted by the
+/// driver's rules, that reads at most `row_limit` rows, the connection's row
+/// limit, written into its `LIMIT`.
 pub fn preview_sql(driver: &dyn Driver, path: &ObjectPath, row_limit: u32) -> String {
     format!(
         "SELECT * FROM {} LIMIT {row_limit};",
         driver.relation_name(path)
     )
+}
+
+/// The statement the **Data** view reads the relation at `path` with: every
+/// row, quoted by the driver's rules and without a `LIMIT`. The row limit
+/// applies while it is read, as the size of each page, and the next pages
+/// are read from the result the session keeps open ([`fetch`]), so the text
+/// says what runs and no page is cut by it.
+pub fn data_sql(driver: &dyn Driver, path: &ObjectPath) -> String {
+    format!("SELECT * FROM {};", driver.relation_name(path))
 }
 
 #[cfg(test)]
@@ -1518,6 +1527,45 @@ mod tests {
             preview_sql(&DatabricksDriver, &path, 50_000),
             "SELECT * FROM `cat`.`sch`.`a``b` LIMIT 50000;"
         );
+    }
+
+    #[test]
+    fn the_data_view_reads_every_row_without_a_limit_in_its_text() {
+        let path = ObjectPath::default()
+            .child(ObjectKind::Database, "db")
+            .child(ObjectKind::Schema, "a.b")
+            .child(ObjectKind::Table, "t\"x");
+        assert_eq!(
+            data_sql(&PostgresDriver, &path),
+            "SELECT * FROM \"a.b\".\"t\"\"x\";"
+        );
+        let path = ObjectPath::default()
+            .child(ObjectKind::Database, "d`b")
+            .child(ObjectKind::View, "orders");
+        assert_eq!(
+            data_sql(&MySqlDriver, &path),
+            "SELECT * FROM `d``b`.`orders`;"
+        );
+        let path = ObjectPath::default()
+            .child(ObjectKind::Catalog, "cat")
+            .child(ObjectKind::Schema, "sch")
+            .child(ObjectKind::Table, "a`b");
+        assert_eq!(
+            data_sql(&DatabricksDriver, &path),
+            "SELECT * FROM `cat`.`sch`.`a``b`;"
+        );
+        // One statement, which the run takes whole.
+        for dialect in [
+            SqlDialect::Postgres,
+            SqlDialect::MySql,
+            SqlDialect::DatabricksSql,
+        ] {
+            let sql = data_sql(&PostgresDriver, &path);
+            assert_eq!(
+                crate::sql::statements(&sql, Some(dialect)),
+                vec![0..sql.len()]
+            );
+        }
     }
 
     /// Answers every statement with `rows` rows, honouring the row limit and
