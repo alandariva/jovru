@@ -687,9 +687,8 @@ impl Workspace {
         }
     }
 
-    /// **Add to a report**: the tab's SQL, in the tab's database, becomes a
-    /// new panel of a saved report of the same connection, chosen in a
-    /// dialog.
+    /// **Add to a report**: the tab's SQL, on the tab's connection and in its
+    /// database, becomes a new panel of a saved report chosen in a dialog.
     fn add_to_report(&mut self, cx: &mut Context<Self>) {
         if let Some(sql) = self.report_sql(cx) {
             cx.emit(WorkspaceEvent::AddToReport {

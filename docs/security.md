@@ -68,6 +68,11 @@ document is the engineering standard.
   otherwise the panel fails with a validation error
   ([ADR-0025](adr/0025-report-panels.md)). The server decides what that user
   may read in it.
+- A report's panels may run on several connections: each connection that
+  needs a password asks for it before the run, one after another, and the
+  vault is read for each as for a query tab. On production connections the
+  risky statements of each are checked and one confirmation names those
+  connections before anything runs.
 
 ## SQL sent to servers
 

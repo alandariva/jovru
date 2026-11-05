@@ -18,14 +18,12 @@ pub fn names(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
     names
 }
 
-/// The parameter names of every SQL in `sqls`, once each, in the order they
-/// first appear: the panels of a report share them.
-pub fn names_all<'a>(
-    sqls: impl IntoIterator<Item = &'a str>,
-    dialect: Option<SqlDialect>,
-) -> Vec<String> {
+/// The parameter names of every SQL in `sqls`, each read by its own dialect
+/// (panels of a report may run on different connections), once each, in the
+/// order they first appear: the panels of a report share them.
+pub fn names_all<'a>(sqls: impl IntoIterator<Item = (&'a str, Option<SqlDialect>)>) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
-    for sql in sqls {
+    for (sql, dialect) in sqls {
         for name in self::names(sql, dialect) {
             if !names.contains(&name) {
                 names.push(name);
@@ -218,8 +216,21 @@ mod tests {
     #[test]
     fn names_of_several_panels_come_once_in_order() {
         assert_eq!(
-            names_all(["SELECT :b, :a", "SELECT :c, :a", "SELECT 1"], POSTGRES),
+            names_all([
+                ("SELECT :b, :a", POSTGRES),
+                ("SELECT :c, :a", POSTGRES),
+                ("SELECT 1", POSTGRES)
+            ]),
             ["b", "a", "c"]
+        );
+        // Each SQL is read by its own dialect: `#` starts a comment only in
+        // MySQL.
+        assert_eq!(
+            names_all([
+                ("SELECT 1 # :hidden", Some(SqlDialect::MySql)),
+                ("SELECT :shown", POSTGRES)
+            ]),
+            ["shown"]
         );
     }
 

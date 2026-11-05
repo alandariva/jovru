@@ -150,3 +150,22 @@ fn a_tab_is_renamed_in_place_and_reports_only_changes() {
         Err(super::TabsError::TabNotFound)
     );
 }
+
+#[test]
+fn a_group_may_hide_its_new_tab_button_and_keeps_its_tabs() {
+    let mut model: Model<()> = Model::default();
+    let group = model.add_group("Report".into(), rgb(0x8bddbc).into());
+    assert!(model.group(group).unwrap().new_tab);
+    assert_eq!(model.set_new_tab(group, false), Ok(true));
+    // The same choice again asks for no redraw.
+    assert_eq!(model.set_new_tab(group, false), Ok(false));
+    let tab = model.add_tab(group, "Revenue".into(), ()).unwrap();
+    assert!(!model.group(group).unwrap().new_tab);
+    assert_eq!(model.location(tab), Some((0, 0)));
+    model.close(tab).unwrap();
+    assert_eq!(
+        model.set_new_tab(group, true),
+        Err(super::TabsError::GroupNotFound),
+        "the group went away with its last tab"
+    );
+}

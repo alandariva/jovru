@@ -3,20 +3,25 @@
 //! [ADR-0025](../../docs/adr/0025-report-panels.md)): the saved reports,
 //! their list, and the tabs that edit and run them.
 //!
-//! Report tabs are tracked apart from query tabs (`report_tabs`), live in
-//! their connection's tab group and are not reopened after a restart. The
-//! library is written to `config.db` under its own setting, never with a
-//! result.
-use super::report_view::{ReportEvent, ReportMode, ReportTarget, ReportView};
+//! Report tabs are tracked apart from query tabs (`report_tabs`). A report's
+//! panels may run on several connections, so each report tab has a tab
+//! group of its own, named after the report, which no other tab joins and
+//! which goes away with the tab. Report tabs are not reopened after a
+//! restart. The library is written to `config.db` under its own setting,
+//! never with a result.
+use super::report_panel::{ReportSource, Sources};
+use super::report_view::{ReportEvent, ReportMode, ReportView};
 use super::*;
 use jykre::reports::{ConnectionRef, Report, ReportLibrary};
+use std::rc::Rc;
 
 /// Changes are written once they settle.
 const SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// A report's tab and what listens to it.
+/// A report's tab, its own tab group and what listens to it.
 pub(super) struct ReportTab {
     pub(super) view: Entity<ReportView>,
+    pub(super) group: TabGroupId,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -70,68 +75,67 @@ impl AppView {
             })
     }
 
-    fn report_target(&self, index: usize) -> Option<ReportTarget> {
-        let connection = self.connections.get(index)?;
-        Some(ReportTarget {
-            name: connection.name.clone(),
-            id: connection.profile.as_ref().map(|profile| profile.id),
-            input: connection.input.clone(),
-            row_limit: connection.row_limit,
-            environment: connection.appearance.environment,
-        })
+    /// The connections a report's panels may run on, with what their
+    /// editors need: the databases of each and the cache's names.
+    fn report_sources(&self) -> Sources {
+        Rc::new(
+            self.connections
+                .iter()
+                .map(|connection| ReportSource {
+                    connection: ConnectionRef {
+                        id: connection.profile.as_ref().map(|profile| profile.id),
+                        name: connection.name.clone(),
+                    },
+                    input: connection.input.clone(),
+                    row_limit: connection.row_limit,
+                    environment: connection.appearance.environment,
+                    dialect: connection
+                        .profile
+                        .as_ref()
+                        .map(|profile| profile.config.driver)
+                        .and_then(|driver| {
+                            builtin_registry()
+                                .and_then(|registry| registry.get(driver))
+                                .ok()
+                                .map(|driver| driver.descriptor().dialect)
+                        }),
+                    choices: connection
+                        .namespaces
+                        .iter()
+                        .map(jykre::ddl::namespace_context)
+                        .collect(),
+                    names: connection
+                        .profile
+                        .as_ref()
+                        .zip(connection.names.as_ref())
+                        .map(|(profile, names)| (profile.id, names.clone())),
+                })
+                .collect(),
+        )
     }
 
-    /// Hands a report tab what its panels' editors need from the
-    /// connection at `index`: the databases a panel may run in and the
-    /// cache's names for completion.
-    pub(super) fn push_report_language(
-        &self,
-        view: &Entity<ReportView>,
-        index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(connection) = self.connections.get(index) else {
-            return;
-        };
-        let choices: Vec<SessionContext> = connection
-            .namespaces
-            .iter()
-            .map(jykre::ddl::namespace_context)
-            .collect();
-        let names = connection
-            .profile
-            .as_ref()
-            .zip(connection.names.as_ref())
-            .map(|(profile, names)| (profile.id, names.clone()));
-        view.update(cx, |view, cx| {
-            view.set_context_choices(choices, cx);
-            if let Some((id, names)) = names {
-                view.set_names(id, names, cx);
-            }
-        });
-    }
-
-    /// Hands every report tab its connection and the ones it can switch to.
+    /// Hands every report tab the connections its panels may run on, as
+    /// they are now: after a connection is added, edited or removed, given
+    /// its password, or its namespaces and names are read.
     pub(super) fn sync_reports(&self, cx: &mut Context<Self>) {
-        let names: Vec<String> = self.connections.iter().map(|c| c.name.clone()).collect();
+        if self.report_tabs.is_empty() {
+            return;
+        }
+        let sources = self.report_sources();
         let tabs: Vec<Entity<ReportView>> = self
             .report_tabs
             .values()
             .map(|tab| tab.view.clone())
             .collect();
         for view in tabs {
-            let connection = view.read(cx).connection();
-            let index = self.report_connection(&connection);
-            let target = index.and_then(|index| self.report_target(index));
-            let names = names.clone();
-            view.update(cx, |view, cx| {
-                view.set_connection_choices(names, cx);
-                view.set_target(target, cx);
-            });
-            if let Some(index) = index {
-                self.push_report_language(&view, index, cx);
-            }
+            let sources = sources.clone();
+            view.update(cx, |view, cx| view.set_sources(sources, cx));
         }
+    }
+
+    /// Whether `group` is a report's own tab group.
+    pub(super) fn is_report_group(&self, group: TabGroupId) -> bool {
+        self.report_tabs.values().any(|tab| tab.group == group)
     }
 
     pub(super) fn report_tab_of(&self, view: &Entity<ReportView>) -> Option<TabId> {
@@ -141,8 +145,8 @@ impl AppView {
             .map(|(id, _)| *id)
     }
 
-    /// **New report**: a draft on the connection of the tab on screen, or
-    /// the first one.
+    /// **New report**: a draft whose first panel runs on the connection of
+    /// the tab on screen (a report's first panel's), or the first one.
     pub(super) fn new_report(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let active = self.tabs.read(cx).active_tab();
         let name = active
@@ -151,9 +155,13 @@ impl AppView {
                     .get(&tab)
                     .map(|panel| panel.read(cx).connection_name().to_owned())
                     .or_else(|| {
-                        self.report_tabs
-                            .get(&tab)
-                            .map(|tab| tab.view.read(cx).connection_name().to_owned())
+                        self.report_tabs.get(&tab).and_then(|tab| {
+                            tab.view
+                                .read(cx)
+                                .connections(cx)
+                                .first()
+                                .map(|connection| connection.name.clone())
+                        })
                     })
             })
             .filter(|name| self.connections.iter().any(|c| c.name == *name))
@@ -202,11 +210,13 @@ impl AppView {
     }
 
     /// **Add to a report** from a query tab: the SQL becomes a new panel of
-    /// the saved report `id`, in its open tab or in one opened for it. The
-    /// report is stored only when the user saves it.
+    /// the saved report `id`, on the tab's connection and in its database,
+    /// in the report's open tab or in one opened for it. The report is
+    /// stored only when the user saves it.
     pub(super) fn add_to_report(
         &mut self,
         id: u64,
+        connection: ConnectionRef,
         sql: String,
         context: SessionContext,
         window: &mut Window,
@@ -234,7 +244,9 @@ impl AppView {
         };
         self.show_tab(tab, window, cx);
         // A full report says so in its own notice bar.
-        let _ = view.update(cx, |view, cx| view.add_panel(sql, context, window, cx));
+        let _ = view.update(cx, |view, cx| {
+            view.add_panel(sql, connection, context, window, cx)
+        });
         cx.notify();
     }
 
@@ -261,28 +273,25 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<TabId> {
-        let index = self.report_connection(&report.connection);
-        let group = match index {
-            Some(index) => self.ensure_group(index, cx),
-            None => self.group_for(&report.connection.name, cx),
-        };
         let title = if report.title.trim().is_empty() {
             tr!("Untitled report").to_owned()
         } else {
             report.title.clone()
         };
+        // A report may run on several connections: its tab has a group of
+        // its own, which offers no new tab.
+        let group = self.tabs.update(cx, |tabs, cx| {
+            let group = tabs.add_group(title.clone(), rgb(MINT).into(), cx);
+            let _ = tabs.set_group_new_tab(group, false, cx);
+            group
+        });
         let view = cx.new(|cx| ReportView::new(report, mode, window, cx));
-        let target = index.and_then(|index| self.report_target(index));
-        let names: Vec<String> = self.connections.iter().map(|c| c.name.clone()).collect();
         let catalogs = self.sql_catalogs.clone();
+        let sources = self.report_sources();
         view.update(cx, |view, cx| {
             view.set_catalogs(catalogs, cx);
-            view.set_connection_choices(names, cx);
-            view.set_target(target, cx);
+            view.set_sources(sources, cx);
         });
-        if let Some(index) = index {
-            self.push_report_language(&view, index, cx);
-        }
         let events = cx.subscribe_in(
             &view,
             window,
@@ -309,6 +318,7 @@ impl AppView {
             tab,
             ReportTab {
                 view: view.clone(),
+                group,
                 _subscriptions: vec![events, status],
             },
         );
@@ -332,17 +342,20 @@ impl AppView {
                     let title = stored.title.clone();
                     view.update(cx, |view, cx| view.saved(stored, cx));
                     if let Some(tab) = self.report_tab_of(view) {
-                        let _ = self
-                            .tabs
-                            .update(cx, |tabs, cx| tabs.set_tab_title(tab, title, cx));
+                        let group = self.report_tabs.get(&tab).map(|tab| tab.group);
+                        let _ = self.tabs.update(cx, |tabs, cx| {
+                            if let Some(group) = group {
+                                let _ = tabs.rename_group(group, title.clone(), cx);
+                            }
+                            tabs.set_tab_title(tab, title, cx)
+                        });
                     }
                 }
                 self.filter_library(cx);
                 self.save_reports_soon(cx);
             }
-            ReportEvent::PasswordRequired => {
-                let connection = view.read(cx).connection();
-                if let Some(index) = self.report_connection(&connection) {
+            ReportEvent::PasswordRequired(connection) => {
+                if let Some(index) = self.report_connection(connection) {
                     let resume = view.clone();
                     let cancel = view.clone();
                     self.ask_password(
@@ -375,22 +388,8 @@ impl AppView {
                     },
                 );
             }
-            ReportEvent::ConnectionRequested(name) => {
-                if let Some(index) = self.connections.iter().position(|c| c.name == *name)
-                    && let Some(tab) = self.report_tab_of(view)
-                {
-                    let group = self.ensure_group(index, cx);
-                    let _ = self
-                        .tabs
-                        .update(cx, |tabs, cx| tabs.move_tab(tab, group, usize::MAX, cx));
-                    let target = self.report_target(index);
-                    view.update(cx, |view, cx| view.set_target(target, cx));
-                    self.push_report_language(view, index, cx);
-                }
-            }
-            ReportEvent::Reveal(path) => {
-                let connection = view.read(cx).connection();
-                if let Some(index) = self.report_connection(&connection) {
+            ReportEvent::Reveal { connection, path } => {
+                if let Some(index) = self.report_connection(connection) {
                     self.reveal_object(index, path.clone(), cx);
                 }
             }
@@ -452,22 +451,6 @@ impl AppView {
         );
     }
 
-    /// A report tab moved to another group runs on that group's connection.
-    pub(super) fn report_moved(&mut self, tab: TabId, group: TabGroupId, cx: &mut Context<Self>) {
-        let Some(view) = self.report_tabs.get(&tab).map(|tab| tab.view.clone()) else {
-            return;
-        };
-        let index = self
-            .connections
-            .iter()
-            .position(|connection| connection.group == group);
-        let target = index.and_then(|index| self.report_target(index));
-        view.update(cx, |view, cx| view.set_target(target, cx));
-        if let Some(index) = index {
-            self.push_report_language(&view, index, cx);
-        }
-    }
-
     /// Removes a saved report after the user confirms. A tab that has it
     /// open keeps it as a draft.
     pub(super) fn remove_report(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -521,15 +504,16 @@ impl AppView {
         let index = *self.library_shown.get(position)?;
         let report = self.reports.reports.get(index)?;
         let id = report.id;
+        let connections = report.connections_label();
         let detail = if report.panels.len() > 1 {
             tr!(
                 "{0} · {1} panels · {2}",
-                report.connection.name,
+                connections,
                 report.panels.len(),
                 report.preview(1)
             )
         } else {
-            format!("{} · {}", report.connection.name, report.preview(2))
+            format!("{} · {}", connections, report.preview(2))
         };
         let symbol = if report.panels.len() > 1 {
             I::LayoutDashboard

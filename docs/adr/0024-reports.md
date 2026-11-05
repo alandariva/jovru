@@ -1,6 +1,6 @@
 # ADR-0024: Reports, with stored definitions, tabs of their own and a print HTML the user saves
 
-- **Status:** Proposed (amended by [ADR-0025](0025-report-panels.md): a report is a set of panels, each with its SQL, database and chart, run on a session per database)
+- **Status:** Proposed (amended by [ADR-0025](0025-report-panels.md): a report is a set of panels, each with its connection, database, SQL and chart, run on a session per connection and database, and its tab has a group of its own)
 - **Date:** 2026-11-04
 - **Authors:** AI agent, at the maintainer's request (plan approved 2026-11-04)
 

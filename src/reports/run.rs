@@ -1,13 +1,14 @@
 //! How a report runs (ADR-0025): which panels run, with which requests,
-//! grouped by the context (the database of the report's connection) they
-//! run in, and which session each group uses.
+//! grouped by where they run (a connection and a database of it), and which
+//! session each group uses.
 //!
-//! Panels of one context share a session and run one after another, in the
-//! report's order; different contexts run at the same time, at most
-//! [`MAX_PARALLEL`] at once. A session only ever runs in its own context, so
-//! a panel left at the session default never inherits another panel's
-//! database. Nothing here touches GPUI or the network: the report's view
-//! starts each group's loop and hands the outcomes back.
+//! Panels of one connection and database share a session and run one after
+//! another, in the report's order; different ones run at the same time, at
+//! most [`MAX_PARALLEL`] at once. A session only ever runs in its own
+//! connection and context, so a panel left at the session default never
+//! inherits another panel's database. Nothing here touches GPUI or the
+//! network: the report's view starts each group's loop and hands the
+//! outcomes back.
 use super::chart::{self, ChartProblem, Visual};
 use super::params::{self, ParameterError};
 use super::{ChartSpec, Panel, PanelId, ParameterSpec};
@@ -16,8 +17,8 @@ use crate::grouped_tabs::TabStatus;
 use crate::result::{DEFAULT_MEMORY_CEILING, ResultData};
 use crate::sql::SqlDialect;
 use jykre_core::{
-    CancellationToken, DriverError, DriverResult, ErrorCode, ExecutionOptions, QueryRequest,
-    Session, SessionContext,
+    CancellationToken, ConnectionId, DriverError, DriverResult, ErrorCode, ExecutionOptions,
+    QueryRequest, Session, SessionContext,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -27,6 +28,14 @@ pub const MAX_PARALLEL: usize = 4;
 /// The most idle sessions a report keeps between runs; the least recently
 /// used one closes first.
 pub const MAX_KEPT: usize = 4;
+
+/// Where a group of panels runs: a connection and the context (database,
+/// schema, catalog) its session stays in. Each key has its own session.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SessionKey {
+    pub connection: ConnectionId,
+    pub context: SessionContext,
+}
 
 /// Which panels a run covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,10 +116,11 @@ pub struct PanelJob {
     pub info: JobInfo,
 }
 
-/// The panels a run covers, grouped by context in the report's order.
+/// The panels a run covers, grouped by where they run, in the report's
+/// order.
 #[derive(Debug, Default)]
 pub struct Plan {
-    pub groups: Vec<(SessionContext, Vec<PanelJob>)>,
+    pub groups: Vec<(SessionKey, Vec<PanelJob>)>,
 }
 
 impl Plan {
@@ -129,6 +139,28 @@ impl Plan {
         self.jobs().map(|job| job.panel).collect()
     }
 
+    /// The statements the plan runs on `connection`, for the production
+    /// check of that connection.
+    pub fn statements_on(&self, connection: ConnectionId) -> Vec<String> {
+        self.groups
+            .iter()
+            .filter(|(key, _)| key.connection == connection)
+            .flat_map(|(_, jobs)| jobs.iter())
+            .flat_map(|job| job.info.statements.iter().cloned())
+            .collect()
+    }
+
+    /// The connections the plan runs on, once each.
+    pub fn connections(&self) -> Vec<ConnectionId> {
+        let mut found = Vec::new();
+        for (key, _) in &self.groups {
+            if !found.contains(&key.connection) {
+                found.push(key.connection);
+            }
+        }
+        found
+    }
+
     fn jobs(&self) -> impl Iterator<Item = &PanelJob> {
         self.groups.iter().flat_map(|(_, jobs)| jobs.iter())
     }
@@ -140,23 +172,43 @@ pub fn memory_ceiling(panel_count: usize) -> usize {
     DEFAULT_MEMORY_CEILING / panel_count.max(1)
 }
 
+/// A panel to plan, with where it runs as the view resolved it from its
+/// connection.
+#[derive(Clone, Copy, Debug)]
+pub struct PlanPanel<'a> {
+    pub panel: &'a Panel,
+    pub connection: ConnectionId,
+    pub dialect: Option<SqlDialect>,
+    /// The connection's row limit.
+    pub max_rows: u32,
+}
+
 /// The jobs for the panels of `scope` that hold SQL, with the values the
 /// form holds. Only the parameters those panels use are checked; every
 /// problem is reported once, by name. Each job gets a new run number from
-/// `next_run`.
+/// `next_run`. `count` is the report's number of panels, which shares the
+/// memory ceiling.
 pub fn plan(
-    panels: &[Panel],
+    panels: &[PlanPanel],
+    count: usize,
     scope: &RunScope,
-    dialect: Option<SqlDialect>,
     specs: &[ParameterSpec],
     values: &HashMap<String, String>,
-    max_rows: u32,
     next_run: &mut u64,
 ) -> Result<Plan, Vec<ParameterError>> {
-    let ceiling = memory_ceiling(panels.len());
+    let ceiling = memory_ceiling(count);
     let mut plan = Plan::default();
     let mut errors: Vec<ParameterError> = Vec::new();
-    for panel in panels.iter().filter(|panel| scope.includes(panel.id)) {
+    for planned in panels
+        .iter()
+        .filter(|planned| scope.includes(planned.panel.id))
+    {
+        let PlanPanel {
+            panel,
+            connection,
+            dialect,
+            max_rows,
+        } = *planned;
         if panel.sql.trim().is_empty() {
             continue;
         }
@@ -205,13 +257,13 @@ pub fn plan(
             memory_ceiling: ceiling,
             cancel: CancellationToken::new(),
         };
-        match plan
-            .groups
-            .iter_mut()
-            .find(|(context, _)| *context == panel.context)
-        {
+        let key = SessionKey {
+            connection,
+            context: panel.context.clone(),
+        };
+        match plan.groups.iter_mut().find(|(known, _)| *known == key) {
             Some((_, jobs)) => jobs.push(job),
-            None => plan.groups.push((panel.context.clone(), vec![job])),
+            None => plan.groups.push((key, vec![job])),
         }
     }
     if errors.is_empty() {
@@ -288,17 +340,18 @@ pub fn settle(
     (session, outcome)
 }
 
-/// The panels waiting and running, grouped by context, and the phase of
+/// The panels waiting and running, grouped by where they run, and the phase of
 /// every panel that ran.
 #[derive(Debug, Default)]
 pub struct Scheduler {
     /// Groups waiting or running, in the order they were asked for.
-    groups: Vec<(SessionContext, VecDeque<PanelJob>)>,
+    groups: Vec<(SessionKey, VecDeque<PanelJob>)>,
     /// The groups whose loop runs.
-    running: HashSet<SessionContext>,
+    running: HashSet<SessionKey>,
     phases: HashMap<PanelId, PanelPhase>,
-    /// The run of each panel handed to a group, and how to stop it.
-    current: HashMap<PanelId, (u64, CancellationToken)>,
+    /// The run of each panel handed to a group, how to stop it and where it
+    /// runs.
+    current: HashMap<PanelId, (u64, CancellationToken, SessionKey)>,
 }
 
 impl Scheduler {
@@ -325,7 +378,7 @@ impl Scheduler {
 
     /// The groups to start now: those waiting, in order, while fewer than
     /// [`MAX_PARALLEL`] run.
-    pub fn start(&mut self) -> Vec<SessionContext> {
+    pub fn start(&mut self) -> Vec<SessionKey> {
         let mut started = Vec::new();
         for (context, jobs) in &self.groups {
             if self.running.len() >= MAX_PARALLEL {
@@ -339,16 +392,16 @@ impl Scheduler {
         started
     }
 
-    /// The next job of the group running in `context`; `None` ends the
+    /// The next job of the group running at `context`; `None` ends the
     /// group, which then no longer counts as running.
-    pub fn next(&mut self, context: &SessionContext) -> Option<PanelJob> {
+    pub fn next(&mut self, context: &SessionKey) -> Option<PanelJob> {
         let index = self.groups.iter().position(|(known, _)| known == context);
         let job = index.and_then(|index| self.groups[index].1.pop_front());
         match job {
             Some(job) => {
                 self.phases.insert(job.panel, PanelPhase::Running);
                 self.current
-                    .insert(job.panel, (job.run, job.cancel.clone()));
+                    .insert(job.panel, (job.run, job.cancel.clone(), context.clone()));
                 Some(job)
             }
             None => {
@@ -366,7 +419,7 @@ impl Scheduler {
     /// its outcome is dropped.
     pub fn finish(&mut self, panel: PanelId, run: u64, phase: PanelPhase) -> bool {
         match self.current.get(&panel) {
-            Some((current, _)) if *current == run => {
+            Some((current, _, _)) if *current == run => {
                 self.current.remove(&panel);
                 self.phases.insert(panel, phase);
                 true
@@ -387,7 +440,7 @@ impl Scheduler {
         if dropped {
             self.phases.insert(panel, PanelPhase::Cancelled);
         }
-        if let Some((_, cancel)) = self.current.get(&panel) {
+        if let Some((_, cancel, _)) = self.current.get(&panel) {
             cancel.cancel();
         }
     }
@@ -401,6 +454,37 @@ impl Scheduler {
             .chain(self.current.keys().copied())
             .collect();
         for panel in panels {
+            self.cancel_panel(panel);
+        }
+    }
+
+    /// Marks `panel` as failed without running it (its connection cannot
+    /// run), unless it waits or runs.
+    pub fn mark_failed(&mut self, panel: PanelId) {
+        if !self.phase(panel).is_active() {
+            self.phases.insert(panel, PanelPhase::Failed);
+        }
+    }
+
+    /// Stops every panel of `connection`, waiting or running, as when the
+    /// connection's settings change or it is removed.
+    pub fn cancel_connection(&mut self, connection: ConnectionId) {
+        let waiting: Vec<PanelId> = self
+            .groups
+            .iter()
+            .filter(|(key, _)| key.connection == connection)
+            .flat_map(|(_, jobs)| jobs.iter().map(|job| job.panel))
+            .collect();
+        for panel in waiting {
+            self.cancel_panel(panel);
+        }
+        let running: Vec<PanelId> = self
+            .current
+            .iter()
+            .filter(|(_, (_, _, key))| key.connection == connection)
+            .map(|(panel, _)| *panel)
+            .collect();
+        for panel in running {
             self.cancel_panel(panel);
         }
     }
@@ -454,10 +538,11 @@ impl Scheduler {
     }
 }
 
-/// A report's sessions, one per context, each lent to one group at a time.
+/// A report's sessions, one per connection and context, each lent to one
+/// group at a time.
 #[derive(Debug, Default)]
 pub struct Sessions {
-    slots: HashMap<SessionContext, Slot>,
+    slots: HashMap<SessionKey, Slot>,
     next_lease: u64,
     clock: u64,
 }
@@ -474,7 +559,7 @@ struct Slot {
 impl Sessions {
     /// Lends the session of `context` (`None` when there is none yet: the
     /// group opens one) under a new lease.
-    pub fn take(&mut self, context: &SessionContext) -> (Option<Box<dyn Session>>, u64) {
+    pub fn take(&mut self, context: &SessionKey) -> (Option<Box<dyn Session>>, u64) {
         self.next_lease += 1;
         let lease = self.next_lease;
         let slot = self.slots.entry(context.clone()).or_default();
@@ -483,7 +568,7 @@ impl Sessions {
     }
 
     /// Whether `lease` still holds the session of `context`.
-    pub fn is_current(&self, context: &SessionContext, lease: u64) -> bool {
+    pub fn is_current(&self, context: &SessionKey, lease: u64) -> bool {
         self.slots
             .get(context)
             .is_some_and(|slot| slot.lease == Some(lease))
@@ -494,7 +579,7 @@ impl Sessions {
     /// least recently used idle ones beyond [`MAX_KEPT`].
     pub fn give_back(
         &mut self,
-        context: &SessionContext,
+        context: &SessionKey,
         lease: u64,
         session: Option<Box<dyn Session>>,
     ) -> Vec<Box<dyn Session>> {
@@ -510,7 +595,7 @@ impl Sessions {
             slot.used = self.clock;
         }
         loop {
-            let idle: Vec<(&SessionContext, u64)> = self
+            let idle: Vec<(&SessionKey, u64)> = self
                 .slots
                 .iter()
                 .filter(|(_, slot)| slot.lease.is_none() && slot.session.is_some())
@@ -537,8 +622,8 @@ impl Sessions {
 
     /// Returns the idle sessions of contexts no panel uses any more, to
     /// close.
-    pub fn retain_used(&mut self, used: &[SessionContext]) -> Vec<Box<dyn Session>> {
-        let unused: Vec<SessionContext> = self
+    pub fn retain_used(&mut self, used: &[SessionKey]) -> Vec<Box<dyn Session>> {
+        let unused: Vec<SessionKey> = self
             .slots
             .iter()
             .filter(|(context, slot)| slot.lease.is_none() && !used.contains(context))
@@ -547,6 +632,21 @@ impl Sessions {
         unused
             .into_iter()
             .filter_map(|context| self.slots.remove(&context))
+            .filter_map(|slot| slot.session)
+            .collect()
+    }
+
+    /// Returns the idle sessions of `connection`, to close, and voids the
+    /// leases of its sessions lent meanwhile, which close when given back.
+    pub fn close_connection(&mut self, connection: ConnectionId) -> Vec<Box<dyn Session>> {
+        let keys: Vec<SessionKey> = self
+            .slots
+            .keys()
+            .filter(|key| key.connection == connection)
+            .cloned()
+            .collect();
+        keys.into_iter()
+            .filter_map(|key| self.slots.remove(&key))
             .filter_map(|slot| slot.session)
             .collect()
     }
@@ -585,8 +685,39 @@ mod tests {
         }
     }
 
+    /// The test's one connection, unless a test names another.
+    fn home() -> ConnectionId {
+        static HOME: std::sync::OnceLock<ConnectionId> = std::sync::OnceLock::new();
+        *HOME.get_or_init(ConnectionId::new)
+    }
+
+    /// Where a panel on the test's connection runs in `schema`.
+    fn key(schema: Option<&str>) -> SessionKey {
+        SessionKey {
+            connection: home(),
+            context: context(schema),
+        }
+    }
+
     fn panel(id: u64, sql: &str, schema: Option<&str>) -> Panel {
-        Panel::new(PanelId(id), sql, context(schema))
+        Panel::new(
+            PanelId(id),
+            crate::reports::ConnectionRef::default(),
+            sql,
+            context(schema),
+        )
+    }
+
+    fn on_home(panels: &[Panel]) -> Vec<PlanPanel<'_>> {
+        panels
+            .iter()
+            .map(|panel| PlanPanel {
+                panel,
+                connection: home(),
+                dialect: None,
+                max_rows: 100,
+            })
+            .collect()
     }
 
     fn values(pairs: &[(&str, &str)]) -> HashMap<String, String> {
@@ -597,7 +728,15 @@ mod tests {
     }
 
     fn plan_of(panels: &[Panel], scope: &RunScope, next_run: &mut u64) -> Plan {
-        plan(panels, scope, None, &[], &HashMap::new(), 100, next_run).unwrap()
+        plan(
+            &on_home(panels),
+            panels.len(),
+            scope,
+            &[],
+            &HashMap::new(),
+            next_run,
+        )
+        .unwrap()
     }
 
     #[derive(Debug)]
@@ -641,9 +780,9 @@ mod tests {
         let groups: Vec<(Option<&str>, Vec<PanelId>)> = plan
             .groups
             .iter()
-            .map(|(context, jobs)| {
+            .map(|(key, jobs)| {
                 (
-                    context.schema.as_deref(),
+                    key.context.schema.as_deref(),
                     jobs.iter().map(|job| job.panel).collect(),
                 )
             })
@@ -667,6 +806,82 @@ mod tests {
     }
 
     #[test]
+    fn the_same_database_of_two_connections_runs_in_two_groups() {
+        let other = ConnectionId::new();
+        let panels = [
+            panel(1, "SELECT 1", Some("shop")),
+            panel(2, "SELECT 2", Some("shop")),
+            panel(3, "DELETE FROM t", None),
+        ];
+        let planned = vec![
+            PlanPanel {
+                panel: &panels[0],
+                connection: home(),
+                dialect: None,
+                max_rows: 100,
+            },
+            PlanPanel {
+                panel: &panels[1],
+                connection: other,
+                dialect: None,
+                max_rows: 7,
+            },
+            PlanPanel {
+                panel: &panels[2],
+                connection: other,
+                dialect: None,
+                max_rows: 7,
+            },
+        ];
+        let mut next_run = 0;
+        let plan = plan(
+            &planned,
+            3,
+            &RunScope::All,
+            &[],
+            &HashMap::new(),
+            &mut next_run,
+        )
+        .unwrap();
+        let keys: Vec<&SessionKey> = plan.groups.iter().map(|(key, _)| key).collect();
+        assert_eq!(keys.len(), 3);
+        assert_eq!(*keys[0], key(Some("shop")));
+        assert_eq!(keys[1].connection, other);
+        assert_eq!(plan.groups[1].1[0].requests[0].options.max_rows, 7);
+        assert_eq!(plan.connections(), [home(), other]);
+        assert_eq!(plan.statements_on(other), ["SELECT 2", "DELETE FROM t"]);
+        assert_eq!(plan.statements_on(home()), ["SELECT 1"]);
+        // Stopping one connection leaves the other's panels.
+        let mut scheduler = Scheduler::default();
+        scheduler.enqueue(plan);
+        let started = scheduler.start();
+        assert_eq!(started.len(), 3);
+        let running = scheduler.next(&started[1]).unwrap();
+        scheduler.cancel_connection(other);
+        assert!(running.cancel.is_cancelled());
+        assert_eq!(scheduler.phase(PanelId(3)), PanelPhase::Cancelled);
+        assert_eq!(scheduler.phase(PanelId(1)), PanelPhase::Queued);
+        // A panel that could not start fails; one under way keeps its phase.
+        scheduler.mark_failed(PanelId(9));
+        assert_eq!(scheduler.phase(PanelId(9)), PanelPhase::Failed);
+        scheduler.mark_failed(PanelId(1));
+        assert_eq!(scheduler.phase(PanelId(1)), PanelPhase::Queued);
+        let mut sessions = Sessions::default();
+        for key in &started {
+            let (_, lease) = sessions.take(key);
+            assert!(sessions.give_back(key, lease, session()).is_empty());
+        }
+        let (lent, lease) = sessions.take(&started[1]);
+        assert_eq!(sessions.close_connection(other).len(), 1);
+        assert_eq!(
+            sessions.give_back(&started[1], lease, lent).len(),
+            1,
+            "a session lent meanwhile closes when it comes back"
+        );
+        assert_eq!(sessions.len(), 1);
+    }
+
+    #[test]
     fn a_plan_checks_only_the_parameters_its_panels_use_and_reports_each_once() {
         let specs = [
             crate::reports::ParameterSpec {
@@ -681,12 +896,11 @@ mod tests {
         ];
         let mut next_run = 0;
         let only_first = plan(
-            &panels,
+            &on_home(&panels),
+            panels.len(),
             &RunScope::panel(PanelId(1)),
-            None,
             &specs,
             &values(&[("day", "2024-01-31")]),
-            10,
             &mut next_run,
         )
         .unwrap();
@@ -695,12 +909,11 @@ mod tests {
             [("day".to_owned(), Some("2024-01-31".to_owned()))]
         );
         let errors = plan(
-            &panels,
+            &on_home(&panels),
+            panels.len(),
             &RunScope::All,
-            None,
             &specs,
             &values(&[("day", "soon")]),
-            10,
             &mut next_run,
         )
         .unwrap_err();
@@ -737,7 +950,7 @@ mod tests {
         let started = scheduler.start();
         assert_eq!(started.len(), MAX_PARALLEL);
         assert!(scheduler.start().is_empty(), "no place is free");
-        let s1 = context(Some("s1"));
+        let s1 = key(Some("s1"));
         let first = scheduler.next(&s1).unwrap();
         assert_eq!(first.panel, PanelId(1));
         assert_eq!(scheduler.phase(PanelId(1)), PanelPhase::Running);
@@ -758,7 +971,7 @@ mod tests {
         assert!(scheduler.finish(PanelId(7), second.run, PanelPhase::Failed));
         assert!(scheduler.next(&s1).is_none(), "the group ends");
         // Its place goes to a waiting context.
-        assert_eq!(scheduler.start(), [context(Some("s5"))]);
+        assert_eq!(scheduler.start(), [key(Some("s5"))]);
         assert_eq!(scheduler.status(), TabStatus::Running);
     }
 
@@ -772,7 +985,7 @@ mod tests {
             &RunScope::panel(PanelId(1)),
             &mut next_run,
         ));
-        let none = context(None);
+        let none = key(None);
         assert_eq!(scheduler.start(), std::slice::from_ref(&none));
         let first = scheduler.next(&none).unwrap();
         scheduler.enqueue(plan_of(
@@ -796,15 +1009,15 @@ mod tests {
         let mut scheduler = Scheduler::default();
         scheduler.enqueue(plan_of(&panels, &RunScope::All, &mut next_run));
         scheduler.start();
-        let running = scheduler.next(&context(None)).unwrap();
+        let running = scheduler.next(&key(None)).unwrap();
         scheduler.cancel_panel(PanelId(2));
         assert_eq!(scheduler.phase(PanelId(2)), PanelPhase::Cancelled);
         scheduler.cancel_panel(PanelId(1));
         assert!(running.cancel.is_cancelled());
         assert!(scheduler.finish(PanelId(1), running.run, PanelPhase::Cancelled));
-        assert!(scheduler.next(&context(None)).is_none());
+        assert!(scheduler.next(&key(None)).is_none());
         // A removed panel's run is dropped when it reports back.
-        let other = scheduler.next(&context(Some("x"))).unwrap();
+        let other = scheduler.next(&key(Some("x"))).unwrap();
         scheduler.remove_panel(PanelId(3));
         assert!(other.cancel.is_cancelled());
         assert!(!scheduler.finish(PanelId(3), other.run, PanelPhase::Succeeded));
@@ -813,19 +1026,18 @@ mod tests {
         // A reset voids everything under way.
         scheduler.enqueue(plan_of(&panels, &RunScope::All, &mut next_run));
         scheduler.start();
-        let job = scheduler.next(&context(None)).unwrap();
+        let job = scheduler.next(&key(None)).unwrap();
         scheduler.reset();
         assert!(job.cancel.is_cancelled());
         assert!(!scheduler.finish(job.panel, job.run, PanelPhase::Succeeded));
-        assert!(scheduler.next(&context(None)).is_none());
+        assert!(scheduler.next(&key(None)).is_none());
         assert!(!scheduler.is_busy());
     }
 
     #[test]
     fn sessions_are_lent_under_leases_and_the_oldest_idle_ones_close() {
         let mut sessions = Sessions::default();
-        let contexts: Vec<SessionContext> =
-            (0..6).map(|n| context(Some(&format!("s{n}")))).collect();
+        let contexts: Vec<SessionKey> = (0..6).map(|n| key(Some(&format!("s{n}")))).collect();
         let (none, lease) = sessions.take(&contexts[0]);
         assert!(none.is_none());
         assert!(sessions.is_current(&contexts[0], lease));

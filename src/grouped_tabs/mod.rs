@@ -308,6 +308,21 @@ impl GroupedTabs {
         Ok(())
     }
 
+    /// Whether the group's header offers a button for a new tab, as every
+    /// group does by default. A group that holds one kind of content the
+    /// host does not create on request (a report) hides it.
+    pub fn set_group_new_tab(
+        &mut self,
+        group: TabGroupId,
+        new_tab: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), TabsError> {
+        if self.model.set_new_tab(group, new_tab)? {
+            cx.notify();
+        }
+        Ok(())
+    }
+
     /// Removing a group closes its tabs and emits `TabClosed` for each one.
     pub fn remove_group(
         &mut self,
@@ -775,20 +790,22 @@ impl GroupedTabs {
                     ),
             )
             .child(div().flex_1().min_w_0())
-            .child(
-                Button::new(("add-tab", id.0))
-                    .ghost()
-                    .xsmall()
-                    .size(px(21.))
-                    .text_color(cx.theme().muted_foreground)
-                    .icon(IconName::Plus)
-                    .accessibility_label(tr!("New tab in {0}", group.name))
-                    .tooltip(tr!("New tab in {0}", group.name))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.stop_propagation();
-                        cx.emit(GroupedTabsEvent::NewTabRequested(id));
-                    })),
-            );
+            .when(group.new_tab, |header| {
+                header.child(
+                    Button::new(("add-tab", id.0))
+                        .ghost()
+                        .xsmall()
+                        .size(px(21.))
+                        .text_color(cx.theme().muted_foreground)
+                        .icon(IconName::Plus)
+                        .accessibility_label(tr!("New tab in {0}", group.name))
+                        .tooltip(tr!("New tab in {0}", group.name))
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.stop_propagation();
+                            cx.emit(GroupedTabsEvent::NewTabRequested(id));
+                        })),
+                )
+            });
 
         let tabs = group.tabs.iter().enumerate().map(|(tab_index, tab)| {
             let tab_id = tab.id;

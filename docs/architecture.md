@@ -264,26 +264,35 @@ sequenceDiagram
 
 ### Run a report
 
-A report is a set of panels, each with its SQL, its context (the database,
-schema or catalog of the report's connection) and its chart
-([ADR-0025](adr/0025-report-panels.md)).
+A report is a set of panels, each with its connection, its SQL, its context
+(the database, schema or catalog of that connection) and its chart
+([ADR-0025](adr/0025-report-panels.md)). The host gives the report view one
+`ReportSource` per connection (what runs it, its row limit, environment,
+dialect, databases and name index) whenever a connection, a password or the
+metadata changes; a connection whose settings changed, or that is gone, stops
+its panels and closes its sessions.
 
-1. `ReportView` (`src/app/report_view.rs`) reads the form and asks
-   `jykre::reports::run::plan` for the panels to run (all, or the one whose
-   editor has the keyboard): one `QueryRequest` per statement, built with
+1. `ReportView` (`src/app/report_view.rs`) resolves each panel's source,
+   reads the form and asks `jykre::reports::run::plan` for the panels to run
+   (all, or the one whose editor has the keyboard): one `QueryRequest` per
+   statement, in the dialect and within the row limit of the panel's
+   connection, built with
    `jykre::reports::params::requests`, which finds the `:name` markers with
    `jykre_sql::named_markers`, checks only the values the panel's SQL uses
    (a list parameter takes one of its choices) and puts them in the request
    with the byte ranges of their markers. The values never go into the SQL
    text ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)). The jobs
-   are grouped by context, in the report's order.
-2. As in a query tab, a missing password is asked for first (panels asked for
-   meanwhile join the waiting run), and a run on a production connection with
-   risky statements in any panel is confirmed first; exactly the plan
-   confirmed runs.
+   are grouped by `run::SessionKey` (connection and context), in the report's
+   order. A panel whose connection is gone or cannot run fails alone, saying
+   why.
+2. As in a query tab, each connection's missing password is asked for first,
+   one connection after another (panels asked for meanwhile join the waiting
+   run), and the risky statements of every production connection of the run
+   are confirmed first, in one dialog naming those connections; exactly the
+   plan confirmed runs.
 3. `run::Scheduler` starts at most four groups at once; a group's panels run
-   one after the other on the session of its context, lent by `run::Sessions`
-   (one per context, at most four kept idle). For each panel,
+   one after the other on the session of its connection and context, lent by
+   `run::Sessions` (one per key, at most four kept idle). For each panel,
    `backend::query_in_context` opens or reopens the session with the
    connection the driver gives for the context
    (`Driver::session_connection`: another database's for PostgreSQL), runs

@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 pub struct Document<'a> {
     pub title: &'a str,
     pub description: &'a str,
-    pub connection: &'a str,
+    /// The connections the panels run on, as the meta line names them.
+    pub connections: Vec<String>,
     pub panels: Vec<PanelDocument<'a>>,
     /// When the report ran, as UTC text.
     pub generated: String,
@@ -25,8 +26,9 @@ pub struct Document<'a> {
 /// One panel of the document.
 pub struct PanelDocument<'a> {
     pub title: String,
-    /// Where the panel ran, as the report shows it.
-    pub context: String,
+    /// Where the panel ran, as the report shows it: its connection and
+    /// database.
+    pub source: String,
     pub width: Width,
     /// The last run's result; `None` when the panel did not run.
     pub result: Option<&'a ResultData>,
@@ -128,7 +130,7 @@ pub fn html(document: &Document) -> String {
         "<p class=\"meta\">{}</p>",
         escape(&crate::tr!(
             "{0} · generated {1} UTC",
-            document.connection,
+            document.connections.join(", "),
             document.generated
         ))
     ));
@@ -154,8 +156,8 @@ fn section(page: &mut String, panel: &PanelDocument, shared: &[(String, Option<S
         Width::Full => "<section class=\"full\">",
     });
     page.push_str(&format!("<h2>{}</h2>", escape(&panel.title)));
-    if !panel.context.is_empty() {
-        page.push_str(&format!("<p class=\"meta\">{}</p>", escape(&panel.context)));
+    if !panel.source.is_empty() {
+        page.push_str(&format!("<p class=\"meta\">{}</p>", escape(&panel.source)));
     }
     // A panel run again with other values says which.
     let own: Vec<(String, Option<String>)> = panel
@@ -508,7 +510,7 @@ mod tests {
     fn panel<'a>(result: Option<&'a ResultData>, visual: Option<&'a Visual>) -> PanelDocument<'a> {
         PanelDocument {
             title: "Revenue <by region>".into(),
-            context: "shop".into(),
+            source: "warehouse · shop".into(),
             width: Width::Full,
             result,
             limited: true,
@@ -526,7 +528,7 @@ mod tests {
         Document {
             title: "Sales <2024>",
             description: "By \"region\"",
-            connection: "warehouse",
+            connections: vec!["warehouse".into(), "archive <old>".into()],
             panels,
             generated: "2026-11-04 10:00:00".into(),
         }
@@ -576,6 +578,8 @@ mod tests {
         assert!(page.contains("<title>Sales &lt;2024&gt;</title>"));
         assert!(page.contains("By &quot;region&quot;"));
         assert!(page.contains("<h2>Revenue &lt;by region&gt;</h2>"));
+        assert!(page.contains("warehouse, archive &lt;old&gt; · generated"));
+        assert!(page.contains("<p class=\"meta\">warehouse · shop</p>"));
         assert!(page.contains("<td class=\"null\">NULL</td>"));
         assert!(page.contains("<td class=\"number\">10.50</td>"));
         assert!(page.contains("<dd>NULL</dd>"));

@@ -15,6 +15,8 @@ pub(super) struct Group<C> {
     pub color: Hsla,
     pub tabs: Vec<Tab<C>>,
     pub last_selected: Option<TabId>,
+    /// The group's header offers a button for a new tab.
+    pub new_tab: bool,
 }
 
 /// Layout and selection are independent of GPUI windows and content types.
@@ -51,8 +53,22 @@ impl<C> Model<C> {
             color,
             tabs: Vec::new(),
             last_selected: None,
+            new_tab: true,
         });
         id
+    }
+
+    /// Whether the group's header offers a new tab; `Ok(true)` when that
+    /// changed.
+    pub fn set_new_tab(&mut self, id: TabGroupId, new_tab: bool) -> Result<bool, TabsError> {
+        let group = self
+            .groups
+            .iter_mut()
+            .find(|group| group.id == id)
+            .ok_or(TabsError::GroupNotFound)?;
+        let changed = group.new_tab != new_tab;
+        group.new_tab = new_tab;
+        Ok(changed)
     }
 
     pub fn group(&self, id: TabGroupId) -> Option<&Group<C>> {

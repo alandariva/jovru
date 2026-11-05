@@ -97,13 +97,15 @@ cannot be read starts an empty workspace. Results are never stored.
 
 `reports` keeps the report definitions ([ADR-0024](adr/0024-reports.md),
 [ADR-0025](adr/0025-report-panels.md), `jykre::reports`):
-`{"version": 2, "next_id": n, "reports": [...]}`, each report with a stable
-numeric `id`, its title, description, connection (`{"id": …, "name": …}`),
-parameters (name, label, kind, default, required, choices), panels (`id`,
-title, SQL, context as `{"catalog": …, "schema": …}`, optional chart,
-`table`, `width`) and when it was created and last changed. A version 1
-report (one top-level SQL and chart) is read as one panel and written back as
-version 2. Keys this version does not know are kept in the library, each
+`{"version": 3, "next_id": n, "reports": [...]}`, each report with a stable
+numeric `id`, its title, description, parameters (name, label, kind,
+default, required, choices), panels (`id`, title, connection as
+`{"id": …, "name": …}`, SQL, context as `{"catalog": …, "schema": …}`,
+optional chart, `table`, `width`) and when it was created and last changed.
+A version 1 report (one top-level SQL and chart) is read as one panel, and
+the report-level connection of versions 1 and 2 is given to each of its
+panels; both are written back as version 3. Keys this version does not know
+are kept in the library, each
 report, parameter and panel. It stores definitions only: never results, and
 never the values typed for a run, only each parameter's default and the
 choices of a list. It lives apart from `workspace.state`, whose writer keeps

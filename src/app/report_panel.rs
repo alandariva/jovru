@@ -1,12 +1,14 @@
 //! A panel of a report ([ADR-0025](../../docs/adr/0025-report-panels.md)):
-//! its SQL, the database of the report's connection it runs in, and the
-//! chart, indicator or table it shows. It is its own entity, embedded with
+//! its SQL, the connection and database it runs in, and the chart,
+//! indicator or table it shows. It is its own entity, embedded with
 //! `.cached`, so hovering one panel's grid does not lay the others out.
 //!
 //! The panel holds its definition and what its last run showed; the report
-//! runs it (its sessions are shared by the panels of one database) and hands
-//! it the outcome. Its SQL editor is created the first time the panel is
-//! edited, with the connection's names for completion.
+//! runs it (its sessions are shared by the panels of one connection and
+//! database) and hands it the outcome. Its SQL editor is created the first
+//! time the panel is edited, with its connection's names for completion.
+//! While the report is edited, the panel's header chooses where it runs and
+//! its grip drags it to another place.
 use super::report_chart::ReportChart;
 use super::result_grid::ResultGrid;
 use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
@@ -23,7 +25,7 @@ use jykre::drivers::*;
 use jykre::reports::chart::{self, Visual};
 use jykre::reports::export::PanelDocument;
 use jykre::reports::run::{PanelOutcome, PanelPhase};
-use jykre::reports::{ChartKind, ChartSpec, Direction, Panel, PanelId, Width};
+use jykre::reports::{ChartKind, ChartSpec, ConnectionRef, Direction, Panel, PanelId, Width};
 use jykre::result::ResultData;
 use jykre::{backend, tr};
 use std::rc::Rc;
@@ -43,17 +45,141 @@ const TABLE_ALONE_HEIGHT: f32 = 300.;
 const NOTICE_HEIGHT: f32 = 28.;
 const STATEMENTS_HEIGHT: f32 = 120.;
 
+/// A connection a report's panels may run on, as the host knows it.
+#[derive(Clone)]
+pub struct ReportSource {
+    pub connection: ConnectionRef,
+    /// `None` while the connection cannot run (no profile, demo).
+    pub input: Option<ResolvedConnection>,
+    pub row_limit: u32,
+    pub environment: Option<jykre::connection_appearance::Environment>,
+    pub dialect: Option<SqlDialect>,
+    /// The databases (namespaces) a panel may run in.
+    pub choices: Vec<SessionContext>,
+    /// The connection's cache names, once the explorer read them.
+    pub names: Option<(ConnectionId, Arc<NameIndex>)>,
+}
+
+/// The connections a report's panels may run on.
+pub type Sources = Rc<Vec<ReportSource>>;
+
+/// The source `connection` names: by its identity, then by its name.
+pub fn find_source<'a>(
+    sources: &'a [ReportSource],
+    connection: &ConnectionRef,
+) -> Option<&'a ReportSource> {
+    connection
+        .id
+        .and_then(|id| {
+            sources
+                .iter()
+                .find(|source| source.connection.id == Some(id))
+        })
+        .or_else(|| {
+            sources
+                .iter()
+                .find(|source| source.connection.name == connection.name)
+        })
+}
+
+/// What a source menu does with the connection and database chosen.
+pub type PickSource = Rc<dyn Fn(ConnectionRef, SessionContext, &mut Window, &mut App)>;
+
+/// Fills `menu` with one submenu per connection, each offering the session
+/// default and the connection's databases; `current` is checked.
+pub fn source_menu(
+    mut menu: gpui_kit::component::menu::PopupMenu,
+    window: &mut Window,
+    cx: &mut Context<gpui_kit::component::menu::PopupMenu>,
+    sources: &Sources,
+    current: Option<(ConnectionRef, SessionContext)>,
+    pick: PickSource,
+) -> gpui_kit::component::menu::PopupMenu {
+    if sources.is_empty() {
+        return menu.label(tr!("No connections yet. Add one in the explorer."));
+    }
+    for (index, source) in sources.iter().enumerate() {
+        let sources = sources.clone();
+        let current = current.clone();
+        let pick = pick.clone();
+        let here = current
+            .as_ref()
+            .is_some_and(|(connection, _)| source.connection.same(connection));
+        let label = if here {
+            format!("✓ {}", source.connection.name)
+        } else {
+            source.connection.name.clone()
+        };
+        menu = menu.submenu(label, window, cx, move |mut menu, _, _| {
+            let Some(source) = sources.get(index) else {
+                return menu;
+            };
+            let item = |label: String, context: SessionContext| {
+                let pick = pick.clone();
+                let connection = source.connection.clone();
+                let checked = current.as_ref().is_some_and(|(chosen, chosen_context)| {
+                    chosen.same(&connection) && *chosen_context == context
+                });
+                PopupMenuItem::new(label)
+                    .checked(checked)
+                    .on_click(move |_, window, cx| {
+                        pick(connection.clone(), context.clone(), window, cx)
+                    })
+            };
+            menu = menu.item(item(
+                tr!("Session default").to_owned(),
+                SessionContext::default(),
+            ));
+            if source.choices.is_empty() {
+                menu = menu.label(tr!("Refresh the metadata to list namespaces"));
+            }
+            for choice in &source.choices {
+                menu = menu.item(item(jykre::ddl::context_label(choice), choice.clone()));
+            }
+            menu
+        });
+    }
+    menu
+}
+
 /// What the panels' editors need from the report. The report keeps it, so
 /// a panel opened for editing later gets it too.
 #[derive(Clone, Default)]
 pub struct PanelLanguage {
-    pub dialect: Option<SqlDialect>,
-    pub connection: Option<ConnectionConfig>,
     pub catalogs: Arc<SqlCatalogs>,
-    /// The connection's cache names, once the explorer read them.
-    pub names: Option<(ConnectionId, Arc<NameIndex>)>,
-    /// The databases (namespaces) of the connection a panel may run in.
-    pub choices: Rc<Vec<SessionContext>>,
+    pub sources: Sources,
+}
+
+/// A panel being dragged to another place of its report.
+#[derive(Clone)]
+pub struct PanelDrag {
+    /// The report the panel belongs to; another report refuses it.
+    pub owner: EntityId,
+    pub panel: PanelId,
+    pub title: SharedString,
+}
+
+/// What follows the pointer while a panel is dragged.
+struct PanelDragPreview {
+    title: SharedString,
+}
+
+impl Render for PanelDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        row()
+            .w(px(220.))
+            .h(px(36.))
+            .px_3()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgb(MINT))
+            .bg(rgb(SURFACE))
+            .shadow_md()
+            .text_size(px(13.))
+            .text_color(rgb(TEXT))
+            .child(icon(I::GripVertical, MINT))
+            .child(div().min_w_0().truncate().child(self.title.clone()))
+    }
 }
 
 pub enum PanelEvent {
@@ -96,6 +222,8 @@ struct Shown {
 
 pub struct ReportPanel {
     panel: Panel,
+    /// The report the panel belongs to, for dragging it.
+    owner: EntityId,
     index: usize,
     count: usize,
     /// The report is being edited: the panel can be moved, resized and
@@ -129,6 +257,7 @@ pub struct ReportPanel {
 impl ReportPanel {
     pub fn new(
         panel: Panel,
+        owner: EntityId,
         fresh: bool,
         language: PanelLanguage,
         window: &mut Window,
@@ -148,6 +277,7 @@ impl ReportPanel {
         })];
         Self {
             panel,
+            owner,
             index: 0,
             count: 1,
             arranging: false,
@@ -294,16 +424,77 @@ impl ReportPanel {
         self.apply_language(cx);
     }
 
-    /// What the editor needs from the report: the connection, its dialect,
-    /// the catalogs, the cache's names and where the panel's names resolve.
+    /// What the editor needs from the report: the connections, with their
+    /// dialect and cache names, and the catalogs.
     pub fn set_language(&mut self, language: PanelLanguage, cx: &mut Context<Self>) {
         self.language = language;
         self.apply_language(cx);
         cx.notify();
     }
 
+    /// The connection the panel runs on, as the host knows it now.
+    pub fn source(&self) -> Option<&ReportSource> {
+        find_source(&self.language.sources, &self.panel.connection)
+    }
+
+    /// Where the panel runs, with the connection's current name.
+    fn source_label(&self) -> String {
+        let name = self
+            .source()
+            .map_or(self.panel.connection.name.as_str(), |source| {
+                source.connection.name.as_str()
+            });
+        let name = if name.is_empty() {
+            tr!("Choose a connection")
+        } else {
+            name
+        };
+        jykre::reports::source_label(name, &self.panel.context)
+    }
+
+    /// Whether the connection exists and lists the panel's database.
+    fn source_known(&self) -> bool {
+        self.source().is_some_and(|source| {
+            self.panel.context == SessionContext::default()
+                || source.choices.contains(&self.panel.context)
+        })
+    }
+
+    /// Runs on `connection` in `context` from now on. Another connection
+    /// brings its dialect and names to the editor, and the report reads the
+    /// parameters again by that dialect.
+    pub fn set_source(
+        &mut self,
+        connection: ConnectionRef,
+        context: SessionContext,
+        cx: &mut Context<Self>,
+    ) {
+        let moved = !self.panel.connection.same(&connection);
+        if !moved && self.panel.context == context {
+            return;
+        }
+        self.panel.connection = connection;
+        self.panel.context = context;
+        self.apply_language(cx);
+        if moved {
+            cx.emit(PanelEvent::SqlChanged);
+        }
+        cx.emit(PanelEvent::Changed);
+        cx.notify();
+    }
+
+    /// The run could not start: the panel says why.
+    pub fn fail(&mut self, message: String, cx: &mut Context<Self>) {
+        self.error = Some(message.clone());
+        if self.has_result() {
+            self.notice = Some(Feedback::new(Tone::Error, message));
+        }
+        cx.notify();
+    }
+
     fn apply_language(&mut self, cx: &mut Context<Self>) {
-        let language = self.language.clone();
+        let source = self.source().cloned();
+        let catalogs_now = self.language.catalogs.clone();
         let context = self.panel.context.clone();
         let Some(editor) = self.editor.as_mut() else {
             return;
@@ -311,16 +502,21 @@ impl ReportPanel {
         let catalogs = (!editor
             .catalogs
             .as_ref()
-            .is_some_and(|known| Arc::ptr_eq(known, &language.catalogs)))
-        .then(|| language.catalogs.clone());
-        let names = language
-            .names
+            .is_some_and(|known| Arc::ptr_eq(known, &catalogs_now)))
+        .then(|| catalogs_now.clone());
+        let source_names = source.as_ref().and_then(|source| source.names.clone());
+        let names = source_names
             .as_ref()
             .map(|(id, names)| (*id, names.version));
-        let new_names = (editor.names != names).then(|| language.names.clone());
+        let new_names = (editor.names != names).then(|| source_names.clone());
+        let config = source
+            .as_ref()
+            .and_then(|source| source.input.as_ref())
+            .map(|input| input.config.clone());
+        let dialect = source.as_ref().and_then(|source| source.dialect);
         editor.sql_editor.update(cx, |sql_editor, cx| {
-            sql_editor.set_connection(language.connection.as_ref());
-            sql_editor.set_dialect(language.dialect, cx);
+            sql_editor.set_connection(config.as_ref());
+            sql_editor.set_dialect(dialect, cx);
             if let Some(catalogs) = catalogs.clone() {
                 sql_editor.set_catalogs(catalogs, cx);
             }
@@ -475,22 +671,11 @@ impl ReportPanel {
         cx.notify();
     }
 
-    fn set_context(&mut self, context: SessionContext, cx: &mut Context<Self>) {
-        self.panel.context = context;
-        self.apply_language(cx);
-        cx.emit(PanelEvent::Changed);
-        cx.notify();
-    }
-
     /// The panel as the print document shows it.
     pub fn print_parts(&self) -> PanelDocument<'_> {
         PanelDocument {
             title: self.panel.shown_title(self.index),
-            context: if self.panel.context == SessionContext::default() {
-                String::new()
-            } else {
-                jykre::ddl::context_label(&self.panel.context)
-            },
+            source: self.source_label(),
             width: self.panel.width,
             result: self.shown.as_ref().map(|shown| &*shown.data),
             limited: self.shown.as_ref().is_some_and(|shown| shown.limited),
@@ -576,6 +761,7 @@ impl ReportPanel {
             .gap_1()
             .border_b_1()
             .border_color(rgb(BORDER))
+            .when(self.arranging, |s| s.child(self.grip(&title)))
             .child(icon(self.symbol(), MINT))
             .child(
                 div()
@@ -586,8 +772,15 @@ impl ReportPanel {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(title),
             )
-            .when(self.panel.context != SessionContext::default(), |s| {
-                s.child(badge(jykre::ddl::context_label(&self.panel.context), BLUE))
+            .map(|s| {
+                if self.arranging {
+                    s.child(self.source_button(cx))
+                } else {
+                    s.child(badge(
+                        self.source_label(),
+                        if self.source_known() { BLUE } else { AMBER },
+                    ))
+                }
             })
             .child(self.phase_mark())
             .child(if active {
@@ -725,15 +918,13 @@ impl ReportPanel {
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(
-                row()
-                    .child(
-                        div().w(px(260.)).child(
-                            Input::new(&self.title)
-                                .small()
-                                .aria_label(tr!("Panel title")),
-                        ),
-                    )
-                    .child(self.context_menu(cx)),
+                row().child(
+                    div().w(px(260.)).child(
+                        Input::new(&self.title)
+                            .small()
+                            .aria_label(tr!("Panel title")),
+                    ),
+                ),
             )
             .child(
                 div()
@@ -747,53 +938,60 @@ impl ReportPanel {
             .child(self.visual_controls(cx))
     }
 
-    /// Where the panel's unqualified names resolve: the session default or
-    /// one of the connection's databases (schemas, catalogs).
-    fn context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Where the panel runs: its connection and the database its
+    /// unqualified names resolve in, chosen in a menu of the connections,
+    /// each with its databases.
+    fn source_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
-        let current = self.panel.context.clone();
-        let choices = self.language.choices.clone();
-        let known = current == SessionContext::default() || choices.contains(&current);
-        let shown = if current == SessionContext::default() {
-            tr!("Session default").to_owned()
-        } else {
-            jykre::ddl::context_label(&current)
-        };
-        Button::new("panel-context")
+        let known = self.source_known();
+        let shown = self.source_label();
+        let sources = self.language.sources.clone();
+        let current = Some((self.panel.connection.clone(), self.panel.context.clone()));
+        let pick: PickSource = Rc::new(move |connection, context, _, cx| {
+            let _ = view.update(cx, |this, cx| this.set_source(connection, context, cx));
+        });
+        Button::new("panel-source")
             .ghost()
             .small()
             .icon(if known { I::Database } else { I::TriangleAlert })
             .label(shown.clone())
             .dropdown_caret(true)
-            .accessibility_label(tr!("Database: {0}", shown))
+            .accessibility_label(tr!("Runs on: {0}", shown))
             .tooltip(if known {
-                tr!("Where the panel's unqualified names resolve")
+                tr!("The connection and database the panel runs in")
             } else {
-                tr!("The connection does not list this database. Refresh its metadata or choose another.")
+                tr!("The connection or its database is no longer listed. Choose another one or refresh its metadata.")
             })
-            .dropdown_menu(move |menu, _, _| {
-                let pick = |context: SessionContext| {
-                    let view = view.clone();
-                    move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                        let _ = view.update(cx, |this, cx| this.set_context(context.clone(), cx));
-                    }
-                };
-                let mut menu = menu.item(
-                    PopupMenuItem::new(tr!("Session default"))
-                        .checked(current == SessionContext::default())
-                        .on_click(pick(SessionContext::default())),
-                );
-                if choices.is_empty() {
-                    menu = menu.label(tr!("Refresh the metadata to list namespaces"));
-                }
-                for choice in choices.iter() {
-                    menu = menu.item(
-                        PopupMenuItem::new(jykre::ddl::context_label(choice))
-                            .checked(*choice == current)
-                            .on_click(pick(choice.clone())),
-                    );
-                }
-                menu
+            .dropdown_menu(move |menu, window, cx| {
+                source_menu(menu, window, cx, &sources, current.clone(), pick.clone())
+            })
+    }
+
+    /// The grip that drags the panel to another place of the report.
+    fn grip(&self, title: &str) -> impl IntoElement {
+        let drag = PanelDrag {
+            owner: self.owner,
+            panel: self.panel.id,
+            title: title.to_owned().into(),
+        };
+        div()
+            .id("panel-grip")
+            .flex_none()
+            .size(px(24.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .cursor_grab()
+            .hover(|s| s.bg(rgb(HOVER)))
+            .tooltip(move |window, cx| {
+                Tooltip::new(tr!("Drag to move the panel")).build(window, cx)
+            })
+            .child(icon(I::GripVertical, FAINT))
+            .on_drag(drag, |drag, _, _, cx| {
+                cx.new(|_| PanelDragPreview {
+                    title: drag.title.clone(),
+                })
             })
     }
 

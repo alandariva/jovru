@@ -1805,6 +1805,8 @@ impl AppView {
                         Ok(namespaces) => {
                             this.connections[index].namespaces = namespaces;
                             this.push_context_choices(index, cx);
+                            // Report panels pick their database the same way.
+                            this.sync_reports(cx);
                         }
                         Err(error) => {
                             tracing::debug!(error_code = ?error.code, "namespaces unavailable")
@@ -1832,6 +1834,8 @@ impl AppView {
                     Ok(names) => {
                         this.connections[index].names = Some(std::sync::Arc::new(names));
                         this.push_context_choices(index, cx);
+                        // Report panels complete names the same way.
+                        this.sync_reports(cx);
                     }
                     Err(error) => {
                         tracing::debug!(error_code = ?error.code, "editor names unavailable")
@@ -2069,16 +2073,6 @@ impl AppView {
                     }
                 }
             });
-        }
-        // Report panels pick their database and complete names the same way.
-        let reports: Vec<_> = self
-            .report_tabs
-            .values()
-            .map(|tab| tab.view.clone())
-            .filter(|view| self.report_connection(&view.read(cx).connection()) == Some(index))
-            .collect();
-        for view in reports {
-            self.push_report_language(&view, index, cx);
         }
     }
 

@@ -1,7 +1,7 @@
 //! The dialog that adds a query tab's SQL to a saved report
-//! ([ADR-0025](../../docs/adr/0025-report-panels.md)): it lists the reports
-//! of the tab's connection, with a search, and the one chosen gets a new
-//! panel with the SQL in the tab's database. Nothing is stored until the
+//! ([ADR-0025](../../docs/adr/0025-report-panels.md)): it lists the saved
+//! reports, with a search, and the one chosen gets a new panel with the SQL
+//! on the tab's connection and in its database. Nothing is stored until the
 //! report is saved.
 use super::*;
 use jykre::reports::ConnectionRef;
@@ -28,15 +28,6 @@ impl ReportPicker {
     }
 }
 
-/// Whether `report` runs on `connection`: by identity when both have one,
-/// otherwise by name.
-fn same_connection(report: &ConnectionRef, connection: &ConnectionRef) -> bool {
-    match (report.id, connection.id) {
-        (Some(report), Some(connection)) => report == connection,
-        _ => report.name == connection.name,
-    }
-}
-
 impl AppView {
     /// Opens the dialog for `sql`, to run in `context` of `connection`.
     pub(super) fn open_report_picker(
@@ -56,9 +47,8 @@ impl AppView {
             .iter()
             .find(|candidate| candidate.name == connection)
             .and_then(|candidate| candidate.profile.as_ref().map(|profile| profile.id));
-        let search = cx.new(|cx| {
-            InputState::new(window, cx).placeholder(tr!("Search the reports of this connection"))
-        });
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Search the saved reports")));
         let subscription = cx.subscribe_in(
             &search,
             window,
@@ -103,9 +93,7 @@ impl AppView {
             .reports
             .reports
             .iter()
-            .filter(|report| {
-                same_connection(&report.connection, &picker.connection) && report.matches(&query)
-            })
+            .filter(|report| report.matches(&query))
             .map(|report| report.id)
             .collect();
         if let Some(picker) = &mut self.report_picker {
@@ -124,7 +112,14 @@ impl AppView {
 
     fn pick_report(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(picker) = self.report_picker.take() {
-            self.add_to_report(id, picker.sql, picker.context, window, cx);
+            self.add_to_report(
+                id,
+                picker.connection,
+                picker.sql,
+                picker.context,
+                window,
+                cx,
+            );
         }
     }
 
@@ -132,9 +127,13 @@ impl AppView {
         let id = *self.report_picker.as_ref()?.shown.get(position)?;
         let report = self.reports.get(id)?;
         let detail = if report.panels.len() == 1 {
-            tr!("1 panel · {0}", report.preview(1))
+            tr!("{0} · 1 panel", report.connections_label())
         } else {
-            tr!("{0} panels · {1}", report.panels.len(), report.preview(1))
+            tr!(
+                "{0} · {1} panels",
+                report.connections_label(),
+                report.panels.len()
+            )
         };
         Some(
             column()
@@ -184,11 +183,7 @@ impl AppView {
         };
         let title = tr!("Add to a report");
         let empty = picker.shown.is_empty();
-        let none_on_connection = !self
-            .reports
-            .reports
-            .iter()
-            .any(|report| same_connection(&report.connection, &picker.connection));
+        let no_reports = self.reports.reports.is_empty();
         self.overlay("picker-backdrop", cx)
             .child(
                 column()
@@ -212,22 +207,22 @@ impl AppView {
                             .child(title),
                     )
                     .child(label(tr!(
-                        "The query becomes a new panel of the report, in this tab's database. Save the report to keep it."
+                        "The query becomes a new panel of the report, on this tab's connection and database. Save the report to keep it."
                     )))
                     .child(
                         Input::new(&picker.search)
                             .prefix(I::Search)
                             .w_full()
-                            .aria_label(tr!("Search the reports of this connection")),
+                            .aria_label(tr!("Search the saved reports")),
                     )
                     .child(if empty {
                         div()
                             .p_3()
                             .text_size(px(14.))
                             .text_color(rgb(MUTED))
-                            .child(if none_on_connection {
+                            .child(if no_reports {
                                 tr!(
-                                    "No saved report uses this connection yet. Save the query as a new report instead."
+                                    "There is no saved report yet. Save the query as a new report instead."
                                 )
                             } else {
                                 tr!("Nothing matches the search.")

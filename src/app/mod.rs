@@ -409,16 +409,13 @@ impl AppView {
         .detach();
         let tab_subscription =
             cx.subscribe_in(&tabs, window, |this, _, event, window, cx| match event {
+                // A report's own group offers no new tab.
+                GroupedTabsEvent::NewTabRequested(group) if this.is_report_group(*group) => {}
                 GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
                 GroupedTabsEvent::TabClosed(tab) => {
                     this.panels.remove(tab);
                     this.report_tabs.remove(tab);
                     this.save_state_soon(cx);
-                }
-                GroupedTabsEvent::TabMoved { tab, from, to, .. }
-                    if from != to && this.report_tabs.contains_key(tab) =>
-                {
-                    this.report_moved(*tab, *to, cx);
                 }
                 GroupedTabsEvent::SelectionChanged(_) => this.save_state_soon(cx),
                 GroupedTabsEvent::CloseRequested(tab) => this.request_close(*tab, window, cx),
@@ -1449,12 +1446,13 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let same_group = self.tabs.read(cx).group_of(tab) == Some(group);
-        if self.report_tabs.contains_key(&tab) {
-            // A report keeps its definition on any connection; the move
-            // itself switches it ([`AppView::report_moved`]).
-            let _ = self
-                .tabs
-                .update(cx, |tabs, cx| tabs.move_tab(tab, group, index, cx));
+        // A report tab stays in its own group, and no other tab joins one.
+        if self.report_tabs.contains_key(&tab) || self.is_report_group(group) {
+            if same_group {
+                let _ = self
+                    .tabs
+                    .update(cx, |tabs, cx| tabs.move_tab(tab, group, index, cx));
+            }
             return;
         }
         let Some(panel) = self.panels.get(&tab) else {

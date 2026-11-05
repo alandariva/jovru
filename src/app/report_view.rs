@@ -3,14 +3,18 @@
 //! description and the parameters its panels share), the parameter form,
 //! and its panels laid out in two columns.
 //!
-//! Each panel runs its SQL in its own database of the report's connection.
-//! Panels of one database share a session and run in turn; different
-//! databases run at the same time, at most four at once
-//! ([`jykre::reports::run`] decides; this view only starts each group's
-//! loop). Parameter values are bound by the driver, never written into the
-//! SQL (ADR-0023).
-use super::report_panel::{PanelEvent, PanelLanguage, ReportPanel};
-use super::sql_editor::{NameIndex, SqlCatalogs};
+//! Each panel runs its SQL on its own connection and database. Panels of one
+//! connection and database share a session and run in turn; others run at
+//! the same time, at most four at once ([`jykre::reports::run`] decides;
+//! this view only starts each group's loop). Parameter values are bound by
+//! the driver, never written into the SQL (ADR-0023). While the report is
+//! edited, a panel dragged by its grip and dropped on another takes its
+//! place.
+use super::report_panel::{
+    PanelDrag, PanelEvent, PanelLanguage, PickSource, ReportPanel, ReportSource, Sources,
+    find_source, source_menu,
+};
+use super::sql_editor::SqlCatalogs;
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::Sizable;
@@ -20,9 +24,12 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::drivers::*;
 use jykre::reports::params::{self, ParameterProblem};
-use jykre::reports::run::{self, PanelOutcome, PanelPhase, Plan, RunScope, Scheduler, Sessions};
+use jykre::reports::run::{
+    self, PanelOutcome, PanelPhase, Plan, PlanPanel, RunScope, Scheduler, SessionKey, Sessions,
+};
 use jykre::reports::{
-    ConnectionRef, Direction, MAX_CHOICES, MAX_PANELS, Panel, PanelId, Report, Width, export,
+    ConnectionRef, Direction, MAX_CHOICES, MAX_PANELS, Panel, PanelId, Report, Width, drop_index,
+    export,
 };
 use jykre::{backend, connection_store, tr};
 use std::collections::HashMap;
@@ -34,16 +41,6 @@ use std::sync::Arc;
 pub enum ReportMode {
     Edit,
     View,
-}
-
-/// Where the report runs, as the host knows it.
-#[derive(Clone)]
-pub struct ReportTarget {
-    pub name: String,
-    pub id: Option<ConnectionId>,
-    pub input: Option<ResolvedConnection>,
-    pub row_limit: u32,
-    pub environment: Option<jykre::connection_appearance::Environment>,
 }
 
 /// The editable parts of a parameter's specification.
@@ -66,7 +63,7 @@ struct ValueField {
 
 /// A run waiting for the user.
 enum Pending {
-    /// The connection's password; the panels asked for meanwhile join.
+    /// A connection's password; the panels asked for meanwhile join.
     Password(RunScope),
     /// The confirmation of risky statements on production: exactly this
     /// plan runs once confirmed.
@@ -76,21 +73,24 @@ enum Pending {
 pub enum ReportEvent {
     /// The definition or a run changed.
     Changed,
-    /// A run needs the connection's password; the host asks and calls
+    /// A run needs this connection's password; the host asks and calls
     /// [`ReportView::resume_pending`].
-    PasswordRequired,
-    /// A run on a production connection holds risky statements; the host
+    PasswordRequired(ConnectionRef),
+    /// A run on production connections holds risky statements; the host
     /// asks and calls [`ReportView::confirm_risk`].
     ConfirmRisk {
+        /// The production connections, named for the question.
         connection: String,
         description: String,
     },
     /// Store this definition; the host answers with [`ReportView::saved`].
     Save(Box<Report>),
-    /// The user chose another connection.
-    ConnectionRequested(String),
-    /// Go to definition asks the explorer to show this object.
-    Reveal(ObjectPath),
+    /// Go to definition asks the explorer to show this object of a panel's
+    /// connection.
+    Reveal {
+        connection: ConnectionRef,
+        path: ObjectPath,
+    },
 }
 
 impl EventEmitter<ReportEvent> for ReportView {}
@@ -113,10 +113,9 @@ pub struct ReportView {
     spec_rows: Vec<SpecRow>,
     values: Vec<ValueField>,
     errors: HashMap<String, ParameterProblem>,
-    target: Option<ReportTarget>,
-    /// What the panels' editors need, kept for the panels made later.
+    /// The connections the panels may run on and what their editors need,
+    /// kept for the panels made later.
     language: PanelLanguage,
-    connection_choices: Vec<String>,
     scheduler: Scheduler,
     sessions: Sessions,
     pending: Option<Pending>,
@@ -170,9 +169,7 @@ impl ReportView {
             spec_rows: Vec::new(),
             values: Vec::new(),
             errors: HashMap::new(),
-            target: None,
             language: PanelLanguage::default(),
-            connection_choices: Vec::new(),
             scheduler: Scheduler::default(),
             sessions: Sessions::default(),
             pending: None,
@@ -210,8 +207,9 @@ impl ReportView {
     ) -> Entity<ReportPanel> {
         let language = self.language.clone();
         let arranging = self.mode == ReportMode::Edit;
+        let owner = cx.entity_id();
         let entity = cx.new(|cx| {
-            let mut view = ReportPanel::new(panel, fresh, language, window, cx);
+            let mut view = ReportPanel::new(panel, owner, fresh, language, window, cx);
             view.set_arranging(arranging, cx);
             view
         });
@@ -252,7 +250,13 @@ impl ReportView {
             PanelEvent::Move(direction) => self.move_panel(id, *direction, cx),
             PanelEvent::Duplicate => self.duplicate_panel(id, window, cx),
             PanelEvent::Remove => self.remove_panel(id, window, cx),
-            PanelEvent::Reveal(path) => cx.emit(ReportEvent::Reveal(path.clone())),
+            PanelEvent::Reveal(path) => {
+                let connection = panel.read(cx).definition().connection.clone();
+                cx.emit(ReportEvent::Reveal {
+                    connection,
+                    path: path.clone(),
+                });
+            }
         }
     }
 
@@ -332,11 +336,12 @@ impl ReportView {
         )
     }
 
-    /// Adds a panel of `sql` in `context` and opens its definition. Refused
-    /// when the report holds [`MAX_PANELS`] already.
+    /// Adds a panel of `sql` on `connection` in `context` and opens its
+    /// definition. Refused when the report holds [`MAX_PANELS`] already.
     pub fn add_panel(
         &mut self,
         sql: String,
+        connection: ConnectionRef,
         context: SessionContext,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -349,7 +354,7 @@ impl ReportView {
             cx.notify();
             return Err(jykre::reports::Full);
         }
-        let panel = Panel::new(self.next_panel_id(cx), sql, context);
+        let panel = Panel::new(self.next_panel_id(cx), connection, sql, context);
         let id = panel.id;
         let entity = self.make_panel(panel, true, window, cx);
         self.panels.push(entity);
@@ -360,9 +365,23 @@ impl ReportView {
         Ok(())
     }
 
-    fn add_empty_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // A full report says so in its notice bar.
-        let _ = self.add_panel(String::new(), SessionContext::default(), window, cx);
+    /// Moves the panel `id` dropped on the panel at `target` (or after the
+    /// last one) to take that place.
+    fn drop_panel(&mut self, id: PanelId, target: usize, cx: &mut Context<Self>) {
+        let Some(from) = self
+            .panels
+            .iter()
+            .position(|panel| panel.read(cx).id() == id)
+        else {
+            return;
+        };
+        let Some(index) = drop_index(from, target, self.panels.len()) else {
+            return;
+        };
+        let panel = self.panels.remove(from);
+        self.panels.insert(index, panel);
+        self.positions(cx);
+        self.changed(cx);
     }
 
     fn move_panel(&mut self, id: PanelId, direction: Direction, cx: &mut Context<Self>) {
@@ -420,12 +439,22 @@ impl ReportView {
         self.changed(cx);
     }
 
-    /// Closes the idle sessions of databases no panel runs in any more.
+    /// Where a panel runs, when its connection can run.
+    fn key_of(&self, panel: &Panel) -> Option<SessionKey> {
+        let source = find_source(&self.language.sources, &panel.connection)?;
+        Some(SessionKey {
+            connection: source.connection.id?,
+            context: panel.context.clone(),
+        })
+    }
+
+    /// Closes the idle sessions of connections and databases no panel runs
+    /// in any more.
     fn close_unused_sessions(&mut self, cx: &App) {
-        let used: Vec<SessionContext> = self
+        let used: Vec<SessionKey> = self
             .panels
             .iter()
-            .map(|panel| panel.read(cx).definition().context.clone())
+            .filter_map(|panel| self.key_of(panel.read(cx).definition()))
             .collect();
         for session in self.sessions.retain_used(&used) {
             backend::close_in_background(session);
@@ -437,12 +466,18 @@ impl ReportView {
     /// they hold.
     fn sync_parameters(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.store_spec_fields(cx);
-        let sqls: Vec<String> = self
+        let sqls: Vec<(String, Option<SqlDialect>)> = self
             .panels
             .iter()
-            .map(|panel| panel.read(cx).definition().sql.clone())
+            .map(|panel| {
+                let panel = panel.read(cx);
+                (
+                    panel.definition().sql.clone(),
+                    panel.source().and_then(|source| source.dialect),
+                )
+            })
             .collect();
-        let names = params::names_all(sqls.iter().map(String::as_str), self.language.dialect);
+        let names = params::names_all(sqls.iter().map(|(sql, dialect)| (sql.as_str(), *dialect)));
         let current: Vec<&str> = self
             .report
             .parameters
@@ -627,11 +662,12 @@ impl ReportView {
             }
         }
         report.panels = self.panel_definitions(cx);
-        if let Some(target) = &self.target {
-            report.connection = ConnectionRef {
-                id: target.id,
-                name: target.name.clone(),
-            };
+        // A connection renamed since the panel chose it is saved by its
+        // current name.
+        for panel in &mut report.panels {
+            if let Some(source) = find_source(&self.language.sources, &panel.connection) {
+                panel.connection = source.connection.clone();
+            }
         }
         report
     }
@@ -649,23 +685,9 @@ impl ReportView {
         self.saved.as_ref().map(|report| report.id)
     }
 
-    /// The connection the report names, for finding it in the host.
-    pub fn connection(&self) -> ConnectionRef {
-        match &self.target {
-            Some(target) => ConnectionRef {
-                id: target.id,
-                name: target.name.clone(),
-            },
-            None => self.report.connection.clone(),
-        }
-    }
-
-    pub fn connection_name(&self) -> &str {
-        self.target
-            .as_ref()
-            .map_or(self.report.connection.name.as_str(), |target| {
-                target.name.as_str()
-            })
+    /// The connections the panels run on, once each, in their order.
+    pub fn connections(&self, cx: &App) -> Vec<ConnectionRef> {
+        self.definition(cx).connections()
     }
 
     /// The definition differs from the stored one (a draft always does once
@@ -710,81 +732,32 @@ impl ReportView {
         self.push_language(cx);
     }
 
-    /// The connection's cache names, for the panels' completion, hover and
-    /// go to definition.
-    pub fn set_names(&mut self, id: ConnectionId, names: Arc<NameIndex>, cx: &mut Context<Self>) {
-        let same = self
-            .language
-            .names
-            .as_ref()
-            .is_some_and(|(known, index)| *known == id && Arc::ptr_eq(index, &names));
-        if !same {
-            self.language.names = Some((id, names));
-            self.push_language(cx);
-        }
-    }
-
-    /// The connection's databases a panel may run in.
-    pub fn set_context_choices(&mut self, choices: Vec<SessionContext>, cx: &mut Context<Self>) {
-        if *self.language.choices != choices {
-            self.language.choices = Rc::new(choices);
-            self.push_language(cx);
-        }
-    }
-
-    pub fn set_connection_choices(&mut self, choices: Vec<String>, cx: &mut Context<Self>) {
-        if self.connection_choices != choices {
-            self.connection_choices = choices;
-            cx.notify();
-        }
-    }
-
-    /// Runs on `target` from now on. Another server closes the sessions;
-    /// the same one with a new password or settings keeps the results on
-    /// screen.
-    pub fn set_target(&mut self, target: Option<ReportTarget>, cx: &mut Context<Self>) {
-        let same = match (&self.target, &target) {
-            (Some(old), Some(new)) => {
-                old.name == new.name
-                    && old.input.as_ref().map(|input| &input.config)
-                        == new.input.as_ref().map(|input| &input.config)
+    /// The connections the panels may run on, as the host knows them now.
+    /// A connection whose settings changed, or that is gone, stops its
+    /// panels and closes its sessions; a new password keeps them.
+    pub fn set_sources(&mut self, sources: Sources, cx: &mut Context<Self>) {
+        let old = self.language.sources.clone();
+        for before in old.iter() {
+            let Some(id) = before.connection.id else {
+                continue;
+            };
+            let config =
+                |source: &ReportSource| source.input.as_ref().map(|input| input.config.clone());
+            let same = sources
+                .iter()
+                .find(|source| source.connection.id == Some(id))
+                .is_some_and(|after| config(after) == config(before));
+            if !same {
+                self.scheduler.cancel_connection(id);
+                for session in self.sessions.close_connection(id) {
+                    backend::close_in_background(session);
+                }
             }
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            self.abandon(cx);
-            // Another server's names and databases are not this one's.
-            self.language.names = None;
-            self.language.choices = Rc::default();
         }
-        let config = target
-            .as_ref()
-            .and_then(|target| target.input.as_ref())
-            .map(|input| input.config.clone());
-        let dialect = config.as_ref().and_then(|config| {
-            builtin_registry()
-                .and_then(|registry| registry.get(config.driver))
-                .ok()
-                .map(|driver| driver.descriptor().dialect)
-        });
-        self.language.dialect = dialect;
-        self.language.connection = config;
-        self.target = target;
+        self.language.sources = sources;
         self.push_language(cx);
-        self.refresh_unsaved(cx);
-        cx.notify();
-    }
-
-    /// Stops every run and closes the sessions, as when the connection
-    /// changes.
-    fn abandon(&mut self, cx: &mut Context<Self>) {
-        self.scheduler.reset();
-        for session in self.sessions.clear() {
-            backend::close_in_background(session);
-        }
-        self.pending = None;
         self.sync_phases(cx);
+        self.refresh_unsaved(cx);
         cx.notify();
     }
 
@@ -867,48 +840,77 @@ impl ReportView {
         }
     }
 
-    /// Runs the panels of `scope` with the values in the form.
+    /// Runs the panels of `scope` with the values in the form, each on its
+    /// own connection. A panel whose connection cannot run says so and the
+    /// others run; a connection without its password asks for it first.
     pub fn run(&mut self, scope: RunScope, cx: &mut Context<Self>) {
-        let Some(target) = self.target.clone() else {
-            self.notice = Some(Feedback::new(
-                Tone::Warning,
-                tr!("Choose a connection for this report."),
-            ));
-            cx.notify();
-            return;
-        };
-        let Some(input) = target.input.clone() else {
-            self.notice = Some(Feedback::new(
-                Tone::Warning,
-                tr!(
-                    "The connection {0} is not available. Choose another one.",
-                    target.name
-                ),
-            ));
-            cx.notify();
-            return;
-        };
-        // While the password is asked for, the panels asked for meanwhile
+        // While a password is asked for, the panels asked for meanwhile
         // join the waiting run; a waiting confirmation is asked again.
         if let Some(Pending::Password(waiting)) = self.pending.take() {
             self.pending = Some(Pending::Password(waiting.merge(scope)));
             return;
         }
-        if connection_store::needs_password(&input) {
-            self.pending = Some(Pending::Password(scope));
-            cx.emit(ReportEvent::PasswordRequired);
-            return;
-        }
         self.store_spec_fields(cx);
         let panels = self.panel_definitions(cx);
+        let sources = self.language.sources.clone();
+        let mut planned: Vec<PlanPanel> = Vec::new();
+        let mut unavailable: Vec<(PanelId, String)> = Vec::new();
+        let mut asked = false;
+        for panel in panels
+            .iter()
+            .filter(|panel| scope.includes(panel.id) && !panel.sql.trim().is_empty())
+        {
+            let source = find_source(&sources, &panel.connection);
+            let ready = source
+                .and_then(|source| Some((source, source.connection.id?, source.input.as_ref()?)));
+            match ready {
+                Some((source, connection, input)) => {
+                    if connection_store::needs_password(input) {
+                        self.pending = Some(Pending::Password(scope.clone()));
+                        cx.emit(ReportEvent::PasswordRequired(source.connection.clone()));
+                        asked = true;
+                        break;
+                    }
+                    planned.push(PlanPanel {
+                        panel,
+                        connection,
+                        dialect: source.dialect,
+                        max_rows: source.row_limit,
+                    });
+                }
+                None => {
+                    let name = source.map_or(panel.connection.name.clone(), |source| {
+                        source.connection.name.clone()
+                    });
+                    unavailable.push((panel.id, name));
+                }
+            }
+        }
+        if asked {
+            return;
+        }
+        for (id, name) in unavailable {
+            let message = if name.is_empty() {
+                tr!("Choose a connection for this panel.").to_owned()
+            } else {
+                tr!(
+                    "The connection {0} is not available. Choose another one.",
+                    name
+                )
+            };
+            self.scheduler.mark_failed(id);
+            if let Some(panel) = self.panel_entity(id, cx) {
+                panel.update(cx, |panel, cx| panel.fail(message, cx));
+            }
+        }
+        self.sync_phases(cx);
         let typed = self.typed_values(cx);
         let mut plan = match run::plan(
-            &panels,
+            &planned,
+            panels.len(),
             &scope,
-            self.language.dialect,
             &self.report.parameters,
             &typed,
-            target.row_limit,
             &mut self.next_run,
         ) {
             Ok(plan) => plan,
@@ -927,10 +929,16 @@ impl ReportView {
         };
         self.errors.clear();
         if plan.is_empty() {
-            self.notice = Some(Feedback::new(
-                Tone::Info,
-                tr!("There is no SQL statement to execute."),
-            ));
+            let any_sql = panels
+                .iter()
+                .any(|panel| scope.includes(panel.id) && !panel.sql.trim().is_empty());
+            if !any_sql {
+                self.notice = Some(Feedback::new(
+                    Tone::Info,
+                    tr!("There is no SQL statement to execute."),
+                ));
+            }
+            cx.emit(ReportEvent::Changed);
             cx.notify();
             return;
         }
@@ -941,17 +949,44 @@ impl ReportView {
                     .is_some_and(|panel| panel.read(cx).is_fresh());
             }
         }
-        if target.environment == Some(jykre::connection_appearance::Environment::Production) {
-            let statements = plan.statements();
-            let risks = jykre::guard::risks(&statements, self.language.dialect);
-            if !risks.is_empty() {
-                self.pending = Some(Pending::Risk(plan));
-                cx.emit(ReportEvent::ConfirmRisk {
-                    connection: target.name.clone(),
-                    description: super::workspace::risk_description(&risks, statements.len()),
-                });
-                return;
+        // Each production connection's statements are checked; one
+        // confirmation names them all.
+        let mut names = Vec::new();
+        let mut descriptions = Vec::new();
+        for connection in plan.connections() {
+            let Some(source) = sources
+                .iter()
+                .find(|source| source.connection.id == Some(connection))
+            else {
+                continue;
+            };
+            if source.environment != Some(jykre::connection_appearance::Environment::Production) {
+                continue;
             }
+            let statements = plan.statements_on(connection);
+            let risks = jykre::guard::risks(&statements, source.dialect);
+            if !risks.is_empty() {
+                names.push(source.connection.name.clone());
+                descriptions.push(super::workspace::risk_description(&risks, statements.len()));
+            }
+        }
+        if !names.is_empty() {
+            self.pending = Some(Pending::Risk(plan));
+            let description = if names.len() == 1 {
+                descriptions.concat()
+            } else {
+                names
+                    .iter()
+                    .zip(&descriptions)
+                    .map(|(name, description)| format!("{name}\n{description}"))
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            };
+            cx.emit(ReportEvent::ConfirmRisk {
+                connection: names.join(", "),
+                description,
+            });
+            return;
         }
         self.start_plan(plan, cx);
     }
@@ -966,21 +1001,16 @@ impl ReportView {
     }
 
     /// Starts the loop of each group the scheduler lets run: it lends the
-    /// group its database's session, runs the group's panels in turn on it
-    /// and gives it back.
+    /// group its connection and database's session, runs the group's panels
+    /// in turn on it and gives it back. Each panel takes the connection as
+    /// it is then, with a password given meanwhile.
     fn start_groups(&mut self, cx: &mut Context<Self>) {
-        let Some(input) = self.target.as_ref().and_then(|target| target.input.clone()) else {
-            self.scheduler.reset();
-            self.sync_phases(cx);
-            return;
-        };
         for context in self.scheduler.start() {
             let (session, lease) = self.sessions.take(&context);
-            let input = input.clone();
             cx.spawn(async move |weak, cx| {
                 let mut session = session;
                 loop {
-                    let Ok(Some(job)) =
+                    let Ok(Some((job, input))) =
                         weak.update(cx, |this, cx| this.next_job(&context, lease, cx))
                     else {
                         break;
@@ -993,23 +1023,38 @@ impl ReportView {
                         cancel,
                         info,
                     } = job;
-                    let (connection, place, lent) =
-                        (input.clone(), context.clone(), session.take());
+                    let (place, lent) = (context.context.clone(), session.take());
                     // Reading the result for the chart and dropping the
                     // other statements' results happen on the runtime.
-                    let settled = backend::run(async move {
-                        let result = backend::query_in_context(
-                            connection,
-                            place,
-                            lent,
-                            requests,
-                            memory_ceiling,
-                            cancel,
-                        )
-                        .await;
-                        Ok(run::settle(result, info))
-                    })
-                    .await;
+                    let settled = match input {
+                        Some(connection) => {
+                            backend::run(async move {
+                                let result = backend::query_in_context(
+                                    connection,
+                                    place,
+                                    lent,
+                                    requests,
+                                    memory_ceiling,
+                                    cancel,
+                                )
+                                .await;
+                                Ok(run::settle(result, info))
+                            })
+                            .await
+                        }
+                        // The connection went away meanwhile; the session
+                        // goes back as it was.
+                        None => {
+                            let (_, outcome) = run::settle(
+                                Err(DriverError::new(
+                                    ErrorCode::Connection,
+                                    tr!("The connection is not available."),
+                                )),
+                                info,
+                            );
+                            Ok((lent, outcome))
+                        }
+                    };
                     let outcome = match settled {
                         Ok((kept, outcome)) => {
                             session = kept;
@@ -1050,21 +1095,28 @@ impl ReportView {
         }
     }
 
-    /// The next panel of the group running in `context`, unless the group's
-    /// lease was voided (the connection changed).
+    /// The next panel of the group running at `context`, with its
+    /// connection as it is now (`None` when it cannot run), unless the
+    /// group's lease was voided (the connection changed).
     fn next_job(
         &mut self,
-        context: &SessionContext,
+        context: &SessionKey,
         lease: u64,
         cx: &mut Context<Self>,
-    ) -> Option<run::PanelJob> {
+    ) -> Option<(run::PanelJob, Option<ResolvedConnection>)> {
         if !self.sessions.is_current(context, lease) {
             return None;
         }
         let job = self.scheduler.next(context);
         self.sync_phases(cx);
         cx.notify();
-        job
+        let input = self
+            .language
+            .sources
+            .iter()
+            .find(|source| source.connection.id == Some(context.connection))
+            .and_then(|source| source.input.clone());
+        job.map(|job| (job, input))
     }
 
     fn publish(&mut self, id: PanelId, run: u64, outcome: PanelOutcome, cx: &mut Context<Self>) {
@@ -1083,7 +1135,7 @@ impl ReportView {
 
     fn group_done(
         &mut self,
-        context: &SessionContext,
+        context: &SessionKey,
         lease: u64,
         session: Option<Box<dyn Session>>,
         cx: &mut Context<Self>,
@@ -1137,15 +1189,6 @@ impl ReportView {
         }
     }
 
-    /// The connection was given its password or new settings: the next run
-    /// uses them, on the same sessions when the server is the same.
-    pub fn update_input(&mut self, input: ResolvedConnection, cx: &mut Context<Self>) {
-        if let Some(target) = &mut self.target {
-            target.input = Some(input);
-        }
-        cx.notify();
-    }
-
     /// Writes the print document where the user chooses and opens it in the
     /// browser, which prints it or saves it as PDF.
     fn export(&mut self, cx: &mut Context<Self>) {
@@ -1161,10 +1204,18 @@ impl ReportView {
         let description = self.description.read(cx).value().to_string();
         let html = {
             let app: &App = cx;
+            let connections = self
+                .connections(app)
+                .into_iter()
+                .map(|connection| {
+                    find_source(&self.language.sources, &connection)
+                        .map_or(connection.name, |source| source.connection.name.clone())
+                })
+                .collect();
             export::html(&export::Document {
                 title: &title,
                 description: &description,
-                connection: self.connection_name(),
+                connections,
                 panels: self
                     .panels
                     .iter()
@@ -1226,40 +1277,27 @@ impl ReportView {
         .detach();
     }
 
-    fn connection_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// **Add a panel**: a menu of the connections, each with its
+    /// databases; the new panel runs where it is chosen.
+    fn add_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
-        let current = self.connection_name().to_owned();
-        let shown = if current.is_empty() {
-            tr!("Choose a connection").to_owned()
-        } else {
-            current.clone()
-        };
-        let choices = self.connection_choices.clone();
-        Button::new("report-connection")
+        let sources = self.language.sources.clone();
+        let pick: PickSource = Rc::new(move |connection, context, window, cx| {
+            let _ = view.update(cx, |this, cx| {
+                // A full report says so in its notice bar.
+                let _ = this.add_panel(String::new(), connection, context, window, cx);
+            });
+        });
+        Button::new("report-add-panel")
             .ghost()
             .small()
-            .icon(I::Server)
-            .label(shown.clone())
+            .icon(I::Plus)
             .dropdown_caret(true)
-            .accessibility_label(tr!("Connection: {0}", shown))
-            .tooltip(tr!("Connection of this report"))
-            .dropdown_menu(move |mut menu, _, _| {
-                for name in &choices {
-                    let view = view.clone();
-                    let chosen = name.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(name.clone())
-                            .checked(*name == current)
-                            .on_click(move |_, _, cx| {
-                                let _ = view.update(cx, |this, cx| {
-                                    if this.connection_name() != chosen {
-                                        cx.emit(ReportEvent::ConnectionRequested(chosen.clone()));
-                                    }
-                                });
-                            }),
-                    );
-                }
-                menu
+            .accessibility_label(tr!("Add a panel"))
+            .tooltip(tr!("Add a panel"))
+            .dropdown_menu(move |menu, window, cx| {
+                let menu = menu.label(tr!("Where the new panel runs"));
+                source_menu(menu, window, cx, &sources, None, pick.clone())
             })
     }
 
@@ -1291,7 +1329,6 @@ impl ReportView {
                     .child(self.title(cx))
                     .into_any_element()
             })
-            .child(self.connection_menu(cx))
             .child(div().flex_1())
             .child(if editing {
                 button("report-view", I::Eye, tr!("Done editing")).on_click(
@@ -1302,10 +1339,7 @@ impl ReportView {
                     cx.listener(|this, _, window, cx| this.set_mode(ReportMode::Edit, window, cx)),
                 )
             })
-            .child(
-                icon_button("report-add-panel", I::Plus, tr!("Add a panel"))
-                    .on_click(cx.listener(|this, _, window, cx| this.add_empty_panel(window, cx))),
-            )
+            .child(self.add_menu(cx))
             .child(
                 icon_button(
                     "report-save",
@@ -1667,7 +1701,16 @@ impl ReportView {
                 .into_any_element();
         }
         // The panels are the scrolled element's own children, so the one
-        // opened for editing can be scrolled into view by its position.
+        // opened for editing can be scrolled into view by its position. A
+        // panel dragged by its grip is dropped on another to take its place,
+        // or after the last one.
+        let owner = cx.entity_id();
+        let accepts = move |value: &dyn std::any::Any, _: &mut Window, _: &mut App| {
+            value
+                .downcast_ref::<PanelDrag>()
+                .is_some_and(|drag| drag.owner == owner)
+        };
+        let count = self.panels.len();
         div()
             .id("report-panels")
             .flex_1()
@@ -1679,20 +1722,53 @@ impl ReportView {
             .content_start()
             .items_start()
             .p_2()
-            .children(self.panels.iter().map(|panel| {
+            .children(self.panels.iter().enumerate().map(|(index, panel)| {
                 let (width, height) = {
                     let panel = panel.read(cx);
                     (panel.width(), panel.height())
                 };
                 div()
+                    .id(("panel-slot", index))
                     .w(match width {
                         Width::Half => relative(0.5),
                         Width::Full => relative(1.),
                     })
                     .h(px(height))
                     .p_1()
+                    .rounded(px(10.))
+                    .border_2()
+                    .border_color(transparent_black())
+                    .drag_over::<PanelDrag>(|style, _, _, _| style.border_color(rgb(MINT)))
+                    .can_drop(accepts)
+                    .on_drop(cx.listener(move |this, drag: &PanelDrag, _, cx| {
+                        this.drop_panel(drag.panel, index, cx)
+                    }))
                     .child(panel.clone().cached(StyleRefinement::default().size_full()))
             }))
+            .when(cx.has_active_drag(), |s| {
+                s.child(
+                    div()
+                        .id("panel-slot-end")
+                        .w_full()
+                        .h(px(56.))
+                        .m_1()
+                        .rounded(px(8.))
+                        .border_2()
+                        .border_dashed()
+                        .border_color(rgb(BORDER))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.))
+                        .text_color(rgb(FAINT))
+                        .child(tr!("Drop here to move the panel to the end"))
+                        .drag_over::<PanelDrag>(|style, _, _, _| style.border_color(rgb(MINT)))
+                        .can_drop(accepts)
+                        .on_drop(cx.listener(move |this, drag: &PanelDrag, _, cx| {
+                            this.drop_panel(drag.panel, count, cx)
+                        })),
+                )
+            })
             .into_any_element()
     }
 

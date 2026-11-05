@@ -1,6 +1,5 @@
 //! Reports: panels of saved SQL with shared named parameters, each panel
-//! with its own database of the report's connection and its own chart
-//! (ADR-0024, ADR-0025).
+//! with its own connection, database and chart (ADR-0024, ADR-0025).
 //!
 //! The library is one JSON value under its own `config.db` setting
 //! ([Persistence](../docs/persistence.md)). It holds definitions only: never
@@ -19,8 +18,9 @@ pub mod run;
 /// The settings key the library is stored under.
 pub const SETTINGS_KEY: &str = "reports";
 /// The format written; a reader ignores what it does not know. Version 1
-/// held one SQL and one chart per report; it is read as one panel.
-const VERSION: u64 = 2;
+/// held one SQL and one chart per report, read as one panel; versions 1 and
+/// 2 held one connection per report, given to each of its panels.
+const VERSION: u64 = 3;
 /// The most panels a report holds. Each one keeps a result and a chart, so
 /// the bound keeps a report's memory and its frame small.
 pub const MAX_PANELS: usize = 12;
@@ -44,12 +44,45 @@ impl std::error::Error for Unreadable {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Full;
 
-/// The connection a report runs on: its identity, and its name for showing
+/// The connection a panel runs on: its identity, and its name for showing
 /// and for finding it when the identity is gone or was never stored.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConnectionRef {
     pub id: Option<ConnectionId>,
     pub name: String,
+}
+
+impl ConnectionRef {
+    /// Whether both name the same connection: by identity when both have
+    /// one, otherwise by name.
+    pub fn same(&self, other: &ConnectionRef) -> bool {
+        match (self.id, other.id) {
+            (Some(ours), Some(theirs)) => ours == theirs,
+            _ => self.name == other.name,
+        }
+    }
+
+    fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        Some(Self {
+            id: object
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| id.parse().ok()),
+            name: object
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "id": self.id.map(|id| id.to_string()),
+            "name": self.name,
+        })
+    }
 }
 
 /// A `:name` parameter of a report, shared by every panel whose SQL holds
@@ -247,13 +280,14 @@ pub enum Direction {
     Down,
 }
 
-/// One part of a report: its SQL, the database of the report's connection it
-/// runs in, and how its result is shown.
+/// One part of a report: its SQL, the connection and database it runs in,
+/// and how its result is shown.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Panel {
     pub id: PanelId,
     /// Empty shows "Panel n".
     pub title: String,
+    pub connection: ConnectionRef,
     pub sql: String,
     /// Where the panel's unqualified names resolve; the default leaves the
     /// session as the connection opens it.
@@ -266,9 +300,15 @@ pub struct Panel {
 }
 
 impl Panel {
-    pub fn new(id: PanelId, sql: impl Into<String>, context: SessionContext) -> Self {
+    pub fn new(
+        id: PanelId,
+        connection: ConnectionRef,
+        sql: impl Into<String>,
+        context: SessionContext,
+    ) -> Self {
         Self {
             id,
+            connection,
             sql: sql.into(),
             context,
             table: true,
@@ -290,13 +330,29 @@ impl Panel {
         self.table || self.chart.is_none()
     }
 
+    /// Where the panel runs, as the application shows it: the connection,
+    /// then the database when one is chosen.
+    pub fn source_label(&self) -> String {
+        source_label(&self.connection.name, &self.context)
+    }
+
     fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         let chart = ChartSpec::from_value(&value["chart"]);
-        let known = ["id", "title", "sql", "context", "chart", "table", "width"];
+        let known = [
+            "id",
+            "title",
+            "connection",
+            "sql",
+            "context",
+            "chart",
+            "table",
+            "width",
+        ];
         Some(Self {
             id: PanelId(value["id"].as_u64().unwrap_or(0)),
             title: value["title"].as_str().unwrap_or_default().to_owned(),
+            connection: ConnectionRef::from_value(&value["connection"]).unwrap_or_default(),
             sql: value["sql"].as_str().unwrap_or_default().to_owned(),
             context: context_from(&value["context"]),
             table: value["table"].as_bool().unwrap_or(chart.is_none()),
@@ -315,6 +371,7 @@ impl Panel {
             json!({
                 "id": self.id.0,
                 "title": self.title,
+                "connection": self.connection.to_value(),
                 "sql": self.sql,
                 "context": {
                     "catalog": self.context.catalog,
@@ -334,7 +391,6 @@ pub struct Report {
     pub id: u64,
     pub title: String,
     pub description: String,
-    pub connection: ConnectionRef,
     /// Shared by the panels, in the order their markers first appear.
     pub parameters: Vec<ParameterSpec>,
     /// In the order they show.
@@ -346,9 +402,9 @@ pub struct Report {
 }
 
 impl Report {
-    /// An unsaved report with one panel of this SQL, in `context`; its
-    /// parameters follow the SQL's markers, by generic rules until the
-    /// connection's dialect is known.
+    /// An unsaved report with one panel of this SQL, on `connection` in
+    /// `context`; its parameters follow the SQL's markers, by generic rules
+    /// until the connection's dialect is known.
     pub fn draft(
         title: impl Into<String>,
         connection: ConnectionRef,
@@ -358,11 +414,35 @@ impl Report {
         let sql = sql.into();
         Self {
             title: title.into(),
-            connection,
             parameters: params::reconcile(&[], &params::names(&sql, None)),
-            panels: vec![Panel::new(PanelId(1), sql, context)],
+            panels: vec![Panel::new(PanelId(1), connection, sql, context)],
             ..Self::default()
         }
+    }
+
+    /// The connections the panels run on, as a list row names them: one or
+    /// two by name, more by their number.
+    pub fn connections_label(&self) -> String {
+        let connections = self.connections();
+        match connections.len() {
+            0..=2 => connections
+                .into_iter()
+                .map(|connection| connection.name)
+                .collect::<Vec<_>>()
+                .join(", "),
+            count => crate::tr!("{0} connections", count),
+        }
+    }
+
+    /// The connections the panels run on, once each, in the panels' order.
+    pub fn connections(&self) -> Vec<ConnectionRef> {
+        let mut found: Vec<ConnectionRef> = Vec::new();
+        for panel in &self.panels {
+            if !found.iter().any(|known| known.same(&panel.connection)) {
+                found.push(panel.connection.clone());
+            }
+        }
+        found
     }
 
     /// The panel with identity `id`.
@@ -382,9 +462,11 @@ impl Report {
         )
     }
 
-    /// Adds a panel of `sql` in `context` at the end, with a new identity.
+    /// Adds a panel of `sql` on `connection` in `context` at the end, with a
+    /// new identity.
     pub fn add_panel(
         &mut self,
+        connection: ConnectionRef,
         sql: impl Into<String>,
         context: SessionContext,
     ) -> Result<PanelId, Full> {
@@ -392,7 +474,7 @@ impl Report {
             return Err(Full);
         }
         let id = self.next_panel_id();
-        self.panels.push(Panel::new(id, sql, context));
+        self.panels.push(Panel::new(id, connection, sql, context));
         Ok(id)
     }
 
@@ -428,32 +510,55 @@ impl Report {
         true
     }
 
+    /// Moves the panel `id` to `index` (counted after taking it out, as
+    /// [`drop_index`] gives it); `false` when nothing moved.
+    pub fn move_panel_to(&mut self, id: PanelId, index: usize) -> bool {
+        let Some(from) = self.panels.iter().position(|panel| panel.id == id) else {
+            return false;
+        };
+        let index = index.min(self.panels.len() - 1);
+        if from == index {
+            return false;
+        }
+        let panel = self.panels.remove(from);
+        self.panels.insert(index, panel);
+        true
+    }
+
     /// Removes the panel `id` and returns it.
     pub fn remove_panel(&mut self, id: PanelId) -> Option<Panel> {
         let index = self.panels.iter().position(|panel| panel.id == id)?;
         Some(self.panels.remove(index))
     }
 
-    /// The parameters follow the markers of every panel's SQL: a name keeps
-    /// its specification, a new one gets a required text one, and a name no
+    /// The parameters follow the markers of every panel's SQL, each read by
+    /// its connection's dialect (`dialect` gives it): a name keeps its
+    /// specification, a new one gets a required text one, and a name no
     /// panel uses any more loses its own.
-    pub fn reconcile_parameters(&mut self, dialect: Option<jykre_core::SqlDialect>) {
-        let names = params::names_all(self.panels.iter().map(|panel| panel.sql.as_str()), dialect);
+    pub fn reconcile_parameters(
+        &mut self,
+        dialect: impl Fn(&ConnectionRef) -> Option<jykre_core::SqlDialect>,
+    ) {
+        let names = params::names_all(
+            self.panels
+                .iter()
+                .map(|panel| (panel.sql.as_str(), dialect(&panel.connection))),
+        );
         self.parameters = params::reconcile(&self.parameters, &names);
     }
 
-    /// Whether the report's title, description, connection, or a panel's
-    /// title or SQL contains `query`, ignoring case. An empty query matches
-    /// everything.
+    /// Whether the report's title or description, or a panel's title,
+    /// connection or SQL contains `query`, ignoring case. An empty query
+    /// matches everything.
     pub fn matches(&self, query: &str) -> bool {
         let query = query.trim().to_lowercase();
         query.is_empty()
-            || [&self.title, &self.description, &self.connection.name]
+            || [&self.title, &self.description]
                 .into_iter()
                 .chain(
                     self.panels
                         .iter()
-                        .flat_map(|panel| [&panel.title, &panel.sql]),
+                        .flat_map(|panel| [&panel.title, &panel.connection.name, &panel.sql]),
                 )
                 .any(|text| text.to_lowercase().contains(&query))
     }
@@ -489,12 +594,10 @@ impl Report {
     }
 
     /// Whether `other` defines the same report: the same title, description,
-    /// connection name, parameters and panels. Identity and times are not
-    /// compared.
+    /// parameters and panels. Identity and times are not compared.
     pub fn same_definition(&self, other: &Report) -> bool {
         self.title == other.title
             && self.description == other.description
-            && self.connection.name == other.connection.name
             && self.parameters == other.parameters
             && self.panels == other.panels
     }
@@ -508,7 +611,8 @@ impl Report {
                 .unwrap_or_default()
                 .to_owned()
         };
-        let connection = &value["connection"];
+        // Versions 1 and 2: one connection for the whole report.
+        let shared = ConnectionRef::from_value(&value["connection"]);
         let parameters = value["parameters"]
             .as_array()
             .into_iter()
@@ -529,6 +633,13 @@ impl Report {
                 }]
             }
         };
+        if let Some(shared) = &shared {
+            for panel in &mut panels {
+                if panel.connection == ConnectionRef::default() {
+                    panel.connection = shared.clone();
+                }
+            }
+        }
         let mut next = panels
             .iter()
             .map(|panel| panel.id.0)
@@ -559,10 +670,6 @@ impl Report {
             id: value["id"].as_u64().unwrap_or(0),
             title: text("title"),
             description: text("description"),
-            connection: ConnectionRef {
-                id: connection["id"].as_str().and_then(|id| id.parse().ok()),
-                name: connection["name"].as_str().unwrap_or_default().to_owned(),
-            },
             parameters,
             panels,
             created_at: value["created_at"].as_u64().unwrap_or(0),
@@ -578,10 +685,6 @@ impl Report {
                 "id": self.id,
                 "title": self.title,
                 "description": self.description,
-                "connection": {
-                    "id": self.connection.id.map(|id| id.to_string()),
-                    "name": self.connection.name,
-                },
                 "parameters": self.parameters.iter().map(ParameterSpec::to_value).collect::<Vec<_>>(),
                 "panels": self.panels.iter().map(Panel::to_value).collect::<Vec<_>>(),
                 "created_at": self.created_at,
@@ -589,6 +692,27 @@ impl Report {
             }),
         )
     }
+}
+
+/// Where a panel on `connection` runs in `context`, as the application
+/// shows it: the connection, then the database when one is chosen.
+pub fn source_label(connection: &str, context: &SessionContext) -> String {
+    if *context == SessionContext::default() {
+        connection.to_owned()
+    } else {
+        format!("{connection} · {}", crate::ddl::context_label(context))
+    }
+}
+
+/// Where a panel dragged from `from` lands when dropped on the panel at
+/// `target` (or after the last one, `target == len`), counted after taking
+/// it out: it takes the target's place. `None` when nothing moves.
+pub fn drop_index(from: usize, target: usize, len: usize) -> Option<usize> {
+    if from >= len {
+        return None;
+    }
+    let index = if target >= len { len - 1 } else { target };
+    (index != from).then_some(index)
 }
 
 /// The context a stored `{"catalog", "schema"}` names; anything else is the
@@ -762,14 +886,17 @@ impl ReportLibrary {
 mod tests {
     use super::*;
 
+    fn warehouse() -> ConnectionRef {
+        ConnectionRef {
+            id: Some(ConnectionId::new()),
+            name: "warehouse".into(),
+        }
+    }
+
     fn sample() -> Report {
         let mut report = Report {
             title: "Revenue".into(),
             description: "By month".into(),
-            connection: ConnectionRef {
-                id: Some(ConnectionId::new()),
-                name: "warehouse".into(),
-            },
             parameters: vec![ParameterSpec {
                 kind: ParameterKind::Date,
                 default: Some("2024-01-01".into()),
@@ -779,6 +906,7 @@ mod tests {
         };
         report
             .add_panel(
+                warehouse(),
                 "SELECT month, total\nFROM sales\nWHERE day >= :start",
                 SessionContext::default(),
             )
@@ -790,6 +918,10 @@ mod tests {
         });
         let other = report
             .add_panel(
+                ConnectionRef {
+                    id: None,
+                    name: "shop db".into(),
+                },
                 "SELECT count(*) FROM orders WHERE day >= :start",
                 SessionContext {
                     catalog: None,
@@ -816,12 +948,16 @@ mod tests {
         let read = ReportLibrary::from_value(Some(library.to_value())).unwrap();
         assert_eq!(read, library);
         assert_eq!(read.get(id).unwrap().created_at, 100);
-        assert_eq!(read.to_value()["version"], 2);
+        assert_eq!(read.to_value()["version"], 3);
         let panels = &read.get(id).unwrap().panels;
         assert_eq!(panels.len(), 2);
+        assert_eq!(panels[0].connection.name, "warehouse");
+        assert!(panels[0].connection.id.is_some());
+        assert_eq!(panels[1].connection.name, "shop db");
         assert_eq!(panels[1].context.schema.as_deref(), Some("shop"));
         assert_eq!(panels[1].width, Width::Half);
         assert_eq!(panels[1].chart.as_ref().unwrap().kind, ChartKind::Number);
+        assert!(read.to_value()["reports"][0].get("connection").is_none());
     }
 
     #[test]
@@ -839,12 +975,13 @@ mod tests {
     }
 
     #[test]
-    fn a_first_version_report_is_read_as_one_panel() {
+    fn a_first_version_report_is_read_as_one_panel_on_its_connection() {
         let stored = json!({
             "version": 1,
             "next_id": 2,
             "reports": [{
                 "id": 1, "title": "Old", "sql": "SELECT a, b FROM t",
+                "connection": {"id": null, "name": "db"},
                 "chart": {"kind": "bar", "label": "a", "values": ["b"]},
                 "parameters": [],
             }],
@@ -854,18 +991,47 @@ mod tests {
         assert_eq!(report.panels.len(), 1);
         let panel = &report.panels[0];
         assert_eq!(panel.id, PanelId(1));
+        assert_eq!(panel.connection.name, "db");
         assert_eq!(panel.sql, "SELECT a, b FROM t");
         assert_eq!(panel.chart.as_ref().unwrap().kind, ChartKind::Bar);
         assert_eq!(panel.context, SessionContext::default());
         assert!(panel.table);
         // Written back in the new format, without the old fields.
         let written = library.to_value();
-        assert_eq!(written["version"], 2);
+        assert_eq!(written["version"], 3);
         assert!(written["reports"][0].get("sql").is_none());
+        assert!(written["reports"][0].get("connection").is_none());
         assert_eq!(
-            written["reports"][0]["panels"][0]["sql"],
-            "SELECT a, b FROM t"
+            written["reports"][0]["panels"][0]["connection"]["name"],
+            "db"
         );
+    }
+
+    #[test]
+    fn a_second_version_report_gives_its_connection_to_every_panel() {
+        let id = ConnectionId::new();
+        let stored = json!({
+            "version": 2,
+            "reports": [{
+                "id": 1, "title": "Two",
+                "connection": {"id": id.to_string(), "name": "db"},
+                "panels": [
+                    {"id": 1, "sql": "SELECT 1"},
+                    {"id": 2, "sql": "SELECT 2", "connection": {"id": null, "name": "other"}},
+                ],
+            }],
+        });
+        let library = ReportLibrary::from_value(Some(stored)).unwrap();
+        let panels = &library.reports[0].panels;
+        assert_eq!(
+            panels[0].connection,
+            ConnectionRef {
+                id: Some(id),
+                name: "db".into()
+            }
+        );
+        assert_eq!(panels[1].connection.name, "other");
+        assert_eq!(library.reports[0].connections().len(), 2);
     }
 
     #[test]
@@ -875,13 +1041,13 @@ mod tests {
             "future": {"a": 1},
             "reports": [
                 {"title": "New", "shared_with": ["x"],
-                 "connection": {"id": "not-a-uuid", "name": "db"},
                  "parameters": [
                      {"name": "n", "kind": "money", "choices": ["a", 1, "b"], "hint": "h"},
                      {"name": "1bad"},
                  ],
                  "panels": [
                      {"sql": "SELECT 1", "chart": {"kind": "radar", "label": "a", "values": ["b"]},
+                      "connection": {"id": "not-a-uuid", "name": "db"},
                       "color": "red", "context": {"catalog": "", "schema": "s"}},
                      "not a panel",
                      {"id": 7, "sql": "SELECT 2", "width": "half"},
@@ -895,12 +1061,13 @@ mod tests {
         let report = &library.reports[0];
         assert_eq!(report.id, 1);
         assert_eq!(
-            report.connection,
+            report.panels[0].connection,
             ConnectionRef {
                 id: None,
                 name: "db".into()
             }
         );
+        assert_eq!(report.panels[1].connection, ConnectionRef::default());
         assert_eq!(report.parameters.len(), 1);
         assert_eq!(report.parameters[0].kind, ParameterKind::Text);
         assert_eq!(report.parameters[0].choices, ["a", "b"]);
@@ -921,7 +1088,7 @@ mod tests {
         assert_eq!(written["reports"][0]["shared_with"], json!(["x"]));
         assert_eq!(written["reports"][0]["panels"][0]["color"], "red");
         assert_eq!(written["reports"][0]["parameters"][0]["hint"], "h");
-        assert_eq!(written["version"], 2);
+        assert_eq!(written["version"], 3);
     }
 
     #[test]
@@ -958,15 +1125,10 @@ mod tests {
 
     #[test]
     fn panels_are_added_moved_duplicated_and_removed_up_to_the_limit() {
-        let mut report = Report::draft(
-            "R",
-            ConnectionRef::default(),
-            "SELECT 1",
-            SessionContext::default(),
-        );
+        let mut report = Report::draft("R", warehouse(), "SELECT 1", SessionContext::default());
         let first = report.panels[0].id;
         let second = report
-            .add_panel("SELECT 2", SessionContext::default())
+            .add_panel(warehouse(), "SELECT 2", SessionContext::default())
             .unwrap();
         assert!(report.move_panel(second, Direction::Up));
         assert!(!report.move_panel(second, Direction::Up));
@@ -980,11 +1142,11 @@ mod tests {
         );
         while report.panels.len() < MAX_PANELS {
             report
-                .add_panel("SELECT", SessionContext::default())
+                .add_panel(warehouse(), "SELECT", SessionContext::default())
                 .unwrap();
         }
         assert_eq!(
-            report.add_panel("SELECT", SessionContext::default()),
+            report.add_panel(warehouse(), "SELECT", SessionContext::default()),
             Err(Full)
         );
         assert_eq!(report.duplicate_panel(copy), Err(Full));
@@ -995,32 +1157,81 @@ mod tests {
     }
 
     #[test]
-    fn parameters_follow_the_markers_of_every_panel() {
+    fn a_dropped_panel_takes_the_place_of_the_one_it_lands_on() {
+        // Forward: the panel goes after the one it lands on.
+        assert_eq!(drop_index(0, 2, 4), Some(2));
+        // Backward: before it.
+        assert_eq!(drop_index(3, 1, 4), Some(1));
+        // On itself: nothing moves.
+        assert_eq!(drop_index(2, 2, 4), None);
+        // After the last panel: to the end.
+        assert_eq!(drop_index(1, 4, 4), Some(3));
+        assert_eq!(drop_index(3, 4, 4), None);
+        assert_eq!(drop_index(5, 1, 4), None);
+        let mut report = sample();
+        report
+            .add_panel(warehouse(), "SELECT 3", SessionContext::default())
+            .unwrap();
+        let ids: Vec<_> = report.panels.iter().map(|panel| panel.id).collect();
+        assert!(report.move_panel_to(ids[0], 2));
+        let moved: Vec<_> = report.panels.iter().map(|panel| panel.id).collect();
+        assert_eq!(moved, [ids[1], ids[2], ids[0]]);
+        assert!(!report.move_panel_to(ids[0], 2));
+        assert!(report.move_panel_to(ids[0], 0));
+        assert!(!report.move_panel_to(PanelId(99), 0));
+    }
+
+    #[test]
+    fn parameters_follow_the_markers_of_every_panel_in_its_dialect() {
         let mut report = sample();
         report.panels[1].sql = "SELECT count(*) FROM orders WHERE region = :region".into();
-        report.reconcile_parameters(None);
+        report.reconcile_parameters(|_| None);
         let names: Vec<_> = report.parameters.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["start", "region"]);
         assert_eq!(report.parameters[0].kind, ParameterKind::Date);
         report.panels[0].sql = "SELECT 1".into();
-        report.reconcile_parameters(None);
+        report.reconcile_parameters(|_| None);
         let names: Vec<_> = report.parameters.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["region"]);
     }
 
     #[test]
-    fn matching_covers_every_panel_and_previews_skip_blank_lines() {
+    fn matching_covers_every_panel_and_its_connection() {
         let report = sample();
         assert!(report.matches(""));
         assert!(report.matches("REVENUE"));
         assert!(report.matches("warehouse"));
+        assert!(report.matches("shop db"));
         assert!(report.matches(":start"));
         assert!(report.matches("orders"));
         assert!(!report.matches("inventory"));
         assert_eq!(report.preview(2), "SELECT month, total FROM sales");
+        let names: Vec<_> = report
+            .connections()
+            .into_iter()
+            .map(|connection| connection.name)
+            .collect();
+        assert_eq!(names, ["warehouse", "shop db"]);
+        assert_eq!(report.connections_label(), "warehouse, shop db");
+        let mut many = report.clone();
+        many.add_panel(
+            ConnectionRef {
+                id: None,
+                name: "third".into(),
+            },
+            "SELECT 3",
+            SessionContext::default(),
+        )
+        .unwrap();
+        assert_eq!(many.connections_label(), "3 connections");
+        assert_eq!(report.panels[0].source_label(), "warehouse");
+        assert_eq!(report.panels[1].source_label(), "shop db · shop");
         let mut same = report.clone();
         assert!(same.same_definition(&report));
         same.panels[1].width = Width::Full;
         assert!(!same.same_definition(&report));
+        let mut moved = report.clone();
+        moved.panels[1].connection = warehouse();
+        assert!(!moved.same_definition(&report));
     }
 }

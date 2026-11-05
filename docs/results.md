@@ -325,7 +325,7 @@ system's save dialog (`jykre::export`, `backend::export`).
 
 A report ([ADR-0024](adr/0024-reports.md),
 [ADR-0025](adr/0025-report-panels.md)) shows, in each panel, the last result
-of the panel's SQL up to the connection's row limit, without paging, in the
+of the panel's SQL up to its connection's row limit, without paging, in the
 same grid. A panel's result may also take the memory ceiling divided by the
 report's number of panels (`jykre::reports::run::memory_ceiling`), so a
 report holds no more than one query tab.
@@ -342,9 +342,9 @@ report holds no more than one query tab.
 - **Copy as CSV** and **Copy for a spreadsheet**, in a panel's menu, copy its
   result with the rules above, asking first above 50 MiB.
 - **Export for printing or PDF…** (`jykre::reports::export`) writes one HTML
-  file where the user chooses: the title, description, the values the panels
-  ran with, and each panel with its chart (as SVG) or number and, when it
-  shows one, its table, in two columns like the report, with every text
+  file where the user chooses: the title, description, the connections, the
+  values the panels ran with, and each panel with its connection and
+  database, its chart (as SVG) or number and, when it shows one, its table, in two columns like the report, with every text
   escaped, nothing loaded from elsewhere and print styles (A4, the header
   repeated on each page). Like an export, it reaches the disk only at the
   user's request, at the path they chose ([Persistence](persistence.md)).

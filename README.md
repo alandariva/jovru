@@ -98,16 +98,19 @@ Demo connections and results are labelled as such and never reach a server.
   spreadsheets; the context menu also copies it with headers. **pt-BR
   numbers** groups digits without converting decimals or integers to floating
   point. CSV copy keeps the original values regardless of presentation.
-- **Reports** (a section of the rail) gather panels on one connection: each
-  panel has its SQL, its own database (schema, catalog, or another PostgreSQL
-  database when the connection offers them), and shows a table, a bar, line
-  or pie chart, or a single number, at half or full width. The panels share
+- **Reports** (a section of the rail) gather panels, each on its own
+  connection and database (schema, catalog, or another PostgreSQL database
+  when the connection offers them), chosen from the panel's header. A panel
+  shows a table, a bar, line or pie chart, or a single number, at half or
+  full width, and is dragged by its grip to another place. The panels share
   `:name` parameters filled in before each run (text, number, true or false,
   date, date and time, or one of a list; bound by the database driver, never
-  written into the SQL), and the panels of different databases run at the
-  same time. The SQL editor completes names like a query tab. Create a report
-  with **+**, or from a query tab with **Save as a new report** or **Add to a
-  report…**. Copy a panel's result as CSV or for a spreadsheet, or export a
+  written into the SQL), and the panels of different databases or
+  connections run at the same time. A report tab has a tab group of its own.
+  The SQL editor completes names like a query tab, for the panel's
+  connection. Create a report with **+**, or from a query tab with **Save as
+  a new report** or **Add to a report…**, which adds a panel to any saved
+  report. Copy a panel's result as CSV or for a spreadsheet, or export a
   print document (HTML) with every panel that the browser prints or saves as
   PDF. Parameters need a SQL warehouse on Databricks.
 - `Ctrl B` toggles the explorer and `Ctrl Shift B` the assistant. Dividers and
