@@ -1,6 +1,7 @@
 use super::*;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use jykre::explorer::QuickMode;
 use jykre::metadata_scope::{MetadataScope, RefreshPhase, RefreshProgress, format_eta};
 use jykre::refresh_queue::{Queued, RefreshJob};
 use jykre::result::{DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT};
@@ -1555,7 +1556,7 @@ impl AppView {
     }
 
     /// The focus handle of an explorer node, created the first time it shows.
-    fn node_handle(&self, index: usize, path: &ObjectPath, cx: &App) -> FocusHandle {
+    pub(super) fn node_handle(&self, index: usize, path: &ObjectPath, cx: &App) -> FocusHandle {
         self.node_focus
             .borrow_mut()
             .entry((index, path.clone()))
@@ -1564,7 +1565,7 @@ impl AppView {
     }
 
     /// Selects an explorer node and gives it the keyboard.
-    fn select_node(
+    pub(super) fn select_node(
         &mut self,
         index: usize,
         path: &ObjectPath,
@@ -1593,12 +1594,15 @@ impl AppView {
         use jykre::explorer::TreeMove;
         let searching = !self.search.read(cx).value().is_empty();
         let connection = &self.connections[index];
-        let rows = if searching {
-            connection.search_rows.as_slice()
-        } else {
-            connection.tree.rows()
-        };
-        let nodes: Vec<_> = rows.iter().filter_map(TreeRow::object).collect();
+        // The nodes on the list, so a quick search's filter is followed.
+        let nodes: Vec<_> = self
+            .explorer_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ExplorerEntry::Row(at, row) if *at == index => row.object(),
+                _ => None,
+            })
+            .collect();
         let Some(current) = nodes.iter().position(|node| node.path == *path) else {
             return;
         };
@@ -1616,7 +1620,7 @@ impl AppView {
 
     /// Expands or collapses a node, reading its first page of children from
     /// the cache when they were not read yet.
-    fn toggle_node(&mut self, index: usize, path: &ObjectPath, cx: &mut Context<Self>) {
+    pub(super) fn toggle_node(&mut self, index: usize, path: &ObjectPath, cx: &mut Context<Self>) {
         if self.connections[index].tree.toggle(path) {
             self.load_children(index, path.clone(), None, cx);
         }
@@ -2733,10 +2737,23 @@ impl AppView {
                 )
             })
             .collect();
-        if signature == self.explorer_signature {
+        // A quick search that filters changes the entries; one that marks
+        // changes only how many match.
+        let quick = self
+            .explorer_quick
+            .as_ref()
+            .map(|quick| (quick.text.clone(), self.explorer_quick_mode));
+        if signature == self.explorer_signature && quick == self.explorer_quick_key {
             return;
         }
         self.explorer_signature = signature;
+        let filter = quick
+            .as_ref()
+            .filter(|(text, mode)| *mode == QuickMode::Filter && !text.is_empty())
+            .map(|(text, _)| text.clone());
+        let text = quick.as_ref().map(|(text, _)| text.clone());
+        self.explorer_quick_key = quick;
+        let mut matches = 0;
         let mut entries = Vec::with_capacity(self.explorer_entries.len());
         for (index, connection) in self.connections.iter().enumerate() {
             entries.push(ExplorerEntry::Connection(index));
@@ -2748,11 +2765,28 @@ impl AppView {
             } else {
                 connection.tree.rows()
             };
-            entries.extend(
-                rows.iter()
-                    .cloned()
-                    .map(|row| ExplorerEntry::Row(index, row)),
-            );
+            if let Some(text) = text.as_deref().filter(|text| !text.is_empty()) {
+                matches += rows
+                    .iter()
+                    .filter_map(TreeRow::object)
+                    .filter(|object| jykre::explorer::quick_matches(&object.name, text))
+                    .count();
+            }
+            match filter.as_deref() {
+                Some(filter) => entries.extend(
+                    jykre::explorer::filter_rows(rows, filter)
+                        .into_iter()
+                        .map(|row| ExplorerEntry::Row(index, row)),
+                ),
+                None => entries.extend(
+                    rows.iter()
+                        .cloned()
+                        .map(|row| ExplorerEntry::Row(index, row)),
+                ),
+            }
+        }
+        if let Some(quick) = self.explorer_quick.as_mut() {
+            quick.matches = matches;
         }
         let old: Vec<_> = self
             .explorer_entries
@@ -2792,15 +2826,19 @@ impl AppView {
         }
     }
 
-    /// Scrolls the explorer so the node is on screen.
-    fn reveal_explorer_node(&self, index: usize, path: &ObjectPath) {
-        let found = self.explorer_entries.iter().position(|entry| match entry {
+    /// Where the node is in the explorer list, if it shows.
+    pub(super) fn explorer_position(&self, index: usize, path: &ObjectPath) -> Option<usize> {
+        self.explorer_entries.iter().position(|entry| match entry {
             &ExplorerEntry::Row(at, ref row) => {
                 at == index && row.object().is_some_and(|object| object.path == *path)
             }
             ExplorerEntry::Connection(_) => false,
-        });
-        if let Some(found) = found {
+        })
+    }
+
+    /// Scrolls the explorer so the node is on screen.
+    fn reveal_explorer_node(&self, index: usize, path: &ObjectPath) {
+        if let Some(found) = self.explorer_position(index, path) {
             self.explorer_list.scroll_to_reveal_item(found);
         }
     }
@@ -2878,8 +2916,26 @@ impl AppView {
             .as_ref()
             .is_some_and(|(at, chosen)| *at == index && *chosen == path);
         let focus = self.node_handle(index, &path, cx);
+        // What the quick search, or else the explorer search, typed is
+        // marked in the name; only rows on screen do this.
+        let marks = match self.explorer_quick.as_ref() {
+            Some(quick) => jykre::palette::highlights(&object.name, &[&quick.text]),
+            None => jykre::palette::highlights(&object.name, &[&self.search.read(cx).value()]),
+        };
         row()
             .id(("node-row", id))
+            .relative()
+            // Where the selected node is, for the menu Shift F10 opens.
+            .when(selected, |s| {
+                let cell = self.selected_bounds.clone();
+                s.child(
+                    canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+            })
             .pl(px(tree_indent(path.0.len())))
             .pr_1()
             .h(px(32.))
@@ -2965,7 +3021,7 @@ impl AppView {
                         div()
                             .truncate()
                             .text_size(px(14.))
-                            .child(object.name.clone()),
+                            .child(marked(object.name.clone(), marks)),
                     )
                     .when_some(detail, |s, detail| {
                         s.child(

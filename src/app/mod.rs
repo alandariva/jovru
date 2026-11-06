@@ -7,6 +7,7 @@ mod layout;
 mod password;
 pub mod performance;
 mod probe;
+mod quick_search;
 mod report_chart;
 mod report_panel;
 mod report_picker;
@@ -146,7 +147,12 @@ actions!(
         ExportResult,
         /// Ctrl+/ in the SQL editor: comments the selected lines (or the
         /// caret's line) with `--`, or uncomments them.
-        ToggleComment
+        ToggleComment,
+        /// Shift+F10 in the explorer: the selected node's context menu.
+        ExplorerContextMenu,
+        /// Ctrl+F in the explorer: the quick search marks its matches or
+        /// shows only them.
+        ToggleExplorerFilter
     ]
 );
 
@@ -383,6 +389,22 @@ struct AppView {
     orphan_groups: Vec<(String, TabGroupId)>,
     /// The explorer node selected by a click or the arrow keys.
     explorer_selected: Option<(usize, ObjectPath)>,
+    /// The explorer's quick search, while open ([`quick_search`]).
+    explorer_quick: Option<quick_search::QuickSearch>,
+    /// Whether the quick search marks its matches or shows only them; kept
+    /// from one search to the next.
+    explorer_quick_mode: jykre::explorer::QuickMode,
+    /// The quick search the explorer entries were last built for.
+    explorer_quick_key: Option<(String, jykre::explorer::QuickMode)>,
+    /// The explorer tree's own focus: it keeps the keyboard while a filter
+    /// hides the selected node, so typing goes on.
+    explorer_focus: FocusHandle,
+    /// Where the selected explorer node was drawn this frame, for the
+    /// context menu `Shift F10` opens.
+    selected_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
+    /// The selection before the explorer search started, given back when
+    /// the search is cleared and the node it chose is not shown.
+    selection_before_search: Option<Option<(usize, ObjectPath)>>,
     /// Focus of each explorer node shown so far, so the arrow keys can move
     /// it. Rendering takes `&self`, hence the cell.
     node_focus: std::cell::RefCell<HashMap<(usize, ObjectPath), FocusHandle>>,
@@ -477,7 +499,7 @@ impl AppView {
         });
         let search_subscription = cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                this.search_cache(false, cx);
+                this.search_changed(cx);
             }
             cx.notify();
         });
@@ -621,6 +643,12 @@ impl AppView {
             state_revision: 0,
             orphan_groups: Vec::new(),
             explorer_selected: None,
+            explorer_quick: None,
+            explorer_quick_mode: jykre::explorer::QuickMode::default(),
+            explorer_quick_key: None,
+            explorer_focus: cx.focus_handle(),
+            selected_bounds: Default::default(),
+            selection_before_search: None,
             node_focus: std::cell::RefCell::new(HashMap::new()),
             _subscriptions: vec![
                 // The last edits are written before the application exits.
@@ -1758,13 +1786,34 @@ impl AppView {
             )
             .when(self.section == Section::Explorer, |s| {
                 s.child(
-                    div().px_3().pb_3().child(
-                        Input::new(&self.search)
-                            .small()
-                            .prefix(I::Search)
-                            .w_full()
-                            .aria_label(tr!("Search objects in the explorer")),
-                    ),
+                    div()
+                        .px_3()
+                        .pb_3()
+                        // Esc clears the text, then gives the keyboard to the
+                        // tree; Down goes to the tree's first node.
+                        .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            if event.keystroke.modifiers.modified() {
+                                return;
+                            }
+                            match event.keystroke.key.as_str() {
+                                "escape" if !this.search.read(cx).value().is_empty() => {
+                                    this.search
+                                        .update(cx, |input, cx| input.set_value("", window, cx));
+                                    this.search_changed(cx);
+                                }
+                                "escape" | "down" => this.focus_explorer_tree(window, cx),
+                                _ => return,
+                            }
+                            window.prevent_default();
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            Input::new(&self.search)
+                                .small()
+                                .prefix(I::Search)
+                                .w_full()
+                                .aria_label(tr!("Search objects in the explorer")),
+                        ),
                 )
                 .child(
                     row()
@@ -1848,6 +1897,7 @@ impl AppView {
                 .child(
                     column()
                         .id("connection-tree")
+                        .relative()
                         .flex_1()
                         .min_h_0()
                         .when(self.connections_loading, |s| {
@@ -1883,13 +1933,51 @@ impl AppView {
                                 )
                             },
                         )
+                        // Above the list, not over it, so the first rows
+                        // (often the matches) stay visible.
+                        .when_some(self.quick_search_bar(cx), |s, bar| s.child(bar))
                         .child({
                             let view = cx.entity();
-                            list(self.explorer_list.clone(), move |entry, _, cx| {
-                                view.update(cx, |this, cx| this.explorer_entry(entry, cx))
-                            })
-                            .flex_1()
-                            .pb_3()
+                            // Typing on the tree searches it (`quick_search`);
+                            // its keys are seen here before the focused node.
+                            div()
+                                .id("explorer-keys")
+                                .role(Role::Tree)
+                                .aria_label(tr!("Explorer"))
+                                .key_context(quick_search::EXPLORER_CONTEXT)
+                                .track_focus(&self.explorer_focus)
+                                .flex()
+                                .flex_col()
+                                .flex_1()
+                                .min_h_0()
+                                .capture_key_down(cx.listener(
+                                    |this, event: &KeyDownEvent, window, cx| {
+                                        if this.explorer_capture_key(event, window, cx) {
+                                            window.prevent_default();
+                                            cx.stop_propagation();
+                                        }
+                                    },
+                                ))
+                                .on_action(cx.listener(
+                                    |this, _: &ExplorerContextMenu, window, cx| {
+                                        this.open_node_menu(window, cx)
+                                    },
+                                ))
+                                .on_action(cx.listener(
+                                    |this, _: &ToggleExplorerFilter, window, cx| {
+                                        let mode = this.explorer_quick_mode.toggled();
+                                        this.set_quick_mode(mode, window, cx)
+                                    },
+                                ))
+                                .child(
+                                    list(self.explorer_list.clone(), move |entry, _, cx| {
+                                        view.update(cx, |this, cx| {
+                                            this.explorer_entry(entry, cx)
+                                        })
+                                    })
+                                    .flex_1()
+                                    .pb_3(),
+                                )
                         })
                         .vertical_scrollbar(&self.explorer_list),
                 )
@@ -2670,6 +2758,8 @@ impl Render for AppView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         probe::frame_started();
         probe::rendered("AppView");
+        // Set again by the selected node while it is drawn.
+        self.selected_bounds.set(None);
         self.sync_explorer(cx);
         if std::mem::take(&mut self.details_needs_focus) {
             self.details_name
@@ -2965,6 +3055,16 @@ pub fn run() {
             KeyBinding::new("ctrl-shift-e", ExportResult, None),
             KeyBinding::new("ctrl-shift-e", ExportResult, Some(&editor)),
             KeyBinding::new("ctrl-/", ToggleComment, Some(&editor)),
+            KeyBinding::new(
+                "shift-f10",
+                ExplorerContextMenu,
+                Some(quick_search::EXPLORER_CONTEXT),
+            ),
+            KeyBinding::new(
+                "ctrl-f",
+                ToggleExplorerFilter,
+                Some(quick_search::EXPLORER_CONTEXT),
+            ),
         ]);
         Theme::change(ThemeMode::Dark, None, cx);
         Theme::update(cx, |theme| {
