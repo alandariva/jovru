@@ -358,9 +358,13 @@ fn library_without_language_features(root: &Path) -> Result<(), String> {
 /// What the AI assistant's code may not touch (ADR-0028): result values,
 /// bound parameter values, sessions, credentials and server reads. Its
 /// requests are built from the allow-list in `src/assistant/facts.rs` and
-/// the metadata cache only. Test files may build fixtures with them.
-const ASSISTANT_FORBIDDEN: [&str; 9] = [
+/// the metadata cache only, and from a query's result only through
+/// `src/assistant/released.rs` ([`RELEASED_MAY_NAME`]). Test files may
+/// build fixtures with them.
+const ASSISTANT_FORBIDDEN: [&str; 11] = [
     "ResultData",
+    "QueryBatch",
+    "QueryResult",
     ".parameters",
     "inspect_object",
     "object_definition",
@@ -370,6 +374,10 @@ const ASSISTANT_FORBIDDEN: [&str; 9] = [
     "backend::fetch",
     "held_pages",
 ];
+
+/// What `src/assistant/released.rs` alone may name: a query's result, which
+/// it cuts to what may be sent once the user sends it.
+const RELEASED_MAY_NAME: [&str; 3] = ["ResultData", "QueryBatch", "QueryResult"];
 
 fn assistant_privacy(root: &Path) -> Result<(), String> {
     let mut pending = vec![root.join("src").join("assistant")];
@@ -397,9 +405,13 @@ fn assistant_privacy(root: &Path) -> Result<(), String> {
     }
     for path in files {
         let source = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let released = path.file_name().is_some_and(|name| name == "released.rs")
+            && path
+                .parent()
+                .is_some_and(|dir| dir == root.join("src").join("assistant"));
         if let Some(name) = ASSISTANT_FORBIDDEN
             .iter()
-            .find(|name| source.contains(**name))
+            .find(|name| source.contains(**name) && !(released && RELEASED_MAY_NAME.contains(name)))
         {
             return Err(format!(
                 "{} uses {name}; the assistant may read only the facts allow-list and the metadata cache",
@@ -689,14 +701,31 @@ mod tests {
             "src/assistant/tests.rs",
             "let data = ResultData::from_rows(columns, rows);",
         );
+        // A query's result is cut to what may be sent in one file only.
+        write(
+            "src/assistant/released.rs",
+            "pub fn from_batch(batch: &QueryBatch) { let data: &ResultData = &batch.completed[0].data; }",
+        );
         assert!(assistant_privacy(&root).is_ok());
         write(
             "src/app/assistant_panel.rs",
             "let values = tab.parameters.clone();",
         );
         let refused = assistant_privacy(&root);
-        fs::remove_dir_all(&root).unwrap();
         assert!(refused.is_err_and(|error| error.contains("assistant_panel.rs")));
+        fs::remove_file(root.join("src/app/assistant_panel.rs")).unwrap();
+        // Nowhere else, and not even there for anything else.
+        write("src/assistant/run.rs", "fn rows(batch: &QueryBatch) {}");
+        let refused = assistant_privacy(&root);
+        assert!(refused.is_err_and(|error| error.contains("run.rs")));
+        fs::remove_file(root.join("src/assistant/run.rs")).unwrap();
+        write(
+            "src/assistant/released.rs",
+            "fn bound(request: &QueryRequest) { request.parameters.len(); }",
+        );
+        let refused = assistant_privacy(&root);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(refused.is_err_and(|error| error.contains("released.rs")));
     }
 
     #[test]

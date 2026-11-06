@@ -79,6 +79,7 @@
 | AI assistant: a whole round | 300 s; cancellable at any time (**Stop**), which closes the connection |
 | AI assistant: **Test** in Preferences | 30 s, cancellable |
 | AI assistant: one tool reading the metadata cache | 10 s; past it the model is told so and the round goes on |
+| AI assistant: a query the user approved (`run_query`) | The tab's statement time limit; **Stop** cancels it and ends the turn. It runs in the assistant's own session, kept between queries and closed when the tab's connection changes or the tab closes; it reads at most 4 MB |
 | AI assistant: reading, saving or removing the API key in the OS vault | 10 s, as passwords |
 | Telemetry: one export of a batch of spans or log records to the collector | 10 s, then the batch is retried at most three times with backoff, as OpenTelemetry recommends; past the queue (2,048), new items are dropped |
 | Telemetry: what is queued when the application exits | 3 s |

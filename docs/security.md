@@ -110,7 +110,14 @@ sends requests to the provider the user chose. What a request may carry:
   codes and position, how many rows a statement returned and changed, and
   what the metadata tools read from this computer's cache: names, types,
   nullability, keys, column defaults and comments.
-- **Never sent:** result values, the values bound to `:name` parameters,
+- **Sent only after two approvals:** the result of a query the model asked
+  for with `run_query`. The user approves the statement, which runs in a
+  session of the assistant's own; then the user sees the rows and the exact
+  text to be sent, may hide any column (its name and type stay, each value
+  becomes `[hidden]`) and sends it or not. At most 50 rows, cells cut at
+  200 characters, 16 KiB. Preferences can turn the tool off.
+- **Never sent:** the values of result tabs, the values bound to `:name`
+  parameters, a hidden column's values, a result the user did not send,
   anything read live from the server (Inspect, definitions), credentials,
   and the API key outside the provider's authentication header.
 - Error messages and SQL may hold values the user typed or the server
@@ -119,16 +126,26 @@ sends requests to the provider the user chose. What a request may carry:
   request by default, the first only, or never), with its tool steps and
   token counts. The review shows the request the application builds; the
   provider library turns it into its wire format without adding content.
-- The rule is enforced by types (`jykre::assistant::facts`), by a source
-  check in `cargo xtask check` (`assistant_privacy`) and by a test that
-  proves a result value and a bound value never reach a request.
+- Every request repeats the whole conversation, so a result the user sent
+  goes again with each later request, until the user compacts the context:
+  **Prune long tool results** stops sending it; **Summarize with the
+  model** replaces the conversation with the model's summary (asked to
+  leave values out), which then goes in the system prompt of later
+  requests.
+- The rule is enforced by types (`jykre::assistant::facts`, and
+  `jykre::assistant::released` for query results), by a source check in
+  `cargo xtask check` (`assistant_privacy`, which lets only `released.rs`
+  name a result) and by tests that prove a result tab's value, a bound
+  value, a hidden column's value, a withheld result and a declined query
+  never reach a request.
 - Addresses are HTTPS, except a server on this computer (loopback); TLS uses
   rustls with the system's trust store; redirects are not followed.
 - The model's answer is untrusted text: it is shown as plain text, never
-  as markup, and its SQL is never run by the application. Comments,
-  defaults and error messages can carry instructions aimed at the model;
-  the tools only read the local cache, so following them can only read
-  metadata.
+  as markup, and its SQL is never run by the application without the
+  user's approval. Comments, defaults, error messages and query results can
+  carry instructions aimed at the model; the cache tools only read
+  metadata, and a statement the model asks for runs only after the user
+  has read and approved it.
 - Logs record each round's provider, time, token counts and error code;
   never a prompt, an answer, schema text or a key. The provider library's
   own log is off (`genai=off`), as its warnings can quote answers.

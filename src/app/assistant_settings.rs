@@ -66,6 +66,7 @@ fn review_name(mode: ReviewMode) -> &'static str {
 pub(super) struct AssistantSettingsView {
     provider: Option<ProviderKind>,
     review: ReviewMode,
+    queries: bool,
     model: Entity<InputState>,
     endpoint: Entity<InputState>,
     key: Entity<InputState>,
@@ -102,6 +103,7 @@ impl AssistantSettingsView {
         let mut view = Self {
             provider: None,
             review: ReviewMode::default(),
+            queries: true,
             model,
             endpoint,
             key,
@@ -124,6 +126,7 @@ impl AssistantSettingsView {
         self.filled = true;
         self.provider = settings.provider;
         self.review = settings.review;
+        self.queries = settings.queries;
         let set = |state: &Entity<InputState>,
                    text: String,
                    window: &mut Window,
@@ -170,6 +173,7 @@ impl AssistantSettingsView {
         let mut preferences = (*preferences(cx)).clone();
         preferences.provider = self.provider;
         preferences.review = self.review;
+        preferences.queries = self.queries;
         preferences.model = text(&self.model);
         let endpoint = text(&self.endpoint);
         preferences.endpoint = (!endpoint.is_empty()).then_some(endpoint);
@@ -437,6 +441,21 @@ impl Render for AssistantSettingsView {
                                     cx.notify();
                                 }))
                         },
+                    )))
+                    .child(label(tr!("Queries the assistant asks to run")))
+                    .child(row().flex_wrap().gap_1().children(
+                        [(true, tr!("Ask me each time")), (false, tr!("Off"))].into_iter().enumerate().map(
+                            |(index, (allowed, title))| {
+                                choice(("assistant-queries", index), title, self.queries == allowed)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.queries = allowed;
+                                        cx.notify();
+                                    }))
+                            },
+                        ),
+                    ))
+                    .child(label(tr!(
+                        "You approve each query and each result. At most 50 rows are sent, and you can hide columns."
                     )))
                     .child(label(tr!("Price per million tokens (optional, for the cost shown)")))
                     .child(

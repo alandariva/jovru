@@ -1,5 +1,5 @@
 use super::assistant_panel::{
-    AssistantPanel, AssistantPanelEvent, FixTarget, Mode as AssistantMode,
+    AssistantPanel, AssistantPanelEvent, FixTarget, Mode as AssistantMode, QueryTicket,
 };
 use super::demo::{self, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
@@ -23,6 +23,7 @@ use jykre::{
         apply,
         facts::{ErrorFacts, RunFacts, SchemaScope},
         prompts,
+        released::{self, QueryPreview},
     },
     backend, cell_format, connection_store,
     drivers::*,
@@ -105,6 +106,15 @@ pub struct Workspace {
     query_split: Entity<ResizableState>,
     /// The assistant, its own cached entity (ADR-0028).
     assistant_panel: Entity<AssistantPanel>,
+    /// The assistant's own session, for the queries the user lets it run:
+    /// apart from the tab's, so they never touch its transaction, temporary
+    /// tables or `USE`.
+    assistant_session: Option<Box<dyn Session>>,
+    /// Bumped when the connection changes: a session coming back from the
+    /// previous one is closed.
+    assistant_lease: u64,
+    /// The assistant's query waiting for the connection's password.
+    pending_assistant: Option<AssistantQuery>,
     connection: SharedString,
     dialect: SharedString,
     database: String,
@@ -359,6 +369,9 @@ impl Workspace {
             selection_summary: Summary::default(),
             result_view: ResultView::Table,
             assistant_open: true,
+            assistant_session: None,
+            assistant_lease: 0,
+            pending_assistant: None,
             cache_id: None,
             run: QueryRun::new(sql),
             editor_sql: sql.to_string(),
@@ -3094,8 +3107,110 @@ impl Workspace {
             AssistantPanelEvent::Notice(notice) => self.notice = Some(notice.clone()),
             AssistantPanelEvent::OpenPreferences => cx.emit(WorkspaceEvent::OpenPreferences),
             AssistantPanelEvent::Close => self.assistant_open = false,
+            AssistantPanelEvent::RunQuery {
+                sql,
+                ticket,
+                cancel,
+            } => self.run_assistant_query(
+                AssistantQuery {
+                    sql: sql.clone(),
+                    ticket: *ticket,
+                    cancel: cancel.clone(),
+                },
+                cx,
+            ),
         }
         cx.notify();
+    }
+
+    /// Runs a statement the user approved for the assistant, in the
+    /// assistant's own session, and hands the panel its result cut to what
+    /// may be sent ([`QueryPreview`]); the panel then asks the user whether
+    /// to send it. It is not a result tab and not in the history.
+    fn run_assistant_query(&mut self, query: AssistantQuery, cx: &mut Context<Self>) {
+        let Some(input) = self.input.clone() else {
+            let error = DriverError::new(
+                ErrorCode::Connection,
+                tr!("Choose a connection for this tab."),
+            );
+            let preview = QueryPreview::from_error(&error, &query.sql);
+            self.assistant_panel.update(cx, |panel, cx| {
+                panel.query_done(query.ticket, Some(preview), cx)
+            });
+            return;
+        };
+        if connection_store::needs_password(&input) {
+            // The host asks for the password, then resumes this query.
+            self.pending_assistant = Some(query);
+            cx.emit(WorkspaceEvent::PasswordRequired);
+            return;
+        }
+        let AssistantQuery {
+            sql,
+            ticket,
+            cancel,
+        } = query;
+        let session = self.assistant_session.take();
+        let lease = self.assistant_lease;
+        let connection = self.cache_id;
+        let context = self.context.clone();
+        let request = QueryRequest::new(
+            sql.clone(),
+            ExecutionOptions {
+                max_rows: released::READ_ROWS,
+                ..self.options()
+            },
+        );
+        cx.spawn(async move |weak, cx| {
+            // The result becomes a preview on the runtime; its rows are
+            // dropped there.
+            let outcome = backend::run(async move {
+                let stopped = cancel.clone();
+                let run = backend::query_in_context(
+                    connection,
+                    input,
+                    context,
+                    session,
+                    vec![request],
+                    ASSISTANT_MEMORY_CEILING,
+                    cancel,
+                )
+                .await;
+                let (preview, session) = match run {
+                    Ok(run) => {
+                        let preview = match &run.batch {
+                            Ok(batch) => QueryPreview::from_batch(batch, &sql),
+                            Err(error) => QueryPreview::from_error(error, &sql),
+                        };
+                        (preview, run.session)
+                    }
+                    Err(error) => (QueryPreview::from_error(&error, &sql), None),
+                };
+                Ok(((!stopped.is_cancelled()).then_some(preview), session))
+            })
+            .await;
+            let (preview, session) = outcome.unwrap_or((None, None));
+            let mut session = session;
+            let _ = weak.update(cx, |this, cx| {
+                if this.assistant_lease == lease && this.assistant_session.is_none() {
+                    this.assistant_session = session.take();
+                }
+                this.assistant_panel
+                    .update(cx, |panel, cx| panel.query_done(ticket, preview, cx));
+            });
+            if let Some(session) = session {
+                backend::close_in_background(session);
+            }
+        })
+        .detach();
+    }
+
+    /// Closes the assistant's session: the connection changed or went away.
+    fn drop_assistant_session(&mut self) {
+        self.assistant_lease += 1;
+        if let Some(session) = self.assistant_session.take() {
+            backend::close_in_background(session);
+        }
     }
 
     /// Tells the panel which connection's cache its tools read, and where
@@ -3154,6 +3269,17 @@ impl Workspace {
         });
         cx.notify();
     }
+}
+
+/// The memory one query of the assistant may read: far more than the
+/// [`released::MAX_ROWS`] rows it may send, far less than a tab's result.
+const ASSISTANT_MEMORY_CEILING: usize = 4 << 20;
+
+/// A statement the user approved for the assistant, on its way.
+struct AssistantQuery {
+    sql: String,
+    ticket: QueryTicket,
+    cancel: CancellationToken,
 }
 
 /// What the editor header says about the tab's session.
@@ -3257,6 +3383,7 @@ impl Workspace {
             self.set_connection(input, row_limit, cx);
         } else {
             self.abandon_run();
+            self.drop_assistant_session();
             self.input = None;
             self.sql_editor
                 .update(cx, |editor, _| editor.set_connection(None));
@@ -3350,6 +3477,8 @@ impl Workspace {
         self.connection = name.into();
         // The new limit applies from the next run.
         self.row_limit = row_limit;
+        // The assistant's next query opens a session with the new settings.
+        self.drop_assistant_session();
         let same_server = self
             .input
             .as_ref()
@@ -3391,6 +3520,9 @@ impl Workspace {
         if let Some((scope, placement)) = self.pending_run.take() {
             self.execute_queries(scope, placement, cx);
         }
+        if let Some(query) = self.pending_assistant.take() {
+            self.run_assistant_query(query, cx);
+        }
     }
 
     /// Runs what waited for the user to confirm its risky statements.
@@ -3412,6 +3544,9 @@ impl Workspace {
     ) {
         self.connection_color = color;
         self.environment = environment;
+        let production = environment == Some(jykre::connection_appearance::Environment::Production);
+        self.assistant_panel
+            .update(cx, |panel, cx| panel.set_production(production, cx));
         cx.notify();
     }
 
@@ -3421,6 +3556,7 @@ impl Workspace {
     /// runs until another connection is chosen.
     pub fn connection_deleted(&mut self, cx: &mut Context<Self>) {
         self.abandon_run();
+        self.drop_assistant_session();
         self.input = None;
         self.transactions = false;
         self.pending_run = None;
@@ -3435,9 +3571,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Forgets the run that waited for a password the user did not give.
-    pub fn cancel_pending(&mut self) {
+    /// Forgets the run that waited for a password the user did not give;
+    /// the assistant's query waiting for it does not run.
+    pub fn cancel_pending(&mut self, cx: &mut Context<Self>) {
         self.pending_run = None;
+        if let Some(query) = self.pending_assistant.take() {
+            self.assistant_panel
+                .update(cx, |panel, cx| panel.query_done(query.ticket, None, cx));
+        }
     }
 
     /// Opens the tab without its connection, which no longer exists, and
@@ -3549,6 +3690,7 @@ impl Workspace {
     /// Another server: its namespaces and the names read from its cache are
     /// not this one's.
     fn forget_server(&mut self, cx: &mut Context<Self>) {
+        self.drop_assistant_session();
         self.context = SessionContext::default();
         self.context_choices.clear();
         self.sql_editor
@@ -3945,6 +4087,9 @@ impl Drop for Workspace {
         self.cancellation.cancel();
         self.export.cancel();
         if let Some(session) = self.session.take() {
+            backend::close_in_background(session);
+        }
+        if let Some(session) = self.assistant_session.take() {
             backend::close_in_background(session);
         }
     }

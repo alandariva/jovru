@@ -4,10 +4,12 @@
 //! the model is given ([`prompts`]), the agentic loop ([`run`]) and putting
 //! a suggestion into the editor ([`apply`]). The provider side is the
 //! `jykre-assistant` crate. No view decides anything here, and nothing here
-//! reads a result's values or opens a session.
+//! opens a session. A query's values reach a request only through
+//! [`released`], after the user approved the query and its result.
 pub mod apply;
 pub mod facts;
 pub mod prompts;
+pub mod released;
 pub mod run;
 pub mod tools;
 
@@ -24,15 +26,31 @@ pub const PREFERENCES_KEY: &str = "assistant.preferences";
 
 /// What the user chose in **Preferences › Assistant**. The API key is not
 /// here: it lives in the system vault only.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssistantPreferences {
     /// `None` turns the assistant off.
     pub provider: Option<ProviderKind>,
     pub model: String,
     pub endpoint: Option<String>,
     pub review: ReviewMode,
+    /// The model may ask to run queries (`run_query`); each query and each
+    /// result still waits for the user.
+    pub queries: bool,
     /// Prices per model name, entered by the user.
     pub prices: BTreeMap<String, Price>,
+}
+
+impl Default for AssistantPreferences {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            model: String::new(),
+            endpoint: None,
+            review: ReviewMode::default(),
+            queries: true,
+            prices: BTreeMap::new(),
+        }
+    }
 }
 
 impl AssistantPreferences {
@@ -69,6 +87,10 @@ impl AssistantPreferences {
             review: text("review")
                 .and_then(ReviewMode::from_key)
                 .unwrap_or_default(),
+            queries: value
+                .get("queries")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
             prices,
         }
     }
@@ -79,6 +101,7 @@ impl AssistantPreferences {
             "model": self.model,
             "endpoint": self.endpoint,
             "review": self.review.key(),
+            "queries": self.queries,
             "prices": self.prices,
         })
     }

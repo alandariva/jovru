@@ -58,7 +58,8 @@ no fallback that skips checks.
 - `jykre-assistant` depends on core and external libraries only; core never
   depends on `genai`. The assistant's code names no result data, bound
   parameters, sessions, credentials or server reads (`assistant_privacy`,
-  a source check; `tests.rs` files may build fixtures with them).
+  a source check; `tests.rs` files may build fixtures with them, and
+  `src/assistant/released.rs` alone may name a query's result).
 - The check covers direct Cargo edges, including dev and build dependencies.
   Where logic lives and transitive dependencies still need review.
 
@@ -237,6 +238,16 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   metadata cache, and proves that a result value and a bound `:name` value
   never reach a request, that every reviewed text is in what the provider
   received, and that rounds are never logged with their text or the key.
+  The same file runs `run_query` on a synthetic SQLite file of 60 rows,
+  answered as the user would (send with a column hidden, withhold,
+  decline): a hidden column's value, a withheld result and a declined
+  query never reach a request, a declined query never runs, at most 50
+  rows are sent, and a call with two statements is refused before the user
+  is asked. The loop's tests (`src/assistant/run.rs`) prove that nothing is
+  left out of a request on its own, that each request knows what the last
+  sent one carried, that pruning keeps the calls and stops a sent value
+  from being sent again, and that a summary replaces the conversation only
+  when the model answered with one.
   Real providers are checked by hand: record the provider, model and
   outcome, never the key.
 - Telemetry ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)) is

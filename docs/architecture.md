@@ -106,7 +106,9 @@ edge, including dev and build dependencies:
 7. The assistant's code (`src/assistant/`, `src/app/assistant_panel.rs`,
    `src/app/assistant_settings.rs`; tests aside) names no result data,
    bound parameters, sessions, credentials or server reads: what a request
-   may tell comes from `assistant::facts` and the metadata cache only
+   may tell comes from `assistant::facts` and the metadata cache, and a
+   query's result only through `src/assistant/released.rs`, the one file
+   allowed to name a result
    ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)).
 
 Transitive dependencies and where logic lives inside the `jykre` crate are

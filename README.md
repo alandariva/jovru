@@ -10,7 +10,8 @@ and run real SQL.
 > **Status:** early prototype (`0.1.0`). Windows is the primary and only
 > validated platform. The AI assistant talks to Anthropic, OpenAI, an
 > OpenAI-compatible server or Ollama, once set up in Preferences; it sees
-> SQL, errors, row counts and structure, never values.
+> SQL, errors, row counts and structure, and values only from a query it
+> asked for, after you approve the query and send its result.
 
 ## Requirements
 

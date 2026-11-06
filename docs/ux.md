@@ -77,27 +77,54 @@ right of the query area ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metad
   is sent and never sent ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)).
 - **Set up** in Preferences › Assistant: provider (Anthropic, OpenAI,
   OpenAI-compatible, Ollama or off), model, address, API key (kept in the
-  system vault and never shown again), when to review requests, and prices
-  per million tokens for the costs shown. **Test** asks the model a tiny
+  system vault and never shown again), when to review requests, whether
+  the model may ask to run queries (**Ask me each time** or **Off**), and
+  prices per million tokens for the costs shown. **Test** asks the model a tiny
   question with one tool declared. Until it is set up, the panel offers to
   open Preferences.
 - **Fix with AI**, next to **Copy details** on a failed statement, sends the
   statement and the server's error. **Ask** sends a question, with the row
   counts of the tab's last result; **Write SQL** sends a description, with
   the selection or the statement at the cursor.
-- Each request appears as a card (**Request N**: model, estimated tokens and
-  cost) with its messages, tools and JSON. When the review mode asks, it
+- Each request appears as a card (**Request N**: model, estimated tokens,
+  the estimated tokens that are new, and cost) with its messages, tools and
+  JSON. Messages show what is new since the last request sent; a **…** row
+  says what is the same (the system prompt, N messages) and shows everything
+  when chosen. When the review mode asks, it
   waits with **Send** and **Cancel**, saying nothing has been sent yet.
   Each tool the model calls is a step showing its arguments and the answer
   the next request carries. After 300 ms a round shows **Thinking…**, after
   2 s its elapsed time, and **Stop** (or the composer's stop button)
   cancels it. After 8 rounds the request stops until **Continue**.
+- When the model asks to run a query, a card says why (its purpose), shows
+  the statement, marks one that changes or deletes data and a production
+  connection, and says where it runs: **Decline** or **Run** (**Run on
+  production** for a risky statement there). It runs in the assistant's own
+  session, with **Running…** and **Stop**. Then the card shows a toggle per
+  column (focusable buttons that wrap, so every column is reachable in a
+  narrow panel), up to 50 rows and, below,
+  the exact text the model would receive, updated as columns are hidden;
+  it says nothing of the result has been sent: **Don't send** or **Send
+  result**. A decided card folds to one line (sent, with rows and hidden
+  columns; ran, not sent; declined) that opens on the statement and what
+  the model was told. Columns hidden once start hidden in the next result
+  of the conversation.
 - Answers are plain text; each SQL block has Copy, **Insert at the cursor**
   and, for a fix, **Replace the failed statement**, which replaces it only
   where it still is unchanged, as one undo step. A block that changes or
-  deletes every row is marked. Nothing runs on its own.
-- Each answer shows its tokens (input, output, cached), cost and time; the
-  header shows the conversation's totals. **Copy the whole trace** exports
+  deletes every row is marked. Nothing runs without the user's approval.
+- Each answer shows its tokens (input, output, cached), cost and time.
+  Below the header, the **Session** summary shows three tiles (spent in the
+  session, tokens in the context, the share of input from the provider's
+  cache with a bar) and a line with rounds, input and output, and cache
+  hits and misses; its chevron folds it to one line (spent · tokens ·
+  cache), and it stays as left. The gear (**Assistant options**) says what
+  is sent and holds **Compact the context**: **Prune long tool results**
+  and **Summarize with the model** (a request reviewed like any other),
+  available when nothing is on its way. Each compaction shows in the
+  conversation with the context's estimated size before and after, and
+  that the next request starts the provider's cache again. A request the
+  provider rejects suggests compacting. **Copy the whole trace** exports
   every request, answer and tool step as JSON. **New conversation** starts
   over; choosing another connection does too. A failure shows inline with
   **Try again**, never in a dialog.

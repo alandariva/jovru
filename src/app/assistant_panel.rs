@@ -6,17 +6,24 @@
 //! the tokens and cost of every round.
 //!
 //! The panel decides nothing about privacy: the workspace builds each
-//! request's first message from the facts allow-list, and the tools read
-//! the metadata cache only (`jykre::assistant`).
+//! request's first message from the facts allow-list, the tools read the
+//! metadata cache only (`jykre::assistant`), and a query the model asks for
+//! runs only once the user approves it, its result leaving only once the
+//! user sends it, through `jykre::assistant::released`.
 use super::assistant_settings::{self, AssistantSettings};
 use super::demo;
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::Sizable as _;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::assistant::facts::SchemaScope;
-use jykre::assistant::run::{self, Conversation, Next, Round, RoundState, ToolStep};
+use jykre::assistant::released::{self, QueryPreview};
+use jykre::assistant::run::{
+    self, CompactionKind, Conversation, Next, QueryDecision, Round, RoundState, ToolStep,
+};
 use jykre::assistant::tools::CacheTools;
 use jykre::assistant::{self as library, AssistantPreferences, prompts};
 use jykre::drivers::{CancellationToken, DriverError, DriverResult, ErrorCode};
@@ -24,7 +31,7 @@ use jykre::{backend, tr};
 use jykre_assistant::{
     Assistant, KeyUse, Message, RoundEvent, RoundResult, Timeouts, ToolCall, sql_blocks,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -46,9 +53,60 @@ pub(super) enum AssistantPanelEvent {
     Notice(Feedback),
     OpenPreferences,
     Close,
+    /// The user approved running `sql` for the model: run it in the
+    /// assistant's own session, stop when `cancel` fires, and answer with
+    /// [`AssistantPanel::query_done`] and `ticket`.
+    RunQuery {
+        sql: String,
+        ticket: QueryTicket,
+        cancel: CancellationToken,
+    },
 }
 
 impl EventEmitter<AssistantPanelEvent> for AssistantPanel {}
+
+/// Which query a result answers; a result for an older conversation or
+/// card is dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct QueryTicket {
+    epoch: u64,
+    card: usize,
+}
+
+/// A `run_query` call put to the user.
+struct QueryCard {
+    call: ToolCall,
+    sql: String,
+    purpose: Option<String>,
+    risk: Option<jykre::guard::Risk>,
+    state: CardState,
+}
+
+enum CardState {
+    /// Waits for **Run** or **Decline**.
+    Asked,
+    Running {
+        started: Instant,
+        cancel: CancellationToken,
+    },
+    /// Ran; waits for **Send result** or **Don't send**. `text` is exactly
+    /// what sending would put in the next request.
+    Review {
+        preview: Arc<QueryPreview>,
+        hidden: BTreeSet<usize>,
+        text: String,
+    },
+    Done(ToolStep),
+}
+
+/// The tool calls of a round being answered.
+struct InFlight {
+    calls: Vec<ToolCall>,
+    steps: Vec<ToolStep>,
+    /// Cards still to put to the user, in order.
+    queue: VecDeque<usize>,
+    continued: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
@@ -72,6 +130,10 @@ enum Phase {
         started: Instant,
     },
     Tools,
+    /// A query card waits for the user, or its query runs.
+    Query {
+        card: usize,
+    },
     /// The turn used its rounds; these calls wait for **Continue**.
     Limit(Vec<ToolCall>),
 }
@@ -79,11 +141,30 @@ enum Phase {
 /// One row of the conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
-    User { turn: usize },
-    Request { round: usize },
-    Answer { round: usize, turn: usize },
-    Tool { round: usize, step: usize },
-    Demo { index: usize },
+    User {
+        turn: usize,
+    },
+    Request {
+        round: usize,
+    },
+    Answer {
+        round: usize,
+        turn: usize,
+    },
+    Tool {
+        round: usize,
+        step: usize,
+    },
+    Query {
+        card: usize,
+    },
+    /// The conversation's compaction `index`.
+    Compaction {
+        index: usize,
+    },
+    Demo {
+        index: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -97,6 +178,8 @@ enum Section {
 struct Turn {
     text: String,
     fix: Option<FixTarget>,
+    /// The turn asks the model to summarize the conversation.
+    summary: bool,
 }
 
 pub(super) struct AssistantPanel {
@@ -123,6 +206,21 @@ pub(super) struct AssistantPanel {
     epoch: u64,
     cancel: CancellationToken,
     clock: bool,
+    /// The conversation offers `run_query`.
+    queries: bool,
+    cards: Vec<QueryCard>,
+    in_flight: Option<InFlight>,
+    /// Columns the user hid in this conversation, lowercase: they start
+    /// hidden in the next result.
+    hidden_names: BTreeSet<String>,
+    /// The tab's connection is marked production.
+    production: bool,
+    /// Request cards (by item) showing every message, not only what is new
+    /// since the last request sent.
+    whole_requests: HashSet<usize>,
+    /// The session summary shows its tiles; folded, it is one line. It
+    /// stays as the user left it across conversations.
+    summary_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -167,6 +265,13 @@ impl AssistantPanel {
             epoch: 0,
             cancel: CancellationToken::new(),
             clock: false,
+            queries: false,
+            cards: Vec::new(),
+            in_flight: None,
+            hidden_names: BTreeSet::new(),
+            production: false,
+            whole_requests: HashSet::new(),
+            summary_open: true,
             _subscriptions: vec![submit, settings],
         }
     }
@@ -203,12 +308,27 @@ impl AssistantPanel {
         }
     }
 
-    /// Stops what runs and forgets the conversation.
+    /// Whether the tab's connection is marked production, which a query
+    /// card says before **Run**.
+    pub(super) fn set_production(&mut self, production: bool, cx: &mut Context<Self>) {
+        if self.production != production {
+            self.production = production;
+            cx.notify();
+        }
+    }
+
+    /// Stops what runs and forgets the conversation. A query on its way is
+    /// cancelled; its result, if any, is dropped.
     pub(super) fn clear(&mut self, cx: &mut Context<Self>) {
         self.cancel.cancel();
+        self.cancel_queries();
         self.epoch += 1;
         self.conversation = None;
         self.tools = None;
+        self.cards.clear();
+        self.in_flight = None;
+        self.hidden_names.clear();
+        self.whole_requests.clear();
         self.turns.clear();
         self.items.clear();
         self.expanded.clear();
@@ -227,6 +347,9 @@ impl AssistantPanel {
                 self.cancel.cancel();
                 cx.notify();
             }
+            // The turn ends: the query on its way is cancelled and nothing
+            // of it, or of the queries after it, is sent.
+            Phase::Query { .. } => self.abandon_tools(&DriverError::cancelled(), cx),
             Phase::Limit(_) => {
                 self.phase = Phase::Idle;
                 cx.notify();
@@ -237,6 +360,61 @@ impl AssistantPanel {
 
     pub(super) fn busy(&self) -> bool {
         self.phase != Phase::Idle
+    }
+
+    /// The conversation can be compacted now.
+    fn can_compact(&self) -> bool {
+        !self.busy()
+            && self
+                .conversation
+                .as_ref()
+                .is_some_and(Conversation::can_compact)
+    }
+
+    /// **Prune tool results**: long tool answers become one line each.
+    fn compact_prune(&mut self, cx: &mut Context<Self>) {
+        if !self.can_compact() {
+            return;
+        }
+        let Some(conversation) = &mut self.conversation else {
+            return;
+        };
+        match conversation.prune_tool_results() {
+            Some(_) => {
+                let index = conversation.compactions().len() - 1;
+                self.push(Item::Compaction { index });
+            }
+            None => cx.emit(AssistantPanelEvent::Notice(Feedback::new(
+                Tone::Info,
+                tr!("There are no long tool results to prune."),
+            ))),
+        }
+        cx.notify();
+    }
+
+    /// **Summarize with the model**: a turn that asks for a summary, which
+    /// then replaces the conversation. It is reviewed like any request.
+    fn compact_summary(&mut self, cx: &mut Context<Self>) {
+        if !self.can_compact() {
+            return;
+        }
+        let Some(conversation) = &mut self.conversation else {
+            return;
+        };
+        let Some(round) = conversation.start_summary().map(|round| round.number - 1) else {
+            return;
+        };
+        self.turns.push(Turn {
+            text: tr!("Summarize the conversation to compact the context").to_owned(),
+            fix: None,
+            summary: true,
+        });
+        self.push(Item::User {
+            turn: self.turns.len() - 1,
+        });
+        self.push(Item::Request { round });
+        self.expanded.insert(self.items.len() - 1);
+        self.advance(cx);
     }
 
     /// The demo's opening exchange.
@@ -250,6 +428,7 @@ impl AssistantPanel {
         self.turns.push(Turn {
             text: question,
             fix: None,
+            summary: false,
         });
         self.push(Item::User {
             turn: self.turns.len() - 1,
@@ -331,15 +510,22 @@ impl AssistantPanel {
             } else {
                 "English"
             };
+            // Whether the model may ask to run queries is fixed for the
+            // conversation, so every request offers the same tools.
+            self.queries = preferences.queries && !self.demo;
             self.conversation = Some(Conversation::new(
                 config.kind.key(),
                 &config.model,
-                prompts::system_prompt(&target.engine, language),
-                CacheTools::specs(),
+                prompts::system_prompt(&target.engine, language, self.queries),
+                CacheTools::specs(self.queries),
             ));
             self.tools = Some(Arc::new(CacheTools::new(target.clone())));
         }
-        self.turns.push(Turn { text: display, fix });
+        self.turns.push(Turn {
+            text: display,
+            fix,
+            summary: false,
+        });
         let turn = self.turns.len() - 1;
         self.push(Item::User { turn });
         let Some(conversation) = &mut self.conversation else {
@@ -482,11 +668,32 @@ impl AssistantPanel {
         };
         self.streaming.clear();
         match result {
-            Ok(result) => match conversation.record(result, elapsed) {
-                Next::Done => self.phase = Phase::Idle,
-                Next::LimitReached(calls) => self.phase = Phase::Limit(calls),
-                Next::Tools(calls) => self.run_tools(calls, false, cx),
-            },
+            Ok(result) => {
+                let next = conversation.record(result, elapsed);
+                // A summary turn ends with its first answer, which takes
+                // the conversation's place.
+                let summary = conversation.summarizing().then(|| {
+                    conversation
+                        .apply_summary()
+                        .map(|_| conversation.compactions().len() - 1)
+                });
+                match (summary, next) {
+                    (Some(Ok(index)), _) => {
+                        self.phase = Phase::Idle;
+                        self.push(Item::Compaction { index });
+                    }
+                    (Some(Err(_)), _) => {
+                        self.phase = Phase::Idle;
+                        cx.emit(AssistantPanelEvent::Notice(Feedback::new(
+                            Tone::Warning,
+                            tr!("The model did not answer with a summary; the context was not compacted."),
+                        )));
+                    }
+                    (None, Next::Done) => self.phase = Phase::Idle,
+                    (None, Next::LimitReached(calls)) => self.phase = Phase::Limit(calls),
+                    (None, Next::Tools(calls)) => self.run_tools(calls, false, cx),
+                }
+            }
             Err(error) => {
                 if error.code == ErrorCode::Authentication {
                     self.assistant = None;
@@ -499,12 +706,49 @@ impl AssistantPanel {
         cx.notify();
     }
 
-    /// Runs the tools of the last round on the cache, shows each step and
-    /// prepares the next round.
+    /// Answers the tools of the last round: the cache's on the runtime,
+    /// then each `run_query` put to the user in turn; then shows each step
+    /// and prepares the next round.
     fn run_tools(&mut self, calls: Vec<ToolCall>, continued: bool, cx: &mut Context<Self>) {
         let Some(tools) = self.tools.clone() else {
             return;
         };
+        let (cache, asked) = run::split_calls(calls.clone());
+        let dialect = self.target.as_ref().and_then(|target| target.dialect);
+        let mut steps = Vec::new();
+        let mut queue = VecDeque::new();
+        for call in asked {
+            let raw = call
+                .arguments
+                .get("sql")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let checked = if self.queries {
+                run::query_sql(&call, dialect)
+            } else {
+                Err(format!("Error: there is no tool named {}.", call.name))
+            };
+            match checked {
+                Ok(sql) => {
+                    self.cards.push(QueryCard {
+                        purpose: run::query_purpose(&call).map(str::to_owned),
+                        risk: jykre::guard::risk(&sql, dialect),
+                        call,
+                        sql,
+                        state: CardState::Asked,
+                    });
+                    queue.push_back(self.cards.len() - 1);
+                }
+                Err(reason) => steps.push(released::rejected(call, raw, reason)),
+            }
+        }
+        self.in_flight = Some(InFlight {
+            calls,
+            steps,
+            queue,
+            continued,
+        });
         self.phase = Phase::Tools;
         let epoch = self.epoch;
         let cancel = self.cancel.clone();
@@ -513,11 +757,11 @@ impl AssistantPanel {
                 tokio::select! {
                     biased;
                     _ = cancel.cancelled() => Err(DriverError::cancelled()),
-                    steps = run::run_tools(&tools, &calls) => Ok(steps),
+                    steps = run::run_tools(&tools, &cache) => Ok(steps),
                 }
             })
             .await;
-            let _ = weak.update(cx, |this, cx| this.tools_done(epoch, steps, continued, cx));
+            let _ = weak.update(cx, |this, cx| this.tools_done(epoch, steps, cx));
         })
         .detach();
         cx.notify();
@@ -527,32 +771,66 @@ impl AssistantPanel {
         &mut self,
         epoch: u64,
         steps: DriverResult<Vec<ToolStep>>,
-        continued: bool,
         cx: &mut Context<Self>,
     ) {
         if self.epoch != epoch {
             return;
         }
+        match steps {
+            Ok(steps) => {
+                if let Some(flight) = &mut self.in_flight {
+                    flight.steps.extend(steps);
+                }
+                self.next_query(cx);
+            }
+            Err(error) => self.abandon_tools(&error, cx),
+        }
+    }
+
+    /// Puts the next query to the user, or ends the round's tools.
+    fn next_query(&mut self, cx: &mut Context<Self>) {
+        match self
+            .in_flight
+            .as_mut()
+            .and_then(|flight| flight.queue.pop_front())
+        {
+            Some(card) => {
+                self.phase = Phase::Query { card };
+                self.push(Item::Query { card });
+                cx.notify();
+            }
+            None => self.finish_tools(cx),
+        }
+    }
+
+    /// Every tool of the round is answered: the steps go to the model in
+    /// the order it asked for them, and the next round is prepared.
+    fn finish_tools(&mut self, cx: &mut Context<Self>) {
+        let Some(flight) = self.in_flight.take() else {
+            return;
+        };
         let Some(conversation) = &mut self.conversation else {
             return;
         };
-        let steps = match steps {
-            Ok(steps) => steps,
-            Err(error) => {
-                conversation.record_error(&error);
-                self.phase = Phase::Idle;
-                cx.notify();
-                return;
-            }
-        };
+        let steps = run::in_call_order(&flight.calls, flight.steps);
+        // A query the user saw already has its card.
+        let shown: Vec<usize> = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| {
+                step.query
+                    .as_ref()
+                    .is_none_or(|query| query.decision == QueryDecision::Rejected)
+            })
+            .map(|(at, _)| at)
+            .collect();
         let answered = conversation.rounds().len() - 1;
-        let count = steps.len();
-        let next = if continued {
+        let next = if flight.continued {
             conversation.continue_turn(steps).number - 1
         } else {
             conversation.answer_tools(steps).number - 1
         };
-        for step in 0..count {
+        for step in shown {
             self.push(Item::Tool {
                 round: answered,
                 step,
@@ -561,6 +839,181 @@ impl AssistantPanel {
         self.push(Item::Request { round: next });
         self.expanded.insert(self.items.len() - 1);
         self.advance(cx);
+    }
+
+    /// The round's tools stop: queries on their way are cancelled, those
+    /// waiting are declined, and the turn ends with nothing more sent.
+    fn abandon_tools(&mut self, error: &DriverError, cx: &mut Context<Self>) {
+        self.cancel_queries();
+        for card in &mut self.cards {
+            if !matches!(card.state, CardState::Done(_)) {
+                card.state =
+                    CardState::Done(released::declined(card.call.clone(), card.sql.clone()));
+            }
+        }
+        self.in_flight = None;
+        if let Some(conversation) = &mut self.conversation {
+            conversation.record_error(error);
+        }
+        self.phase = Phase::Idle;
+        self.list.remeasure();
+        cx.notify();
+    }
+
+    fn cancel_queries(&self) {
+        for card in &self.cards {
+            if let CardState::Running { cancel, .. } = &card.state {
+                cancel.cancel();
+            }
+        }
+    }
+
+    fn remeasure_card(&mut self, card: usize) {
+        if let Some(at) = self
+            .items
+            .iter()
+            .position(|item| *item == Item::Query { card })
+        {
+            self.list.remeasure_items(at..at + 1);
+        }
+    }
+
+    /// The user's answer to a card: it goes to the model with the round's
+    /// other steps, and the next card comes up.
+    fn decide(&mut self, card: usize, step: ToolStep, cx: &mut Context<Self>) {
+        if let Some(data) = self.cards.get_mut(card) {
+            data.state = CardState::Done(step.clone());
+        }
+        if let Some(flight) = &mut self.in_flight {
+            flight.steps.push(step);
+        }
+        self.remeasure_card(card);
+        self.next_query(cx);
+    }
+
+    /// **Run**: the workspace runs the statement in the assistant's session.
+    fn run_card(&mut self, card: usize, cx: &mut Context<Self>) {
+        let epoch = self.epoch;
+        let cancel = self.cancel.child_token();
+        let Some(data) = self.cards.get_mut(card) else {
+            return;
+        };
+        if !matches!(data.state, CardState::Asked) {
+            return;
+        }
+        data.state = CardState::Running {
+            started: Instant::now(),
+            cancel: cancel.clone(),
+        };
+        let sql = data.sql.clone();
+        cx.emit(AssistantPanelEvent::RunQuery {
+            sql,
+            ticket: QueryTicket { epoch, card },
+            cancel,
+        });
+        self.start_clock(cx);
+        self.remeasure_card(card);
+        cx.notify();
+    }
+
+    /// **Decline**: nothing runs.
+    fn decline_card(&mut self, card: usize, cx: &mut Context<Self>) {
+        let Some(data) = self.cards.get(card) else {
+            return;
+        };
+        if !matches!(data.state, CardState::Asked) {
+            return;
+        }
+        let step = released::declined(data.call.clone(), data.sql.clone());
+        self.decide(card, step, cx);
+    }
+
+    /// The workspace ran the query of `ticket`: `None` when it did not run
+    /// (no password was given) or was stopped.
+    pub(super) fn query_done(
+        &mut self,
+        ticket: QueryTicket,
+        preview: Option<QueryPreview>,
+        cx: &mut Context<Self>,
+    ) {
+        if ticket.epoch != self.epoch {
+            return;
+        }
+        let Some(data) = self.cards.get_mut(ticket.card) else {
+            return;
+        };
+        if !matches!(data.state, CardState::Running { .. }) {
+            return;
+        }
+        match preview {
+            None => {
+                let step = released::declined(data.call.clone(), data.sql.clone());
+                self.decide(ticket.card, step, cx);
+            }
+            Some(preview) => {
+                let hidden = preview.hidden_by_name(&self.hidden_names);
+                let text = released::release(&preview, &hidden);
+                data.state = CardState::Review {
+                    preview: Arc::new(preview),
+                    hidden,
+                    text,
+                };
+                self.remeasure_card(ticket.card);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Hides or shows the values of `column` in what would be sent.
+    fn toggle_column(&mut self, card: usize, column: usize, cx: &mut Context<Self>) {
+        let Some(QueryCard {
+            state:
+                CardState::Review {
+                    preview,
+                    hidden,
+                    text,
+                },
+            ..
+        }) = self.cards.get_mut(card)
+        else {
+            return;
+        };
+        if !hidden.remove(&column) {
+            hidden.insert(column);
+        }
+        *text = released::release(preview, hidden);
+        self.remeasure_card(card);
+        cx.notify();
+    }
+
+    /// **Send result** (`send`) or **Don't send**.
+    fn settle_card(&mut self, card: usize, send: bool, cx: &mut Context<Self>) {
+        let Some(QueryCard {
+            call,
+            sql,
+            state: CardState::Review {
+                preview, hidden, ..
+            },
+            ..
+        }) = self.cards.get(card)
+        else {
+            return;
+        };
+        let step = if send {
+            // What the user hid or showed again holds for the next results.
+            for (at, column) in preview.columns.iter().enumerate() {
+                let name = column.name.to_lowercase();
+                if hidden.contains(&at) {
+                    self.hidden_names.insert(name);
+                } else {
+                    self.hidden_names.remove(&name);
+                }
+            }
+            released::sent(call.clone(), sql.clone(), preview, hidden)
+        } else {
+            released::withheld(call.clone(), sql.clone(), preview)
+        };
+        self.decide(card, step, cx);
     }
 
     fn start_clock(&mut self, cx: &mut Context<Self>) {
@@ -575,7 +1028,18 @@ impl AssistantPanel {
                     .await;
                 let running = weak
                     .update(cx, |this, cx| {
-                        let running = matches!(this.phase, Phase::Sending { .. } | Phase::Tools);
+                        let running = match this.phase {
+                            Phase::Sending { .. } | Phase::Tools => true,
+                            Phase::Query { card } => this.cards.get(card).is_some_and(|data| {
+                                matches!(data.state, CardState::Running { .. })
+                            }),
+                            _ => false,
+                        };
+                        if let Phase::Query { card } = this.phase
+                            && running
+                        {
+                            this.remeasure_card(card);
+                        }
                         if running {
                             cx.notify();
                         } else {
@@ -592,18 +1056,273 @@ impl AssistantPanel {
         .detach();
     }
 
-    fn total_line(&self, cx: &App) -> Option<String> {
-        let conversation = self.conversation.as_ref()?;
-        let usage = conversation.usage();
-        let (input, output) = (usage.input?, usage.output?);
-        let mut line = tr!("{0} in · {1} out", input, output);
-        if let Some(cost) = Self::preferences(cx)
-            .price()
-            .and_then(|price| conversation.cost(&price))
-        {
-            line.push_str(&format!(" · ${cost:.4}"));
+    /// The conversation at a glance: what it cost, how big the next request
+    /// is, and how much of the input the provider served from its cache.
+    fn summary_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let stats = self
+            .conversation
+            .as_ref()
+            .map(Conversation::stats)
+            .unwrap_or_default();
+        let usage = stats.usage;
+        let cost = self.conversation.as_ref().and_then(|conversation| {
+            Self::preferences(cx)
+                .price()
+                .and_then(|price| conversation.cost(&price))
+        });
+        let tile = |value: String, caption: &'static str| {
+            column()
+                .flex_1()
+                .min_w(px(84.))
+                .gap(px(2.))
+                .px_2()
+                .py(px(6.))
+                .rounded(px(6.))
+                .bg(rgb(SURFACE))
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(TEXT))
+                        .child(value),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(rgb(FAINT))
+                        .child(caption),
+                )
+        };
+        let spent = match cost {
+            Some(cost) => format!("${cost:.4}"),
+            None => "—".to_owned(),
+        };
+        let context = match stats.context_tokens {
+            Some(tokens) if stats.context_estimated => format!("~{}", count_short(tokens)),
+            Some(tokens) => count_short(tokens),
+            None => "—".to_owned(),
+        };
+        // Hits are input tokens read from the provider's prompt cache; the
+        // rest of the input was a miss.
+        let input = usage.input.unwrap_or(0);
+        let hits = usage.cache_read.unwrap_or(0).min(input);
+        let known = usage.cache_read.is_some() && input > 0;
+        let fraction = if known {
+            hits as f32 / input as f32
+        } else {
+            0.0
+        };
+        let mut details = vec![tr!("{0} rounds", stats.rounds)];
+        if let (Some(input), Some(output)) = (usage.input, usage.output) {
+            details.push(tr!(
+                "{0} in · {1} out",
+                count_short(input),
+                count_short(output)
+            ));
         }
-        Some(line)
+        if known {
+            details.push(tr!(
+                "cache: {0} hit · {1} missed",
+                count_short(hits),
+                count_short(input - hits)
+            ));
+        } else if input > 0 {
+            details.push(tr!("the provider reported no cache").to_owned());
+        }
+        let open = self.summary_open;
+        let cache = if known {
+            format!("{:.0}%", fraction * 100.0)
+        } else {
+            "—".to_owned()
+        };
+        // Folded, the three numbers stay in one line.
+        let folded = tr!(
+            "{0} · {1} tokens · {2} cache",
+            spent.clone(),
+            context.clone(),
+            cache.clone()
+        );
+        let toggle = row()
+            .id("assistant-summary-toggle")
+            .role(Role::Button)
+            .aria_label(if open {
+                tr!("Fold the session summary")
+            } else {
+                tr!("Unfold the session summary")
+            })
+            .aria_toggled(if open { Toggled::True } else { Toggled::False })
+            .focusable()
+            .tab_index(0)
+            .gap_1()
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|s| s.bg(rgb(HOVER)))
+            .focus_visible(|s| s.bg(rgb(HOVER)))
+            .child(icon(
+                if open {
+                    I::ChevronDown
+                } else {
+                    I::ChevronRight
+                },
+                FAINT,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child(if open {
+                        tr!("Session").to_owned()
+                    } else {
+                        folded
+                    }),
+            )
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.summary_open = !this.summary_open;
+                cx.notify();
+            }));
+        column()
+            .id("assistant-summary")
+            .role(Role::Status)
+            .flex_none()
+            .px_4()
+            .py_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(toggle)
+            .when(open, |s| {
+                s.child(
+                    row()
+                        .flex_wrap()
+                        .items_stretch()
+                        .gap_2()
+                        .child(tile(
+                            spent,
+                            if cost.is_some() || self.conversation.is_none() {
+                                tr!("spent in the session")
+                            } else {
+                                tr!("no price for the model")
+                            },
+                        ))
+                        .child(tile(context, tr!("context tokens")))
+                        .child(
+                            tile(cache, tr!("cache hits")).child(
+                                div()
+                                    .h(px(3.))
+                                    .w_full()
+                                    .rounded(px(2.))
+                                    .bg(rgb(BORDER))
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(fraction))
+                                            .rounded(px(2.))
+                                            .bg(rgb(MINT)),
+                                    ),
+                            ),
+                        ),
+                )
+                .child(label(details.join(" · ")))
+            })
+    }
+
+    /// The gear of the panel: what is sent, and compacting the context.
+    /// More options will join it.
+    fn options_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let panel = cx.entity().downgrade();
+        let can_compact = self.can_compact();
+        // What leaves the computer, in two short lines a menu can hold.
+        let values = if Self::preferences(cx).queries {
+            tr!("Values: only query results you send")
+        } else {
+            tr!("Values: never")
+        };
+        Button::new("assistant-options")
+            .ghost()
+            .small()
+            .icon(I::Settings)
+            .accessibility_label(tr!("Assistant options"))
+            .tooltip(tr!("Assistant options"))
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let prune = panel.clone();
+                let summarize = panel.clone();
+                menu.max_w(px(320.))
+                    .label(tr!("Sends: SQL, errors, row counts, structure"))
+                    .label(values)
+                    .separator()
+                    .label(tr!("Compact the context"))
+                    .item(
+                        PopupMenuItem::new(tr!("Prune long tool results"))
+                            .icon(I::Scissors)
+                            .disabled(!can_compact)
+                            .on_click(move |_, _, cx| {
+                                let _ = prune.update(cx, |this, cx| this.compact_prune(cx));
+                            }),
+                    )
+                    .item(
+                        PopupMenuItem::new(tr!("Summarize with the model"))
+                            .icon(I::Sparkles)
+                            .disabled(!can_compact)
+                            .on_click(move |_, _, cx| {
+                                let _ = summarize.update(cx, |this, cx| this.compact_summary(cx));
+                            }),
+                    )
+            })
+    }
+
+    fn compaction_item(&self, index: usize) -> Div {
+        let Some(compaction) = self
+            .conversation
+            .as_ref()
+            .and_then(|conversation| conversation.compactions().get(index))
+        else {
+            return div();
+        };
+        let (glyph, what) = match compaction.kind {
+            CompactionKind::Pruned => (
+                I::Scissors,
+                tr!(
+                    "Context compacted: {0} tool results pruned",
+                    compaction.count
+                ),
+            ),
+            CompactionKind::Summarized => (
+                I::Sparkles,
+                tr!(
+                    "Context compacted: a summary replaced {0} messages",
+                    compaction.count
+                ),
+            ),
+        };
+        div().child(
+            column()
+                .id(("assistant-compaction", index))
+                .role(Role::Status)
+                .gap_1()
+                .px_3()
+                .py_2()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    row().items_start().child(icon(glyph, TEAL)).child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(rgb(TEXT))
+                            .child(what),
+                    ),
+                )
+                .child(label(tr!(
+                    "~{0} → ~{1} tokens. The next request starts the provider's cache again.",
+                    count_short(compaction.before_tokens),
+                    count_short(compaction.after_tokens)
+                ))),
+        )
     }
 
     fn render_item(&mut self, index: usize, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -615,6 +1334,8 @@ impl AssistantPanel {
             Item::Request { round } => self.request_item(index, round, cx),
             Item::Answer { round, turn } => self.answer_item(round, turn, cx),
             Item::Tool { round, step } => self.tool_item(index, round, step, cx),
+            Item::Query { card } => self.query_item(index, card, cx),
+            Item::Compaction { index: compaction } => self.compaction_item(compaction),
             Item::Demo { index: answer } => self.demo_item(answer, cx),
         };
         div().px_4().py_2().child(body).into_any_element()
@@ -653,19 +1374,82 @@ impl AssistantPanel {
                 .is_some_and(|p| p.number == data.number);
         let price = Self::preferences(cx).price();
         let estimate = data.estimated_tokens;
+        // What is new since the last request sent; the rest went before.
+        let repeated = data.repeated_messages.min(data.request.messages.len());
+        let skip_system = data.repeated_system;
+        let new_bytes: usize = data.request.messages[repeated..]
+            .iter()
+            .map(Message::len)
+            .sum::<usize>()
+            + if skip_system {
+                0
+            } else {
+                data.request.system.len()
+            };
         let mut summary = tr!(
             "Request {0} · {1} · ~{2} tokens",
             data.number,
             data.request.model.clone(),
             estimate
         );
+        if repeated > 0 || skip_system {
+            summary.push_str(&format!(" · {}", tr!("~{0} new", new_bytes.div_ceil(4))));
+        }
         if let Some(price) = price {
             let cost = price.input_per_mtok * estimate as f64 / 1_000_000.0;
             summary.push_str(&format!(" · ~${cost:.4}"));
         }
         let section = self.sections.get(&index).copied().unwrap_or_default();
         let request = data.request.clone();
-        let omitted = data.omitted_messages;
+        let whole = self.whole_requests.contains(&index);
+        let (skip, skip_system) = if whole {
+            (0, false)
+        } else {
+            (repeated, skip_system)
+        };
+        // Unfolds what the last request already carried.
+        let earlier = (skip > 0 || skip_system).then(|| {
+            let mut what = Vec::new();
+            if skip_system {
+                what.push(tr!("the system prompt").to_owned());
+            }
+            match skip {
+                0 => {}
+                1 => what.push(tr!("1 message").to_owned()),
+                _ => what.push(tr!("{0} messages", skip)),
+            }
+            row()
+                .id(("assistant-request-earlier", index))
+                .role(Role::Button)
+                .aria_label(tr!("Show the whole request"))
+                .focusable()
+                .tab_index(0)
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded(px(4.))
+                .bg(rgb(SURFACE))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(HOVER)))
+                .focus_visible(|s| s.bg(rgb(HOVER)))
+                .child(div().text_size(px(14.)).text_color(rgb(TEXT)).child("…"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .text_color(rgb(FAINT))
+                        .child(tr!(
+                            "{0} as in the last request sent. Show everything",
+                            what.join(tr!(" and "))
+                        )),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.whole_requests.insert(index);
+                    this.list.remeasure_items(index..index + 1);
+                    cx.notify();
+                }))
+        });
         column()
             .rounded(px(6.))
             .border_1()
@@ -737,7 +1521,10 @@ impl AssistantPanel {
                         )),
                 )
                 .child(column().px_3().pb_3().gap_2().child(match section {
-                    Section::Messages => request_messages(&request, omitted),
+                    Section::Messages => column()
+                        .gap_2()
+                        .children(earlier)
+                        .child(request_messages(&request, skip, skip_system)),
                     Section::Tools => column().gap_2().children(request.tools.iter().map(|tool| {
                         column()
                             .gap_1()
@@ -870,6 +1657,13 @@ impl AssistantPanel {
                                 format!("{title}: {message}"),
                             ))),
                     )
+                    // A request past the model's context is rejected; the
+                    // user may compact it.
+                    .when(*code == ErrorCode::Validation, |s| {
+                        s.child(label(tr!(
+                            "If the conversation is too long for the model, compact it in the assistant's options (gear)."
+                        )))
+                    })
                     .child(
                         button(("assistant-retry", round), I::RotateCcw, tr!("Try again"))
                             .on_click(
@@ -884,8 +1678,13 @@ impl AssistantPanel {
         }
     }
 
-    /// Starts the failed turn again, with the same first message.
+    /// Starts the failed turn again, with the same first message; a failed
+    /// summary asks for a summary again.
     fn retry(&mut self, turn: usize, round: usize, cx: &mut Context<Self>) {
+        if self.turns.get(turn).is_some_and(|turn| turn.summary) {
+            self.compact_summary(cx);
+            return;
+        }
         let Some(prompt) = self.round(round).and_then(|round| {
             round
                 .request
@@ -971,6 +1770,343 @@ impl AssistantPanel {
             })
     }
 
+    /// A query the model asked for: the statement to approve, the query
+    /// running, its result to send with columns hidden, or what was decided.
+    fn query_item(&self, index: usize, card: usize, cx: &mut Context<Self>) -> Div {
+        let Some(data) = self.cards.get(card) else {
+            return div();
+        };
+        let title = |text: String, color: u32| {
+            row().child(icon(I::Database, color)).child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child(text),
+            )
+        };
+        let frame = |color: u32| {
+            column()
+                .rounded(px(6.))
+                .border_1()
+                .border_color(rgb(color))
+                .bg(rgb(BG))
+                .px_3()
+                .py_2()
+                .gap_2()
+        };
+        match &data.state {
+            CardState::Asked => {
+                let dangerous = self.production && data.risk.is_some();
+                frame(AMBER)
+                    .child(title(tr!("The assistant asks to run a query").to_owned(), AMBER))
+                    .when_some(data.purpose.clone(), |s, purpose| s.child(prose(&purpose)))
+                    .child(sql_text(data.sql.clone()))
+                    .when(data.risk.is_some(), |s| {
+                        s.child(badge(tr!("Changes or deletes data"), AMBER))
+                    })
+                    .when(self.production, |s| {
+                        s.child(feedback_line(&Feedback::new(
+                            Tone::Warning,
+                            tr!("This is a production connection."),
+                        )))
+                    })
+                    .child(
+                        div()
+                            .id(("assistant-query-status", card))
+                            .role(Role::Status)
+                            .child(label(tr!(
+                                "It runs on {0}, in a session of the assistant's own. Nothing of the result is sent until you approve it.",
+                                self.label.clone()
+                            ))),
+                    )
+                    .child(
+                        row()
+                            .justify_end()
+                            .gap_1()
+                            .child(button(("assistant-query-decline", card), I::X, tr!("Decline")).on_click(
+                                cx.listener(move |this, _, _, cx| this.decline_card(card, cx)),
+                            ))
+                            .child(
+                                primary_button(
+                                    ("assistant-query-run", card),
+                                    I::Play,
+                                    if dangerous { tr!("Run on production") } else { tr!("Run") },
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| this.run_card(card, cx))),
+                            ),
+                    )
+            }
+            CardState::Running { started, .. } => {
+                let elapsed = started.elapsed();
+                let mut status = tr!("Running…").to_owned();
+                if elapsed >= Duration::from_secs(2) {
+                    status.push_str(&format!(" {:.1} s", elapsed.as_secs_f32()));
+                }
+                frame(BORDER)
+                    .child(title(tr!("Query").to_owned(), BLUE))
+                    .child(sql_text(data.sql.clone()))
+                    .child(
+                        row()
+                            .id(("assistant-query-running", card))
+                            .role(Role::Status)
+                            .child(spinning_icon(
+                                ("assistant-query-spinner", card),
+                                I::LoaderCircle,
+                                AMBER,
+                            ))
+                            .child(label(status))
+                            .child(div().flex_1())
+                            .child(
+                                button(("assistant-query-stop", card), I::Square, tr!("Stop"))
+                                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx))),
+                            ),
+                    )
+            }
+            CardState::Review {
+                preview,
+                hidden,
+                text,
+            } => {
+                let mut counts = if preview.more {
+                    tr!("First {0} rows; there are more", preview.rows.len())
+                } else {
+                    tr!("{0} rows", preview.rows.len())
+                };
+                if let Some(affected) = preview.rows_affected {
+                    counts.push_str(&format!(" · {}", tr!("{0} affected", affected)));
+                }
+                if !hidden.is_empty() {
+                    counts.push_str(&format!(" · {}", tr!("hidden columns: {0}", hidden.len())));
+                }
+                counts.push_str(&format!(" · {} ms", preview.elapsed_ms));
+                let result = if let Some(error) = &preview.error {
+                    column().child(feedback_line(&Feedback::new(
+                        Tone::Error,
+                        format!("{}: {}", error.title, error.message),
+                    )))
+                } else if preview.columns.is_empty() {
+                    column().child(label(tr!("The statement ran and returned no rows.")))
+                } else {
+                    // One toggle per column, wrapping, so every column can
+                    // be hidden however narrow the panel is.
+                    let toggles =
+                        row()
+                            .flex_wrap()
+                            .gap_1()
+                            .children(preview.columns.iter().enumerate().map(|(at, info)| {
+                                let off = hidden.contains(&at);
+                                row()
+                                    .id(("assistant-query-hide", card * 4096 + at))
+                                    .role(Role::Button)
+                                    .aria_label(if off {
+                                        tr!("Send the values of column {0}", info.name.clone())
+                                    } else {
+                                        tr!("Hide the values of column {0}", info.name.clone())
+                                    })
+                                    .aria_toggled(if off { Toggled::True } else { Toggled::False })
+                                    .focusable()
+                                    .tab_index(0)
+                                    .gap_1()
+                                    .px_2()
+                                    .py(px(2.))
+                                    .rounded(px(4.))
+                                    .border_1()
+                                    .border_color(rgb(if off { AMBER } else { BORDER }))
+                                    .cursor_pointer()
+                                    .hover(|s| s.bg(rgb(HOVER)))
+                                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                                    .child(icon(
+                                        if off { I::EyeOff } else { I::Eye },
+                                        if off { AMBER } else { MUTED },
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(if off { FAINT } else { TEXT }))
+                                            .when(off, |s| s.line_through())
+                                            .child(info.name.clone()),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_column(card, at, cx)
+                                    }))
+                            }));
+                    let head = row()
+                        .gap_0()
+                        .children(preview.columns.iter().enumerate().map(|(at, info)| {
+                            let off = hidden.contains(&at);
+                            column()
+                                .w(RESULT_COLUMN)
+                                .flex_none()
+                                .px_1()
+                                .border_b_1()
+                                .border_color(rgb(BORDER))
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(if off { FAINT } else { TEXT }))
+                                        .child(info.name.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(FAINT))
+                                        .child(info.data_type.clone()),
+                                )
+                        }));
+                    let rows = preview.rows.iter().map(|cells| {
+                        row()
+                            .gap_0()
+                            .children(cells.iter().enumerate().map(|(at, cell)| {
+                                let off = hidden.contains(&at);
+                                let (shown, color) = match (off, cell) {
+                                    (true, _) => (released::HIDDEN.to_owned(), FAINT),
+                                    (false, Some(text)) => (text.replace(['\r', '\n'], " "), MUTED),
+                                    (false, None) => ("NULL".to_owned(), FAINT),
+                                };
+                                div()
+                                    .w(RESULT_COLUMN)
+                                    .flex_none()
+                                    .px_1()
+                                    .truncate()
+                                    .font_family("Cascadia Mono")
+                                    .text_size(px(12.))
+                                    .text_color(rgb(color))
+                                    .child(shown)
+                            }))
+                    });
+                    column()
+                        .gap_2()
+                        .child(label(tr!("Columns to send; select one to hide its values")))
+                        .child(toggles)
+                        .child(
+                            div()
+                                .id(("assistant-query-grid", card))
+                                .overflow_x_scroll()
+                                .child(column().child(head).children(rows)),
+                        )
+                };
+                frame(AMBER)
+                    .child(title(
+                        tr!("Result of the query: review what is sent").to_owned(),
+                        AMBER,
+                    ))
+                    .child(sql_text(data.sql.clone()))
+                    .child(result)
+                    .child(label(counts))
+                    .child(label(tr!("What the model receives if you send it")))
+                    .child(mono(text.clone()))
+                    .child(
+                        div()
+                            .id(("assistant-query-review", card))
+                            .role(Role::Status)
+                            .text_size(px(12.))
+                            .text_color(rgb(AMBER))
+                            .child(tr!("Nothing of the result has been sent yet.")),
+                    )
+                    .child(
+                        row()
+                            .justify_end()
+                            .gap_1()
+                            .child(
+                                button(
+                                    ("assistant-query-withhold", card),
+                                    I::Ban,
+                                    tr!("Don't send"),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.settle_card(card, false, cx),
+                                )),
+                            )
+                            .child(
+                                primary_button(
+                                    ("assistant-query-send", card),
+                                    I::Send,
+                                    tr!("Send result"),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.settle_card(card, true, cx),
+                                )),
+                            ),
+                    )
+            }
+            CardState::Done(step) => {
+                let open = self.expanded.contains(&index);
+                let record = step.query.as_ref();
+                let mut summary = match record.map(|record| record.decision) {
+                    Some(QueryDecision::Sent) => tr!("Query · result sent").to_owned(),
+                    Some(QueryDecision::Withheld) => tr!("Query · ran, result not sent").to_owned(),
+                    _ => tr!("Query · declined, nothing ran").to_owned(),
+                };
+                if let Some(record) = record.filter(|record| record.decision == QueryDecision::Sent)
+                {
+                    summary.push_str(&format!(" · {}", tr!("{0} rows", record.rows_sent)));
+                    if !record.hidden.is_empty() {
+                        summary.push_str(&format!(
+                            " · {}",
+                            tr!("hidden: {0}", record.hidden.join(", "))
+                        ));
+                    }
+                }
+                column()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        row()
+                            .id(("assistant-query-done", index))
+                            .role(Role::Button)
+                            .aria_label(tr!("Show or hide the query"))
+                            .focusable()
+                            .tab_index(0)
+                            .focus_visible(|s| s.bg(rgb(HOVER)))
+                            .px_3()
+                            .h(px(28.))
+                            .cursor_pointer()
+                            .child(icon(
+                                if open {
+                                    I::ChevronDown
+                                } else {
+                                    I::ChevronRight
+                                },
+                                FAINT,
+                            ))
+                            .child(icon(I::Database, TEAL))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child(summary),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.expanded.remove(&index) {
+                                    this.expanded.insert(index);
+                                }
+                                this.list.remeasure_items(index..index + 1);
+                                cx.notify();
+                            })),
+                    )
+                    .when(open, |s| {
+                        s.child(
+                            column()
+                                .px_3()
+                                .pb_3()
+                                .gap_1()
+                                .child(sql_text(data.sql.clone()))
+                                .child(label(tr!("Answer sent to the model with the next request")))
+                                .child(mono(step.output.clone())),
+                        )
+                    })
+            }
+        }
+    }
+
     fn demo_item(&self, index: usize, cx: &mut Context<Self>) -> Div {
         let Some((text, sql)) = self.demo_answers.get(index) else {
             return div();
@@ -992,10 +2128,44 @@ impl AssistantPanel {
 }
 
 impl Drop for AssistantPanel {
-    /// Closing the tab stops a round on its way; nothing more is sent.
+    /// Closing the tab stops a round or a query on its way; nothing more
+    /// is sent.
     fn drop(&mut self) {
         self.cancel.cancel();
+        self.cancel_queries();
     }
+}
+
+/// Width of a column in a query's result card.
+const RESULT_COLUMN: Pixels = px(150.);
+
+/// A token count in few characters: `850`, `12.4k`, `1.2M` (a decimal comma
+/// in Portuguese).
+fn count_short(count: u64) -> String {
+    let text = match count {
+        0..1_000 => count.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", count as f64 / 1_000.0),
+        _ => format!("{:.1}M", count as f64 / 1_000_000.0),
+    };
+    if jykre::i18n::locale().starts_with("pt") {
+        text.replace('.', ",")
+    } else {
+        text
+    }
+}
+
+/// A query's statement, as the user approves it.
+fn sql_text(sql: String) -> Div {
+    div()
+        .px_2()
+        .py_1()
+        .rounded(px(4.))
+        .bg(rgb(SURFACE))
+        .font_family("Cascadia Mono")
+        .text_size(px(12.))
+        .text_color(rgb(BLUE))
+        .whitespace_normal()
+        .child(sql)
 }
 
 fn mono(text: String) -> Div {
@@ -1010,19 +2180,21 @@ fn mono(text: String) -> Div {
         .child(text)
 }
 
-fn request_messages(request: &jykre_assistant::ModelRequest, omitted: usize) -> Div {
+/// A request's messages after the first `skip`, with the system prompt
+/// unless `skip_system`: what is new since the last request sent.
+fn request_messages(
+    request: &jykre_assistant::ModelRequest,
+    skip: usize,
+    skip_system: bool,
+) -> Div {
     let role = |title: &'static str, size: usize| label(format!("{title} · {size} B"));
     column()
         .gap_2()
-        .child(role(tr!("System"), request.system.len()))
-        .child(mono(request.system.clone()))
-        .when(omitted > 0, |s| {
-            s.child(label(tr!(
-                "{0} earlier messages left out to keep the request small",
-                omitted
-            )))
+        .when(!skip_system, |s| {
+            s.child(role(tr!("System"), request.system.len()))
+                .child(mono(request.system.clone()))
         })
-        .children(request.messages.iter().map(|message| {
+        .children(request.messages.iter().skip(skip).map(|message| {
             match message {
                 Message::User { text } => column()
                     .gap_1()
@@ -1179,7 +2351,6 @@ impl Render for AssistantPanel {
             .config()
             .map(|config| format!("{} · {}", config.kind.key(), config.model))
             .unwrap_or_default();
-        let total = self.total_line(cx);
         let busy = self.busy();
         let limit = matches!(self.phase, Phase::Limit(_));
         let entity = cx.entity();
@@ -1209,6 +2380,7 @@ impl Render for AssistantPanel {
                     .child(
                         row()
                             .gap_0()
+                            .when(!self.demo, |s| s.child(self.options_menu(cx)))
                             .when(self.conversation.is_some(), |s| {
                                 s.child(icon_button("assistant-copy-trace", I::ClipboardCopy, tr!("Copy the whole trace as JSON")).on_click(
                                     cx.listener(|this, _, _, cx| {
@@ -1227,26 +2399,7 @@ impl Render for AssistantPanel {
                             )),
                     ),
             )
-            .child(
-                column()
-                    .flex_none()
-                    .px_4()
-                    .py_2()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        row()
-                            .child(icon(I::Layers, FAINT))
-                            .child(label(if self.label.is_empty() {
-                                SharedString::from(tr!("No connection"))
-                            } else {
-                                self.label.clone()
-                            }))
-                            .when_some(total, |s, total| s.child(div().flex_1()).child(label(total))),
-                    )
-                    .child(label(tr!("Sends SQL, errors, row counts and structure. Never values."))),
-            )
+            .when(configured && !self.demo, |s| s.child(self.summary_view(cx)))
             .child(if !configured {
                 column()
                     .flex_1()

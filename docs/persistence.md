@@ -68,13 +68,16 @@ asked for winning across tabs. A missing or unknown value takes its default
 `assistant.preferences` keeps the AI assistant's choices
 (`jykre::assistant::AssistantPreferences`, [ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
 `{"provider": "anthropic", "model": "…", "endpoint": null, "review":
-"every-request", "prices": {"<model>": {"input_per_mtok": 3.0,
-"output_per_mtok": 15.0, "cache_read_per_mtok": 0.3, "cache_write_per_mtok":
-null}}}`. `provider` is `anthropic`, `openai`, `openai-compatible`, `ollama`
-or `null` (off); `review` is `every-request`, `first-only` or `never`; prices
-are per million tokens, as the user entered them. It is read once at start
-and written from Preferences, the last write asked for winning. A missing or
-unknown value takes its default (off, review every request). The API key is
+"every-request", "queries": true, "prices": {"<model>": {"input_per_mtok":
+3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3,
+"cache_write_per_mtok": null}}}`. `provider` is `anthropic`, `openai`,
+`openai-compatible`, `ollama` or `null` (off); `review` is `every-request`,
+`first-only` or `never`; `queries` offers the model `run_query`, each query
+and result still approved by the user; prices are per million tokens, as the
+user entered them. It is read once at start and written from Preferences,
+the last write asked for winning. A missing or unknown value takes its
+default (off, review every request, queries offered). Columns hidden in a
+conversation are not saved. The API key is
 never here: it is in the OS vault ([Security](security.md#where-they-live)).
 Conversations are not saved.
 

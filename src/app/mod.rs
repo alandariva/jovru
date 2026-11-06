@@ -1260,7 +1260,7 @@ impl AppView {
                                     resume.update(cx, |panel, cx| panel.resume_pending(cx))
                                 }),
                                 Box::new(move |_, cx| {
-                                    cancel.update(cx, |panel, _| panel.cancel_pending())
+                                    cancel.update(cx, |panel, cx| panel.cancel_pending(cx))
                                 }),
                                 cx,
                             );

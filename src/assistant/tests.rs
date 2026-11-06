@@ -2,7 +2,7 @@
 //! fake provider, and what the fake received is checked against what the
 //! user would have reviewed and against values that must never leave.
 use super::facts::{ErrorFacts, RunFacts, SchemaScope};
-use super::run::{Conversation, Next, RoundState, drive};
+use super::run::{Conversation, DeclineQueries, Next, QueryDecision, QueryGate, RoundState, drive};
 use super::tools::CacheTools;
 use super::*;
 use crate::backend::cache_config;
@@ -261,14 +261,15 @@ async fn no_result_value_or_bound_parameter_reaches_the_provider() {
         let mut conversation = Conversation::new(
             "openai-compatible",
             "fake",
-            prompts::system_prompt(&scope.engine, "English"),
-            CacheTools::specs(),
+            prompts::system_prompt(&scope.engine, "English", false),
+            CacheTools::specs(false),
         );
         conversation.start_turn(message);
         let next = drive(
             &mut conversation,
             &assistant,
             &tools,
+            &mut DeclineQueries,
             &events,
             &CancellationToken::new(),
         )
@@ -314,6 +315,229 @@ async fn no_result_value_or_bound_parameter_reaches_the_provider() {
     assert!(recorded[1].1.contains("Unknown column 'stauts'"));
 }
 
+const VISIBLE: &str = "synthetic-visible-5b1e";
+const HIDDEN_VALUE: &str = "synthetic-hidden-c4d9";
+
+/// What the user does with each `run_query` call in the test.
+#[derive(Clone, Copy, PartialEq)]
+enum Choice {
+    /// Run it and send the result, hiding `secret`.
+    SendHidingSecret,
+    /// Run it and keep the result.
+    Withhold,
+    /// Do not run it.
+    Decline,
+}
+
+/// A user answering `run_query` as the panel and the workspace would: the
+/// statement runs in a session of its own on a synthetic SQLite file.
+struct User {
+    input: jykre_core::ResolvedConnection,
+    session: Option<Box<dyn jykre_core::Session>>,
+    choice: Choice,
+    runs: usize,
+}
+
+impl QueryGate for User {
+    async fn answer(&mut self, call: jykre_assistant::ToolCall) -> run::ToolStep {
+        let sql = match run::query_sql(&call, Some(SqlDialect::Sqlite)) {
+            Ok(sql) => sql,
+            Err(reason) => return released::rejected(call, String::new(), reason),
+        };
+        if self.choice == Choice::Decline {
+            return released::declined(call, sql);
+        }
+        self.runs += 1;
+        let run = crate::backend::query_in_context(
+            None,
+            self.input.clone(),
+            SessionContext::default(),
+            self.session.take(),
+            vec![jykre_core::QueryRequest::new(
+                sql.clone(),
+                jykre_core::ExecutionOptions {
+                    max_rows: released::READ_ROWS,
+                    ..jykre_core::ExecutionOptions::default()
+                },
+            )],
+            4 << 20,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        self.session = run.session;
+        let preview = match &run.batch {
+            Ok(batch) => released::QueryPreview::from_batch(batch, &sql),
+            Err(error) => released::QueryPreview::from_error(error, &sql),
+        };
+        match self.choice {
+            Choice::SendHidingSecret => {
+                let hidden = preview.hidden_by_name(&["secret".to_owned()].into());
+                released::sent(call, sql, &preview, &hidden)
+            }
+            _ => released::withheld(call, sql, &preview),
+        }
+    }
+}
+
+/// A synthetic SQLite file with 60 rows holding a visible and a secret value.
+async fn people() -> jykre_core::ResolvedConnection {
+    let path = std::env::temp_dir().join(format!("jykre-assistant-{}.sqlite", ConnectionId::new()));
+    std::fs::write(&path, b"").unwrap();
+    let input = jykre_core::ResolvedConnection {
+        config: ConnectionConfig {
+            driver: DriverKind::Sqlite,
+            options: serde_json::json!({"path": path.to_string_lossy()}),
+        },
+        credentials: jykre_core::Credentials::default(),
+    };
+    let setup = [
+        "CREATE TABLE people (id INTEGER, visible TEXT, secret TEXT)".to_owned(),
+        format!(
+            "INSERT INTO people WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 60) \
+             SELECT i, '{VISIBLE}', '{HIDDEN_VALUE}' FROM n"
+        ),
+    ];
+    let run = crate::backend::query_in_context(
+        None,
+        input.clone(),
+        SessionContext::default(),
+        None,
+        setup
+            .into_iter()
+            .map(|sql| jykre_core::QueryRequest::new(sql, jykre_core::ExecutionOptions::default()))
+            .collect(),
+        4 << 20,
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let batch = run.batch.unwrap();
+    assert!(batch.error.is_none(), "{:?}", batch.error);
+    crate::backend::close_session(run.session).await;
+    input
+}
+
+/// A round asking for one good query and one with two statements.
+fn asks_for_queries() -> Vec<serde_json::Value> {
+    let call = |index: u32, id: &str, arguments: serde_json::Value| {
+        chunk(
+            serde_json::json!({"tool_calls": [{"index": index, "id": id, "type": "function",
+          "function": {"name": "run_query", "arguments": arguments.to_string()}}]}),
+        )
+    };
+    vec![
+        call(
+            0,
+            "q",
+            serde_json::json!({"sql": "SELECT id, visible, secret FROM people", "purpose": "See the values"}),
+        ),
+        call(
+            1,
+            "r",
+            serde_json::json!({"sql": "SELECT 1; SELECT 2", "purpose": "Two at once"}),
+        ),
+        serde_json::json!({"id": "x", "object": "chat.completion.chunk", "model": "fake",
+                           "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+    ]
+}
+
+#[tokio::test]
+async fn query_values_leave_only_when_sent_and_never_from_a_hidden_column() {
+    let input = people().await;
+    let scope = cache().await;
+    let tools = CacheTools::new(scope.clone());
+    let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
+    for choice in [Choice::SendHidingSecret, Choice::Withhold, Choice::Decline] {
+        let (url, recorded) = fake(vec![asks_for_queries(), answers("Done.")]).await;
+        let assistant = Assistant::new(
+            jykre_assistant::ProviderConfig {
+                kind: jykre_assistant::ProviderKind::OpenAiCompatible,
+                model: "fake".into(),
+                endpoint: Some(url),
+            },
+            Some(SecretString::from(KEY.to_owned())),
+            Timeouts::default(),
+        )
+        .unwrap();
+        let mut conversation = Conversation::new(
+            "openai-compatible",
+            "fake",
+            prompts::system_prompt(&scope.engine, "English", true),
+            CacheTools::specs(true),
+        );
+        conversation.start_turn("What is in people?".into());
+        let mut user = User {
+            input: input.clone(),
+            session: None,
+            choice,
+            runs: 0,
+        };
+        let next = drive(
+            &mut conversation,
+            &assistant,
+            &tools,
+            &mut user,
+            &events,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        crate::backend::close_session(user.session.take()).await;
+        assert_eq!(next, Next::Done);
+        let recorded = recorded.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 2);
+        assert!(recorded[0].1.contains("run_query"));
+        let body = &recorded[1].1;
+        for (request, (_, sent)) in conversation.rounds().iter().zip(&recorded) {
+            for text in shown_texts(&request.request) {
+                assert!(
+                    sent.contains(&text),
+                    "missing from the request sent: {text}"
+                );
+            }
+        }
+        // The statement with two queries never reached the user.
+        assert!(body.contains("exactly one statement"));
+        let steps = &conversation.rounds()[0].tools;
+        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            steps[1].query.as_ref().unwrap().decision,
+            QueryDecision::Rejected
+        );
+        assert!(
+            !body.contains(HIDDEN_VALUE),
+            "a hidden value left the computer"
+        );
+        match choice {
+            Choice::SendHidingSecret => {
+                assert_eq!(user.runs, 1);
+                assert!(body.contains(VISIBLE));
+                assert!(body.contains("hidden by the user"));
+                assert!(body.contains(released::HIDDEN));
+                assert!(body.contains("more than 50 rows"));
+                let record = steps[0].query.as_ref().unwrap();
+                assert_eq!(record.decision, QueryDecision::Sent);
+                assert_eq!(record.hidden, ["secret"]);
+                assert_eq!(record.rows_sent, 50);
+            }
+            Choice::Withhold => {
+                assert_eq!(user.runs, 1);
+                assert!(
+                    !body.contains(VISIBLE),
+                    "a withheld value left the computer"
+                );
+                assert!(body.contains("chose not to share"));
+            }
+            Choice::Decline => {
+                assert_eq!(user.runs, 0, "a declined query ran");
+                assert!(!body.contains(VISIBLE));
+                assert!(body.contains("declined to run"));
+            }
+        }
+    }
+}
+
 #[test]
 fn preferences_round_trip_and_ignore_what_they_do_not_know() {
     let mut preferences = AssistantPreferences {
@@ -321,6 +545,7 @@ fn preferences_round_trip_and_ignore_what_they_do_not_know() {
         model: "llama".into(),
         endpoint: Some("http://localhost:11434/".into()),
         review: run::ReviewMode::FirstOnly,
+        queries: false,
         prices: BTreeMap::new(),
     };
     preferences.prices.insert(
@@ -365,8 +590,8 @@ async fn assistant_turns_never_log_prompts_answers_schema_or_keys_above_trace() 
     let mut conversation = Conversation::new(
         "openai-compatible",
         "fake",
-        prompts::system_prompt(&scope.engine, "English"),
-        CacheTools::specs(),
+        prompts::system_prompt(&scope.engine, "English", false),
+        CacheTools::specs(false),
     );
     conversation.start_turn("synthetic-question-marker".into());
     let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -374,6 +599,7 @@ async fn assistant_turns_never_log_prompts_answers_schema_or_keys_above_trace() 
         &mut conversation,
         &assistant,
         &tools,
+        &mut DeclineQueries,
         &events,
         &CancellationToken::new(),
     )

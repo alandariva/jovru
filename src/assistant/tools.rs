@@ -22,6 +22,8 @@ const MAX_DESCRIPTION: usize = 16 * 1024;
 
 pub const SEARCH_OBJECTS: &str = "search_objects";
 pub const DESCRIBE_RELATION: &str = "describe_relation";
+/// Answered by the user, not the cache ([`super::released`]).
+pub const RUN_QUERY: &str = "run_query";
 
 /// The tools of one conversation, over one connection's cache.
 pub struct CacheTools {
@@ -42,8 +44,34 @@ impl CacheTools {
         &self.scope
     }
 
-    /// What the model is told about each tool.
-    pub fn specs() -> Vec<ToolSpec> {
+    /// What the model is told about each tool; `queries` offers
+    /// `run_query` too.
+    pub fn specs(queries: bool) -> Vec<ToolSpec> {
+        let mut specs = Self::cache_specs();
+        if queries {
+            specs.push(ToolSpec {
+                name: RUN_QUERY.into(),
+                description: "Asks the user to run ONE SQL statement on the database and \
+                    share its result. The user approves or declines the statement first, then \
+                    sends or withholds the result and may hide the values of any column. At \
+                    most 50 rows come back, cells cut at 200 characters, 16 KiB in all. \
+                    `:name` parameters are not supported. Prefer aggregates, COUNT and LIMIT; \
+                    ask only when the structure is not enough."
+                    .into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "sql": {"type": "string", "description": "One statement, in the database's dialect."},
+                        "purpose": {"type": "string", "description": "Why you need it, in one short sentence for the user."}
+                    },
+                    "required": ["sql", "purpose"]
+                }),
+            });
+        }
+        specs
+    }
+
+    fn cache_specs() -> Vec<ToolSpec> {
         vec![
             ToolSpec {
                 name: SEARCH_OBJECTS.into(),
