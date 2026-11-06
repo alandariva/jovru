@@ -1716,19 +1716,6 @@ impl AppView {
             )
             .child(div().flex_1())
             .child(self.rail_item(4, Section::Settings, I::Settings2, tr!("Preferences"), cx))
-            .child(
-                div()
-                    .size(px(26.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(rgb(0x303c36))
-                    .text_color(rgb(MINT))
-                    .text_size(px(12.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("AL"),
-            )
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
