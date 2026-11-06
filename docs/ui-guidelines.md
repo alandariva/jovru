@@ -97,9 +97,21 @@ See [Performance](performance.md) for budgets and how to measure.
 
 ## Colours and theme
 
-- The application uses a dark theme (`ThemeMode::Dark`). Colours come from
-  the named tokens in `ui.rs` (`BG`, `PANEL`, `TEXT`, `MINT`, `RED`, ...);
-  views do not use raw hex values. A new colour is a new named token.
+- The application has a dark and a light theme; the user chooses
+  **System** (the default, following the operating system), **Light** or
+  **Dark** in Preferences (`jykre::theme::ThemeChoice`, kept as
+  `appearance.theme`). Colours come from the named tokens of the theme on
+  screen, `ui::colors()` (`bg`, `panel`, `text`, `mint`, `red`, ...): fields
+  of a `Palette` with one value per theme (`ui::DARK`, `ui::LIGHT`). Views do
+  not use raw hex values. A new colour is a new field, with a value in both
+  palettes; hues in the light palette keep a 4.5:1 contrast on `bg`.
+- Read the token while drawing; never keep a resolved colour in state, so a
+  change of theme redraws everything in the new palette. What is chosen by
+  the user (a connection's colour) is kept as its hue
+  (`ConnectionColor`) and resolved with `connection_color` when drawn; tab
+  groups are given their shades again when the theme changes.
+- `theme::apply` (`src/app/theme.rs`) sets the palette and the component
+  kit's theme together; GPUI's refresh redraws cached views as well.
 - Value colours by type family are defined once in
   [Results](results.md#value-presentation).
 
@@ -132,7 +144,6 @@ See [Performance](performance.md) for budgets and how to measure.
 
 | Standard | Current code |
 | --- | --- |
-| Shortcuts are actions in one keymap | Only the run shortcuts, closing a tab, moving between tabs, the export bar and commenting lines are actions (`ExecuteCurrentQuery`, `ExecuteCurrentQueryInNewResult`, `ExecuteAllQueries`, `CloseActiveTab`, `NextTab`, `PreviousTab`, `ExportResult`, `ToggleComment`, and in the explorer `ExplorerContextMenu` and `ToggleExplorerFilter`). Typing in the explorer's quick search is text-like navigation, read by a `capture_key_down` on the tree (`src/app/quick_search.rs`). The others are matched by hand in `on_key_down`/`capture_key_down` handlers in `src/app/mod.rs`, `workspace.rs`, `connections.rs`, `result_grid.rs` (the grid's navigation keys) and `grouped_tabs` |
+| Shortcuts are actions in one keymap | Only the run shortcuts, closing a tab, a new tab, moving between tabs, Preferences, the export bar and commenting lines are actions (`ExecuteCurrentQuery`, `ExecuteCurrentQueryInNewResult`, `ExecuteAllQueries`, `CloseActiveTab`, `NewTab`, `NextTab`, `PreviousTab`, `ShowPreferences`, `ExportResult`, `ToggleComment`, and in the explorer `ExplorerContextMenu` and `ToggleExplorerFilter`). Typing in the explorer's quick search is text-like navigation, read by a `capture_key_down` on the tree (`src/app/quick_search.rs`). The others are matched by hand in `on_key_down`/`capture_key_down` handlers in `src/app/mod.rs`, `workspace.rs`, `connections.rs`, `result_grid.rs` (the grid's navigation keys) and `grouped_tabs` |
 | Frequently changing regions are their own cached entities | The result grid is its own cached entity (`src/app/result_grid.rs`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); so is the assistant panel (`src/app/assistant_panel.rs`, [ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)). The editor still renders inside `Workspace` |
-| Colours come from named tokens | A few views still use inline hex values (the gutter's running and error icons, the assistant panel) |
 | Long collections are virtualized | The result grid, the explorer tree, Messages and the saved queries and history are. The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`) |

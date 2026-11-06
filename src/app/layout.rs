@@ -1,4 +1,4 @@
-use super::ui::{BORDER, MINT};
+use super::ui::colors;
 use gpui_kit::base::ResizeHandleRenderer;
 use gpui_kit::component::resizable::ResizableState;
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -44,8 +44,12 @@ pub fn splitter(
             .focusable()
             .tab_index(0)
             .flex_none()
-            .bg(rgb(if handle.is_active() { MINT } else { BORDER }))
-            .focus_visible(|s| s.bg(rgb(MINT)))
+            .bg(rgb(if handle.is_active() {
+                colors().mint
+            } else {
+                colors().border
+            }))
+            .focus_visible(|s| s.bg(rgb(colors().mint)))
             .map(|s| {
                 if horizontal {
                     s.w(px(1.)).h_full()

@@ -1078,18 +1078,18 @@ impl AssistantPanel {
                 .px_2()
                 .py(px(6.))
                 .rounded(px(6.))
-                .bg(rgb(SURFACE))
+                .bg(rgb(colors().surface))
                 .child(
                     div()
                         .text_size(px(15.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(colors().text))
                         .child(value),
                 )
                 .child(
                     div()
                         .text_size(px(11.))
-                        .text_color(rgb(FAINT))
+                        .text_color(rgb(colors().faint))
                         .child(caption),
                 )
         };
@@ -1156,15 +1156,15 @@ impl AssistantPanel {
             .gap_1()
             .rounded(px(4.))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(HOVER)))
-            .focus_visible(|s| s.bg(rgb(HOVER)))
+            .hover(|s| s.bg(rgb(colors().hover)))
+            .focus_visible(|s| s.bg(rgb(colors().hover)))
             .child(icon(
                 if open {
                     I::ChevronDown
                 } else {
                     I::ChevronRight
                 },
-                FAINT,
+                colors().faint,
             ))
             .child(
                 div()
@@ -1172,7 +1172,7 @@ impl AssistantPanel {
                     .min_w_0()
                     .truncate()
                     .text_size(px(12.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(colors().muted))
                     .child(if open {
                         tr!("Session").to_owned()
                     } else {
@@ -1191,7 +1191,7 @@ impl AssistantPanel {
             .py_2()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(toggle)
             .when(open, |s| {
                 s.child(
@@ -1214,13 +1214,13 @@ impl AssistantPanel {
                                     .h(px(3.))
                                     .w_full()
                                     .rounded(px(2.))
-                                    .bg(rgb(BORDER))
+                                    .bg(rgb(colors().border))
                                     .child(
                                         div()
                                             .h_full()
                                             .w(relative(fraction))
                                             .rounded(px(2.))
-                                            .bg(rgb(MINT)),
+                                            .bg(rgb(colors().mint)),
                                     ),
                             ),
                         ),
@@ -1306,14 +1306,14 @@ impl AssistantPanel {
                 .py_2()
                 .rounded(px(6.))
                 .border_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(colors().border))
                 .child(
-                    row().items_start().child(icon(glyph, TEAL)).child(
+                    row().items_start().child(icon(glyph, colors().teal)).child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .text_size(px(12.))
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(colors().text))
                             .child(what),
                     ),
                 )
@@ -1351,10 +1351,15 @@ impl AssistantPanel {
             .gap_1()
             .child(
                 row()
-                    .child(icon(I::UserRound, MUTED))
+                    .child(icon(I::UserRound, colors().muted))
                     .child(label(tr!("You"))),
             )
-            .child(div().text_size(px(14.)).text_color(rgb(TEXT)).child(text))
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(rgb(colors().text))
+                    .child(text),
+            )
     }
 
     fn round(&self, round: usize) -> Option<&Round> {
@@ -1428,17 +1433,22 @@ impl AssistantPanel {
                 .px_2()
                 .py_1()
                 .rounded(px(4.))
-                .bg(rgb(SURFACE))
+                .bg(rgb(colors().surface))
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(HOVER)))
-                .focus_visible(|s| s.bg(rgb(HOVER)))
-                .child(div().text_size(px(14.)).text_color(rgb(TEXT)).child("…"))
+                .hover(|s| s.bg(rgb(colors().hover)))
+                .focus_visible(|s| s.bg(rgb(colors().hover)))
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .text_color(rgb(colors().text))
+                        .child("…"),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .text_size(px(12.))
-                        .text_color(rgb(FAINT))
+                        .text_color(rgb(colors().faint))
                         .child(tr!(
                             "{0} as in the last request sent. Show everything",
                             what.join(tr!(" and "))
@@ -1453,8 +1463,8 @@ impl AssistantPanel {
         column()
             .rounded(px(6.))
             .border_1()
-            .border_color(rgb(if reviewing { AMBER } else { BORDER }))
-            .bg(rgb(BG))
+            .border_color(rgb(if reviewing { colors().amber } else { colors().border }))
+            .bg(rgb(colors().bg))
             .child(
                 row()
                     .id(("assistant-request", index))
@@ -1462,13 +1472,13 @@ impl AssistantPanel {
                     .aria_label(tr!("Show or hide the request"))
                     .focusable()
                     .tab_index(0)
-                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                    .focus_visible(|s| s.bg(rgb(colors().hover)))
                     .px_3()
                     .h(px(30.))
                     .cursor_pointer()
-                    .child(icon(if open { I::ChevronDown } else { I::ChevronRight }, FAINT))
-                    .child(icon(I::Send, if reviewing { AMBER } else { BLUE }))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgb(MUTED)).child(summary))
+                    .child(icon(if open { I::ChevronDown } else { I::ChevronRight }, colors().faint))
+                    .child(icon(I::Send, if reviewing { colors().amber } else { colors().blue }))
+                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgb(colors().muted)).child(summary))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.expanded.remove(&index) {
                             this.expanded.insert(index);
@@ -1498,9 +1508,9 @@ impl AssistantPanel {
                                         .rounded(px(4.))
                                         .text_size(px(12.))
                                         .cursor_pointer()
-                                        .text_color(rgb(if section == kind { TEXT } else { FAINT }))
-                                        .when(section == kind, |s| s.bg(rgb(SURFACE)))
-                                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                                        .text_color(rgb(if section == kind { colors().text } else { colors().faint }))
+                                        .when(section == kind, |s| s.bg(rgb(colors().surface)))
+                                        .focus_visible(|s| s.bg(rgb(colors().hover)))
                                         .child(title)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.sections.insert(index, kind);
@@ -1528,8 +1538,8 @@ impl AssistantPanel {
                     Section::Tools => column().gap_2().children(request.tools.iter().map(|tool| {
                         column()
                             .gap_1()
-                            .child(div().text_size(px(12.)).text_color(rgb(TEXT)).child(tool.name.clone()))
-                            .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(tool.description.clone()))
+                            .child(div().text_size(px(12.)).text_color(rgb(colors().text)).child(tool.name.clone()))
+                            .child(div().text_size(px(12.)).text_color(rgb(colors().muted)).child(tool.description.clone()))
                             .child(mono(serde_json::to_string_pretty(&tool.input_schema).unwrap_or_default()))
                     })),
                     Section::Json => column().child(mono(serde_json::to_string_pretty(&request).unwrap_or_default())),
@@ -1546,7 +1556,7 @@ impl AssistantPanel {
                                 .id("assistant-review-status")
                                 .role(Role::Status)
                                 .text_size(px(12.))
-                                .text_color(rgb(AMBER))
+                                .text_color(rgb(colors().amber))
                                 .child(tr!(
                                     "Nothing has been sent yet. Review what will leave this computer."
                                 )),
@@ -1571,7 +1581,7 @@ impl AssistantPanel {
             return div();
         };
         let header = row()
-            .child(icon(I::Sparkles, MINT))
+            .child(icon(I::Sparkles, colors().mint))
             .child(label(tr!("Assistant")));
         match &data.state {
             RoundState::Ready => {
@@ -1592,7 +1602,7 @@ impl AssistantPanel {
                             .child(spinning_icon(
                                 ("assistant-spinner", round),
                                 I::LoaderCircle,
-                                AMBER,
+                                colors().amber,
                             ))
                             .child(label(format!("{}{elapsed}", tr!("Thinking…"))))
                             .child(
@@ -1717,7 +1727,7 @@ impl AssistantPanel {
         column()
             .rounded(px(6.))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(
                 row()
                     .id(("assistant-tool", index))
@@ -1725,7 +1735,7 @@ impl AssistantPanel {
                     .aria_label(tr!("Show or hide the tool step"))
                     .focusable()
                     .tab_index(0)
-                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                    .focus_visible(|s| s.bg(rgb(colors().hover)))
                     .px_3()
                     .h(px(28.))
                     .cursor_pointer()
@@ -1735,16 +1745,16 @@ impl AssistantPanel {
                         } else {
                             I::ChevronRight
                         },
-                        FAINT,
+                        colors().faint,
                     ))
-                    .child(icon(I::Wrench, TEAL))
+                    .child(icon(I::Wrench, colors().teal))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_size(px(12.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(colors().muted))
                             .child(format!(
                                 "{} {} · {} B · {} ms",
                                 step.call.name, arguments, size, step.elapsed_ms
@@ -1782,7 +1792,7 @@ impl AssistantPanel {
                     .flex_1()
                     .min_w_0()
                     .text_size(px(12.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(colors().muted))
                     .child(text),
             )
         };
@@ -1791,7 +1801,7 @@ impl AssistantPanel {
                 .rounded(px(6.))
                 .border_1()
                 .border_color(rgb(color))
-                .bg(rgb(BG))
+                .bg(rgb(colors().bg))
                 .px_3()
                 .py_2()
                 .gap_2()
@@ -1799,12 +1809,12 @@ impl AssistantPanel {
         match &data.state {
             CardState::Asked => {
                 let dangerous = self.production && data.risk.is_some();
-                frame(AMBER)
-                    .child(title(tr!("The assistant asks to run a query").to_owned(), AMBER))
+                frame(colors().amber)
+                    .child(title(tr!("The assistant asks to run a query").to_owned(), colors().amber))
                     .when_some(data.purpose.clone(), |s, purpose| s.child(prose(&purpose)))
                     .child(sql_text(data.sql.clone()))
                     .when(data.risk.is_some(), |s| {
-                        s.child(badge(tr!("Changes or deletes data"), AMBER))
+                        s.child(badge(tr!("Changes or deletes data"), colors().amber))
                     })
                     .when(self.production, |s| {
                         s.child(feedback_line(&Feedback::new(
@@ -1844,8 +1854,8 @@ impl AssistantPanel {
                 if elapsed >= Duration::from_secs(2) {
                     status.push_str(&format!(" {:.1} s", elapsed.as_secs_f32()));
                 }
-                frame(BORDER)
-                    .child(title(tr!("Query").to_owned(), BLUE))
+                frame(colors().border)
+                    .child(title(tr!("Query").to_owned(), colors().blue))
                     .child(sql_text(data.sql.clone()))
                     .child(
                         row()
@@ -1854,7 +1864,7 @@ impl AssistantPanel {
                             .child(spinning_icon(
                                 ("assistant-query-spinner", card),
                                 I::LoaderCircle,
-                                AMBER,
+                                colors().amber,
                             ))
                             .child(label(status))
                             .child(div().flex_1())
@@ -1881,21 +1891,19 @@ impl AssistantPanel {
                     counts.push_str(&format!(" · {}", tr!("hidden columns: {0}", hidden.len())));
                 }
                 counts.push_str(&format!(" · {} ms", preview.elapsed_ms));
-                let result = if let Some(error) = &preview.error {
-                    column().child(feedback_line(&Feedback::new(
-                        Tone::Error,
-                        format!("{}: {}", error.title, error.message),
-                    )))
-                } else if preview.columns.is_empty() {
-                    column().child(label(tr!("The statement ran and returned no rows.")))
-                } else {
-                    // One toggle per column, wrapping, so every column can
-                    // be hidden however narrow the panel is.
-                    let toggles =
-                        row()
-                            .flex_wrap()
-                            .gap_1()
-                            .children(preview.columns.iter().enumerate().map(|(at, info)| {
+                let result =
+                    if let Some(error) = &preview.error {
+                        column().child(feedback_line(&Feedback::new(
+                            Tone::Error,
+                            format!("{}: {}", error.title, error.message),
+                        )))
+                    } else if preview.columns.is_empty() {
+                        column().child(label(tr!("The statement ran and returned no rows.")))
+                    } else {
+                        // One toggle per column, wrapping, so every column can
+                        // be hidden however narrow the panel is.
+                        let toggles = row().flex_wrap().gap_1().children(
+                            preview.columns.iter().enumerate().map(|(at, info)| {
                                 let off = hidden.contains(&at);
                                 row()
                                     .id(("assistant-query-hide", card * 4096 + at))
@@ -1913,86 +1921,101 @@ impl AssistantPanel {
                                     .py(px(2.))
                                     .rounded(px(4.))
                                     .border_1()
-                                    .border_color(rgb(if off { AMBER } else { BORDER }))
+                                    .border_color(rgb(if off {
+                                        colors().amber
+                                    } else {
+                                        colors().border
+                                    }))
                                     .cursor_pointer()
-                                    .hover(|s| s.bg(rgb(HOVER)))
-                                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                                    .hover(|s| s.bg(rgb(colors().hover)))
+                                    .focus_visible(|s| s.bg(rgb(colors().hover)))
                                     .child(icon(
                                         if off { I::EyeOff } else { I::Eye },
-                                        if off { AMBER } else { MUTED },
+                                        if off { colors().amber } else { colors().muted },
                                     ))
                                     .child(
                                         div()
                                             .text_size(px(12.))
-                                            .text_color(rgb(if off { FAINT } else { TEXT }))
+                                            .text_color(rgb(if off {
+                                                colors().faint
+                                            } else {
+                                                colors().text
+                                            }))
                                             .when(off, |s| s.line_through())
                                             .child(info.name.clone()),
                                     )
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.toggle_column(card, at, cx)
                                     }))
-                            }));
-                    let head = row()
-                        .gap_0()
-                        .children(preview.columns.iter().enumerate().map(|(at, info)| {
-                            let off = hidden.contains(&at);
-                            column()
-                                .w(RESULT_COLUMN)
-                                .flex_none()
-                                .px_1()
-                                .border_b_1()
-                                .border_color(rgb(BORDER))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(if off { FAINT } else { TEXT }))
-                                        .child(info.name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(11.))
-                                        .text_color(rgb(FAINT))
-                                        .child(info.data_type.clone()),
-                                )
-                        }));
-                    let rows = preview.rows.iter().map(|cells| {
-                        row()
+                            }),
+                        );
+                        let head = row()
                             .gap_0()
-                            .children(cells.iter().enumerate().map(|(at, cell)| {
+                            .children(preview.columns.iter().enumerate().map(|(at, info)| {
                                 let off = hidden.contains(&at);
-                                let (shown, color) = match (off, cell) {
-                                    (true, _) => (released::HIDDEN.to_owned(), FAINT),
-                                    (false, Some(text)) => (text.replace(['\r', '\n'], " "), MUTED),
-                                    (false, None) => ("NULL".to_owned(), FAINT),
-                                };
-                                div()
+                                column()
                                     .w(RESULT_COLUMN)
                                     .flex_none()
                                     .px_1()
-                                    .truncate()
-                                    .font_family("Cascadia Mono")
-                                    .text_size(px(12.))
-                                    .text_color(rgb(color))
-                                    .child(shown)
-                            }))
-                    });
-                    column()
-                        .gap_2()
-                        .child(label(tr!("Columns to send; select one to hide its values")))
-                        .child(toggles)
-                        .child(
-                            div()
-                                .id(("assistant-query-grid", card))
-                                .overflow_x_scroll()
-                                .child(column().child(head).children(rows)),
-                        )
-                };
-                frame(AMBER)
+                                    .border_b_1()
+                                    .border_color(rgb(colors().border))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(if off {
+                                                colors().faint
+                                            } else {
+                                                colors().text
+                                            }))
+                                            .child(info.name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(11.))
+                                            .text_color(rgb(colors().faint))
+                                            .child(info.data_type.clone()),
+                                    )
+                            }));
+                        let rows = preview.rows.iter().map(|cells| {
+                            row()
+                                .gap_0()
+                                .children(cells.iter().enumerate().map(|(at, cell)| {
+                                    let off = hidden.contains(&at);
+                                    let (shown, color) = match (off, cell) {
+                                        (true, _) => (released::HIDDEN.to_owned(), colors().faint),
+                                        (false, Some(text)) => {
+                                            (text.replace(['\r', '\n'], " "), colors().muted)
+                                        }
+                                        (false, None) => ("NULL".to_owned(), colors().faint),
+                                    };
+                                    div()
+                                        .w(RESULT_COLUMN)
+                                        .flex_none()
+                                        .px_1()
+                                        .truncate()
+                                        .font_family("Cascadia Mono")
+                                        .text_size(px(12.))
+                                        .text_color(rgb(color))
+                                        .child(shown)
+                                }))
+                        });
+                        column()
+                            .gap_2()
+                            .child(label(tr!("Columns to send; select one to hide its values")))
+                            .child(toggles)
+                            .child(
+                                div()
+                                    .id(("assistant-query-grid", card))
+                                    .overflow_x_scroll()
+                                    .child(column().child(head).children(rows)),
+                            )
+                    };
+                frame(colors().amber)
                     .child(title(
                         tr!("Result of the query: review what is sent").to_owned(),
-                        AMBER,
+                        colors().amber,
                     ))
                     .child(sql_text(data.sql.clone()))
                     .child(result)
@@ -2004,7 +2027,7 @@ impl AssistantPanel {
                             .id(("assistant-query-review", card))
                             .role(Role::Status)
                             .text_size(px(12.))
-                            .text_color(rgb(AMBER))
+                            .text_color(rgb(colors().amber))
                             .child(tr!("Nothing of the result has been sent yet.")),
                     )
                     .child(
@@ -2054,7 +2077,7 @@ impl AssistantPanel {
                 column()
                     .rounded(px(6.))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     .child(
                         row()
                             .id(("assistant-query-done", index))
@@ -2062,7 +2085,7 @@ impl AssistantPanel {
                             .aria_label(tr!("Show or hide the query"))
                             .focusable()
                             .tab_index(0)
-                            .focus_visible(|s| s.bg(rgb(HOVER)))
+                            .focus_visible(|s| s.bg(rgb(colors().hover)))
                             .px_3()
                             .h(px(28.))
                             .cursor_pointer()
@@ -2072,16 +2095,16 @@ impl AssistantPanel {
                                 } else {
                                     I::ChevronRight
                                 },
-                                FAINT,
+                                colors().faint,
                             ))
-                            .child(icon(I::Database, TEAL))
+                            .child(icon(I::Database, colors().teal))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_size(px(12.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(colors().muted))
                                     .child(summary),
                             )
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -2119,9 +2142,9 @@ impl AssistantPanel {
             .gap_1()
             .child(
                 row()
-                    .child(icon(I::Sparkles, MINT))
+                    .child(icon(I::Sparkles, colors().mint))
                     .child(label(tr!("Assistant")))
-                    .child(badge(tr!("Simulated"), AMBER)),
+                    .child(badge(tr!("Simulated"), colors().amber)),
             )
             .child(answer_text(&shown, None, 10_000 + index, cx))
     }
@@ -2160,10 +2183,10 @@ fn sql_text(sql: String) -> Div {
         .px_2()
         .py_1()
         .rounded(px(4.))
-        .bg(rgb(SURFACE))
+        .bg(rgb(colors().surface))
         .font_family("Cascadia Mono")
         .text_size(px(12.))
-        .text_color(rgb(BLUE))
+        .text_color(rgb(colors().blue))
         .whitespace_normal()
         .child(sql)
 }
@@ -2172,10 +2195,10 @@ fn mono(text: String) -> Div {
     div()
         .p_2()
         .rounded(px(4.))
-        .bg(rgb(SURFACE))
+        .bg(rgb(colors().surface))
         .font_family("Cascadia Mono")
         .text_size(px(12.))
-        .text_color(rgb(MUTED))
+        .text_color(rgb(colors().muted))
         .whitespace_normal()
         .child(text)
 }
@@ -2242,8 +2265,8 @@ fn answer_text(
         let mut card = column()
             .rounded(px(6.))
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(BG))
+            .border_color(rgb(colors().border))
+            .bg(rgb(colors().bg))
             .overflow_hidden()
             .child(
                 div()
@@ -2251,7 +2274,7 @@ fn answer_text(
                     .py_2()
                     .font_family("Cascadia Mono")
                     .text_size(px(12.))
-                    .text_color(rgb(BLUE))
+                    .text_color(rgb(colors().blue))
                     .child(sql.clone()),
             );
         if block.closed {
@@ -2262,7 +2285,7 @@ fn answer_text(
                 .when_some(risk, |s, _| {
                     s.child(div().px_3().pb_1().child(badge(
                         tr!("Changes or deletes data · review before running"),
-                        AMBER,
+                        colors().amber,
                     )))
                 })
                 .child(
@@ -2272,7 +2295,7 @@ fn answer_text(
                         .flex_wrap()
                         .gap_1()
                         .border_t_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(colors().border))
                         .child(
                             icon_button(
                                 ("assistant-copy-sql", id),
@@ -2338,7 +2361,7 @@ fn prose(text: &str) -> Div {
     div()
         .text_size(px(14.))
         .line_height(relative(1.55))
-        .text_color(rgb(0xaeb8c5))
+        .text_color(rgb(colors().muted))
         .child(text.to_owned())
 }
 
@@ -2356,9 +2379,9 @@ impl Render for AssistantPanel {
         let entity = cx.entity();
         column()
             .size_full()
-            .bg(rgb(0x191d23))
+            .bg(rgb(colors().panel))
             .border_l_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(
                 row()
                     .h(px(48.))
@@ -2366,15 +2389,15 @@ impl Render for AssistantPanel {
                     .px_4()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     .child(
                         row()
                             .min_w_0()
-                            .child(icon(I::Sparkles, MINT))
+                            .child(icon(I::Sparkles, colors().mint))
                             .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(tr!("Assistant")))
-                            .when(self.demo, |s| s.child(badge(tr!("Simulated"), AMBER)))
+                            .when(self.demo, |s| s.child(badge(tr!("Simulated"), colors().amber)))
                             .when(!self.demo && !provider.is_empty(), |s| {
-                                s.child(div().min_w_0().truncate().child(badge(provider.clone(), MINT)))
+                                s.child(div().min_w_0().truncate().child(badge(provider.clone(), colors().mint)))
                             }),
                     )
                     .child(
@@ -2405,7 +2428,7 @@ impl Render for AssistantPanel {
                     .flex_1()
                     .p_4()
                     .gap_3()
-                    .child(icon(I::Sparkles, MINT))
+                    .child(icon(I::Sparkles, colors().mint))
                     .child(div().text_size(px(16.)).child(tr!("Set up the assistant")))
                     .child(label(tr!(
                         "Choose a provider and a model in Preferences. Your SQL, error messages, row counts and the structure of the database are sent; values never are."
@@ -2419,7 +2442,7 @@ impl Render for AssistantPanel {
                     .flex_1()
                     .p_4()
                     .gap_3()
-                    .child(icon(I::Sparkles, MINT))
+                    .child(icon(I::Sparkles, colors().mint))
                     .child(div().text_size(px(16.)).child(tr!("One question, a new path.")))
                     .child(label(tr!(
                         "Ask about the structure of the database, describe a query to write, or use Fix with AI on a failed statement."
@@ -2441,7 +2464,7 @@ impl Render for AssistantPanel {
                         .px_4()
                         .py_2()
                         .border_t_1()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(colors().border))
                         .child(div().flex_1().child(label(tr!("The assistant used {0} rounds for this request.", run::MAX_ROUNDS))))
                         .child(button("assistant-limit-stop", I::Square, tr!("Stop")).on_click(cx.listener(|this, _, _, cx| this.stop(cx))))
                         .child(primary_button("assistant-limit-continue", I::Play, tr!("Continue")).on_click(cx.listener(
@@ -2459,7 +2482,7 @@ impl Render for AssistantPanel {
                     .p_3()
                     .gap_2()
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     .child(
                         row()
                             .gap_1()
@@ -2478,9 +2501,9 @@ impl Render for AssistantPanel {
                                     .rounded(px(4.))
                                     .text_size(px(12.))
                                     .cursor_pointer()
-                                    .text_color(rgb(if self.mode == mode { TEXT } else { FAINT }))
-                                    .when(self.mode == mode, |s| s.bg(rgb(SURFACE)))
-                                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                                    .text_color(rgb(if self.mode == mode { colors().text } else { colors().faint }))
+                                    .when(self.mode == mode, |s| s.bg(rgb(colors().surface)))
+                                    .focus_visible(|s| s.bg(rgb(colors().hover)))
                                     .child(title)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.mode = mode;
@@ -2493,8 +2516,8 @@ impl Render for AssistantPanel {
                             .p_2()
                             .rounded(px(7.))
                             .border_1()
-                            .border_color(rgb(0x3b4945))
-                            .bg(rgb(BG))
+                            .border_color(rgb(colors().border_strong))
+                            .bg(rgb(colors().bg))
                             .child(
                                 div().flex_1().child(
                                     Input::new(&self.prompt)
@@ -2510,11 +2533,11 @@ impl Render for AssistantPanel {
                                     .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
                             } else {
                                 icon_button("send-ai", I::ArrowUp, tr!("Send message"))
-                                    .bg(rgb(0x304a40))
+                                    .bg(rgb(colors().accent_bg))
                                     .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
                             }),
                     )
-                    .child(div().text_center().text_size(px(12.)).text_color(rgb(FAINT)).child(if self.demo {
+                    .child(div().text_center().text_size(px(12.)).text_color(rgb(colors().faint)).child(if self.demo {
                         tr!("Simulated AI · Always review the suggestions.")
                     } else {
                         tr!("Nothing runs on its own · Review the suggestions before running them.")

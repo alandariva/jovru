@@ -73,7 +73,7 @@ fn toggle(id: &'static str, on: bool, title: &'static str) -> Stateful<Div> {
     button(id, if on { I::SquareCheck } else { I::Square }, title)
         .role(Role::CheckBox)
         .aria_toggled(if on { Toggled::True } else { Toggled::False })
-        .when(on, |s| s.text_color(rgb(MINT)))
+        .when(on, |s| s.text_color(rgb(colors().mint)))
 }
 
 /// The form of the telemetry preferences.

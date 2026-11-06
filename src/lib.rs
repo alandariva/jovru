@@ -33,6 +33,7 @@ pub mod result_tabs;
 pub mod run_log;
 pub mod stats;
 pub mod telemetry;
+pub mod theme;
 pub mod transaction;
 pub mod workspace_state;
 

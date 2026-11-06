@@ -119,9 +119,9 @@ impl AppView {
         } else {
             name.to_owned()
         };
-        let group = self
-            .tabs
-            .update(cx, |tabs, cx| tabs.add_group(label, rgb(FAINT).into(), cx));
+        let group = self.tabs.update(cx, |tabs, cx| {
+            tabs.add_group(label, rgb(colors().faint).into(), cx)
+        });
         self.orphan_groups.push((name.to_owned(), group));
         group
     }

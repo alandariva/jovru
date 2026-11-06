@@ -19,9 +19,11 @@ mod reports;
 mod result_grid;
 mod saved_query_dialog;
 mod scope_picker;
+mod settings;
 mod sql_editor;
 mod state;
 mod telemetry_settings;
+mod theme;
 mod ui;
 mod workspace;
 
@@ -30,7 +32,7 @@ use demo::{ORDER_COLUMNS, SALES_SQL, TABLES, table_sql};
 use gpui_kit::assets::IconName as I;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::{
-    ActiveTheme, Sizable, Theme, ThemeMode, TitleBar, WindowExt as _,
+    ActiveTheme, Sizable, Theme, TitleBar, WindowExt as _,
     button::{Button, ButtonVariants as _},
     dialog::{DialogAction, DialogClose, DialogFooter},
     input::{Input, InputEvent, InputState, ShowCompletions},
@@ -156,7 +158,12 @@ actions!(
         ExplorerContextMenu,
         /// Ctrl+F in the explorer: the quick search marks its matches or
         /// shows only them.
-        ToggleExplorerFilter
+        ToggleExplorerFilter,
+        /// Ctrl+T: a new query tab on the connection of the tab on screen;
+        /// without one, a tab that asks for a connection.
+        NewTab,
+        /// Ctrl+,: opens Preferences.
+        ShowPreferences
     ]
 );
 
@@ -175,7 +182,6 @@ enum Section {
     Saved,
     Reports,
     History,
-    Settings,
 }
 
 struct Connection {
@@ -210,7 +216,7 @@ struct Connection {
     detail: String,
     /// The colour its explorer entry and tab group share: the one the user
     /// chose, or the driver's.
-    color: u32,
+    color: jykre::connection_appearance::ConnectionColor,
     /// The colour and environment the user chose.
     appearance: jykre::connection_appearance::Appearance,
     group: TabGroupId,
@@ -291,6 +297,11 @@ struct AppView {
     /// written.
     font_revision: usize,
     sidebar_open: bool,
+    /// The Preferences dialog is open, on this category ([`settings`]).
+    settings_open: bool,
+    settings_page: settings::SettingsPage,
+    /// Keeps Tab inside Preferences.
+    settings_focus: FocusHandle,
     /// Preferences > Assistant (ADR-0028).
     assistant_settings: Entity<assistant_settings::AssistantSettingsView>,
     telemetry_settings: Entity<telemetry_settings::TelemetrySettingsView>,
@@ -463,8 +474,8 @@ impl AppView {
                         .connections
                         .iter()
                         .find(|connection| connection.group == *to)
-                        .map_or((FAINT, None), |connection| {
-                            (connection.color, connection.appearance.environment)
+                        .map_or((None, None), |connection| {
+                            (Some(connection.color), connection.appearance.environment)
                         });
                     let target = this
                         .connections
@@ -574,6 +585,9 @@ impl AppView {
             section: Section::Explorer,
             next_query: 1,
             sidebar_open: true,
+            settings_open: false,
+            settings_page: settings::SettingsPage::default(),
+            settings_focus: cx.focus_handle(),
             assistant_settings: cx
                 .new(|cx| assistant_settings::AssistantSettingsView::new(window, cx)),
             telemetry_settings: cx
@@ -754,6 +768,14 @@ impl AppView {
                 _ => {}
             },
         ));
+        // The system's theme is followed while the application runs.
+        app._subscriptions
+            .push(cx.observe_window_appearance(window, |this, window, cx| {
+                let choice = theme::choice(cx);
+                if choice == jykre::theme::ThemeChoice::System {
+                    this.set_theme(choice, window, cx);
+                }
+            }));
         app._subscriptions.push(cx.subscribe(
             &app.connection_scope,
             |this, _, event: &scope_picker::PickerEvent, cx| match event {
@@ -762,13 +784,25 @@ impl AppView {
         ));
         if demo::enabled() {
             for (name, detail, color) in [
-                (tr!("PostgreSQL · Local"), "localhost:5432", MINT),
-                ("Databricks · Dev", "analytics / development", BLUE),
-                (tr!("MySQL · Finance"), "finance / development", 0xd995a7),
+                (
+                    tr!("PostgreSQL · Local"),
+                    "localhost:5432",
+                    jykre::connection_appearance::ConnectionColor::Mint,
+                ),
+                (
+                    "Databricks · Dev",
+                    "analytics / development",
+                    jykre::connection_appearance::ConnectionColor::Blue,
+                ),
+                (
+                    tr!("MySQL · Finance"),
+                    "finance / development",
+                    jykre::connection_appearance::ConnectionColor::Pink,
+                ),
             ] {
-                let group = app
-                    .tabs
-                    .update(cx, |tabs, cx| tabs.add_group(name, rgb(color).into(), cx));
+                let group = app.tabs.update(cx, |tabs, cx| {
+                    tabs.add_group(name, rgb(connection_color(color)).into(), cx)
+                });
                 app.next_connection_key += 1;
                 app.connections.push(Connection {
                     key: app.next_connection_key,
@@ -863,7 +897,7 @@ impl AppView {
                     .collect();
                 return;
             }
-            Section::Explorer | Section::Settings => {
+            Section::Explorer => {
                 self.library_shown.clear();
                 return;
             }
@@ -910,16 +944,25 @@ impl AppView {
             .rounded(px(4.))
             .border_1()
             .border_color(if chosen {
-                rgb(MINT)
+                rgb(colors().mint)
             } else {
                 transparent_black().into()
             })
-            .focus_visible(|s| s.border_color(rgb(TEXT)))
+            .focus_visible(|s| s.border_color(rgb(colors().text)))
             .cursor_pointer()
             .text_size(px(12.))
-            .text_color(rgb(if chosen { MINT } else { MUTED }))
-            .bg(Hsla::from(rgb(if chosen { MINT } else { FAINT })).opacity(0.12))
-            .hover(|s| s.text_color(rgb(TEXT)))
+            .text_color(rgb(if chosen {
+                colors().mint
+            } else {
+                colors().muted
+            }))
+            .bg(Hsla::from(rgb(if chosen {
+                colors().mint
+            } else {
+                colors().faint
+            }))
+            .opacity(0.12))
+            .hover(|s| s.text_color(rgb(colors().text)))
             .child(format!("#{tag}"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.library_tag = if chosen { None } else { Some(tag.clone()) };
@@ -1134,7 +1177,7 @@ impl AppView {
             .iter()
             .find(|connection| connection.group == group && connection.input.is_some())
         {
-            let (color, environment) = (connection.color, connection.appearance.environment);
+            let (color, environment) = (Some(connection.color), connection.appearance.environment);
             panel.update(cx, |panel, cx| panel.set_appearance(color, environment, cx));
         }
         let subscription = cx.subscribe_in(
@@ -1195,8 +1238,7 @@ impl AppView {
                     }
                     WorkspaceEvent::Changed => {}
                     WorkspaceEvent::OpenPreferences => {
-                        this.section = Section::Settings;
-                        this.sidebar_open = true;
+                        this.open_settings(settings::SettingsPage::Assistant, window, cx);
                     }
                     WorkspaceEvent::SaveAsReport {
                         title,
@@ -1348,7 +1390,11 @@ impl AppView {
         }
         let connection = &mut self.connections[index];
         let group = self.tabs.update(cx, |tabs, cx| {
-            tabs.add_group(connection.name.clone(), rgb(connection.color).into(), cx)
+            tabs.add_group(
+                connection.name.clone(),
+                rgb(connection_color(connection.color)).into(),
+                cx,
+            )
         });
         connection.group = group;
         group
@@ -1519,12 +1565,13 @@ impl AppView {
         let Some(panel) = self.panels.get(&tab) else {
             return;
         };
-        let (from, busy, transaction) = {
+        let (from, busy, transaction, connected) = {
             let panel = panel.read(cx);
             (
                 panel.connection_name().to_owned(),
                 panel.is_busy(),
                 panel.has_open_transaction(),
+                panel.has_connection(),
             )
         };
         let to = self
@@ -1532,7 +1579,8 @@ impl AppView {
             .iter()
             .find(|connection| connection.group == group)
             .map(|connection| connection.name.clone());
-        if same_group || to.as_deref() == Some(from.as_str()) {
+        // A tab without a connection has no session or results to lose.
+        if same_group || to.as_deref() == Some(from.as_str()) || (!connected && !busy) {
             let _ = self
                 .tabs
                 .update(cx, |tabs, cx| tabs.move_tab(tab, group, index, cx));
@@ -1654,6 +1702,35 @@ impl AppView {
         }
     }
 
+    /// `Ctrl T`: a new query tab on the connection of the query tab on
+    /// screen. Without one (no tab, a report's or a tab without a
+    /// connection), the new tab has no connection and asks for one.
+    fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let group = {
+            let tabs = self.tabs.read(cx);
+            tabs.active_tab()
+                .filter(|tab| self.panels.contains_key(tab))
+                .and_then(|tab| tabs.tab_group(tab))
+                .filter(|group| self.connections.iter().any(|c| c.group == *group))
+        };
+        match group {
+            Some(group) => self.new_query(group, window, cx),
+            None => {
+                let group = self.group_for("", cx);
+                let title = tr!("Query {0}", self.next_query);
+                self.next_query += 1;
+                if let Some(tab) = self.add_query(group, &title, "", window, cx)
+                    && let Some(panel) = self.panels.get(&tab)
+                {
+                    panel.update(cx, |panel, cx| {
+                        panel.ask_for_connection(cx);
+                        panel.focus_editor(window, cx);
+                    });
+                }
+            }
+        }
+    }
+
     fn active_group(&self, cx: &App) -> Option<TabGroupId> {
         let tabs = self.tabs.read(cx);
         tabs.active_tab()
@@ -1688,7 +1765,7 @@ impl AppView {
             .aria_selected(active)
             .focusable()
             .tab_index(0)
-            .focus_visible(|s| s.bg(rgb(HOVER)))
+            .focus_visible(|s| s.bg(rgb(colors().hover)))
             .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
             .size(px(34.))
             .flex_none()
@@ -1697,9 +1774,16 @@ impl AppView {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .when(active, |s| s.bg(rgb(0x26342f)))
-            .hover(|s| s.bg(rgb(HOVER)))
-            .child(icon(name, if active { MINT } else { FAINT }))
+            .when(active, |s| s.bg(rgb(colors().accent_bg)))
+            .hover(|s| s.bg(rgb(colors().hover)))
+            .child(icon(
+                name,
+                if active {
+                    colors().mint
+                } else {
+                    colors().faint
+                },
+            ))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.section == section {
                     this.sidebar_open = !this.sidebar_open;
@@ -1720,9 +1804,9 @@ impl AppView {
             .items_center()
             .py_3()
             .gap_2()
-            .bg(rgb(0x13161a))
+            .bg(rgb(colors().chrome))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .children(
                 [
                     (Section::Explorer, I::Database, tr!("Explorer")),
@@ -1736,7 +1820,40 @@ impl AppView {
                 .collect::<Vec<_>>(),
             )
             .child(div().flex_1())
-            .child(self.rail_item(4, Section::Settings, I::Settings2, tr!("Preferences"), cx))
+            .child(
+                div()
+                    .id("rail-preferences")
+                    .role(Role::Button)
+                    .aria_label(tr!("Preferences"))
+                    .aria_selected(self.settings_open)
+                    .focusable()
+                    .tab_index(0)
+                    .focus_visible(|s| s.bg(rgb(colors().hover)))
+                    .tooltip(|window, cx| {
+                        Tooltip::new(tr!("Preferences · Ctrl ,")).build(window, cx)
+                    })
+                    .size(px(34.))
+                    .flex_none()
+                    .rounded(px(7.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .when(self.settings_open, |s| s.bg(rgb(colors().accent_bg)))
+                    .hover(|s| s.bg(rgb(colors().hover)))
+                    .child(icon(
+                        I::Settings2,
+                        if self.settings_open {
+                            colors().mint
+                        } else {
+                            colors().faint
+                        },
+                    ))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let page = this.settings_page;
+                        this.open_settings(page, window, cx);
+                    })),
+            )
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -1745,13 +1862,12 @@ impl AppView {
             Section::Saved => tr!("Saved queries"),
             Section::Reports => tr!("Reports"),
             Section::History => tr!("History"),
-            Section::Settings => tr!("Preferences"),
         };
         column()
             .size_full()
-            .bg(rgb(PANEL))
+            .bg(rgb(colors().panel))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(
                 row()
                     .h(px(48.))
@@ -1842,10 +1958,10 @@ impl AppView {
                             div()
                                 .text_size(px(12.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(rgb(FAINT))
+                                .text_color(rgb(colors().faint))
                                 .child(tr!("Connections")),
                         )
-                        .child(badge(self.connections.len().to_string(), FAINT)),
+                        .child(badge(self.connections.len().to_string(), colors().faint)),
                 )
                 .when_some(self.app_notice.as_ref(), |s, notice| {
                     s.child(
@@ -1889,11 +2005,11 @@ impl AppView {
                             .p_2()
                             .gap_2()
                             .rounded(px(6.))
-                            .bg(rgb(SURFACE))
+                            .bg(rgb(colors().surface))
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(colors().muted))
                                     .child(tr!(
                                         "A copy of the configuration, taken {0}, is available. Restoring it keeps the damaged file next to it.",
                                         age
@@ -1922,7 +2038,7 @@ impl AppView {
                                 row()
                                     .px_4()
                                     .py_3()
-                                    .child(icon(I::LoaderCircle, FAINT))
+                                    .child(icon(I::LoaderCircle, colors().faint))
                                     .child(label(tr!("Loading connections…"))),
                             )
                         })
@@ -2016,33 +2132,33 @@ impl AppView {
         let query = self.search.read(cx).value().to_lowercase();
         let expanded = connection.expanded || !query.is_empty();
         column().flex_none()
-            .child(row().id(("connection", index)).role(Role::Button).aria_label(connection.name.clone()).aria_description(connection.detail.clone()).aria_expanded(expanded).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(38.)).px_3().gap_2().cursor_pointer().hover(|s| s.bg(rgb(SURFACE)))
+            .child(row().id(("connection", index)).role(Role::Button).aria_label(connection.name.clone()).aria_description(connection.detail.clone()).aria_expanded(expanded).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(colors().hover))).h(px(38.)).px_3().gap_2().cursor_pointer().hover(|s| s.bg(rgb(colors().surface)))
                 .on_click(cx.listener(move |this, _, _, cx| { this.connections[index].expanded = !this.connections[index].expanded; cx.notify(); }))
                 // Where it connects, built only when shown.
                 .tooltip({ let detail = connection.detail.clone(); move |window, cx| gpui_kit::component::tooltip::Tooltip::new(detail.clone()).build(window, cx) })
-                .child(icon(if expanded { I::ChevronDown } else { I::ChevronRight }, FAINT))
-                .child(icon(I::Server, connection.color))
+                .child(icon(if expanded { I::ChevronDown } else { I::ChevronRight }, colors().faint))
+                .child(icon(I::Server, connection_color(connection.color)))
                 .child(div().text_size(px(14.)).flex_1().truncate().child(connection.name.clone()))
-                .child(dot(connection.color)))
+                .child(dot(connection_color(connection.color))))
             .when(expanded, |s| s
                 .when(index == 0, |s| s
-                    .child(row().px_3().pl(px(29.)).h(px(30.)).child(icon(I::ChevronDown, FAINT)).child(icon(I::Database, MUTED)).child(label("commerce")))
-                    .child(row().id("schema-public").role(Role::Button).aria_label(tr!("Schema public")).aria_expanded(self.schema_open).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).pl(px(43.)).h(px(30.)).cursor_pointer()
-                        .child(icon(if self.schema_open { I::ChevronDown } else { I::ChevronRight }, FAINT)).child(icon(I::Layers, MUTED)).child(label("public"))
+                    .child(row().px_3().pl(px(29.)).h(px(30.)).child(icon(I::ChevronDown, colors().faint)).child(icon(I::Database, colors().muted)).child(label("commerce")))
+                    .child(row().id("schema-public").role(Role::Button).aria_label(tr!("Schema public")).aria_expanded(self.schema_open).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(colors().hover))).pl(px(43.)).h(px(30.)).cursor_pointer()
+                        .child(icon(if self.schema_open { I::ChevronDown } else { I::ChevronRight }, colors().faint)).child(icon(I::Layers, colors().muted)).child(label("public"))
                         .on_click(cx.listener(|this, _, _, cx| { this.schema_open = !this.schema_open; cx.notify(); })))
                     .when(self.schema_open || !query.is_empty(), |s| s
-                        .child(row().id("tables-folder").role(Role::Button).aria_label(tr!("Tables")).aria_expanded(self.tables_open).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).pl(px(57.)).pr_3().h(px(30.)).cursor_pointer()
-                            .child(icon(if self.tables_open { I::ChevronDown } else { I::ChevronRight }, FAINT)).child(icon(I::Table2, MUTED)).child(label(tr!("Tables")))
+                        .child(row().id("tables-folder").role(Role::Button).aria_label(tr!("Tables")).aria_expanded(self.tables_open).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(colors().hover))).pl(px(57.)).pr_3().h(px(30.)).cursor_pointer()
+                            .child(icon(if self.tables_open { I::ChevronDown } else { I::ChevronRight }, colors().faint)).child(icon(I::Table2, colors().muted)).child(label(tr!("Tables")))
                             .child(div().flex_1()).child(label("7"))
                             .on_click(cx.listener(|this, _, _, cx| { this.tables_open = !this.tables_open; cx.notify(); })))
                         .when(self.tables_open || !query.is_empty(), |s| s.children(TABLES.into_iter().enumerate().filter(|(_, table)| query.is_empty() || table.contains(&query)).map(|(table_index, table)| {
                             column().flex_none()
-                                .child(row().id(("schema-table", table_index)).role(Role::Button).aria_label(tr!("New query for table {0}", table)).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER))).h(px(32.)).pl(px(71.)).pr_3().gap_2().cursor_pointer()
-                                    .when(table == "orders", |s| s.bg(rgb(0x25352f)))
-                                    .hover(|s| s.bg(rgb(HOVER)))
-                                    .child(icon(if table == "orders" && self.orders_open { I::ChevronDown } else { I::ChevronRight }, FAINT))
-                                    .child(icon(I::Table2, if table == "orders" { MINT } else { FAINT }))
-                                    .child(div().text_size(px(14.)).text_color(rgb(if table == "orders" { MINT } else { MUTED })).child(table))
+                                .child(row().id(("schema-table", table_index)).role(Role::Button).aria_label(tr!("New query for table {0}", table)).focusable().tab_index(0).focus_visible(|s| s.bg(rgb(colors().hover))).h(px(32.)).pl(px(71.)).pr_3().gap_2().cursor_pointer()
+                                    .when(table == "orders", |s| s.bg(rgb(colors().accent_bg)))
+                                    .hover(|s| s.bg(rgb(colors().hover)))
+                                    .child(icon(if table == "orders" && self.orders_open { I::ChevronDown } else { I::ChevronRight }, colors().faint))
+                                    .child(icon(I::Table2, if table == "orders" { colors().mint } else { colors().faint }))
+                                    .child(div().text_size(px(14.)).text_color(rgb(if table == "orders" { colors().mint } else { colors().muted })).child(table))
                                     // As in the real explorer: a click selects (orders also
                                     // shows its columns); a double click or Enter opens.
                                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
@@ -2050,13 +2166,13 @@ impl AppView {
                                         else if table == "orders" { this.orders_open = !this.orders_open; cx.notify(); }
                                     })))
                                 .when(table == "orders" && self.orders_open, |s| s.children(ORDER_COLUMNS.into_iter().map(|(name, kind, key)| {
-                                    row().h(px(30.)).pl(px(99.)).pr_3().gap_2().child(icon(if key { I::KeyRound } else { I::Columns3 }, if key { 0xd8be85 } else { FAINT }))
-                                        .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(name)).child(div().flex_1())
-                                        .child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(kind))
+                                    row().h(px(30.)).pl(px(99.)).pr_3().gap_2().child(icon(if key { I::KeyRound } else { I::Columns3 }, if key { colors().amber } else { colors().faint }))
+                                        .child(div().text_size(px(12.)).text_color(rgb(colors().muted)).child(name)).child(div().flex_1())
+                                        .child(div().text_size(px(12.)).text_color(rgb(colors().faint)).child(kind))
                                 })))
                         })))
-                        .child(row().pl(px(57.)).h(px(32.)).child(icon(I::ChevronRight, FAINT)).child(icon(I::Eye, FAINT)).child(label(tr!("Views"))))
-                        .child(row().pl(px(57.)).h(px(32.)).child(icon(I::ChevronRight, FAINT)).child(icon(I::Braces, FAINT)).child(label(tr!("Functions"))))))
+                        .child(row().pl(px(57.)).h(px(32.)).child(icon(I::ChevronRight, colors().faint)).child(icon(I::Eye, colors().faint)).child(label(tr!("Views"))))
+                        .child(row().pl(px(57.)).h(px(32.)).child(icon(I::ChevronRight, colors().faint)).child(icon(I::Braces, colors().faint)).child(label(tr!("Functions"))))))
                 .when(index != 0, |s| s.child(column().pl_5().pr_3().pb_3().gap_2()
                     .child(label(if index == 1 { tr!("analytics · 12 tables") } else { tr!("finance · 8 tables") }))
                     .child(button(("open-connection-query", index), I::SquareTerminal, tr!("New query"))
@@ -2085,17 +2201,17 @@ impl AppView {
             let tags: String = entry.tags.iter().map(|tag| format!("#{tag} ")).collect();
             (
                 I::Bookmark,
-                MINT,
+                colors().mint,
                 entry.title.clone(),
                 format!("{tags}{} · {preview}", entry.connection),
             )
         } else {
             use jykre::workspace_state::RunStatus;
             let (symbol, color) = match entry.status {
-                Some(RunStatus::Failed) => (I::CircleX, RED),
-                Some(RunStatus::Cancelled) => (I::Ban, AMBER),
-                Some(RunStatus::Succeeded) => (I::CircleCheck, MINT),
-                None => (I::Clock, FAINT),
+                Some(RunStatus::Failed) => (I::CircleX, colors().red),
+                Some(RunStatus::Cancelled) => (I::Ban, colors().amber),
+                Some(RunStatus::Succeeded) => (I::CircleCheck, colors().mint),
+                None => (I::Clock, colors().faint),
             };
             let mut detail = vec![entry.connection.clone()];
             if let Some(at) = entry.time() {
@@ -2134,7 +2250,7 @@ impl AppView {
                         .aria_label(label_text)
                         .focusable()
                         .tab_index(0)
-                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                        .focus_visible(|s| s.bg(rgb(colors().hover)))
                         .flex_1()
                         .min_w_0()
                         .h_full()
@@ -2143,7 +2259,7 @@ impl AppView {
                         .gap_1()
                         .rounded(px(6.))
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(HOVER)))
+                        .hover(|s| s.bg(rgb(colors().hover)))
                         .child(
                             row().min_w_0().child(icon(symbol, color)).child(
                                 div()
@@ -2163,7 +2279,7 @@ impl AppView {
                                 .min_w_0()
                                 .truncate()
                                 .text_size(px(12.))
-                                .text_color(rgb(FAINT))
+                                .text_color(rgb(colors().faint))
                                 .child(detail),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -2249,19 +2365,23 @@ impl AppView {
                     })
                     .map(|s| {
                         if empty {
-                            s.child(div().p_3().text_size(px(14.)).text_color(rgb(MUTED)).child(
-                                if saved {
-                                    tr!("Save a query with the bookmark icon in the editor.")
-                                } else {
-                                    tr!("Queries you run appear here.")
-                                },
-                            ))
+                            s.child(
+                                div()
+                                    .p_3()
+                                    .text_size(px(14.))
+                                    .text_color(rgb(colors().muted))
+                                    .child(if saved {
+                                        tr!("Save a query with the bookmark icon in the editor.")
+                                    } else {
+                                        tr!("Queries you run appear here.")
+                                    }),
+                            )
                         } else if self.library_shown.is_empty() {
                             s.child(
                                 div()
                                     .p_3()
                                     .text_size(px(14.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(colors().muted))
                                     .child(tr!("Nothing matches the search.")),
                             )
                         } else {
@@ -2296,9 +2416,6 @@ impl AppView {
             )
             .when(self.section == Section::Reports, |s| {
                 self.reports_list(s, cx)
-            })
-            .when(self.section == Section::Settings, |s| {
-                s.child(self.preferences(cx))
             })
     }
 
@@ -2343,48 +2460,6 @@ impl AppView {
             .child(label(text))
     }
 
-    fn preferences(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        column().id("appearance-preferences").overflow_y_scroll().gap_3()
-            .child(label(tr!("Appearance")))
-            .child(row().justify_between().child(label(tr!("Theme"))).child(badge("Graphite", MINT)))
-            .child(row().justify_between().child(label(tr!("SQL font"))).child(label("Cascadia Code")))
-            .child(row().justify_between().child(label(tr!("SQL size"))).child(badge(format!("{} px", f32::from(cx.theme().mono_font_size)), MINT)))
-            .child(self.sql_catalog_status())
-            .child(row().gap_1().children([12., 14., 16., 18., 20.].into_iter().enumerate().map(|(index, size)| {
-                div().id(("sql-font-size", index)).role(Role::Button).aria_label(tr!("SQL font at {0} pixels", size))
-                    .focusable().tab_index(0).focus_visible(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT))).w(px(37.)).h(px(32.)).flex().items_center().justify_center()
-                    .rounded(px(4.)).border_1().border_color(rgb(BORDER)).cursor_pointer()
-                    .when(f32::from(cx.theme().mono_font_size) == size, |s| s.bg(rgb(0x263b37)).border_color(rgb(MINT)))
-                    .focus_visible(|s| s.border_color(rgb(MINT)))
-                    .hover(|s| s.bg(rgb(HOVER))).child(format!("{size}"))
-                    .on_click(cx.listener(move |this, _, _, cx| { Theme::update(cx, |theme| theme.mono_font_size = px(size)); this.persist_font_size(size, cx); }))
-            })))
-            .child(div().mt_3().child(label(tr!("Layout"))))
-            .child(label(tr!("Drag the dividers. With the keyboard, use Tab to focus a divider and the arrows to adjust it.")))
-            .child(button("reset-layout", I::RotateCcw, tr!("Reset widths"))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.explorer_split.update(cx, |state, cx| state.resize_panel(0, px(EXPLORER_WIDTH), window, cx));
-                    this.assistant_split.update(cx, |state, cx| state.resize_panel(1, px(ASSISTANT_WIDTH), window, cx));
-                    cx.notify();
-                })))
-            .child(div().mt_3().child(label(tr!("Assistant"))))
-            .child(self.assistant_settings.clone())
-            .child(div().mt_3().child(label(tr!("Shortcuts"))))
-            .children([
-                (tr!("Search tables"), "Ctrl Shift P"), (tr!("New query"), "Ctrl N"),
-                (tr!("Run SQL"), "Ctrl ↵"), (tr!("Explorer"), "Ctrl B"),
-                (tr!("Assistant"), "Ctrl Shift B"), (tr!("Next or previous tab"), "Ctrl Tab / Ctrl Shift Tab"),
-                (tr!("SQL font"), "Ctrl + / −"), (tr!("Reset font"), "Ctrl 0"),
-            ].into_iter().map(|(title, key)| row().justify_between().child(label(title)).child(shortcut(key))))
-            .child(div().mt_3().child(label(tr!("Diagnostics"))))
-            .child(label(tr!("The log keeps the last 7 days, without passwords, SQL or values.")))
-            .child(button("open-log-folder", I::FolderOpen, tr!("Open log folder"))
-                .on_click(cx.listener(|this, _, _, cx| this.open_log_folder(cx))))
-            .child(div().mt_3().child(label(tr!("Telemetry (OpenTelemetry)"))))
-            .child(self.telemetry_settings.clone())
-            .child(div().mt_3().child(label(tr!("Preferences saved on this computer."))))
-    }
-
     fn titlebar_content(&self, cx: &mut Context<Self>) -> Div {
         row()
             .w_full()
@@ -2399,11 +2474,11 @@ impl AppView {
                         div()
                             .size(px(21.))
                             .rounded(px(5.))
-                            .bg(rgb(MINT))
+                            .bg(rgb(colors().mint))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(icon(I::Database, 0x172820)),
+                            .child(icon(I::Database, colors().on_accent)),
                     )
                     .child(
                         div()
@@ -2417,14 +2492,14 @@ impl AppView {
                 row()
                     .flex_none()
                     .gap_2()
-                    .child(icon(I::PanelsTopLeft, MUTED))
+                    .child(icon(I::PanelsTopLeft, colors().muted))
                     .child(
                         div()
                             .text_size(px(14.))
                             .font_weight(FontWeight::MEDIUM)
                             .child(tr!("Workspace")),
                     )
-                    .child(icon(I::ChevronRight, FAINT))
+                    .child(icon(I::ChevronRight, colors().faint))
                     .child(label(tr!("Personal"))),
             )
             .child(div().flex_1())
@@ -2435,7 +2510,7 @@ impl AppView {
                     .aria_label(tr!("Search the workspace"))
                     .focusable()
                     .tab_index(0)
-                    .focus_visible(|s| s.border_color(rgb(MINT)))
+                    .focus_visible(|s| s.border_color(rgb(colors().mint)))
                     .w(px(400.))
                     .min_w(px(180.))
                     .flex_shrink_1()
@@ -2443,13 +2518,13 @@ impl AppView {
                     .px_3()
                     .rounded(px(6.))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(BG))
+                    .border_color(rgb(colors().border))
+                    .bg(rgb(colors().bg))
                     .cursor_pointer()
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .hover(|s| s.border_color(rgb(0x4a5753)))
-                    .child(icon(I::Search, FAINT))
+                    .hover(|s| s.border_color(rgb(colors().border_strong)))
+                    .child(icon(I::Search, colors().faint))
                     .child(label(tr!("Search the workspace…")))
                     .child(div().flex_1())
                     .child(shortcut("Ctrl Shift P"))
@@ -2468,8 +2543,8 @@ impl AppView {
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .border_1()
-                    .border_color(rgb(0x3b4943))
-                    .text_color(rgb(MINT))
+                    .border_color(rgb(colors().border_strong))
+                    .text_color(rgb(colors().mint))
                     .on_click(cx.listener(|this, _, window, cx| this.new_active_query(window, cx))),
             )
     }
@@ -2487,7 +2562,7 @@ impl AppView {
             .justify_center()
             .gap_3()
             .p_6()
-            .child(icon(I::Database, MINT))
+            .child(icon(I::Database, colors().mint))
             .child(div().text_size(px(16.)).child(tr!("Connect to a database")))
             .child(label(tr!(
                 "Add a PostgreSQL, MySQL, Databricks or SQLite connection to explore its metadata and run SQL."
@@ -2512,14 +2587,14 @@ impl AppView {
                     .max_h(px(580.))
                     .mt(px(100.))
                     .rounded(px(10.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(colors().panel))
                     .border_1()
-                    .border_color(rgb(0x424c57))
+                    .border_color(rgb(colors().border_strong))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
-                        row().p_4().border_b_1().border_color(rgb(BORDER)).child(
+                        row().p_4().border_b_1().border_color(rgb(colors().border)).child(
                             Input::new(&self.command)
                                 .prefix(I::Search)
                                 .appearance(false)
@@ -2544,7 +2619,7 @@ impl AppView {
                                         .child(spinning_icon(
                                             "command-pending-spinner",
                                             I::LoaderCircle,
-                                            AMBER,
+                                            colors().amber,
                                         ))
                                         .child(label(tr!("Searching…"))),
                                 )
@@ -2591,9 +2666,9 @@ impl AppView {
                             .h(px(40.))
                             .px_4()
                             .justify_between()
-                            .bg(rgb(BG))
+                            .bg(rgb(colors().bg))
                             .border_t_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(colors().border))
                             .child(label(tr!(
                                 "↑ ↓ choose · Enter opens the saved query or the table's data · #tag filters"
                             )))
@@ -2628,13 +2703,13 @@ impl AppView {
                 .aria_selected(selected)
                 .focusable()
                 .tab_index(0)
-                .when(selected, |s| s.bg(rgb(SURFACE)))
-                .focus_visible(|s| s.bg(rgb(HOVER)))
+                .when(selected, |s| s.bg(rgb(colors().surface)))
+                .focus_visible(|s| s.bg(rgb(colors().hover)))
                 .h(px(43.))
                 .px_3()
                 .rounded(px(5.))
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(HOVER)))
+                .hover(|s| s.bg(rgb(colors().hover)))
         };
         // What the text asked for is marked where the row shows it: the
         // words without `#tag` filters, and those filters in the tags.
@@ -2673,14 +2748,14 @@ impl AppView {
                         .min_w_0()
                         .truncate()
                         .text_size(px(12.))
-                        .text_color(rgb(FAINT))
+                        .text_color(rgb(colors().faint))
                         .child(mark(&detail, tags)),
                 )
         };
         let connection_label = |name: &str| {
             div()
                 .text_size(px(12.))
-                .text_color(rgb(MUTED))
+                .text_color(rgb(colors().muted))
                 .child(mark(name, false))
         };
         let open = {
@@ -2700,10 +2775,10 @@ impl AppView {
                     .join(" ");
                 option(("command-saved", index))
                     .aria_label(tr!("Open the saved query {0}", entry.title))
-                    .child(icon(I::Bookmark, MINT))
+                    .child(icon(I::Bookmark, colors().mint))
                     .child(text(entry.title.clone(), tags, true))
                     .child(connection_label(&entry.connection))
-                    .child(icon(I::CornerDownLeft, FAINT))
+                    .child(icon(I::CornerDownLeft, colors().faint))
                     .on_click(open)
             }
             PaletteItem::Relation(found) => {
@@ -2732,10 +2807,10 @@ impl AppView {
                         location,
                         connection
                     ))
-                    .child(icon(I::Table2, MINT))
+                    .child(icon(I::Table2, colors().mint))
                     .child(text(name, location, false))
                     .child(label(connection))
-                    .child(icon(I::CornerDownLeft, FAINT))
+                    .child(icon(I::CornerDownLeft, colors().faint))
                     .on_click(open)
             }
         };
@@ -2757,7 +2832,7 @@ impl AppView {
             .flex()
             .justify_center()
             .items_start()
-            .bg(black().opacity(0.65))
+            .bg(rgba(colors().scrim))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
@@ -2801,8 +2876,8 @@ impl Render for AppView {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(colors().bg))
+            .text_color(rgb(colors().text))
             .font_family("Segoe UI")
             .text_size(px(14.))
             .on_action(cx.listener(|this, _: &ExecuteCurrentQuery, window, cx| {
@@ -2832,6 +2907,25 @@ impl Render for AppView {
                     this.request_close(tab, window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                if this.connection_open
+                    || this.command_open
+                    || this.settings_open
+                    || this.password_prompt.is_some()
+                    || this.dialog_open()
+                {
+                    return;
+                }
+                this.new_tab(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowPreferences, window, cx| {
+                if this.settings_open {
+                    this.close_settings(window, cx);
+                } else {
+                    let page = this.settings_page;
+                    this.open_settings(page, window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &ExportResult, _, cx| {
                 if this.connection_open
                     || this.command_open
@@ -2858,6 +2952,8 @@ impl Render for AppView {
                         this.cancel_details(window, cx);
                     } else if this.report_picker.is_some() {
                         this.close_report_picker(window, cx);
+                    } else if this.settings_open {
+                        this.close_settings(window, cx);
                     } else if this.inspection.take().is_some() {
                         cx.notify();
                     } else if this.command_open {
@@ -2939,9 +3035,9 @@ impl Render for AppView {
             .child(
                 TitleBar::new()
                     .h(px(46.))
-                    .bg(rgb(0x13161a))
+                    .bg(rgb(colors().chrome))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     .child(self.titlebar_content(cx)),
             )
             .child(
@@ -2989,24 +3085,18 @@ impl Render for AppView {
                     .flex_none()
                     .px_3()
                     .gap_3()
-                    .bg(rgb(0x13161a))
+                    .bg(rgb(colors().chrome))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     .justify_between()
                     .child(label(match self.connections.len() {
                         1 => tr!("1 connection").to_string(),
                         count => tr!("{0} connections", count),
                     }))
-                    .child(
-                        row()
-                            .gap_3()
-                            .child(label(tr!("Local data · optional vault")))
-                            .child(divider())
-                            .child(label(format!(
-                                "Jykre Studio · v{}",
-                                env!("CARGO_PKG_VERSION")
-                            ))),
-                    ),
+                    .child(row().gap_3().child(label(format!(
+                        "Jykre Studio · v{}",
+                        env!("CARGO_PKG_VERSION")
+                    )))),
             )
             .when(self.command_open, |s| s.child(self.command_palette(cx)))
             .when(self.inspection.is_some(), |s| {
@@ -3021,6 +3111,9 @@ impl Render for AppView {
             .when(self.details_open(), |s| s.child(self.details_dialog(cx)))
             .when(self.report_picker.is_some(), |s| {
                 s.child(self.report_picker_dialog(cx))
+            })
+            .when(self.settings_open, |s| {
+                s.child(self.settings_dialog(window, cx))
             })
             // Painted last, so it closes the frame for the probe.
             .child(probe::frame_end())
@@ -3064,6 +3157,10 @@ pub fn run() {
             KeyBinding::new("ctrl-shift-e", ExportResult, None),
             KeyBinding::new("ctrl-shift-e", ExportResult, Some(&editor)),
             KeyBinding::new("ctrl-/", ToggleComment, Some(&editor)),
+            KeyBinding::new("ctrl-t", NewTab, None),
+            KeyBinding::new("ctrl-t", NewTab, Some(&editor)),
+            KeyBinding::new("ctrl-,", ShowPreferences, None),
+            KeyBinding::new("ctrl-,", ShowPreferences, Some(&editor)),
             KeyBinding::new(
                 "shift-f10",
                 ExplorerContextMenu,
@@ -3075,30 +3172,8 @@ pub fn run() {
                 Some(quick_search::EXPLORER_CONTEXT),
             ),
         ]);
-        Theme::change(ThemeMode::Dark, None, cx);
-        Theme::update(cx, |theme| {
-            theme.font_family = "Segoe UI".into();
-            theme.font_size = px(14.);
-            theme.mono_font_family = "Cascadia Code".into();
-            theme.mono_font_size = px(14.);
-            theme.background = rgb(BG).into();
-            theme.foreground = rgb(TEXT).into();
-            theme.border = rgb(BORDER).into();
-            theme.input = rgb(BG).into();
-            theme.accent = rgb(HOVER).into();
-            theme.accent_foreground = rgb(TEXT).into();
-            theme.muted = rgb(SURFACE).into();
-            theme.muted_foreground = rgb(MUTED).into();
-            theme.primary = rgb(MINT).into();
-            theme.primary_foreground = rgb(0x172820).into();
-            theme.tab_bar = rgb(PANEL).into();
-            theme.tab_active = rgb(BG).into();
-            theme.tab_foreground = rgb(MUTED).into();
-            theme.tab_active_foreground = rgb(TEXT).into();
-            theme.title_bar = rgb(0x13161a).into();
-            theme.title_bar_border = rgb(BORDER).into();
-            theme.radius = px(5.);
-        });
+        // The system's theme until the preference is read.
+        theme::apply(jykre::theme::ThemeChoice::System, None, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,

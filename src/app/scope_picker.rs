@@ -233,9 +233,9 @@ impl ScopePicker {
                             .rounded(px(4.))
                             .border_1()
                             .border_color(transparent_black())
-                            .focus_visible(|s| s.border_color(rgb(MINT)))
+                            .focus_visible(|s| s.border_color(rgb(colors().mint)))
                             .when(line.enabled && !self.disabled, |s| {
-                                s.cursor_pointer().hover(|s| s.bg(rgb(HOVER)))
+                                s.cursor_pointer().hover(|s| s.bg(rgb(colors().hover)))
                             })
                             .when(!line.enabled || self.disabled, |s| s.opacity(0.6))
                             .on_click(
@@ -244,9 +244,9 @@ impl ScopePicker {
                             .child(icon(
                                 check_icon,
                                 if line.check == Check::Off {
-                                    FAINT
+                                    colors().faint
                                 } else {
-                                    MINT
+                                    colors().mint
                                 },
                             ))
                             .child(
@@ -257,16 +257,20 @@ impl ScopePicker {
                                     .text_ellipsis()
                                     .whitespace_nowrap()
                                     .text_size(px(13.))
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(colors().text))
                                     .child(line.name.clone()),
                             )
-                            .when(line.missing, |s| s.child(badge(tr!("Not found"), AMBER)))
-                            .when(line.suggested, |s| s.child(badge(tr!("Default"), BLUE)))
+                            .when(line.missing, |s| {
+                                s.child(badge(tr!("Not found"), colors().amber))
+                            })
+                            .when(line.suggested, |s| {
+                                s.child(badge(tr!("Default"), colors().blue))
+                            })
                             .when(loading, |s| {
                                 s.child(spinning_icon(
                                     ("scope-loading", index),
                                     I::LoaderCircle,
-                                    MINT,
+                                    colors().mint,
                                 ))
                             })
                             .when_some(
@@ -279,7 +283,7 @@ impl ScopePicker {
                                         div()
                                             .id(("scope-failed", index))
                                             .flex_none()
-                                            .child(badge(tr!("Could not list"), RED))
+                                            .child(badge(tr!("Could not list"), colors().red))
                                             .tooltip(move |window, cx| {
                                                 Tooltip::new(message.clone()).build(window, cx)
                                             }),
@@ -306,11 +310,11 @@ impl Render for ScopePicker {
         let selection = self.tree.selection();
         let all = self.tree.all();
         let summary = if all {
-            badge(tr!("Everything"), MINT)
+            badge(tr!("Everything"), colors().mint)
         } else if selection.is_pending() {
-            badge(tr!("Nothing chosen"), AMBER)
+            badge(tr!("Nothing chosen"), colors().amber)
         } else {
-            badge(tr!("{0} chosen", selection.include.len()), MINT)
+            badge(tr!("{0} chosen", selection.include.len()), colors().mint)
         };
         let root = self.tree.listing(&ObjectPath::default()).cloned();
         let loading = !self.loading.is_empty();
@@ -364,7 +368,7 @@ impl Render for ScopePicker {
                                 )
                                 .role(Role::CheckBox)
                                 .aria_toggled(if all { Toggled::True } else { Toggled::False })
-                                .when(all, |s| s.text_color(rgb(MINT)))
+                                .when(all, |s| s.text_color(rgb(colors().mint)))
                                 .when(self.disabled, |s| s.opacity(0.5).cursor_default())
                                 .on_click(
                                     cx.listener(move |this, _, _, cx| this.set_all(!all, cx)),
@@ -403,8 +407,8 @@ impl Render for ScopePicker {
                             .h(px(ROW_HEIGHT * 9.))
                             .rounded(px(6.))
                             .border_1()
-                            .border_color(rgb(BORDER))
-                            .bg(rgb(BG))
+                            .border_color(rgb(colors().border))
+                            .bg(rgb(colors().bg))
                             .child(if self.rows.is_empty() {
                                 div()
                                     .p_3()

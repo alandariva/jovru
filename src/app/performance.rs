@@ -75,8 +75,8 @@ impl Render for PerformanceView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         column()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(colors().bg))
+            .text_color(rgb(colors().text))
             .child(div().flex_1().min_h_0().child(self.grid.clone()))
             .child(div().p_3().child(self.status.clone()))
     }

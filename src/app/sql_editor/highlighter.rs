@@ -6,9 +6,7 @@
 //! An edit re-reads only the text around it ([`jykre::sql::relex`]), and a
 //! frame classifies only the tokens on screen, so the cost of typing and of
 //! painting does not grow with the script.
-use super::super::ui::{
-    SQL_COMMENT, SQL_FUNCTION, SQL_KEYWORD, SQL_NUMBER, SQL_PARAMETER, SQL_STRING, SQL_TYPE,
-};
+use super::super::ui::colors;
 use gpui_kit::component::input::{
     EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter, Rope,
 };
@@ -68,13 +66,13 @@ impl SqlHighlighter {
 /// text colour.
 fn color(highlight: Highlight) -> Option<u32> {
     match highlight {
-        Highlight::Keyword => Some(SQL_KEYWORD),
-        Highlight::Function => Some(SQL_FUNCTION),
-        Highlight::Type => Some(SQL_TYPE),
-        Highlight::String => Some(SQL_STRING),
-        Highlight::Number => Some(SQL_NUMBER),
-        Highlight::Comment | Highlight::Executable => Some(SQL_COMMENT),
-        Highlight::Parameter => Some(SQL_PARAMETER),
+        Highlight::Keyword => Some(colors().sql_keyword),
+        Highlight::Function => Some(colors().sql_function),
+        Highlight::Type => Some(colors().sql_type),
+        Highlight::String => Some(colors().sql_string),
+        Highlight::Number => Some(colors().sql_number),
+        Highlight::Comment | Highlight::Executable => Some(colors().sql_comment),
+        Highlight::Parameter => Some(colors().sql_parameter),
         Highlight::QuotedIdentifier | Highlight::Operator => None,
     }
 }

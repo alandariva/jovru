@@ -24,7 +24,7 @@ is visible, and the keyboard reaches everything.
 │  │              │ Footer: 1,000 rows · row limit reached · 18 ms       │
 │  │              │ Notice bar (user actions: copied, saved, formatted)  │
 ├──┴──────────────┴──────────────────────────────────────────────────────┤
-│ Status bar: workspace · connections · local data · version             │
+│ Status bar: connections · version                                      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -35,9 +35,24 @@ report's tab has a group of its own (below).
 The rail holds, from the top: Explorer, Saved queries, Reports, History and,
 at the bottom, Preferences.
 
+**Preferences** is a dialog over the window (the rail's gear or `Ctrl ,`),
+with its categories listed on the left: **Appearance** (the theme and
+**Reset widths**), **SQL editor** (the SQL font size from 12 to 24 px, with
+a preview in the editor's colours, and the SQL catalogs read), **Assistant**,
+**Diagnostics** (the log folder and telemetry), **Shortcuts** and **About**
+(the version and the data folder). `Esc` or its close button closes it and
+gives the keyboard back to the tab; Tab stays inside while it is open.
+
+The **theme** is **System** until the user chooses: it follows the
+operating system's light or dark appearance, also when it changes while the
+application runs. **Light** or **Dark** stay chosen across restarts, and
+choosing **System** again follows the system once more. The choice applies
+at once to every part of the window.
+
 A **report** ([ADR-0024](adr/0024-reports.md),
 [ADR-0025](adr/0025-report-panels.md)) opens in a tab of its own, in a tab
-group of its own named after the report: the group offers no new tab, takes
+group of its own named after the report and drawn without a colour (grey),
+since it belongs to no connection: the group offers no new tab, takes
 no other tab and goes away with the report's tab, since the report's panels
 may run on several connections. The tab has a toolbar (title, **Edit**,
 **Add a panel**, save, **Export for printing or PDF…**, **Run**), the
@@ -258,7 +273,8 @@ Rules:
 - Moving a tab to another connection (dragging it to another group, or
   choosing a connection in the editor toolbar) asks first: its results and
   session belong to the previous connection, and an open transaction is
-  rolled back. A report's tab never leaves its own group, and no other tab is
+  rolled back. A tab without a connection moves without asking: it has no
+  session or results to lose. A report's tab never leaves its own group, and no other tab is
   dropped into it.
 - Saving changed connection settings asks first when a tab of that
   connection runs a query or holds an open transaction: applying them cancels
@@ -312,12 +328,14 @@ Rules:
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |
 | New query on the active connection | `Ctrl N` |
+| New query tab on the connection of the query tab on screen; without one (no tab, a report or a tab without a connection), a tab without a connection whose results area offers the connections to choose from | `Ctrl T` |
+| Open or close Preferences | `Ctrl ,` |
 | Close the query tab (asks when it runs or has unsaved SQL) | `Ctrl W`, `Ctrl F4`, or a middle click on the tab |
 | Next or previous query tab, from anywhere in the window | `Ctrl Tab`, `Ctrl Shift Tab` (or `Ctrl Page Down`, `Ctrl Page Up`) |
 | Show or hide the explorer | `Ctrl B` |
 | Show or hide the assistant | `Ctrl Shift B` |
 | SQL font size: larger, smaller, reset | `Ctrl +`, `Ctrl -`, `Ctrl 0` |
-| Close the search or the connection dialog | `Esc` |
+| Close the search, the connection dialog or Preferences | `Esc` |
 | Refresh the focused explorer node | `F5` |
 | Delete the focused connection (asks first) | `Delete` |
 | Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
@@ -371,7 +389,8 @@ stack traces and modal dialogs for query errors.
 
 ## Theme and motion
 
-- A dark theme with the colour tokens of `ui.rs`; result values use the
+- A light and a dark theme with the same colour tokens of `ui.rs`
+  ([UI guidelines](ui-guidelines.md#colours-and-theme)); result values use the
   colours in [Results](results.md#value-presentation).
 - The SQL font size is adjustable (12 to 24 px) and remembered.
 - Motion is reserved for work in progress (spinners). No decorative
@@ -389,4 +408,4 @@ interactive elements expose a role, a label and their state. Details are in
 | --- | --- |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Elapsed time and cancel for work over 2 s | **Format** runs off the UI thread and the editor stays usable, but the first format per dialect (building its grammar) or a long script can take seconds, and it cannot be cancelled; a result for SQL edited meanwhile is dropped |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, moving to the next or previous tab, the export bar, commenting lines and the explorer's context menu and quick search mode are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines and the explorer's context menu and quick search mode are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |

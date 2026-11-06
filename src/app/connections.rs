@@ -211,7 +211,7 @@ impl AppView {
         let group = connection.group;
         if self.tabs.read(cx).group_ids().any(|id| id == group) {
             let _ = self.tabs.update(cx, |tabs, cx| {
-                tabs.set_group_color(group, rgb(FAINT).into(), cx)
+                tabs.set_group_color(group, rgb(colors().faint).into(), cx)
             });
             self.orphan_groups.push((connection.name.clone(), group));
         }
@@ -673,30 +673,34 @@ impl AppView {
                     Err(_) => connection_store::latest_backup(&dir).await,
                     Ok(_) => None,
                 };
-                let (font_size, copy, state, reports) = match ConfigRepository::open(&dir).await {
-                    Ok(repository) => {
-                        let font_size = repository.setting("editor.font_size").await;
-                        let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
-                        let state = super::state::read_state(&repository).await;
-                        let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
-                        repository.close().await;
-                        (font_size, copy, state, reports)
-                    }
-                    Err(error) => (
-                        Err(error.clone()),
-                        Err(error.clone()),
-                        Err(error.clone()),
-                        Err(error),
-                    ),
-                };
-                Ok((connections, font_size, copy, state, reports, backup))
+                let (font_size, copy, state, reports, theme) =
+                    match ConfigRepository::open(&dir).await {
+                        Ok(repository) => {
+                            let font_size = repository.setting("editor.font_size").await;
+                            let theme = repository.setting(jykre::theme::SETTINGS_KEY).await;
+                            let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
+                            let state = super::state::read_state(&repository).await;
+                            let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
+                            repository.close().await;
+                            (font_size, copy, state, reports, theme)
+                        }
+                        Err(error) => (
+                            Err(error.clone()),
+                            Err(error.clone()),
+                            Err(error.clone()),
+                            Err(error.clone()),
+                            Err(error),
+                        ),
+                    };
+                Ok((connections, font_size, copy, state, reports, theme, backup))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connections_loading = false;
-                let (connections, font_size, copy, state, reports, backup) = match result {
+                let (connections, font_size, copy, state, reports, theme, backup) = match result {
                     Ok(parts) => parts,
                     Err(error) => (
+                        Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
@@ -718,6 +722,16 @@ impl AppView {
                     }
                     Err(error) => problems.push(tr!(
                         "Could not read the editor font size; the default is used: {0}",
+                        error
+                    )),
+                }
+                match theme {
+                    Ok(value) => {
+                        let choice = jykre::theme::ThemeChoice::from_value(value.as_ref());
+                        this.set_theme(choice, window, cx);
+                    }
+                    Err(error) => problems.push(tr!(
+                        "Could not read the theme; the system's is used: {0}",
                         error
                     )),
                 }
@@ -862,6 +876,84 @@ impl AppView {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Draws the theme `choice` and gives the tab groups the shades of
+    /// their colours in it.
+    pub(super) fn set_theme(
+        &mut self,
+        choice: jykre::theme::ThemeChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        super::theme::apply(choice, Some(window), cx);
+        self.recolor_groups(cx);
+        cx.notify();
+    }
+
+    /// Gives every tab group the shade of its colour in the theme on
+    /// screen: a connection's own, grey for tabs without one, and no hue
+    /// for a report's.
+    pub(super) fn recolor_groups(&mut self, cx: &mut Context<Self>) {
+        let mut shades: Vec<(TabGroupId, u32)> = self
+            .connections
+            .iter()
+            .map(|connection| (connection.group, connection_color(connection.color)))
+            .collect();
+        shades.extend(
+            self.orphan_groups
+                .iter()
+                .map(|(_, group)| (*group, colors().faint)),
+        );
+        shades.extend(
+            self.report_tabs
+                .values()
+                .map(|report| (report.group, colors().neutral)),
+        );
+        self.tabs.update(cx, |tabs, cx| {
+            for (group, shade) in shades {
+                // A group whose last tab closed is gone; it gets its shade
+                // when it is made again.
+                let _ = tabs.set_group_color(group, rgb(shade).into(), cx);
+            }
+        });
+    }
+
+    /// Saves the theme the user chose in Preferences; the last choice of
+    /// a burst wins.
+    pub(super) fn persist_theme(
+        &mut self,
+        choice: jykre::theme::ThemeChoice,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = connection_store::data_dir();
+        let ticket = connection_store::THEME_WRITES.ask();
+        cx.spawn(async move |weak, cx| {
+            let result = backend::run(async move {
+                connection_store::THEME_WRITES
+                    .run(ticket, async {
+                        let repository = ConfigRepository::open(&dir).await?;
+                        let result = repository
+                            .set_setting(jykre::theme::SETTINGS_KEY, &choice.to_value())
+                            .await;
+                        repository.close().await;
+                        result
+                    })
+                    .await
+                    .unwrap_or(Ok(()))
+            })
+            .await;
+            if let Err(error) = result {
+                let _ = weak.update(cx, |this, cx| {
+                    this.app_notice = Some(Feedback::new(
+                        Tone::Error,
+                        tr!("Could not save the preference: {0}", error),
+                    ));
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
@@ -1215,12 +1307,12 @@ impl AppView {
                                 tabs.rename_group(connection.group, connection.name.clone(), cx)?;
                                 tabs.set_group_color(
                                     connection.group,
-                                    rgb(connection.color).into(),
+                                    rgb(connection_color(connection.color)).into(),
                                     cx,
                                 )
                             });
                             let (color, environment) =
-                                (connection.color, connection.appearance.environment);
+                                (Some(connection.color), connection.appearance.environment);
                             for panel in this.panels.values() {
                                 panel.update(cx, |panel, cx| {
                                     if panel.connection_name() == old_name {
@@ -1989,7 +2081,7 @@ impl AppView {
                                         .w(px(96.))
                                         .flex_none()
                                         .text_size(px(12.))
-                                        .text_color(rgb(FAINT))
+                                        .text_color(rgb(colors().faint))
                                         .child(jykre::explorer::inspected_kind_name(item.kind)),
                                 )
                                 .child(
@@ -2006,7 +2098,7 @@ impl AppView {
                                         .min_w_0()
                                         .truncate()
                                         .text_size(px(12.))
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(colors().muted))
                                         .child(item.detail.clone()),
                                 )
                                 // The whole text, built only when shown.
@@ -2030,9 +2122,9 @@ impl AppView {
                     .w(px(640.))
                     .mt(px(100.))
                     .rounded(px(10.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(colors().panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2041,7 +2133,7 @@ impl AppView {
                             .p_4()
                             .justify_between()
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(colors().border))
                             .child(
                                 div()
                                     .text_size(px(14.))
@@ -2476,7 +2568,7 @@ impl AppView {
             // A neutral line between connections, so where one's tree ends
             // and the next begins is plain.
             .when(index > 0, |s| {
-                s.child(div().mx_2().h(px(1.)).flex_none().bg(rgb(BORDER)))
+                s.child(div().mx_2().h(px(1.)).flex_none().bg(rgb(colors().border)))
             })
             .child(
                 row()
@@ -2487,7 +2579,7 @@ impl AppView {
                     .h(px(38.))
                     // The colour its tab group shows.
                     .border_l_3()
-                    .border_color(rgb(connection.color))
+                    .border_color(rgb(connection_color(connection.color)))
                     // As every node: the chevron expands or collapses, and
                     // so do a double click, Enter and the arrows; a single
                     // click only takes the focus.
@@ -2675,7 +2767,7 @@ impl AppView {
                             s.child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(AMBER))
+                                    .text_color(rgb(colors().amber))
                                     .child(notice),
                             )
                         })
@@ -2689,7 +2781,7 @@ impl AppView {
                                     div()
                                         .text_size(px(12.))
                                         .text_color(rgb(if connection.status.tone == Tone::Info {
-                                            MUTED
+                                            colors().muted
                                         } else {
                                             connection.status.tone.color()
                                         }))
@@ -2996,15 +3088,15 @@ impl AppView {
                     .aria_selected(selected)
                     .track_focus(&focus)
                     .tab_index(0)
-                    .when(selected, |s| s.bg(rgb(SURFACE)))
-                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                    .when(selected, |s| s.bg(rgb(colors().surface)))
+                    .focus_visible(|s| s.bg(rgb(colors().hover)))
                     .flex()
                     .items_center()
                     .gap_2()
                     .flex_1()
                     .min_w_0()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(HOVER)))
+                    .hover(|s| s.bg(rgb(colors().hover)))
                     .child(icon(
                         match object.kind {
                             ObjectKind::View => I::Eye,
@@ -3018,9 +3110,9 @@ impl AppView {
                             _ => I::Database,
                         },
                         if object.primary_key.is_some() {
-                            AMBER
+                            colors().amber
                         } else {
-                            MUTED
+                            colors().muted
                         },
                     ))
                     .child(
@@ -3036,7 +3128,7 @@ impl AppView {
                                 .max_w(px(140.))
                                 .truncate()
                                 .text_size(px(12.))
-                                .text_color(rgb(FAINT))
+                                .text_color(rgb(colors().faint))
                                 .child(detail),
                         )
                     })
@@ -3093,7 +3185,7 @@ impl AppView {
                         .flex_none()
                         .px_1()
                         .text_size(px(12.))
-                        .text_color(rgb(FAINT))
+                        .text_color(rgb(colors().faint))
                         .child(age),
                 )
             })
@@ -3104,7 +3196,7 @@ impl AppView {
                         .flex_none()
                         .px_1()
                         .text_size(px(12.))
-                        .text_color(rgb(AMBER))
+                        .text_color(rgb(colors().amber))
                         .child(tr!("no access")),
                 )
             })
@@ -3244,11 +3336,11 @@ impl AppView {
         let section = self.connection_section;
         let scope = self.connection_scope.read(cx).selection();
         let scope_badge = if scope.all {
-            badge(tr!("All"), MINT)
+            badge(tr!("All"), colors().mint)
         } else if scope.is_pending() {
-            badge(tr!("None"), AMBER)
+            badge(tr!("None"), colors().amber)
         } else {
-            badge(scope.include.len().to_string(), MINT)
+            badge(scope.include.len().to_string(), colors().mint)
         };
         let body = match section {
             ConnectionSection::Connection => self.connection_fields(cx),
@@ -3296,8 +3388,8 @@ impl AppView {
                     .mt(px(40.))
                     .rounded(px(12.))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL))
+                    .border_color(rgb(colors().border))
+                    .bg(rgb(colors().panel))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -3333,7 +3425,7 @@ impl AppView {
                                         .flex_1()
                                         .aria_selected(self.driver == index)
                                         .when(self.driver == index, |s| {
-                                            s.bg(rgb(HOVER)).text_color(rgb(MINT))
+                                            s.bg(rgb(colors().hover)).text_color(rgb(colors().mint))
                                         })
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.select_driver(index, window, cx)
@@ -3347,7 +3439,7 @@ impl AppView {
                                     .aria_label(tr!("Connection settings"))
                                     .gap_0()
                                     .border_b_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(colors().border))
                                     .child(self.section_tab(
                                         "section-connection",
                                         tr!("Connection"),
@@ -3390,7 +3482,7 @@ impl AppView {
                             .py_4()
                             .gap_3()
                             .border_t_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(colors().border))
                             .when_some(self.connection_status.as_ref(), |s, status| {
                                 s.child(
                                     feedback_line(status)
@@ -3492,14 +3584,18 @@ impl AppView {
             .cursor_pointer()
             .border_b_2()
             .border_color(if selected {
-                rgb(MINT)
+                rgb(colors().mint)
             } else {
                 transparent_black().into()
             })
-            .focus_visible(|s| s.bg(rgb(HOVER)))
-            .hover(|s| s.text_color(rgb(TEXT)))
+            .focus_visible(|s| s.bg(rgb(colors().hover)))
+            .hover(|s| s.text_color(rgb(colors().text)))
             .text_size(px(14.))
-            .text_color(rgb(if selected { TEXT } else { MUTED }))
+            .text_color(rgb(if selected {
+                colors().text
+            } else {
+                colors().muted
+            }))
             .child(title)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.connection_section = target;
@@ -3524,13 +3620,13 @@ impl AppView {
                 .px_3()
                 .rounded(px(5.))
                 .border_1()
-                .border_color(rgb(if on { color } else { BORDER }))
-                .focus_visible(|s| s.border_color(rgb(MINT)))
+                .border_color(rgb(if on { color } else { colors().border }))
+                .focus_visible(|s| s.border_color(rgb(colors().mint)))
                 .when(on, |s| s.bg(Hsla::from(rgb(color)).opacity(0.12)))
                 .cursor_pointer()
                 .text_size(px(12.))
-                .text_color(rgb(if on { TEXT } else { MUTED }))
-                .hover(|s| s.bg(rgb(HOVER)))
+                .text_color(rgb(if on { colors().text } else { colors().muted }))
+                .hover(|s| s.bg(rgb(colors().hover)))
                 .child(text)
         };
         column()
@@ -3540,7 +3636,7 @@ impl AppView {
                 row()
                     .gap_2()
                     .child(
-                        chip(("connection-color-auto", 0), tr!("Driver's"), chosen.color.is_none(), MINT)
+                        chip(("connection-color-auto", 0), tr!("Driver's"), chosen.color.is_none(), colors().mint)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.connection_appearance.color = None;
                                 cx.notify();
@@ -3561,8 +3657,8 @@ impl AppView {
                             .rounded_full()
                             .bg(rgb(shade))
                             .border_2()
-                            .border_color(rgb(if on { TEXT } else { PANEL }))
-                            .focus_visible(|s| s.border_color(rgb(MINT)))
+                            .border_color(rgb(if on { colors().text } else { colors().panel }))
+                            .focus_visible(|s| s.border_color(rgb(colors().mint)))
                             .cursor_pointer()
                             .tooltip(move |window, cx| {
                                 Tooltip::new(connection_color_name(color)).build(window, cx)
@@ -3582,7 +3678,7 @@ impl AppView {
                 row()
                     .gap_2()
                     .child(
-                        chip(("environment", 0), tr!("Not set"), chosen.environment.is_none(), MINT)
+                        chip(("environment", 0), tr!("Not set"), chosen.environment.is_none(), colors().mint)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.connection_appearance.environment = None;
                                 cx.notify();
@@ -3590,9 +3686,9 @@ impl AppView {
                     )
                     .children(Environment::ALL.into_iter().enumerate().map(|(index, environment)| {
                         let color = match environment {
-                            Environment::Development => MINT,
-                            Environment::Staging => AMBER,
-                            Environment::Production => RED,
+                            Environment::Development => colors().mint,
+                            Environment::Staging => colors().amber,
+                            Environment::Production => colors().red,
                         };
                         chip(
                             ("environment", index + 1),
@@ -3676,7 +3772,7 @@ impl AppView {
                     } else {
                         Toggled::False
                     })
-                    .when(self.remember_password, |s| s.text_color(rgb(MINT)))
+                    .when(self.remember_password, |s| s.text_color(rgb(colors().mint)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if !this.connection_saving {
                             this.remember_password = !this.remember_password;
@@ -3721,7 +3817,7 @@ impl AppView {
                     } else {
                         Toggled::False
                     })
-                    .when(self.all_databases, |s| s.text_color(rgb(MINT)))
+                    .when(self.all_databases, |s| s.text_color(rgb(colors().mint)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if !this.connection_saving {
                             this.all_databases = !this.all_databases;
@@ -3788,7 +3884,7 @@ impl AppView {
                         } else {
                             Toggled::False
                         })
-                        .when(self.sqlite_read_only, |s| s.text_color(rgb(MINT)))
+                        .when(self.sqlite_read_only, |s| s.text_color(rgb(colors().mint)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             if !this.connection_saving {
                                 this.sqlite_read_only = !this.sqlite_read_only;
@@ -3980,7 +4076,7 @@ fn queued_label() -> Div {
         .flex_none()
         .px_1()
         .text_size(px(12.))
-        .text_color(rgb(FAINT))
+        .text_color(rgb(colors().faint))
         .child(tr!("queued"))
 }
 
@@ -4139,7 +4235,7 @@ fn progress_bar(index: usize, progress: &RefreshProgress) -> impl IntoElement {
                         .min_w_0()
                         .truncate()
                         .text_size(px(12.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(colors().muted))
                         .child(text),
                 )
                 .when(progress.phase == RefreshPhase::Reading, |s| {
@@ -4147,7 +4243,7 @@ fn progress_bar(index: usize, progress: &RefreshProgress) -> impl IntoElement {
                         div()
                             .flex_none()
                             .text_size(px(12.))
-                            .text_color(rgb(FAINT))
+                            .text_color(rgb(colors().faint))
                             .child(format!("{percent}%")),
                     )
                 }),
@@ -4157,17 +4253,22 @@ fn progress_bar(index: usize, progress: &RefreshProgress) -> impl IntoElement {
                 .h(px(4.))
                 .w_full()
                 .rounded_full()
-                .bg(rgb(SURFACE))
+                .bg(rgb(colors().surface))
                 .child(
                     div()
                         .h_full()
                         .rounded_full()
-                        .bg(rgb(MINT))
+                        .bg(rgb(colors().mint))
                         .w(relative(progress.fraction())),
                 ),
         )
         .when(!eta.is_empty(), |s| {
-            s.child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(eta))
+            s.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors().faint))
+                    .child(eta),
+            )
         })
 }
 
@@ -4203,17 +4304,16 @@ fn connection_detail(config: &ConnectionConfig) -> String {
 }
 
 /// The colour of a connection: the one the user chose, or its driver's.
+/// It names a hue, drawn in the theme on screen.
 fn connection_shade(
     driver: DriverKind,
     appearance: jykre::connection_appearance::Appearance,
-) -> u32 {
-    appearance
-        .color
-        .map(connection_color)
-        .unwrap_or(match driver {
-            DriverKind::MySql => BLUE,
-            DriverKind::Databricks => PURPLE,
-            DriverKind::Sqlite => TEAL,
-            _ => MINT,
-        })
+) -> jykre::connection_appearance::ConnectionColor {
+    use jykre::connection_appearance::ConnectionColor as C;
+    appearance.color.unwrap_or(match driver {
+        DriverKind::MySql => C::Blue,
+        DriverKind::Databricks => C::Purple,
+        DriverKind::Sqlite => C::Teal,
+        _ => C::Mint,
+    })
 }

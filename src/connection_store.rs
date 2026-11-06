@@ -636,6 +636,9 @@ impl Default for LatestWrite {
 /// The writes of the SQL font size (`editor.font_size`).
 pub static FONT_SIZE_WRITES: LatestWrite = LatestWrite::new();
 
+/// The writes of the theme chosen in Preferences (`appearance.theme`).
+pub static THEME_WRITES: LatestWrite = LatestWrite::new();
+
 /// Saves the SQL font size for the write `ticket` of [`FONT_SIZE_WRITES`];
 /// a size superseded by a newer one is not written.
 pub async fn save_font_size(dir: &Path, size: f32, ticket: u64) -> DriverResult<()> {

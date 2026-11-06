@@ -324,7 +324,7 @@ impl AppView {
                 .tab_index(0)
                 .border_1()
                 .border_color(transparent_black())
-                .focus_visible(|s| s.border_color(rgb(MINT)))
+                .focus_visible(|s| s.border_color(rgb(colors().mint)))
                 .px(px(6.))
                 .h(px(22.))
                 .flex()
@@ -332,9 +332,13 @@ impl AppView {
                 .rounded(px(4.))
                 .cursor_pointer()
                 .text_size(px(12.))
-                .text_color(rgb(if chosen { TEXT } else { FAINT }))
-                .when(chosen, |s| s.bg(rgb(HOVER)))
-                .hover(|s| s.text_color(rgb(TEXT)))
+                .text_color(rgb(if chosen {
+                    colors().text
+                } else {
+                    colors().faint
+                }))
+                .when(chosen, |s| s.bg(rgb(colors().hover)))
+                .hover(|s| s.text_color(rgb(colors().text)))
                 .child(title)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.set_quick_mode(this_mode, window, cx)
@@ -352,13 +356,13 @@ impl AppView {
                 .gap_1()
                 .rounded(px(6.))
                 .border_1()
-                .border_color(rgb(MINT))
-                .bg(rgb(SURFACE))
+                .border_color(rgb(colors().mint))
+                .bg(rgb(colors().surface))
                 .child(
                     row()
                         .gap_2()
                         .px_1()
-                        .child(icon(I::Search, MINT))
+                        .child(icon(I::Search, colors().mint))
                         .child(
                             div()
                                 .flex_1()
@@ -389,9 +393,9 @@ impl AppView {
                                 .truncate()
                                 .text_size(px(12.))
                                 .text_color(rgb(if quick.matches == 0 && !quick.text.is_empty() {
-                                    AMBER
+                                    colors().amber
                                 } else {
-                                    FAINT
+                                    colors().faint
                                 }))
                                 .child(count),
                         )

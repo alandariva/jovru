@@ -118,7 +118,8 @@ pub struct Workspace {
     connection: SharedString,
     dialect: SharedString,
     database: String,
-    connection_color: u32,
+    /// The hue of the tab's connection; `None` without one.
+    connection_color: Option<jykre::connection_appearance::ConnectionColor>,
     title: SharedString,
     /// One result tab per statement run, each read page by page.
     results: ResultTabs,
@@ -348,13 +349,13 @@ impl Workspace {
                 "commerce".into()
             },
             connection_color: if !demo {
-                FAINT
+                None
             } else if connection.contains("Databricks") {
-                BLUE
+                Some(jykre::connection_appearance::ConnectionColor::Blue)
             } else if connection.contains("MySQL") {
-                0xd995a7
+                Some(jykre::connection_appearance::ConnectionColor::Pink)
             } else {
-                MINT
+                Some(jykre::connection_appearance::ConnectionColor::Mint)
             },
             title: title.to_string().into(),
             results,
@@ -785,7 +786,7 @@ impl Workspace {
             .ghost()
             .small()
             .icon(I::Settings)
-            .when(numbers_pt_br, |s| s.text_color(rgb(MINT)))
+            .when(numbers_pt_br, |s| s.text_color(rgb(colors().mint)))
             .accessibility_label(tr!("Display settings"))
             .tooltip(tr!("Display settings"))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
@@ -1730,7 +1731,7 @@ impl Workspace {
             .px_4()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(
                 row()
                     .gap_3()
@@ -1841,7 +1842,7 @@ impl Workspace {
                             I::PanelRight,
                             tr!("Show or hide the assistant"),
                         )
-                        .when(self.assistant_open, |s| s.bg(rgb(SURFACE)))
+                        .when(self.assistant_open, |s| s.bg(rgb(colors().surface)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.assistant_open = !this.assistant_open;
                             cx.notify();
@@ -1919,7 +1920,11 @@ impl Workspace {
     fn session_status(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.input.is_none() {
             return row()
-                .child(dot(if self.demo { MINT } else { AMBER }))
+                .child(dot(if self.demo {
+                    colors().mint
+                } else {
+                    colors().amber
+                }))
                 .child(label(if self.demo {
                     tr!("Demo")
                 } else {
@@ -1942,21 +1947,21 @@ impl Workspace {
         match SessionIndicator::of(self.session.is_some(), self.is_busy()) {
             SessionIndicator::InUse => status(
                 "session-in-use",
-                MINT,
+                colors().mint,
                 tr!("Connected"),
                 tr!("A query is using the session. Stop it to disconnect."),
             )
             .into_any_element(),
             SessionIndicator::Disconnected => status(
                 "session-closed",
-                FAINT,
+                colors().faint,
                 tr!("Disconnected"),
                 tr!("The next run opens a session."),
             )
             .into_any_element(),
             SessionIndicator::Connected => status(
                 "disconnect-session",
-                MINT,
+                colors().mint,
                 tr!("Connected"),
                 tr!("Disconnect: close this tab's session"),
             )
@@ -1966,10 +1971,10 @@ impl Workspace {
             .tab_index(0)
             .border_1()
             .border_color(transparent_black())
-            .focus_visible(|s| s.border_color(rgb(MINT)))
+            .focus_visible(|s| s.border_color(rgb(colors().mint)))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(HOVER)))
-            .child(icon(I::Unplug, FAINT).size(px(14.)))
+            .hover(|s| s.bg(rgb(colors().hover)))
+            .child(icon(I::Unplug, colors().faint).size(px(14.)))
             .on_click(cx.listener(|this, _, window, cx| this.disconnect(false, window, cx)))
             .into_any_element(),
         }
@@ -2030,7 +2035,7 @@ impl Workspace {
     fn editor_panel(&self, cx: &mut Context<Self>) -> Div {
         column()
             .size_full()
-            .bg(rgb(BG))
+            .bg(rgb(colors().bg))
             .child(
                 row()
                     .h(px(38.))
@@ -2040,7 +2045,11 @@ impl Workspace {
                     .child(
                         row()
                             .gap_2()
-                            .child(icon(I::Server, self.connection_color))
+                            .child(icon(
+                                I::Server,
+                                self.connection_color
+                                    .map_or(colors().faint, connection_color),
+                            ))
                             .child(label(self.connection.clone()))
                             .when_some(self.environment, |s, environment| {
                                 s.child(environment_badge(environment))
@@ -2139,8 +2148,8 @@ impl Workspace {
         column()
             .size_full()
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
+            .border_color(rgb(colors().border))
+            .bg(rgb(colors().panel))
             .child(
                 row()
                     .h(px(42.))
@@ -2149,7 +2158,7 @@ impl Workspace {
                     .gap_2()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     // One tab per statement result; the close button keeps
                     // the tab strip from growing without end.
                     .child(
@@ -2179,7 +2188,7 @@ impl Workspace {
                                         .aria_label(tr!("{0}: {1}", title, status))
                                         .focusable()
                                         .tab_index(0)
-                                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                                        .focus_visible(|s| s.bg(rgb(colors().hover)))
                                         .flex_none()
                                         .h(px(28.))
                                         .pl_2()
@@ -2188,9 +2197,13 @@ impl Workspace {
                                         .rounded(px(5.))
                                         .cursor_pointer()
                                         .text_size(px(12.))
-                                        .text_color(rgb(if index == active { TEXT } else { MUTED }))
-                                        .when(index == active, |s| s.bg(rgb(SURFACE)))
-                                        .hover(|s| s.bg(rgb(HOVER)))
+                                        .text_color(rgb(if index == active {
+                                            colors().text
+                                        } else {
+                                            colors().muted
+                                        }))
+                                        .when(index == active, |s| s.bg(rgb(colors().surface)))
+                                        .hover(|s| s.bg(rgb(colors().hover)))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.results.select(index);
                                             this.show_active(cx);
@@ -2205,9 +2218,9 @@ impl Workspace {
                                         })
                                         .drag_over::<ResultTabDrag>(|style, _, _, _| {
                                             style
-                                                .bg(rgb(HOVER))
+                                                .bg(rgb(colors().hover))
                                                 .border_l_2()
-                                                .border_color(rgb(MINT))
+                                                .border_color(rgb(colors().mint))
                                         })
                                         .on_drop(cx.listener(
                                             move |this, drag: &ResultTabDrag, _, cx| {
@@ -2289,7 +2302,8 @@ impl Workspace {
                                     let mode = icon_button(("result-mode", i), symbol, title)
                                         .aria_selected(self.result_view == view)
                                         .when(self.result_view == view, |s| {
-                                            s.bg(rgb(SURFACE)).text_color(rgb(TEXT))
+                                            s.bg(rgb(colors().surface))
+                                                .text_color(rgb(colors().text))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.result_view = view;
@@ -2306,7 +2320,10 @@ impl Workspace {
                                             tr!("Statistics"),
                                         )
                                         .aria_selected(shown)
-                                        .when(shown, |s| s.bg(rgb(SURFACE)).text_color(rgb(MINT)))
+                                        .when(shown, |s| {
+                                            s.bg(rgb(colors().surface))
+                                                .text_color(rgb(colors().mint))
+                                        })
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.show_statistics(!shown, cx)
@@ -2326,7 +2343,7 @@ impl Workspace {
                                     tr!("Show the selected rows as records"),
                                 )
                                 .aria_selected(records)
-                                .when(records, |s| s.bg(rgb(HOVER)))
+                                .when(records, |s| s.bg(rgb(colors().hover)))
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         this.grid
@@ -2337,7 +2354,7 @@ impl Workspace {
                             .child(
                                 icon_button("filter-results", I::ListFilter, tr!("Filter results"))
                                     .aria_selected(self.filter_open)
-                                    .when(self.filter_open, |s| s.bg(rgb(HOVER)))
+                                    .when(self.filter_open, |s| s.bg(rgb(colors().hover)))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.filter_open = !this.filter_open;
                                         if this.filter_open {
@@ -2374,7 +2391,7 @@ impl Workspace {
                                     tr!("Export the result to a file (Ctrl+Shift+E)"),
                                 )
                                 .aria_selected(open)
-                                .when(open, |s| s.bg(rgb(HOVER)))
+                                .when(open, |s| s.bg(rgb(colors().hover)))
                                 .on_click(cx.listener(|this, _, _, cx| this.toggle_export(cx)))
                             })
                             .child(
@@ -2430,7 +2447,7 @@ impl Workspace {
             // offers to read its rows.
             if self.data_sql.is_some() {
                 return centered()
-                    .child(icon(I::Table2, FAINT))
+                    .child(icon(I::Table2, colors().faint))
                     .child(div().text_size(px(14.)).child(tr!("Ready to explore")))
                     .child(label(tr!(
                         "Read the table's rows, a page at a time, with the query above."
@@ -2442,7 +2459,7 @@ impl Workspace {
                     .into_any_element();
             }
             return centered()
-                .child(icon(I::Terminal, FAINT))
+                .child(icon(I::Terminal, colors().faint))
                 .child(div().text_size(px(14.)).child(tr!("Ready to explore")))
                 .child(label(tr!("Run the query to see the results.")))
                 .child(
@@ -2453,7 +2470,11 @@ impl Workspace {
         };
         match &tab.state {
             ResultState::Running => centered()
-                .child(spinning_icon("running-spinner", I::LoaderCircle, MINT))
+                .child(spinning_icon(
+                    "running-spinner",
+                    I::LoaderCircle,
+                    colors().mint,
+                ))
                 .child(label(if self.input.is_some() {
                     tr!("Running on the server…")
                 } else {
@@ -2462,7 +2483,7 @@ impl Workspace {
                 .into_any_element(),
             ResultState::Failed(report) => self.result_error(tab, report, cx),
             ResultState::Cancelled => centered()
-                .child(icon(I::Ban, AMBER))
+                .child(icon(I::Ban, colors().amber))
                 .child(label(tr!("Execution cancelled")))
                 .into_any_element(),
             ResultState::Done => match self.result_view {
@@ -2480,7 +2501,7 @@ impl Workspace {
                         .into_any_element()
                 }
                 ResultView::Table => centered()
-                    .child(icon(I::CircleCheck, MINT))
+                    .child(icon(I::CircleCheck, colors().mint))
                     .child(label(match tab.rows_affected {
                         Some(affected) => tr!("{0} rows affected", affected),
                         None => tr!("Statement completed").into(),
@@ -2516,11 +2537,11 @@ impl Workspace {
             .p_4()
             .gap_2()
             .child(
-                row().gap_2().child(icon(I::CircleX, RED)).child(
+                row().gap_2().child(icon(I::CircleX, colors().red)).child(
                     div()
                         .text_size(px(14.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(RED))
+                        .text_color(rgb(colors().red))
                         .child(report.title.clone()),
                 ),
             )
@@ -2530,7 +2551,7 @@ impl Workspace {
                     .font_family("Cascadia Mono")
                     .text_size(px(12.))
                     .line_height(relative(1.5))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(colors().text))
                     .child(report.message.clone()),
             )
             .when_some(codes, |s, codes| {
@@ -2541,7 +2562,7 @@ impl Workspace {
                     div()
                         .pl(px(24.))
                         .text_size(px(12.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(colors().muted))
                         .child(action),
                 )
             })
@@ -2607,13 +2628,13 @@ impl Workspace {
                     timeout_label(Some(timeout))
                 )
             });
-            (I::LoaderCircle, AMBER, text, detail)
+            (I::LoaderCircle, colors().amber, text, detail)
         } else if *state == RunState::Cancelling {
             let waited = self.run.cancelling_for().unwrap_or_default();
             if waited >= CANCEL_SLOW {
                 (
                         I::LoaderCircle,
-                        AMBER,
+                        colors().amber,
                         tr!(
                             "Still cancelling… {0}",
                             cell_format::duration(waited.as_millis() as u64)
@@ -2626,29 +2647,47 @@ impl Workspace {
                         ),
                     )
             } else {
-                (I::LoaderCircle, AMBER, tr!("Cancelling…").into(), None)
+                (
+                    I::LoaderCircle,
+                    colors().amber,
+                    tr!("Cancelling…").into(),
+                    None,
+                )
             }
         } else if self.fetching {
             (
                 I::LoaderCircle,
-                AMBER,
+                colors().amber,
                 tr!("Reading the next page…").into(),
                 None,
             )
         } else if let Some(tab) = tab {
             match &tab.state {
                 ResultState::Failed(report) => match state {
-                    RunState::Failed { error } => {
-                        (I::CircleX, RED, report.title.clone(), Some(error.clone()))
-                    }
-                    _ => (I::CircleX, RED, report.title.clone(), None),
+                    RunState::Failed { error } => (
+                        I::CircleX,
+                        colors().red,
+                        report.title.clone(),
+                        Some(error.clone()),
+                    ),
+                    _ => (I::CircleX, colors().red, report.title.clone(), None),
                 },
-                ResultState::Cancelled => (I::Ban, AMBER, tr!("Execution cancelled").into(), None),
-                ResultState::Running => (I::LoaderCircle, AMBER, tr!("Running…").into(), None),
+                ResultState::Cancelled => (
+                    I::Ban,
+                    colors().amber,
+                    tr!("Execution cancelled").into(),
+                    None,
+                ),
+                ResultState::Running => (
+                    I::LoaderCircle,
+                    colors().amber,
+                    tr!("Running…").into(),
+                    None,
+                ),
                 ResultState::Done => page_summary(tab, self.filtered_rows),
             }
         } else {
-            (I::Clock, FAINT, tr!("Waiting to run").into(), None)
+            (I::Clock, colors().faint, tr!("Waiting to run").into(), None)
         };
         // The status region is announced when it changes: the clock is shown,
         // not read out every second.
@@ -2667,7 +2706,7 @@ impl Workspace {
             .flex_none()
             .px_3()
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .justify_between()
             .child(
                 row()
@@ -2715,7 +2754,7 @@ impl Workspace {
                                         .min_w_0()
                                         .truncate()
                                         .text_size(px(12.))
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(colors().muted))
                                         .tooltip(move |window, cx| {
                                             Tooltip::new(detail.clone()).build(window, cx)
                                         })
@@ -2749,7 +2788,7 @@ impl Workspace {
                     .when(self.input.is_some() || self.demo, |s| {
                         s.child(badge(
                             if self.input.is_some() { "SQL" } else { "MOCK" },
-                            FAINT,
+                            colors().faint,
                         ))
                     }),
             )
@@ -2877,7 +2916,7 @@ impl Workspace {
             .justify_center()
             .gap_3()
             .p_4()
-            .child(icon(I::Server, AMBER))
+            .child(icon(I::Server, colors().amber))
             .child(
                 div()
                     .text_size(px(14.))
@@ -2903,16 +2942,16 @@ impl Workspace {
                                     .focusable()
                                     .tab_index(0)
                                     .border_1()
-                                    .border_color(rgb(BORDER))
-                                    .focus_visible(|s| s.border_color(rgb(MINT)))
+                                    .border_color(rgb(colors().border))
+                                    .focus_visible(|s| s.border_color(rgb(colors().mint)))
                                     .h(px(32.))
                                     .px(px(9.))
                                     .rounded(px(5.))
                                     .cursor_pointer()
                                     .text_size(px(14.))
-                                    .text_color(rgb(MUTED))
-                                    .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                                    .child(icon(I::Server, MUTED))
+                                    .text_color(rgb(colors().muted))
+                                    .hover(|s| s.bg(rgb(colors().hover)).text_color(rgb(colors().text)))
+                                    .child(icon(I::Server, colors().muted))
                                     .child(name.clone())
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(WorkspaceEvent::ConnectionRequested(
@@ -2954,7 +2993,7 @@ impl Workspace {
         let (symbol, color, text, detail) = match self.transaction {
             Transaction::AutoCommit => (
                 I::CheckCheck,
-                FAINT,
+                colors().faint,
                 tr!("Auto-commit"),
                 tr!("Each statement commits on its own. BEGIN opens a transaction."),
             ),
@@ -2963,7 +3002,7 @@ impl Workspace {
                 manual: true,
             } => (
                 I::LockOpen,
-                AMBER,
+                colors().amber,
                 tr!("Manual commit"),
                 tr!(
                     "Autocommit is off: statements wait for COMMIT. Closing the tab rolls them back."
@@ -2971,13 +3010,13 @@ impl Workspace {
             ),
             Transaction::Open { changes: false, .. } => (
                 I::LockOpen,
-                AMBER,
+                colors().amber,
                 tr!("Transaction open"),
                 tr!("A transaction is open in this tab's session. Closing the tab rolls it back."),
             ),
             Transaction::Open { changes: true, .. } => (
                 I::CircleDot,
-                AMBER,
+                colors().amber,
                 tr!("Uncommitted changes"),
                 tr!(
                     "Statements in the open transaction changed data that is not committed. Commit or roll back; closing the tab rolls it back."
@@ -2985,7 +3024,7 @@ impl Workspace {
             ),
             Transaction::Failed { .. } => (
                 I::CircleAlert,
-                RED,
+                colors().red,
                 tr!("Transaction failed"),
                 tr!(
                     "A statement failed inside the transaction. The server ignores the next statements until you roll back."
@@ -3538,7 +3577,7 @@ impl Workspace {
     /// explorer shows them.
     pub fn set_appearance(
         &mut self,
-        color: u32,
+        color: Option<jykre::connection_appearance::ConnectionColor>,
         environment: Option<jykre::connection_appearance::Environment>,
         cx: &mut Context<Self>,
     ) {
@@ -3700,6 +3739,22 @@ impl Workspace {
     }
 
     /// Puts the keyboard in the SQL editor.
+    /// Shows the connections to choose from in the results area, for a tab
+    /// opened without one.
+    pub fn ask_for_connection(&mut self, cx: &mut Context<Self>) {
+        if self.input.is_none() && !self.demo {
+            self.choosing_connection = true;
+            self.result_view = ResultView::Table;
+            cx.notify();
+        }
+    }
+
+    /// The tab has a connection to run on (the demo's simulated one too),
+    /// so it may hold a session and results.
+    pub fn has_connection(&self) -> bool {
+        self.input.is_some() || self.demo
+    }
+
     pub fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.editor
             .update(cx, |editor, cx| editor.focus(window, cx));
@@ -3806,7 +3861,7 @@ fn pin_button(index: usize, pinned: bool) -> Stateful<Div> {
         .tab_index(0)
         .border_1()
         .border_color(transparent_black())
-        .focus_visible(|s| s.border_color(rgb(MINT)))
+        .focus_visible(|s| s.border_color(rgb(colors().mint)))
         .size(px(20.))
         .flex()
         .items_center()
@@ -3814,8 +3869,15 @@ fn pin_button(index: usize, pinned: bool) -> Stateful<Div> {
         .rounded(px(5.))
         .cursor_pointer()
         .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
-        .hover(|s| s.bg(rgb(HOVER)))
-        .child(icon(I::Pin, if pinned { MINT } else { FAINT }))
+        .hover(|s| s.bg(rgb(colors().hover)))
+        .child(icon(
+            I::Pin,
+            if pinned {
+                colors().mint
+            } else {
+                colors().faint
+            },
+        ))
 }
 
 /// How a statement that failed or was cancelled reads in Messages.
@@ -3837,19 +3899,25 @@ fn log_entry(index: usize, entry: &LogEntry, now: SystemTime) -> Stateful<Div> {
     let (symbol, color, outcome) = match &entry.outcome {
         LogOutcome::Rows { rows, more } => (
             I::CircleCheck,
-            MINT,
+            colors().mint,
             match (*rows, *more) {
                 (rows, true) => tr!("{0} rows on the first page", cell_format::count(rows)),
                 (1, false) => tr!("1 row").to_string(),
                 (rows, false) => tr!("{0} rows", cell_format::count(rows)),
             },
         ),
-        LogOutcome::Affected(affected) => {
-            (I::CircleCheck, MINT, tr!("{0} rows affected", affected))
-        }
-        LogOutcome::Completed => (I::CircleCheck, MINT, tr!("Statement completed").into()),
-        LogOutcome::Failed(error) => (I::CircleX, RED, error.clone()),
-        LogOutcome::Cancelled => (I::Ban, AMBER, tr!("Execution cancelled").into()),
+        LogOutcome::Affected(affected) => (
+            I::CircleCheck,
+            colors().mint,
+            tr!("{0} rows affected", affected),
+        ),
+        LogOutcome::Completed => (
+            I::CircleCheck,
+            colors().mint,
+            tr!("Statement completed").into(),
+        ),
+        LogOutcome::Failed(error) => (I::CircleX, colors().red, error.clone()),
+        LogOutcome::Cancelled => (I::Ban, colors().amber, tr!("Execution cancelled").into()),
     };
     let age = jykre::explorer::format_age(now.duration_since(entry.at).unwrap_or_default());
     let timing = match entry.elapsed_ms {
@@ -3885,7 +3953,7 @@ fn log_entry(index: usize, entry: &LogEntry, now: SystemTime) -> Stateful<Div> {
             div()
                 .pl(px(24.))
                 .text_size(px(12.))
-                .text_color(rgb(FAINT))
+                .text_color(rgb(colors().faint))
                 .font_family("Cascadia Code")
                 .truncate()
                 .child(entry.sql.clone()),
@@ -3900,20 +3968,20 @@ fn stopping_notice() -> String {
 /// The icon, colour and words for how a result tab ended.
 fn result_status(tab: &ResultTab) -> (I, u32, String) {
     match &tab.state {
-        ResultState::Running => (I::LoaderCircle, AMBER, tr!("Running…").into()),
+        ResultState::Running => (I::LoaderCircle, colors().amber, tr!("Running…").into()),
         ResultState::Failed(report) => (
             I::CircleX,
-            RED,
+            colors().red,
             format!(
                 "{}: {}",
                 report.title,
                 report.message.lines().next().unwrap_or_default()
             ),
         ),
-        ResultState::Cancelled => (I::Ban, AMBER, tr!("Execution cancelled").into()),
+        ResultState::Cancelled => (I::Ban, colors().amber, tr!("Execution cancelled").into()),
         ResultState::Done => {
             let (_, _, text, _) = page_summary(tab, None);
-            (I::CircleCheck, MINT, text)
+            (I::CircleCheck, colors().mint, text)
         }
     }
 }
@@ -3926,7 +3994,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
     let Some(page) = tab.current() else {
         return (
             I::CircleCheck,
-            MINT,
+            colors().mint,
             match tab.rows_affected {
                 Some(affected) => tr!("{0} rows affected", affected),
                 None => tr!("Statement completed").into(),
@@ -3940,7 +4008,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
     match tab.limit {
         Some(ResultLimit::Memory(bytes)) => (
             I::TriangleAlert,
-            AMBER,
+            colors().amber,
             tr!("{0} · memory limit reached", rows),
             Some(tr!(
                 "The page reached the memory limit of {0} MB before the row limit, so the rest of the result was not read. Refine the SQL to get other rows.",
@@ -3949,7 +4017,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
         ),
         _ if tab.rest_closed() => (
             I::TriangleAlert,
-            AMBER,
+            colors().amber,
             tr!("{0} · more rows were not read", rows),
             Some(
                 tr!(
@@ -3963,7 +4031,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
                 Some(affected) => tr!("{0} · {1} rows affected", rows, affected),
                 None => rows,
             };
-            (I::CircleCheck, MINT, text, None)
+            (I::CircleCheck, colors().mint, text, None)
         }
     }
 }
@@ -4000,16 +4068,16 @@ fn run_button(
     workspace: WeakEntity<Workspace>,
 ) -> AnyElement {
     let (symbol, color, title) = match status {
-        StatementStatus::Ready => (I::Play, MINT, tr!("Run this query")),
+        StatementStatus::Ready => (I::Play, colors().mint, tr!("Run this query")),
         StatementStatus::Pending => (
             I::Clock,
-            FAINT,
+            colors().faint,
             tr!("Waiting for the statements before it · stop the run"),
         ),
-        StatementStatus::Running => (I::Square, 0xe7bd7b, tr!("Stop execution")),
-        StatementStatus::Success => (I::CircleCheck, MINT, tr!("Success · run again")),
-        StatementStatus::Error => (I::CircleX, 0xef8b91, tr!("Error · run again")),
-        StatementStatus::Cancelled => (I::Play, FAINT, tr!("Cancelled · run again")),
+        StatementStatus::Running => (I::Square, colors().amber, tr!("Stop execution")),
+        StatementStatus::Success => (I::CircleCheck, colors().mint, tr!("Success · run again")),
+        StatementStatus::Error => (I::CircleX, colors().red, tr!("Error · run again")),
+        StatementStatus::Cancelled => (I::Play, colors().faint, tr!("Cancelled · run again")),
     };
     div()
         .id(("query-run", index))
@@ -4021,7 +4089,7 @@ fn run_button(
         .items_center()
         .justify_center()
         .rounded(px(4.))
-        .hover(|s| s.bg(rgb(HOVER)))
+        .hover(|s| s.bg(rgb(colors().hover)))
         .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
         .child(icon(symbol, color))
         .on_click(move |_, _, cx| {
@@ -4077,7 +4145,7 @@ impl Render for Workspace {
         column()
             .id("query-workspace")
             .size_full()
-            .bg(rgb(BG))
+            .bg(rgb(colors().bg))
             .child(content)
     }
 }
@@ -4112,11 +4180,11 @@ impl Render for ResultTabPreview {
             .h(px(28.))
             .px_3()
             .rounded(px(5.))
-            .bg(rgb(SURFACE))
+            .bg(rgb(colors().surface))
             .border_1()
-            .border_color(rgb(MINT))
+            .border_color(rgb(colors().mint))
             .text_size(px(12.))
-            .text_color(rgb(TEXT))
+            .text_color(rgb(colors().text))
             .child(self.title.clone())
     }
 }

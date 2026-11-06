@@ -111,7 +111,7 @@ fn toggle(id: &'static str, on: bool, title: &'static str) -> Stateful<Div> {
     button(id, if on { I::SquareCheck } else { I::Square }, title)
         .role(Role::CheckBox)
         .aria_toggled(if on { Toggled::True } else { Toggled::False })
-        .when(on, |s| s.text_color(rgb(MINT)))
+        .when(on, |s| s.text_color(rgb(colors().mint)))
 }
 
 impl Workspace {
@@ -673,7 +673,7 @@ impl Workspace {
                 .py_2()
                 .gap_2()
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(colors().border))
         };
         let close = |cx: &mut Context<Self>| {
             icon_button("export-close", I::X, tr!("Close the export bar")).on_click(cx.listener(
@@ -807,7 +807,11 @@ impl Workspace {
                     );
                 }
                 bar()
-                    .child(spinning_icon("export-spinner", I::LoaderCircle, MINT))
+                    .child(spinning_icon(
+                        "export-spinner",
+                        I::LoaderCircle,
+                        colors().mint,
+                    ))
                     .child(
                         div()
                             .id("export-progress")
@@ -815,7 +819,7 @@ impl Workspace {
                             .flex_1()
                             .min_w_0()
                             .text_size(px(12.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(colors().muted))
                             .child(text),
                     )
                     .child(
@@ -824,14 +828,18 @@ impl Workspace {
                     )
             }
             ExportState::Cancelling { .. } => bar()
-                .child(spinning_icon("export-spinner", I::LoaderCircle, AMBER))
+                .child(spinning_icon(
+                    "export-spinner",
+                    I::LoaderCircle,
+                    colors().amber,
+                ))
                 .child(
                     div()
                         .id("export-progress")
                         .role(Role::Status)
                         .flex_1()
                         .text_size(px(12.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(colors().muted))
                         .child(tr!("Cancelling the export…")),
                 ),
             ExportState::Ended { feedback, path } => bar()

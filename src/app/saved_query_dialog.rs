@@ -45,10 +45,10 @@ impl AppView {
         self.query_details.is_some()
     }
 
-    /// A modal dialog of the library is open: the query details or the
-    /// report picker.
+    /// A modal dialog is open: the query details, the report picker or
+    /// Preferences.
     pub(super) fn dialog_open(&self) -> bool {
-        self.details_open() || self.report_picker.is_some()
+        self.details_open() || self.report_picker.is_some() || self.settings_open
     }
 
     /// Opens the dialog for the saved query `id`, to rename it or change its
@@ -162,9 +162,9 @@ impl AppView {
                     .p_5()
                     .gap_3()
                     .rounded(px(10.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(colors().panel))
                     .border_1()
-                    .border_color(rgb(0x424c57))
+                    .border_color(rgb(colors().border_strong))
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
@@ -192,7 +192,7 @@ impl AppView {
                                 .id("details-error")
                                 .role(Role::Alert)
                                 .text_size(px(13.))
-                                .text_color(rgb(RED))
+                                .text_color(rgb(colors().red))
                                 .child(error),
                         )
                     })

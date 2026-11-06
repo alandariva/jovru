@@ -177,9 +177,9 @@ impl AppView {
                     .p_5()
                     .gap_3()
                     .rounded(px(10.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(colors().panel))
                     .border_1()
-                    .border_color(rgb(0x424c57))
+                    .border_color(rgb(colors().border_strong))
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
@@ -213,7 +213,7 @@ impl AppView {
                         } else {
                             Toggled::False
                         })
-                        .when(self.password_remember, |s| s.text_color(rgb(MINT)))
+                        .when(self.password_remember, |s| s.text_color(rgb(colors().mint)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.password_remember = !this.password_remember;
                             cx.notify();

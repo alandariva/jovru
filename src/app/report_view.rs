@@ -1313,8 +1313,8 @@ impl ReportView {
             .px_3()
             .gap_2()
             .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(icon(I::FileChartColumn, MINT))
+            .border_color(rgb(colors().border))
+            .child(icon(I::FileChartColumn, colors().mint))
             .child(if editing {
                 div()
                     .w(px(280.))
@@ -1383,7 +1383,7 @@ impl ReportView {
             .gap_2()
             .p_3()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(
                 Input::new(&self.description)
                     .small()
@@ -1423,7 +1423,7 @@ impl ReportView {
                             .w(px(120.))
                             .font_family("Cascadia Code")
                             .text_size(px(13.))
-                            .text_color(rgb(SQL_PARAMETER))
+                            .text_color(rgb(colors().sql_parameter))
                             .truncate()
                             .child(format!(":{}", spec.name)),
                     )
@@ -1492,7 +1492,7 @@ impl ReportView {
                         button(("parameter-list", index), I::List, tr!("List of choices"))
                             .aria_selected(row_fields.choices_open || !spec.choices.is_empty())
                             .when(!spec.choices.is_empty(), |s| {
-                                s.child(badge(spec.choices.len().to_string(), MINT))
+                                s.child(badge(spec.choices.len().to_string(), colors().mint))
                             })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(row) =
@@ -1521,7 +1521,7 @@ impl ReportView {
                                 .pl_2()
                                 .rounded(px(4.))
                                 .border_1()
-                                .border_color(rgb(if bad { RED } else { BORDER }))
+                                .border_color(rgb(if bad { colors().red } else { colors().border }))
                                 .text_size(px(12.))
                                 .child(choice.clone())
                                 .child(
@@ -1550,7 +1550,7 @@ impl ReportView {
                             s.child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(RED))
+                                    .text_color(rgb(colors().red))
                                     .child(invalid_hint(spec.kind)),
                             )
                         }),
@@ -1587,7 +1587,7 @@ impl ReportView {
             .px_3()
             .py_2()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .children(self.values.iter().enumerate().filter_map(|(index, field)| {
                 let spec = self
                     .report
@@ -1616,17 +1616,26 @@ impl ReportView {
                             div()
                                 .rounded(px(5.))
                                 .border_1()
-                                .border_color(rgb(if problem.is_some() { RED } else { BORDER }))
+                                .border_color(rgb(if problem.is_some() {
+                                    colors().red
+                                } else {
+                                    colors().border
+                                }))
                                 .child(control),
                         )
                         .when_some(problem, |s, problem| {
-                            s.child(div().text_size(px(12.)).text_color(rgb(RED)).child(
-                                match problem {
-                                    ParameterProblem::Missing => tr!("Required"),
-                                    ParameterProblem::Invalid => invalid_hint(spec.kind),
-                                    ParameterProblem::NotAChoice => tr!("Choose one of the list"),
-                                },
-                            ))
+                            s.child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(colors().red))
+                                    .child(match problem {
+                                        ParameterProblem::Missing => tr!("Required"),
+                                        ParameterProblem::Invalid => invalid_hint(spec.kind),
+                                        ParameterProblem::NotAChoice => {
+                                            tr!("Choose one of the list")
+                                        }
+                                    }),
+                            )
                         }),
                 )
             }))
@@ -1697,7 +1706,7 @@ impl ReportView {
                 .items_center()
                 .justify_center()
                 .text_size(px(14.))
-                .text_color(rgb(MUTED))
+                .text_color(rgb(colors().muted))
                 .child(tr!(
                     "Add a panel with the + button: each has its SQL, its database and its chart."
                 ))
@@ -1741,7 +1750,7 @@ impl ReportView {
                     .rounded(px(10.))
                     .border_2()
                     .border_color(transparent_black())
-                    .drag_over::<PanelDrag>(|style, _, _, _| style.border_color(rgb(MINT)))
+                    .drag_over::<PanelDrag>(|style, _, _, _| style.border_color(rgb(colors().mint)))
                     .can_drop(accepts)
                     .on_drop(cx.listener(move |this, drag: &PanelDrag, _, cx| {
                         this.drop_panel(drag.panel, index, cx)
@@ -1758,14 +1767,16 @@ impl ReportView {
                         .rounded(px(8.))
                         .border_2()
                         .border_dashed()
-                        .border_color(rgb(BORDER))
+                        .border_color(rgb(colors().border))
                         .flex()
                         .items_center()
                         .justify_center()
                         .text_size(px(12.))
-                        .text_color(rgb(FAINT))
+                        .text_color(rgb(colors().faint))
                         .child(tr!("Drop here to move the panel to the end"))
-                        .drag_over::<PanelDrag>(|style, _, _, _| style.border_color(rgb(MINT)))
+                        .drag_over::<PanelDrag>(|style, _, _, _| {
+                            style.border_color(rgb(colors().mint))
+                        })
                         .can_drop(accepts)
                         .on_drop(cx.listener(move |this, drag: &PanelDrag, _, cx| {
                             this.drop_panel(drag.panel, count, cx)
@@ -1803,7 +1814,7 @@ impl ReportView {
             .flex_none()
             .px_3()
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(label(parts.join(" · ")))
             .when(self.mode == ReportMode::Edit, |s| {
                 s.child(div().flex_1()).child(label(tr!(
@@ -1818,7 +1829,7 @@ impl Render for ReportView {
         column()
             .id("report")
             .size_full()
-            .bg(rgb(BG))
+            .bg(rgb(colors().bg))
             .child(self.toolbar(cx))
             .when_some(self.notice.clone(), |s, notice| {
                 s.child(div().px_3().py_2().child(feedback_line(&notice)))
