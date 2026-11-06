@@ -2106,13 +2106,16 @@ impl Workspace {
                                     .aria_label(tr!("SQL query editor")),
                             ),
                     )
+                    // Not deferred: a deferred gutter would paint over the
+                    // dialogs. Drawn after the editor, so it still reads the
+                    // editor's prepaint of this frame and paints on top of it.
                     .child(
                         div()
                             .absolute()
                             .left(px(8.))
                             .top_0()
                             .h_full()
-                            .child(deferred(self.query_gutter(cx))),
+                            .child(self.query_gutter(cx)),
                     ),
             )
             .child(
