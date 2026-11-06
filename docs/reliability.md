@@ -62,7 +62,8 @@
 | Inspection or definition of an object (all drivers) | 60 s |
 | Reading, writing or removing a password in the OS vault | 10 s; past it the vault counts as unavailable, so the password is used for the session only and the connection dialog never stays stuck saving |
 | Databricks HTTP request | 30 s |
-| Databricks: first wait for a statement, inside its submit request | 5 s, then status polls from 200 ms up to every 2 s |
+| Databricks: first wait for a statement, inside its submit request | 5 s, then status polls |
+| Databricks: status polls of a warehouse statement or classic command | Every 2 s for the first 10 s since submission (a classic command's first poll comes 2 s after it), then a quarter of the time elapsed, at most 10 s |
 | Databricks compute discovery | 90 s, cancellable without starting compute |
 | Databricks CLI profile discovery | 60 s, cancellable; skips per-profile validation, output bounded to 1 MiB |
 | Databricks classic context creation/readiness | 90 s for readiness/setup, after the bounded submission obtains its ID; destroyed on failure/cancellation |

@@ -953,8 +953,34 @@ struct Pending {
 const SERVER_PAGES: u32 = 5;
 /// How long the first request waits for the statement before polling.
 const FIRST_WAIT: &str = "5s";
-/// Status polls start fast for short statements and slow down to this.
+/// Classic context readiness polls start fast and slow down to this.
 const POLL_MAX: Duration = Duration::from_secs(2);
+
+/// How long to wait before the next status poll of a statement or command
+/// that has been running for `elapsed` since its submission. Databricks
+/// queries seldom finish in under two seconds, so the polls are two seconds
+/// apart for the first ten; past that the gap is a quarter of the time
+/// already spent, at most ten seconds, so a long query costs few requests
+/// and its result is never late by more than a quarter of its run.
+fn poll_wait(elapsed: Duration) -> Duration {
+    const STEADY: Duration = Duration::from_secs(2);
+    if elapsed < Duration::from_secs(10) {
+        STEADY
+    } else {
+        (elapsed / 4).clamp(STEADY, Duration::from_secs(10))
+    }
+}
+
+/// Sleeps [`poll_wait`] before the next status poll.
+async fn poll_pause(elapsed: Duration) {
+    let wait = poll_wait(elapsed);
+    // Unit tests answer from a local fixture server: they keep the order of
+    // the schedule (the first poll still comes after a pause) without
+    // waiting its real seconds.
+    #[cfg(test)]
+    let wait = wait / 20;
+    tokio::time::sleep(wait).await;
+}
 
 impl DatabricksSession {
     fn new(client: Client) -> Self {
@@ -1267,13 +1293,11 @@ impl Session for DatabricksSession {
             if cancelled {
                 return Err(DriverError::cancelled());
             }
-            let mut wait = Duration::from_millis(200);
             loop {
                 match response["status"]["state"].as_str() {
                     Some("SUCCEEDED") => break,
                     Some("PENDING" | "RUNNING") => {
-                        tokio::time::sleep(wait).await;
-                        wait = (wait * 2).min(POLL_MAX);
+                        poll_pause(started.elapsed()).await;
                         response = self.client.request(Method::GET, &path, &[], None).await?;
                     }
                     Some("CANCELED") => return Err(DriverError::cancelled()),
@@ -1663,6 +1687,27 @@ mod tests {
             task,
         )
     }
+    #[test]
+    fn status_polls_are_two_seconds_apart_then_a_quarter_of_the_run_up_to_ten() {
+        let s = Duration::from_secs;
+        for elapsed in [s(0), s(1), s(2), s(9), Duration::from_millis(9_999)] {
+            assert_eq!(poll_wait(elapsed), s(2), "{elapsed:?}");
+        }
+        assert_eq!(poll_wait(s(10)), Duration::from_millis(2_500));
+        assert_eq!(poll_wait(s(20)), s(5));
+        assert_eq!(poll_wait(s(40)), s(10));
+        assert_eq!(poll_wait(s(300)), s(10));
+        assert_eq!(poll_wait(s(86_400)), s(10));
+        // A five-minute command: about forty polls, against about 150 for
+        // the former 200 ms to 2 s schedule.
+        let (mut at, mut polls) = (Duration::ZERO, 0);
+        while at < s(300) {
+            at += poll_wait(at);
+            polls += 1;
+        }
+        assert!((35..=42).contains(&polls), "{polls} polls");
+    }
+
     #[tokio::test]
     async fn sql_timeout_requests_remote_cancellation() {
         let (client, task) = fixture(vec![

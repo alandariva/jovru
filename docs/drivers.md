@@ -498,19 +498,22 @@ connection test checks Unity Catalog and configured compute access (classic
 clusters must be running), without starting compute or executing SQL. Warehouse SQL uses
 INLINE JSON_ARRAY and internal chunks from the same origin, read page by page.
 The submit request waits up to 5 seconds for the statement, then status is
-polled from 200 ms up to every 2 seconds. Inline results are capped at 25 MiB,
-so a statement asks the server for at most five pages of rows; a longer result
-reports that the rest was not read. The CLI token is reused for 5 minutes and
-shared between sessions, discovery, testing and metadata, and refreshed before
-its reported expiration (30-second margin). Concurrent refreshes coalesce; a
+polled every 2 seconds until 10 seconds have passed since submission, and
+from then on after a quarter of the time elapsed, at most 10 seconds apart.
+Inline results are capped at 25 MiB, so a statement asks the server for at
+most five pages of rows; a longer result reports that the rest was not read.
+The CLI token is reused for 5 minutes and shared between sessions, discovery,
+testing and metadata, and refreshed before its reported expiration (30-second margin). Concurrent refreshes coalesce; a
 401 forces one refresh and retry. External
 links are not followed. The initial submission waits for the response with the
 statement ID, up to the CLI/HTTP limits, so it can be cancelled later, even if
 cancelled during that interval. Cancellation or timeout after submission
 requests remote cancellation. Metadata ignores `hive_metastore`.
 
-Classic execution submits a SQL command and polls its status. Cancellation or
-timeout cancels it and confirms a terminal status within five seconds; failed
+Classic execution submits a SQL command and polls its status on the same
+schedule, the first poll 2 seconds after submission (the API has no
+server-side wait). Cancellation or timeout cancels it and confirms a terminal
+status within five seconds, polling from 200 ms and doubling; failed
 recovery destroys/discards the context. Classic results have the API's own
 server cap: returned rows are paged locally and `truncated` is propagated.
 Numbers and structured cells are preserved from raw JSON before decoding,
