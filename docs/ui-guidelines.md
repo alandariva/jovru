@@ -68,6 +68,12 @@ See [Performance](performance.md) for budgets and how to measure.
 - Show progress for anything that may exceed 300 ms and offer cancellation for
   anything that may exceed 2 s ([User experience](ux.md#always-visible-states)).
 - Never hold a `RefCell` borrow of shared UI data across `.await`.
+- Work that must finish before the application exits is not registered with
+  a view's `cx.on_app_quit`: closing the last window releases the window's
+  views before GPUI runs the quit handlers, so that handler never runs. Take
+  what to write when the view is released (`cx.on_release`) and hand the
+  write to `exit_writes::queue` (`src/app/exit_writes.rs`), which one handler
+  of the whole application awaits.
 
 ## Actions and shortcuts
 

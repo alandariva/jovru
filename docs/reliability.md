@@ -82,6 +82,7 @@
 | AI assistant: reading, saving or removing the API key in the OS vault | 10 s, as passwords |
 | Telemetry: one export of a batch of spans or log records to the collector | 10 s, then the batch is retried at most three times with backoff, as OpenTelemetry recommends; past the queue (2,048), new items are dropped |
 | Telemetry: what is queued when the application exits | 3 s |
+| Final writes of the open tabs and the reports when the application exits | 200 ms, GPUI's shutdown limit (`SHUTDOWN_TIMEOUT`); past it the write is abandoned and the last debounced save remains |
 | Telemetry: **Test** in Preferences | 10 s, cancellable |
 | Telemetry: reading, saving or removing the collector's headers in the OS vault | 10 s, as passwords |
 

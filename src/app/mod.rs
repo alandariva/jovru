@@ -5,6 +5,7 @@ mod connections;
 mod copying;
 mod databricks_connection;
 mod demo;
+mod exit_writes;
 mod layout;
 mod password;
 pub mod performance;
@@ -671,17 +672,16 @@ impl AppView {
             node_focus: std::cell::RefCell::new(HashMap::new()),
             _subscriptions: vec![
                 // The last edits are written before the application exits.
-                cx.on_app_quit(|this, cx| {
+                // Closing the window releases this view before GPUI runs the
+                // quit handlers, so the writes are queued on release, for
+                // the handler of the whole application (`exit_writes`).
+                cx.on_release(|this, cx| {
                     let state = this.save_state_now(cx);
                     let reports = this.save_reports_now();
-                    let span = tracing::info_span!("quit");
-                    tracing::Instrument::instrument(
-                        async move {
-                            state.await;
-                            reports.await;
-                        },
-                        span,
-                    )
+                    exit_writes::queue(cx, async move {
+                        state.await;
+                        reports.await;
+                    });
                 }),
                 tab_subscription,
                 search_subscription,
@@ -3031,6 +3031,7 @@ pub fn run() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
         probe::start(cx);
+        exit_writes::install(cx);
         // The editor binds Ctrl+Enter itself; a binding in its own, deeper
         // context added later wins there, and the global ones apply anywhere
         // else in the window.

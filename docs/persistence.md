@@ -114,8 +114,9 @@ an earlier version still read: saved queries without an `id` get one, those
 without `tags` have none, a tab
 is linked to the saved query with its title, connection and SQL, and old
 history entries have no time or status. It is
-written half a second after changes settle and when the application quits,
-and read once the connections are loaded. A tab whose connection no longer
+written half a second after changes settle and when the application quits
+(closing the window included, see `src/app/exit_writes.rs`), and read once
+the connections are loaded. A tab whose connection no longer
 exists reopens in a group of its own, without a connection. A value that
 cannot be read starts an empty workspace. Results are never stored.
 
@@ -136,7 +137,7 @@ choices of a list. It lives apart from `workspace.state`, whose writer keeps
 only the fields it knows, so an older version cannot erase reports. A missing
 value is an empty library; a value that cannot be read is reported and never
 written over. It is written half a second after changes settle and when the
-application quits; the demo writes nothing.
+application quits, closing the window included; the demo writes nothing.
 
 `connection.<connection-id>.explorer` keeps what the explorer shows expanded
 for that connection (`{"expanded": [paths]}`), written half a second after a
