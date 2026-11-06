@@ -36,18 +36,31 @@ Databricks CLI.
 ## Policy for new dependencies
 
 Every new dependency, Rust or tool, needs the **maintainer's prior approval**.
-AI agents never add or upgrade dependencies on their own. The task report
-states:
+AI agents never add or upgrade dependencies on their own.
 
-1. **Why** the need cannot be met with what already exists or with about a
-   hundred lines of our own code.
+Approval is a gate, not a preference against dependencies. A mature crate is
+often cheaper than our own code once its maintenance, edge cases and tests are
+counted. When a dependency would clearly serve better than what we would
+write, **propose it** instead of working around it: do not narrow a feature,
+ship a weaker behaviour or write a large hand-rolled replacement just to avoid
+asking. If the task cannot wait for the decision, deliver the version without
+the dependency, record the trade-off in the task report and in the pending
+item, and leave the proposal for the maintainer.
+
+A proposal states:
+
+1. **Why**: what it gives over what already exists and over our own code,
+   counting the cost of writing, testing and maintaining that code. "About a
+   hundred lines" is a reference for what counts as a trivial helper, not a
+   threshold.
 2. **License**, which must be in the `deny.toml` allow-list. GPL, AGPL and SSPL
    are not accepted.
 3. **Health**: active maintenance and no open advisories. `cargo deny --locked
    check` must pass; an accepted advisory needs a reason and a review date in
    `deny.toml`.
-4. **Weight**: what it adds to the build. Avoid crates that bring a second
-   async runtime, a second TLS stack or a second date library.
+4. **Weight**: what it adds to the build, including anything it duplicates
+   (a second async runtime, TLS stack or date library), weighed against what
+   it gives.
 5. **Minimal features**: turn off `default-features` when they bring unneeded
    code.
 
@@ -61,16 +74,6 @@ Mechanics:
   (included in `cargo xtask check --full`).
 - Upgrades of the GPUI family (`gpui-kit` and the crates it pins) are their own
   task, followed by a manual check of the application.
-
-### Not accepted
-
-- `openssl` or `native-tls`: rustls is used everywhere, so builds behave the
-  same on every platform.
-- A second async runtime (`async-std`, `smol`). GPUI's executors and the single
-  Tokio runtime are the only ones.
-- An ORM (`diesel`, `sea-orm`): local storage is small and uses SQLx directly.
-- A WebView or a second UI toolkit, which would undo [ADR-0001](adr/0001-native-ui-with-gpui.md).
-- A dependency that only covers a trivial helper.
 
 ## Known deviations
 

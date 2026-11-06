@@ -11,7 +11,9 @@ migrated only when that is the goal of the work.
 - UI changes follow `docs/ui-guidelines.md` and must not break a budget in
   `docs/performance.md`; report numbers when the touched path is measured.
 - Do not add or upgrade dependencies, change core contracts, the SQLite schema
-  or an ADR without the maintainer's approval.
+  or an ADR without the maintainer's approval. When a dependency would serve
+  better than our own code, propose it (see `docs/stack-and-dependencies.md`)
+  instead of narrowing the feature or hand-rolling a replacement to avoid it.
 
 # Verifying changes
 
