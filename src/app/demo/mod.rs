@@ -1,5 +1,6 @@
 //! Simulated connections, queries and results for `JYKRE_DEMO=1`. Nothing
 //! here touches a database.
+pub mod assistant;
 use jykre::result::{ResultColumn, ResultData};
 
 pub const SALES_SQL: &str = "-- Revenue by category · Q3 2026\nSELECT\n    c.name AS category,\n    COUNT(o.id) AS orders,\n    SUM(o.total) AS revenue,\n    ROUND(AVG(o.total), 2) AS avg_ticket\nFROM orders o\nJOIN products p ON p.id = o.product_id\nJOIN categories c ON c.id = p.category_id\nWHERE o.created_at >= '2026-07-01'\n  AND o.created_at <  '2026-10-01'\n  AND o.status = 'completed'\nGROUP BY c.name\nORDER BY revenue DESC;";

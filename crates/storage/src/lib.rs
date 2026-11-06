@@ -8,7 +8,7 @@ pub use config::{
 };
 pub use metadata::{
     ChildPage, MetadataRepository, PageCursor, PageRequest, PendingRefresh, RefreshState,
-    RefreshStatus,
+    RefreshStatus, SearchCursor, SearchPage,
 };
 
 use jykre_core::*;

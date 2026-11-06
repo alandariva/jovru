@@ -1068,3 +1068,289 @@ async fn removing_a_deleted_connections_cache_leaves_the_others() {
     reopened.close().await;
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Publishes `objects` as one full refresh.
+async fn publish(repository: &MetadataRepository, objects: Vec<MetadataObject>) {
+    let mut run = repository.begin(&ObjectPath::default()).await.unwrap();
+    for chunk in objects.chunks(10_000) {
+        run.batch(chunk.to_vec()).await.unwrap();
+    }
+    run.activate(&IntrospectionReport::default(), &CancellationToken::new())
+        .await
+        .unwrap();
+}
+
+/// The names of every match of `pattern`, read page by page.
+async fn pattern_names(
+    repository: &MetadataRepository,
+    pattern: &str,
+    kinds: Option<&[ObjectKind]>,
+    namespace: Option<&ObjectPath>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut after = None;
+    loop {
+        let page = repository
+            .search_pattern(pattern, kinds, namespace, after.as_ref(), 200)
+            .await
+            .unwrap();
+        names.extend(page.objects.into_iter().map(|object| object.name));
+        match page.next {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn a_pattern_search_reads_wildcards_by_unicode_lower_case_and_filters() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db");
+    let sales = MetadataObject::new(ObjectKind::Schema, &db.path, "sales");
+    let hr = MetadataObject::new(ObjectKind::Schema, &db.path, "hr");
+    let mut objects = vec![db.clone(), sales.clone(), hr.clone()];
+    for name in [
+        "cliente",
+        "CLIENTES_ATIVOS",
+        "dim_cliente",
+        "CLIÊNTE_VIP",
+        "cliante",
+        "pedido",
+    ] {
+        objects.push(MetadataObject::new(ObjectKind::Table, &sales.path, name));
+    }
+    let cliente = MetadataObject::new(ObjectKind::Table, &sales.path, "cliente");
+    for name in ["cliente_id", "id", "nome"] {
+        objects.push(MetadataObject::new(ObjectKind::Column, &cliente.path, name));
+    }
+    for name in ["cliente_rh", "a[b]c", "abc", "x]y", "a*b", "aXb"] {
+        objects.push(MetadataObject::new(ObjectKind::Table, &hr.path, name));
+    }
+    publish(&repository, objects).await;
+    let all = |pattern| pattern_names(&repository, pattern, None, None);
+    assert_eq!(
+        all("*cliente*").await,
+        [
+            "CLIENTES_ATIVOS",
+            "cliente",
+            "cliente_id",
+            "cliente_rh",
+            "dim_cliente"
+        ]
+    );
+    assert_eq!(
+        all("cliente*").await,
+        ["CLIENTES_ATIVOS", "cliente", "cliente_id", "cliente_rh"]
+    );
+    assert_eq!(all("*_id").await, ["cliente_id"]);
+    assert_eq!(all("cli?nte").await, ["cliante", "cliente"]);
+    // Upper case and accents fold by Unicode rules; `ê` is not `e`.
+    assert_eq!(all("*CLIÊNTE*").await, ["CLIÊNTE_VIP"]);
+    assert_eq!(all("cli?nte_vip").await, ["CLIÊNTE_VIP"]);
+    // Brackets are literal, with or without wildcards: `[b]` is not a class.
+    assert_eq!(all("a[b]c").await, ["a[b]c"]);
+    assert_eq!(all("*[b]*").await, ["a[b]c"]);
+    assert_eq!(all("*]*").await, ["a[b]c", "x]y"]);
+    assert_eq!(all("x]?").await, ["x]y"]);
+    assert_eq!(all("a?b").await, ["a*b", "aXb"]);
+    assert_eq!(all("*").await.len(), 18);
+    // Without a wildcard, a pattern finds what the search finds.
+    for query in ["cliente", "CLIENTE", "li", "e", "_id", "ênte"] {
+        let mut expected: Vec<_> = repository
+            .search(query, None, 200)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|object| search_name(&object.name).contains(&search_name(query)))
+            .map(|object| object.name)
+            .collect();
+        expected.sort();
+        assert_eq!(all(query).await, expected, "{query}");
+    }
+    // Kinds and the namespace apply before the limit.
+    assert_eq!(
+        pattern_names(&repository, "*cliente*", Some(&[ObjectKind::Table]), None).await,
+        ["CLIENTES_ATIVOS", "cliente", "cliente_rh", "dim_cliente"]
+    );
+    assert_eq!(
+        pattern_names(&repository, "*cliente*", None, Some(&hr.path)).await,
+        ["cliente_rh"]
+    );
+    assert_eq!(
+        pattern_names(
+            &repository,
+            "cli*",
+            Some(&[ObjectKind::Column]),
+            Some(&sales.path)
+        )
+        .await,
+        ["cliente_id"]
+    );
+    // Inside a namespace means below it: the node itself is not a match.
+    assert!(
+        pattern_names(&repository, "sales", None, Some(&sales.path))
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        pattern_names(&repository, "sales", None, Some(&ObjectPath::default())).await,
+        ["sales"]
+    );
+    // Matches carry their full path.
+    let page = repository
+        .search_pattern("dim_*", None, None, None, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        page.objects,
+        [MetadataObject::new(
+            ObjectKind::Table,
+            &sales.path,
+            "dim_cliente"
+        )]
+    );
+    assert!(page.next.is_none());
+    for limit in [0, 201] {
+        assert!(
+            repository
+                .search_pattern("*", None, None, None, limit)
+                .await
+                .is_err()
+        );
+    }
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn pattern_pages_return_every_match_exactly_once_in_order() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db");
+    let mut objects = vec![db.clone()];
+    // Many matches share a name, so pages break between equal names.
+    for index in 0..150 {
+        let table = MetadataObject::new(ObjectKind::Table, &db.path, format!("T{index:03}_id"));
+        objects.push(MetadataObject::new(ObjectKind::Column, &table.path, "id"));
+        objects.push(MetadataObject::new(
+            ObjectKind::Column,
+            &table.path,
+            "ID_old",
+        ));
+        objects.push(table);
+    }
+    publish(&repository, objects).await;
+    // `*id*` walks the name index; `*_id` goes through the trigram index.
+    for (pattern, expected) in [("*id*", 450), ("*_id", 150), ("id", 450), ("*_old", 150)] {
+        for limit in [1, 7, 200] {
+            let mut seen = Vec::new();
+            let mut after = None;
+            loop {
+                let page = repository
+                    .search_pattern(pattern, None, None, after.as_ref(), limit)
+                    .await
+                    .unwrap();
+                assert!(page.objects.len() <= limit as usize);
+                seen.extend(page.objects);
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+            assert_eq!(seen.len(), expected, "{pattern} by {limit}");
+            let keys: Vec<_> = seen
+                .iter()
+                .map(|object| (search_name(&object.name), key(&object.path).unwrap()))
+                .collect();
+            let mut sorted = keys.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(sorted.len(), expected, "{pattern} by {limit}: repeated");
+            assert!(
+                keys.windows(2).all(|pair| pair[0].0 <= pair[1].0),
+                "{pattern} by {limit}: out of order"
+            );
+        }
+    }
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_pattern_search_over_100_000_objects_stays_within_budget() {
+    let dir = dir();
+    let repository = MetadataRepository::open(&dir, ConnectionId::new(), &config())
+        .await
+        .unwrap();
+    let db = MetadataObject::new(ObjectKind::Database, &ObjectPath::default(), "db");
+    let mut objects = vec![db.clone()];
+    let columns = [
+        "id",
+        "nome",
+        "criado_em",
+        "valor",
+        "status",
+        "cliente_id",
+        "obs",
+        "tipo",
+    ];
+    let mut schema_3 = None;
+    for schema in 0..10 {
+        let schema = MetadataObject::new(ObjectKind::Schema, &db.path, format!("schema_{schema}"));
+        for table in 0..1_100 {
+            let name = if table % 100 == 0 {
+                format!("cliente_{table:04}")
+            } else {
+                format!("tabela_{table:04}")
+            };
+            let table = MetadataObject::new(ObjectKind::Table, &schema.path, name);
+            for column in columns {
+                objects.push(MetadataObject::new(ObjectKind::Column, &table.path, column));
+            }
+            objects.push(table);
+        }
+        if schema.name == "schema_3" {
+            schema_3 = Some(schema.path.clone());
+        }
+        objects.push(schema);
+    }
+    assert!(objects.len() > 99_000);
+    publish(&repository, objects).await;
+    let schema_3 = schema_3.unwrap();
+    for (pattern, kinds, namespace) in [
+        ("*cliente*", None, None),
+        ("*CLIENTE*", Some(&[ObjectKind::Table][..]), None),
+        ("cli?nte_*", None, Some(&schema_3)),
+        ("*_id", None, None),
+        ("?d", None, None),
+        ("q?", None, None),
+        // No literal prefix and no trigram: the whole name index, no match.
+        ("?q", None, None),
+        ("*", Some(&[ObjectKind::Schema][..]), None),
+    ] {
+        let started = std::time::Instant::now();
+        let page = repository
+            .search_pattern(pattern, kinds, namespace, None, 200)
+            .await
+            .unwrap();
+        let elapsed = started.elapsed();
+        // About 80 ms at worst in a debug build (2026-11-06): the budget is
+        // generous, for a loaded gate, and still fails a complexity regression.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "{pattern}: {elapsed:?}"
+        );
+        if !pattern.contains('q') {
+            assert!(!page.objects.is_empty(), "{pattern}");
+        }
+    }
+    repository.close().await;
+    std::fs::remove_dir_all(dir).unwrap();
+}

@@ -1,4 +1,7 @@
-use super::demo::{self, OPTIMIZED_SQL, SALES_SQL, sample_result};
+use super::assistant_panel::{
+    AssistantPanel, AssistantPanelEvent, FixTarget, Mode as AssistantMode,
+};
+use super::demo::{self, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
 use super::result_grid::{GridSql, ResultGrid, ResultGridEvent, Summary};
 use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
@@ -16,6 +19,11 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::tr;
 use jykre::{
+    assistant::{
+        apply,
+        facts::{ErrorFacts, RunFacts, SchemaScope},
+        prompts,
+    },
     backend, cell_format, connection_store,
     drivers::*,
     error_report::ErrorReport,
@@ -43,12 +51,6 @@ pub const SQL_EDITOR_CONTEXT: &str = "SqlEditor";
 enum ResultView {
     Table,
     Messages,
-}
-
-struct Message {
-    user: bool,
-    text: String,
-    sql: Option<&'static str>,
 }
 
 pub struct Workspace {
@@ -101,7 +103,8 @@ pub struct Workspace {
     editor: Entity<EditorState>,
     assistant_split: Entity<ResizableState>,
     query_split: Entity<ResizableState>,
-    prompt: Entity<InputState>,
+    /// The assistant, its own cached entity (ADR-0028).
+    assistant_panel: Entity<AssistantPanel>,
     connection: SharedString,
     dialect: SharedString,
     database: String,
@@ -133,7 +136,8 @@ pub struct Workspace {
     selection_summary: Summary,
     result_view: ResultView,
     assistant_open: bool,
-    messages: Vec<Message>,
+    /// The connection whose metadata cache the assistant's tools read.
+    cache_id: Option<ConnectionId>,
     /// The run state and the status of each statement in the editor.
     run: QueryRun,
     editor_sql: String,
@@ -163,7 +167,6 @@ pub struct Workspace {
     notice: Option<Feedback>,
     filter_open: bool,
     filter: Entity<InputState>,
-    chat_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -200,16 +203,24 @@ impl Workspace {
                 }
             },
         );
-        let prompt =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Ask about your data…")));
+        let assistant_panel = cx.new(|cx| AssistantPanel::new(demo::enabled(), window, cx));
+        if sql == SALES_SQL {
+            assistant_panel.update(cx, |panel, cx| {
+                panel.seed_demo(
+                    tr!("Which categories generated the most revenue last quarter?").into(),
+                    tr!("I prepared a query for Q3 2026, considering only completed orders.")
+                        .into(),
+                    Some(SALES_SQL),
+                    cx,
+                )
+            });
+        }
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter results…")));
-        let prompt_subscription = cx.subscribe_in(
-            &prompt,
+        let assistant_subscription = cx.subscribe_in(
+            &assistant_panel,
             window,
-            |this, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.submit_prompt(window, cx);
-                }
+            |this, _, event: &AssistantPanelEvent, window, cx| {
+                this.on_assistant_event(event, window, cx)
             },
         );
         let filter_subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
@@ -307,7 +318,7 @@ impl Workspace {
             editor,
             assistant_split,
             query_split,
-            prompt,
+            assistant_panel,
             filter,
             connection: connection.to_string().into(),
             // The demo guesses its database from the connection's name; a
@@ -348,26 +359,7 @@ impl Workspace {
             selection_summary: Summary::default(),
             result_view: ResultView::Table,
             assistant_open: true,
-            messages: if sql == SALES_SQL {
-                vec![
-                    Message {
-                        user: true,
-                        text: tr!("Which categories generated the most revenue last quarter?")
-                            .into(),
-                        sql: None,
-                    },
-                    Message {
-                        user: false,
-                        text: tr!(
-                            "I prepared a query for Q3 2026, considering only completed orders."
-                        )
-                        .into(),
-                        sql: Some(SALES_SQL),
-                    },
-                ]
-            } else {
-                Vec::new()
-            },
+            cache_id: None,
             run: QueryRun::new(sql),
             editor_sql: sql.to_string(),
             statement_lines: jykre::sql::statement_lines(sql, None).into(),
@@ -381,9 +373,8 @@ impl Workspace {
             opened_sql: Some(sql.to_string()),
             notice: None,
             filter_open: false,
-            chat_scroll: ScrollHandle::new(),
             _subscriptions: vec![
-                prompt_subscription,
+                assistant_subscription,
                 filter_subscription,
                 grid_subscription,
                 resize_subscription,
@@ -772,14 +763,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The demo's "distribution": the revenue column's statistics.
-    fn show_revenue_statistics(&mut self, cx: &mut Context<Self>) {
-        self.result_view = ResultView::Table;
-        self.grid
-            .update(cx, |grid, cx| grid.show_column_statistics(2, cx));
-        cx.notify();
-    }
-
     /// The gear of the result toolbar: how the grid shows values. Its
     /// options are toggles that leave the menu's button as an icon.
     fn display_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1034,6 +1017,7 @@ impl Workspace {
             self.sql_editor
                 .update(cx, |editor, _| editor.set_context(context.clone()));
             self.context = context;
+            self.push_assistant_context(cx);
             cx.emit(WorkspaceEvent::Changed);
         }
     }
@@ -1543,73 +1527,6 @@ impl Workspace {
         });
     }
 
-    fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.prompt.read(cx).value().to_string();
-        if text.trim().is_empty() {
-            return;
-        }
-        self.ask(text, cx);
-        self.prompt
-            .update(cx, |input, cx| input.set_value("", window, cx));
-    }
-
-    fn ask(&mut self, text: String, cx: &mut Context<Self>) {
-        let lower = text.to_lowercase();
-        let (answer, sql) = if lower.contains("optimi") || lower.contains("slow") {
-            (
-                tr!(
-                    "One alternative is to aggregate the orders before the JOINs. This can reduce intermediate rows. Validate the difference with EXPLAIN ANALYZE on your database; this mock does not measure performance."
-                ),
-                Some(OPTIMIZED_SQL),
-            )
-        } else if lower.contains("expla") {
-            (
-                tr!(
-                    "The query filters completed orders between July and September 2026, joins products and categories, and groups the values. COUNT counts orders, SUM computes revenue, and AVG returns the average ticket. The ordering shows the highest revenue first."
-                ),
-                None,
-            )
-        } else if lower.contains("chart") || lower.contains("graph") {
-            self.show_revenue_statistics(cx);
-            (
-                tr!(
-                    "I opened the statistics of the revenue column. Electronics leads with R$ 248,760.00; the sum, average and median show how revenue is spread across the categories."
-                ),
-                None,
-            )
-        } else if lower.contains("clean") {
-            (
-                tr!(
-                    "To investigate data quality, start by checking null values in product_id, orders without a category, and duplicate IDs. Also compare the orders count before and after the JOINs."
-                ),
-                None,
-            )
-        } else {
-            (
-                tr!(
-                    "In this sample, Electronics accounts for 32.4% of revenue. Together with Home and decor, the two categories make up 52.7% of the total. You can explore the chart, ask for an explanation of the query, or try an optimization suggestion."
-                ),
-                None,
-            )
-        };
-        self.messages.push(Message {
-            user: true,
-            text,
-            sql: None,
-        });
-        self.messages.push(Message {
-            user: false,
-            text: if self.sales() { answer.into() } else {
-                let (columns, rows) = self.current_page().map_or((0, 0), |page| (page.data.column_count(), page.data.row_count()));
-                tr!("The query runs in the context of {0}. The sample preview has {1} columns and {2} rows. Use the editor to adjust the filters and run it to see the sample. This demo's assistant has a complete analysis flow in the Revenue by category tab.", self.connection, columns, rows)
-            },
-            sql: if self.sales() { sql } else { None },
-        });
-        self.assistant_open = true;
-        self.chat_scroll.scroll_to_bottom();
-        cx.notify();
-    }
-
     /// The connection this tab runs on. Choosing another asks the host,
     /// which confirms with the user before moving the tab.
     fn connection_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1714,6 +1631,7 @@ impl Workspace {
                                     this.sql_editor
                                         .update(cx, |editor, _| editor.set_context(chosen.clone()));
                                     this.context = chosen.clone();
+                                    this.push_assistant_context(cx);
                                     cx.emit(WorkspaceEvent::Changed);
                                     cx.notify();
                                 });
@@ -1735,6 +1653,10 @@ impl Workspace {
     pub fn set_names(&mut self, id: ConnectionId, names: Arc<NameIndex>, cx: &mut Context<Self>) {
         self.sql_editor
             .update(cx, |editor, _| editor.set_names(id, names));
+        if self.cache_id != Some(id) {
+            self.cache_id = Some(id);
+            self.push_assistant_target(cx);
+        }
     }
 
     /// Sets the namespaces the header offers.
@@ -2610,6 +2532,13 @@ impl Workspace {
                 row()
                     .pl(px(24.))
                     .gap_2()
+                    .when(self.assistant_ready(cx), |s| {
+                        s.child(
+                            button("fix-with-ai", I::Sparkles, tr!("Fix with AI")).on_click(
+                                cx.listener(move |this, _, _, cx| this.fix_with_ai(id, cx)),
+                            ),
+                        )
+                    })
                     .child(button("copy-error", I::Copy, tr!("Copy details")).on_click(
                         cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
@@ -2863,11 +2792,6 @@ impl Workspace {
         }
     }
 
-    /// The result on screen is the demo's, with an analysis.
-    fn sales(&self) -> bool {
-        self.results.active().is_some_and(|tab| tab.sales)
-    }
-
     fn result_messages(&self, cx: &mut Context<Self>) -> AnyElement {
         column()
             .id("result-messages")
@@ -3098,70 +3022,133 @@ impl Workspace {
             .update(cx, |editor, cx| editor.format(window, cx));
     }
 
-    fn assistant(&self, cx: &mut Context<Self>) -> Div {
-        column().size_full().bg(rgb(0x191d23)).border_l_1().border_color(rgb(BORDER))
-            .child(row().h(px(48.)).flex_none().px_4().justify_between().border_b_1().border_color(rgb(BORDER))
-                .child(row().child(icon(I::Sparkles, MINT)).child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(tr!("Assistant")))
-                    .child(badge("IA", MINT)))
-                .child(row().gap_0()
-                    .child(icon_button("reset-chat", I::SquarePen, tr!("New conversation"))
-                        .on_click(cx.listener(|this, _, _, cx| { this.messages.clear(); cx.notify(); })))
-                    .child(icon_button("close-ai", I::PanelRightClose, tr!("Collapse assistant"))
-                        .on_click(cx.listener(|this, _, _, cx| { this.assistant_open = false; cx.notify(); })))))
-            // Said as soon as the panel opens, before anything is asked.
-            .child(div().id("assistant-pending").role(Role::Status).flex_none().mx_3().mt_3().p_2().rounded(px(6.))
-                .bg(rgb(Tone::Warning.background()))
-                .child(feedback_line(&Feedback::new(Tone::Warning, tr!(
-                    "Pending implementation: the assistant is not connected to an AI model yet, so its answers are simulated."
-                ))).text_size(px(12.))))
-            .child(row().px_4().h(px(37.)).flex_none().gap_2().border_b_1().border_color(rgb(BORDER))
-                .child(icon(I::Layers, FAINT)).child(label(tr!("Context")))
-                .child(badge(tr!("Current SQL"), MUTED)).child(badge(if self.sales() { tr!("3 tables") } else { tr!("1 query") }, MUTED)))
-            .child(column().id("ai-conversation").flex_1().overflow_y_scroll().track_scroll(&self.chat_scroll).vertical_scrollbar(&self.chat_scroll).px_4().py_4().gap_5()
-                .child(row().gap_2().child(div().h(px(1.)).flex_1().bg(rgb(BORDER)))
-                    .child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Context of this query")))
-                    .child(div().h(px(1.)).flex_1().bg(rgb(BORDER))))
-                .when(self.messages.is_empty(), |s| s.child(column().py_5().gap_3()
-                    .child(icon(I::Sparkles, MINT)).child(div().text_size(px(16.)).child(tr!("One question, a new path.")))
-                    .child(label(tr!("Explore data, understand queries, and turn questions into SQL.")))))
-                .children(self.messages.iter().enumerate().map(|(index, message)| {
-                    column().gap_2()
-                        .child(row().gap_2()
-                            .child(div().size(px(20.)).rounded(px(5.)).bg(rgb(if message.user { HOVER } else { 0x263b34 }))
-                                .flex().items_center().justify_center().child(icon(if message.user { I::UserRound } else { I::Sparkles }, if message.user { MUTED } else { MINT })))
-                            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(if message.user { MUTED } else { MINT })).child(if message.user { tr!("You") } else { "Jykre Studio" })))
-                        .child(div().text_size(px(14.)).line_height(relative(1.6)).text_color(rgb(if message.user { TEXT } else { 0xaeb8c5 })).child(message.text.clone()))
-                        .when_some(message.sql, |s, suggested| s.child(column().mt_1().rounded(px(6.)).border_1().border_color(rgb(BORDER)).bg(rgb(BG)).overflow_hidden()
-                            .child(row().px_3().h(px(28.)).justify_between().border_b_1().border_color(rgb(BORDER)).child(label(tr!("SQL · suggestion")))
-                                .child(icon_button(("copy-ai", index), I::Copy, tr!("Copy suggested SQL"))
-                                    .on_click(cx.listener(move |this, _, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(suggested.into())); this.notice = Some(Feedback::new(Tone::Success, tr!("Suggested SQL copied."))); cx.notify(); }))))
-                            .child(div().px_3().py_3().font_family("Cascadia Mono").text_size(px(12.)).line_height(relative(1.6)).text_color(rgb(BLUE))
-                                .child(if suggested == OPTIMIZED_SQL { "WITH sales AS (\n  SELECT product_id,\n         SUM(total) AS revenue\n  FROM orders\n  …\n)" } else { "SELECT c.name AS category,\n       SUM(o.total) AS revenue\nFROM orders o\nJOIN products p ON …\nGROUP BY c.name;" }))
-                            .child(button(("apply-ai", index), I::CornerDownLeft, tr!("Insert at the cursor")).w_full().justify_center().border_t_1().border_color(rgb(BORDER)).text_color(rgb(MINT))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    // It goes where the cursor is, or in place of the selection;
-                                    // the rest of the SQL stays, and Ctrl+Z takes it out.
-                                    this.editor.update(cx, |editor, cx| { editor.replace(suggested, window, cx); editor.focus(window, cx); });
-                                    this.notice = Some(Feedback::new(Tone::Info, tr!("Suggestion inserted at the cursor. Review the SQL before running it."))); cx.notify();
-                                })))))
-                }))
-                .when(self.has_results() && self.sales(), |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
-                    .child(row().child(icon(I::Lightbulb, MINT)).child(div().text_size(px(14.)).text_color(rgb(MINT)).font_weight(FontWeight::MEDIUM).child(tr!("A look at the data"))))
-                    .child(div().text_size(px(14.)).line_height(relative(1.55)).text_color(rgb(0xb8c8c1)).child(tr!("Electronics and Home account for 52.7% of the quarter's revenue.")))
-                    .child(button("ai-show-chart", I::ChartColumn, tr!("View distribution")).px_0().text_color(rgb(MINT))
-                        .on_click(cx.listener(|this, _, _, cx| this.show_revenue_statistics(cx)))))))
-            .child(column().flex_none().p_3().gap_2().border_t_1().border_color(rgb(BORDER))
-                .child(row().gap_1().children([("explain-chip", tr!("Explain SQL")), ("optimize-chip", tr!("Optimize")), ("chart-chip", tr!("Create chart"))].into_iter().map(|(id, text)| {
-                    div().id(id).role(Role::Button).aria_label(text).focusable().tab_index(0).focus_visible(|s| s.border_color(rgb(MINT))).px_2().py(px(5.)).rounded(px(5.)).border_1().border_color(rgb(BORDER))
-                        .text_size(px(12.)).text_color(rgb(MUTED)).cursor_pointer().hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                        .child(text).on_click(cx.listener(move |this, _, _, cx| this.ask(text.into(), cx)))
-                })))
-                .child(column().p_2().gap_2().rounded(px(7.)).border_1().border_color(rgb(0x3b4945)).bg(rgb(BG))
-                    .child(Input::new(&self.prompt).appearance(false).bordered(false).small().w_full().aria_label(tr!("Message to the AI assistant")))
-                    .child(row().justify_between().child(row().gap_1().child(icon(I::AtSign, FAINT)).child(label(tr!("Query context"))))
-                        .child(icon_button("send-ai", I::ArrowUp, tr!("Send message")).bg(rgb(0x304a40))
-                            .on_click(cx.listener(|this, _, window, cx| this.submit_prompt(window, cx))))))
-                .child(div().text_center().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Simulated AI · Always review the suggestions."))))
+    /// What the assistant panel asks of the tab.
+    fn on_assistant_event(
+        &mut self,
+        event: &AssistantPanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            AssistantPanelEvent::Submit { text, mode } => {
+                // The request's first message holds only what the facts
+                // allow-list lets the tab tell (ADR-0028).
+                let prompt = match mode {
+                    AssistantMode::Ask => prompts::chat_message(
+                        text,
+                        self.results.active().and_then(RunFacts::of),
+                        &self.context,
+                    ),
+                    AssistantMode::WriteSql => {
+                        let current = self.report_sql(cx);
+                        prompts::write_message(text, current.as_deref(), &self.context)
+                    }
+                };
+                let display = text.clone();
+                self.assistant_panel
+                    .update(cx, |panel, cx| panel.start(display, prompt, None, cx));
+            }
+            AssistantPanelEvent::Insert(sql) => {
+                // It goes where the cursor is, or in place of the selection;
+                // the rest of the SQL stays, and Ctrl+Z takes it out.
+                self.editor.update(cx, |editor, cx| {
+                    editor.replace(sql.as_str(), window, cx);
+                    editor.focus(window, cx);
+                });
+                self.notice = Some(Feedback::new(
+                    Tone::Info,
+                    tr!("Suggestion inserted at the cursor. Review the SQL before running it."),
+                ));
+            }
+            AssistantPanelEvent::Replace {
+                statement,
+                origin,
+                sql,
+            } => match apply::locate_statement(&self.editor_sql, statement, *origin) {
+                Some(range) => {
+                    let text = apply::fit_replacement(statement, sql);
+                    // Selecting the statement and replacing it is one undo step.
+                    self.editor.update(cx, |editor, cx| {
+                        editor.set_selected_range(range, cx);
+                        editor.replace(text.as_str(), window, cx);
+                        editor.focus(window, cx);
+                    });
+                    self.notice = Some(Feedback::new(
+                        Tone::Info,
+                        tr!("Statement replaced. Review it before running; Ctrl+Z undoes it."),
+                    ));
+                }
+                None => {
+                    self.notice = Some(Feedback::new(
+                        Tone::Warning,
+                        tr!(
+                            "The failed statement changed in the editor; use Insert at the cursor instead."
+                        ),
+                    ));
+                }
+            },
+            AssistantPanelEvent::Notice(notice) => self.notice = Some(notice.clone()),
+            AssistantPanelEvent::OpenPreferences => cx.emit(WorkspaceEvent::OpenPreferences),
+            AssistantPanelEvent::Close => self.assistant_open = false,
+        }
+        cx.notify();
+    }
+
+    /// Tells the panel which connection's cache its tools read, and where
+    /// names resolve.
+    fn push_assistant_target(&mut self, cx: &mut Context<Self>) {
+        let target = match (&self.input, self.cache_id) {
+            (Some(input), Some(connection)) => Some(SchemaScope {
+                dir: connection_store::data_dir(),
+                connection,
+                config: input.config.clone(),
+                engine: self.dialect.to_string(),
+                dialect: self.run.dialect(),
+                context: self.context.clone(),
+            }),
+            _ => None,
+        };
+        let label = self.connection.clone();
+        self.assistant_panel
+            .update(cx, |panel, cx| panel.set_target(target, label, cx));
+    }
+
+    fn push_assistant_context(&mut self, cx: &mut Context<Self>) {
+        let context = self.context.clone();
+        self.assistant_panel
+            .update(cx, |panel, _| panel.set_context(context));
+    }
+
+    /// Whether **Fix with AI** is offered: a real tab with the assistant set
+    /// up.
+    fn assistant_ready(&self, cx: &App) -> bool {
+        !self.demo
+            && self.input.is_some()
+            && super::assistant_settings::preferences(cx)
+                .config()
+                .is_some()
+    }
+
+    /// Asks the assistant to fix the failed statement of result `id`: the
+    /// statement and the server's error, nothing from any result.
+    fn fix_with_ai(&mut self, id: ResultId, cx: &mut Context<Self>) {
+        let Some(tab) = self.results.get(id) else {
+            return;
+        };
+        let ResultState::Failed(report) = &tab.state else {
+            return;
+        };
+        let facts = ErrorFacts::new(report, &tab.sql);
+        let prompt = prompts::fix_message(&tab.sql, &facts, &self.context);
+        let fix = FixTarget {
+            statement: tab.sql.clone(),
+            origin: tab.origin,
+        };
+        self.assistant_open = true;
+        self.assistant_panel.update(cx, |panel, cx| {
+            panel.start(tr!("Fix this statement").to_owned(), prompt, Some(fix), cx)
+        });
+        cx.notify();
     }
 }
 
@@ -3189,6 +3176,8 @@ impl SessionIndicator {
 }
 
 pub enum WorkspaceEvent {
+    /// The assistant needs setting up: show Preferences.
+    OpenPreferences,
     /// State worth saving changed (SQL, timeout, result tabs).
     Changed,
     /// A run needs the connection's password, which was not remembered.
@@ -3327,6 +3316,7 @@ impl Workspace {
         let context = self.context.clone();
         self.sql_editor
             .update(cx, |editor, _| editor.set_context(context));
+        self.push_assistant_context(cx);
     }
 
     /// What the query tab shows before its title: the run in progress, or
@@ -3518,7 +3508,6 @@ impl Workspace {
         self.assistant_open = false;
         self.results.clear();
         self.show_active(cx);
-        self.messages.clear();
     }
 
     /// Shows what the connection is (its dialect, database and whether it
@@ -3560,6 +3549,8 @@ impl Workspace {
         self.context_choices.clear();
         self.sql_editor
             .update(cx, |editor, _| editor.forget_server());
+        self.cache_id = None;
+        self.push_assistant_target(cx);
     }
 
     /// Puts the keyboard in the SQL editor.
@@ -3926,7 +3917,12 @@ impl Render for Workspace {
                         .size(px(ASSISTANT_WIDTH))
                         .size_range(px(280.)..px(560.))
                         .fixed()
-                        .child(self.assistant(cx)),
+                        // A streamed answer redraws the panel alone.
+                        .child(
+                            self.assistant_panel
+                                .clone()
+                                .cached(StyleRefinement::default().size_full()),
+                        ),
                 )
                 .into_any_element()
         } else {

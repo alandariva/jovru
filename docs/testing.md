@@ -55,6 +55,10 @@ no fallback that skips checks.
   `jykre-sql-language` only on core and `jykre-sql`; neither on GPUI or
   `lsp-types`. No library file outside `src/app/` and `src/main.rs` uses
   `jykre_sql_language` (a source check).
+- `jykre-assistant` depends on core and external libraries only; core never
+  depends on `genai`. The assistant's code names no result data, bound
+  parameters, sessions, credentials or server reads (`assistant_privacy`,
+  a source check; `tests.rs` files may build fixtures with them).
 - The check covers direct Cargo edges, including dev and build dependencies.
   Where logic lives and transitive dependencies still need review.
 
@@ -224,6 +228,17 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   reopen, explicit discovery/cancellation, SQL, context reuse and cancellation.
   Local HTTP fixtures cover these protocols, expiration/concurrent token refresh,
   exact classic JSON cells and failed recovery without real credentials.
+- The AI assistant is tested against a local fake of an OpenAI-compatible
+  server (port 0, synthetic text, a synthetic key): streaming, tool calls,
+  token counts, statuses classified without their bodies, cancellation
+  closing the connection and the silence and round limits
+  (`crates/assistant`). `src/assistant/tests.rs` runs **Fix**, **Write** and
+  **Ask** through the agentic loop against the fake and a temporary
+  metadata cache, and proves that a result value and a bound `:name` value
+  never reach a request, that every reviewed text is in what the provider
+  received, and that rounds are never logged with their text or the key.
+  Real providers are checked by hand: record the provider, model and
+  outcome, never the key.
 - UI changes require opening the app and checking the affected flow, tabs,
   content preservation, shortcuts, focus and dividers where relevant. Record
   that check separately. Use `JYKRE_CONFIG_DIR` with an isolated folder and

@@ -228,6 +228,19 @@ impl ResultTab {
         self.pages.iter().map(|page| page.data.clone()).collect()
     }
 
+    /// How many rows of the result were read, released pages included: the
+    /// count the assistant may be told, never the rows themselves.
+    pub fn rows_read(&self) -> usize {
+        self.pages
+            .last()
+            .map_or(0, |page| page.first_row + page.data.row_count())
+    }
+
+    /// More rows exist than were read, whether or not they can still be.
+    pub fn more_rows(&self) -> bool {
+        self.has_more || self.rest_closed
+    }
+
     /// The rows the tab holds.
     pub fn held_rows(&self) -> usize {
         self.pages.iter().map(|page| page.data.row_count()).sum()

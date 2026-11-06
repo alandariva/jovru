@@ -22,10 +22,12 @@ use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::Subscribe
 /// The environment variable that overrides the log filter.
 pub const FILTER_VARIABLE: &str = "JYKRE_LOG";
 
-/// `info` for Jykre's crates, `warn` for everything else.
+/// `info` for Jykre's crates, `warn` for everything else, and nothing from
+/// the AI provider library: some of its warnings carry streamed answers,
+/// which are payloads (ADR-0028). The assistant logs its own rounds.
 pub const DEFAULT_FILTER: &str = "warn,jykre=info,jykre_core=info,jykre_storage=info,\
 jykre_secrets=info,jykre_driver_postgres=info,jykre_driver_mysql=info,\
-jykre_driver_databricks=info";
+jykre_driver_databricks=info,jykre_assistant=info,genai=off";
 
 /// UI-thread work longer than this is logged as a warning.
 pub const UI_THREAD_WARNING: Duration = Duration::from_millis(100);
@@ -247,9 +249,11 @@ mod tests {
             "jykre_driver_postgres",
             "jykre_driver_mysql",
             "jykre_driver_databricks",
+            "jykre_assistant",
         ] {
             assert!(DEFAULT_FILTER.contains(&format!("{krate}=info")), "{krate}");
         }
+        assert!(DEFAULT_FILTER.contains("genai=off"));
     }
 
     #[test]

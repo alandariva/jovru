@@ -6,6 +6,7 @@ use crate::result::{ResultBuilder, ResultData, ResultLimit};
 use crate::tr;
 use jykre_storage::{
     ChildPage, MetadataRepository, PageCursor, PageRequest, PendingRefresh, RefreshStatus,
+    SearchCursor, SearchPage,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -396,6 +397,54 @@ pub async fn search_metadata(
         forget_cache(dir, id);
     }
     logging::timing("metadata search", started, CACHE_READ_BUDGET);
+    result
+}
+
+/// A wildcard search of a connection's cache, read by
+/// [`search_metadata_pattern`].
+#[derive(Clone, Copy, Debug)]
+pub struct PatternSearch<'a> {
+    /// `*` matches any run of characters and `?` exactly one; a pattern
+    /// with neither means "contains".
+    pub pattern: &'a str,
+    /// Only these kinds, when given.
+    pub kinds: Option<&'a [ObjectKind]>,
+    /// Only the objects inside this schema, catalog or database, when given.
+    pub namespace: Option<&'a ObjectPath>,
+    /// Where the page starts: the `next` of the previous page.
+    pub after: Option<&'a SearchCursor>,
+    /// At most this many matches (1 to 200).
+    pub limit: u32,
+}
+
+/// One page of the connection's cached objects whose name matches
+/// `search` (Unicode, case-insensitive), in folded-name order, each with its
+/// full path.
+pub async fn search_metadata_pattern(
+    dir: &Path,
+    id: ConnectionId,
+    config: &ConnectionConfig,
+    search: PatternSearch<'_>,
+) -> DriverResult<SearchPage> {
+    let started = Instant::now();
+    let result = match cache(dir, id, config).await {
+        Ok((repository, _)) => {
+            repository
+                .search_pattern(
+                    search.pattern,
+                    search.kinds,
+                    search.namespace,
+                    search.after,
+                    search.limit,
+                )
+                .await
+        }
+        Err(error) => Err(error),
+    };
+    if result.is_err() {
+        forget_cache(dir, id);
+    }
+    logging::timing("metadata pattern search", started, CACHE_READ_BUDGET);
     result
 }
 
@@ -1478,6 +1527,19 @@ mod tests {
             .unwrap();
         assert!(search.contains(&db));
         assert!(search.iter().any(|object| object.name == "table_249"));
+        let pattern = PatternSearch {
+            pattern: "TABLE_24?",
+            kinds: Some(&[ObjectKind::Table]),
+            namespace: Some(&db.path),
+            after: None,
+            limit: 200,
+        };
+        let page = search_metadata_pattern(&dir, id, &config, pattern)
+            .await
+            .unwrap();
+        assert_eq!(page.objects.len(), 10);
+        assert_eq!(page.objects[0].name, "table_240");
+        assert!(page.next.is_none());
         let expanded = cached_metadata_pages(
             &dir,
             id,

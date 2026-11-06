@@ -1,4 +1,6 @@
 use jykre::tr;
+mod assistant_panel;
+mod assistant_settings;
 mod connections;
 mod copying;
 mod databricks_connection;
@@ -287,6 +289,8 @@ struct AppView {
     /// written.
     font_revision: usize,
     sidebar_open: bool,
+    /// Preferences > Assistant (ADR-0028).
+    assistant_settings: Entity<assistant_settings::AssistantSettingsView>,
     schema_open: bool,
     tables_open: bool,
     orders_open: bool,
@@ -567,6 +571,8 @@ impl AppView {
             section: Section::Explorer,
             next_query: 1,
             sidebar_open: true,
+            assistant_settings: cx
+                .new(|cx| assistant_settings::AssistantSettingsView::new(window, cx)),
             schema_open: true,
             tables_open: true,
             orders_open: true,
@@ -815,6 +821,7 @@ impl AppView {
         ));
         app.filter_library(cx);
         app.load_connections(window, cx);
+        assistant_settings::load(cx);
         app
     }
 
@@ -1177,6 +1184,10 @@ impl AppView {
                         }
                     }
                     WorkspaceEvent::Changed => {}
+                    WorkspaceEvent::OpenPreferences => {
+                        this.section = Section::Settings;
+                        this.sidebar_open = true;
+                    }
                     WorkspaceEvent::SaveAsReport {
                         title,
                         connection,
@@ -2346,6 +2357,8 @@ impl AppView {
                     this.assistant_split.update(cx, |state, cx| state.resize_panel(1, px(ASSISTANT_WIDTH), window, cx));
                     cx.notify();
                 })))
+            .child(div().mt_3().child(label(tr!("Assistant"))))
+            .child(self.assistant_settings.clone())
             .child(div().mt_3().child(label(tr!("Shortcuts"))))
             .children([
                 (tr!("Search tables"), "Ctrl Shift P"), (tr!("New query"), "Ctrl N"),

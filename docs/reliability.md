@@ -41,7 +41,8 @@
 - **Retries** only for idempotent reads (introspection, Databricks polling,
   token resolution), with exponential backoff and jitter, at most three
   attempts. A user's statement is **never** retried automatically: it may be
-  an `UPDATE`.
+  an `UPDATE`. A round of the AI assistant is not retried either: it
+  costs tokens, and the user retries it with **Try again**.
 - **Clean shutdown.** On exit, running operations are cancelled and sessions
   are closed within a short deadline.
 
@@ -72,6 +73,13 @@
 | Databricks CLI (token resolution) | 60 s |
 | Export: each part read from the session | `ExecutionOptions.timeout` of the tab, as any page |
 | Export: creating, writing one part (about 16 MB) or finishing the file | 60 s (`backend::FILE_TIMEOUT`), so a network share that stops answering fails the export |
+| AI assistant: connecting to the provider | 15 s |
+| AI assistant: first byte of an answer | 120 s |
+| AI assistant: silence between pieces of a streamed answer | 60 s |
+| AI assistant: a whole round | 300 s; cancellable at any time (**Stop**), which closes the connection |
+| AI assistant: **Test** in Preferences | 30 s, cancellable |
+| AI assistant: one tool reading the metadata cache | 10 s; past it the model is told so and the round goes on |
+| AI assistant: reading, saving or removing the API key in the OS vault | 10 s, as passwords |
 
 A new network operation gets an explicit timeout and a row in this table.
 

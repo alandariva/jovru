@@ -611,7 +611,7 @@ async fn vault<T>(operation: impl Future<Output = DriverResult<T>>) -> DriverRes
 
 /// Runs a vault operation within `limit`; past it the vault counts as
 /// unavailable, as when it refuses.
-async fn vault_within<T>(
+pub(crate) async fn vault_within<T>(
     limit: std::time::Duration,
     operation: impl Future<Output = DriverResult<T>>,
 ) -> DriverResult<T> {

@@ -65,9 +65,36 @@ panel of any saved report, chosen in a dialog with a search; both keep the
 tab's connection and database. Nothing is stored until **Save report**.
 Report tabs are not reopened after a restart.
 
-Dividers are adjustable with the mouse and the arrow keys. The assistant panel (simulated today)
-opens to the right of the query area, and says at its top that it is pending
-implementation and its answers are simulated.
+Dividers are adjustable with the mouse and the arrow keys. The assistant panel opens to the
+right of the query area ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
+
+- **Set up** in Preferences › Assistant: provider (Anthropic, OpenAI,
+  OpenAI-compatible, Ollama or off), model, address, API key (kept in the
+  system vault and never shown again), when to review requests, and prices
+  per million tokens for the costs shown. **Test** asks the model a tiny
+  question with one tool declared. Until it is set up, the panel offers to
+  open Preferences.
+- **Fix with AI**, next to **Copy details** on a failed statement, sends the
+  statement and the server's error. **Ask** sends a question, with the row
+  counts of the tab's last result; **Write SQL** sends a description, with
+  the selection or the statement at the cursor.
+- Each request appears as a card (**Request N**: model, estimated tokens and
+  cost) with its messages, tools and JSON. When the review mode asks, it
+  waits with **Send** and **Cancel**, saying nothing has been sent yet.
+  Each tool the model calls is a step showing its arguments and the answer
+  the next request carries. After 300 ms a round shows **Thinking…**, after
+  2 s its elapsed time, and **Stop** (or the composer's stop button)
+  cancels it. After 8 rounds the request stops until **Continue**.
+- Answers are plain text; each SQL block has Copy, **Insert at the cursor**
+  and, for a fix, **Replace the failed statement**, which replaces it only
+  where it still is unchanged, as one undo step. A block that changes or
+  deletes every row is marked. Nothing runs on its own.
+- Each answer shows its tokens (input, output, cached), cost and time; the
+  header shows the conversation's totals. **Copy the whole trace** exports
+  every request, answer and tool step as JSON. **New conversation** starts
+  over; choosing another connection does too. A failure shows inline with
+  **Try again**, never in a dialog.
+- The demo (`JYKRE_DEMO`) answers with canned text marked **Simulated**.
 
 ## Always-visible states
 

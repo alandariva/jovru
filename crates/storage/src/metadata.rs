@@ -328,6 +328,64 @@ pub struct ChildPage {
     pub next: Option<PageCursor>,
 }
 
+/// Where the next page of a [`MetadataRepository::search_pattern`] starts:
+/// just after the last match of the previous page, in the order of the
+/// `objects_search` index (folded name, kind, name, key), so a page costs
+/// the same however deep it is and no match is skipped or repeated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchCursor {
+    search_name: String,
+    kind: String,
+    name: String,
+    path_key: String,
+}
+
+/// One page of a [`MetadataRepository::search_pattern`]; `next` is where the
+/// following page starts, `None` after the last match.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SearchPage {
+    pub objects: Vec<MetadataObject>,
+    pub next: Option<SearchCursor>,
+}
+
+/// A name pattern as SQLite `GLOB` reads it, over folded names: `*` and `?`
+/// stay wildcards, `[` and `]` become literal, and a pattern without a
+/// wildcard means "contains". Also returns the literal fragments of three
+/// characters or more, which the trigram index can match.
+fn glob_of(pattern: &str) -> (String, Vec<String>) {
+    let folded = search_name(pattern);
+    let mut glob = String::with_capacity(folded.len() + 2);
+    let wildcard = folded.contains(['*', '?']);
+    if !wildcard {
+        glob.push('*');
+    }
+    for character in folded.chars() {
+        match character {
+            '[' => glob.push_str("[[]"),
+            ']' => glob.push_str("[]]"),
+            other => glob.push(other),
+        }
+    }
+    if !wildcard {
+        glob.push('*');
+    }
+    let fragments = folded
+        .split(['*', '?'])
+        .filter(|fragment| fragment.chars().count() >= 3)
+        .map(str::to_owned)
+        .collect();
+    (glob, fragments)
+}
+
+/// The matches of a pattern search after a cursor, in index order. `?1` is
+/// the glob, `?2` the kinds (JSON, or NULL for all), `?3` the namespace key
+/// (NULL for the whole cache), `?4`..`?7` the cursor and `?8` the limit.
+const PATTERN_SCAN: &str = "SELECT object_json,search_name,kind,name,path_key FROM objects INDEXED BY objects_search WHERE (search_name,kind,name,path_key)>(?4,?5,?6,?7) AND search_name GLOB ?1 AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2))) AND (?3 IS NULL OR (path_key>?3||'/' AND path_key<?3||'0')) ORDER BY search_name,kind,name,path_key LIMIT ?8";
+
+/// [`PATTERN_SCAN`] over the candidates of the trigram index: `?9` holds
+/// every literal fragment of three characters or more.
+const PATTERN_TRIGRAM: &str = "SELECT object_json,search_name,kind,name,path_key FROM objects WHERE rowid IN (SELECT rowid FROM objects_fts WHERE objects_fts MATCH ?9) AND (search_name,kind,name,path_key)>(?4,?5,?6,?7) AND search_name GLOB ?1 AND (?2 IS NULL OR kind IN (SELECT value FROM json_each(?2))) AND (?3 IS NULL OR (path_key>?3||'/' AND path_key<?3||'0')) ORDER BY search_name,kind,name,path_key LIMIT ?8";
+
 /// A page to read with [`MetadataRepository::pages`]: up to `limit`
 /// children of `parent`, after `after` (from the first when `None`).
 #[derive(Clone, Debug)]
@@ -935,6 +993,103 @@ impl MetadataRepository {
                 .cmp(b.path.0.iter().map(|part| &part.name))
         });
         Ok(found)
+    }
+    /// One page of up to `limit` (1 to 200) objects whose name matches
+    /// `pattern`, after `after` (from the first match when `None`). `*`
+    /// matches any run of characters and `?` exactly one; every other
+    /// character is literal, and a pattern without either means "contains",
+    /// as in [`Self::search`]. Names compare by Unicode lower case.
+    ///
+    /// `kinds` keeps only those kinds and `namespace` only the objects inside
+    /// it (its descendants, not the node itself), both before the limit
+    /// applies. Matches come in folded-name order without their ancestors:
+    /// each holds its full path.
+    pub async fn search_pattern(
+        &self,
+        pattern: &str,
+        kinds: Option<&[ObjectKind]>,
+        namespace: Option<&ObjectPath>,
+        after: Option<&SearchCursor>,
+        limit: u32,
+    ) -> DriverResult<SearchPage> {
+        if !(1..=200).contains(&limit) {
+            return Err(DriverError::validation("Invalid search limit."));
+        }
+        let kinds = kinds
+            .map(|kinds| {
+                serde_json::to_string(
+                    &kinds
+                        .iter()
+                        .map(|kind| kind_text_of(*kind))
+                        .collect::<DriverResult<Vec<_>>>()?,
+                )
+                .map_err(json_error)
+            })
+            .transpose()?;
+        let namespace = namespace
+            .filter(|path| !path.0.is_empty())
+            .map(key)
+            .transpose()?;
+        let (glob, fragments) = glob_of(pattern);
+        // Every row sorts after the empty cursor: its kind and key are never
+        // empty.
+        let (search_name, kind, name, path_key) = after.map_or_else(Default::default, |cursor| {
+            (
+                cursor.search_name.clone(),
+                cursor.kind.clone(),
+                cursor.name.clone(),
+                cursor.path_key.clone(),
+            )
+        });
+        // One more than asked tells whether another page follows. A literal
+        // fragment of three characters or more narrows the candidates through
+        // the trigram index; otherwise the name index is walked from the
+        // cursor, stopping once the page is full.
+        let query = if fragments.is_empty() {
+            sqlx::query(PATTERN_SCAN)
+        } else {
+            sqlx::query(PATTERN_TRIGRAM)
+        };
+        let query = query
+            .bind(glob)
+            .bind(kinds)
+            .bind(namespace)
+            .bind(search_name)
+            .bind(kind)
+            .bind(name)
+            .bind(path_key)
+            .bind(i64::from(limit) + 1);
+        let query = if fragments.is_empty() {
+            query
+        } else {
+            let phrases = fragments
+                .iter()
+                .map(|fragment| format!("\"{}\"", fragment.replace('"', "\"\"")))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            query.bind(phrases)
+        };
+        let rows = query.fetch_all(&self.pool).await.map_err(sql_error)?;
+        let more = rows.len() > limit as usize;
+        let mut objects = Vec::with_capacity(rows.len().min(limit as usize));
+        let mut next = None;
+        for row in rows.into_iter().take(limit as usize) {
+            let path_key: String = row.try_get("path_key").map_err(sql_error)?;
+            objects.push(object_of(
+                &row.try_get::<String, _>("object_json").map_err(sql_error)?,
+                &path_key,
+            )?);
+            next = Some(SearchCursor {
+                search_name: row.try_get("search_name").map_err(sql_error)?,
+                kind: row.try_get("kind").map_err(sql_error)?,
+                name: row.try_get("name").map_err(sql_error)?,
+                path_key,
+            });
+        }
+        Ok(SearchPage {
+            objects,
+            next: next.filter(|_| more),
+        })
     }
     /// One page of up to `limit` (1 to 500) children of `parent`, starting
     /// after `after` (the first child when `None`). Reads only that page.
