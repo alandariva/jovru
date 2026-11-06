@@ -146,6 +146,7 @@ pub async fn read_key(kind: ProviderKind) -> DriverResult<Option<SecretString>> 
         return Ok(None);
     };
     crate::connection_store::vault_within(
+        crate::connection_store::VaultCall::new("api_key", "get"),
         crate::connection_store::VAULT_TIMEOUT,
         SystemSecretStore.get(account),
     )
@@ -158,6 +159,7 @@ pub async fn save_key(kind: ProviderKind, key: SecretString) -> DriverResult<()>
         return Ok(());
     };
     crate::connection_store::vault_within(
+        crate::connection_store::VaultCall::new("api_key", "set"),
         crate::connection_store::VAULT_TIMEOUT,
         SystemSecretStore.set(account, key),
     )
@@ -170,6 +172,7 @@ pub async fn remove_key(kind: ProviderKind) -> DriverResult<()> {
         return Ok(());
     };
     crate::connection_store::vault_within(
+        crate::connection_store::VaultCall::new("api_key", "delete"),
         crate::connection_store::VAULT_TIMEOUT,
         SystemSecretStore.delete(account),
     )

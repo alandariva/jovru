@@ -632,13 +632,7 @@ impl AppView {
         })
         .detach();
         cx.spawn(async move |weak, cx| {
-            let result = backend::run(async move {
-                builtin_registry()?
-                    .get(input.config.driver)?
-                    .test(&input, cancel)
-                    .await
-            })
-            .await;
+            let result = backend::run(backend::test_connection(input, cancel)).await;
             let _ = weak.update(cx, |this, cx| {
                 if this.connection_revision != revision {
                     return;

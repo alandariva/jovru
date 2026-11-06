@@ -51,3 +51,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0026](0026-named-parameters-in-sql-tabs.md) | Named parameters in SQL tabs, and typed literals on classic Databricks clusters (amends 0023 and 0005) | Proposed |
 | [0027](0027-sqlite-driver.md) | SQLite database files through SQLx's bundled SQLite | Proposed |
 | [0028](0028-agentic-ai-assistant-over-the-metadata-cache.md) | An agentic AI assistant over the metadata cache, with every request reviewable | Proposed |
+| [0029](0029-otlp-export-of-logs-and-traces.md) | Optional export of logs and traces over OTLP, with metadata only (amends 0009) | Accepted (implemented) |

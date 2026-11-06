@@ -66,7 +66,8 @@ fn key_unavailable() -> DriverError {
     )
 }
 
-/// The vault account that holds the API key of one assistant provider.
+/// The vault account that holds the API key of one assistant provider, or
+/// the headers of the OpenTelemetry collector.
 ///
 /// Only the fixed accounts built by the constructors exist, so a name typed
 /// in the UI can never reach the vault. The account name is not a secret.
@@ -87,6 +88,12 @@ impl ApiKeyAccount {
     /// The API key of an OpenAI-compatible endpoint.
     pub const fn openai_compatible() -> Self {
         Self("assistant:openai-compatible:api-key")
+    }
+
+    /// The headers sent to the OpenTelemetry collector (ADR-0029), usually
+    /// its authentication.
+    pub const fn telemetry_headers() -> Self {
+        Self("telemetry:otlp:headers")
     }
 
     /// The account name under service `JykreStudio`.
@@ -173,6 +180,10 @@ mod tests {
             ApiKeyAccount::openai_compatible().name(),
             "assistant:openai-compatible:api-key"
         );
+        assert_eq!(
+            ApiKeyAccount::telemetry_headers().name(),
+            "telemetry:otlp:headers"
+        );
     }
 
     #[test]
@@ -181,6 +192,7 @@ mod tests {
             ApiKeyAccount::anthropic(),
             ApiKeyAccount::openai(),
             ApiKeyAccount::openai_compatible(),
+            ApiKeyAccount::telemetry_headers(),
         ];
         for (index, account) in accounts.iter().enumerate() {
             assert!(!account.name().starts_with("connection:"));

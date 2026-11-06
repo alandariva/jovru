@@ -355,7 +355,12 @@ fn test_failure(error: &DriverError) -> String {
     }
 }
 
-fn choice(id: impl Into<ElementId>, text: &'static str, selected: bool) -> Stateful<Div> {
+/// A segmented choice of the Preferences forms.
+pub(super) fn choice(
+    id: impl Into<ElementId>,
+    text: &'static str,
+    selected: bool,
+) -> Stateful<Div> {
     div()
         .id(id)
         .role(Role::Button)

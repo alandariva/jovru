@@ -1025,12 +1025,14 @@ impl ReportView {
                         info,
                     } = job;
                     let (place, lent) = (context.context.clone(), session.take());
+                    let id = context.connection;
                     // Reading the result for the chart and dropping the
                     // other statements' results happen on the runtime.
                     let settled = match input {
                         Some(connection) => {
                             backend::run(async move {
                                 let result = backend::query_in_context(
+                                    Some(id),
                                     connection,
                                     place,
                                     lent,

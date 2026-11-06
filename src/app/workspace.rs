@@ -1221,6 +1221,9 @@ impl Workspace {
         if let Some(input) = self.input.clone() {
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
+            // Labels the run's telemetry span; unknown until the
+            // connection's names are read.
+            let connection = self.cache_id;
             self.run.queue_all(id);
             // The previous run has ended (a stopping one blocks new runs), so
             // its session is back unless it was lost.
@@ -1252,6 +1255,7 @@ impl Workspace {
                 // Rows become compact display text on the database runtime, row
                 // by row, and the driver cells are dropped there.
                 let result = backend::run(backend::query(
+                    connection,
                     input,
                     session,
                     requests,

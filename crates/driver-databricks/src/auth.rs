@@ -61,7 +61,47 @@ fn validate_executable(path: &Path) -> DriverResult<()> {
     Ok(())
 }
 
+/// Runs the CLI inside a process span that records the executable's file
+/// name, the subcommand (`auth token`) and the exit code; never the
+/// arguments after it (a profile), the paths or the output.
 async fn cli_output(
+    executable: &Path,
+    config_file: &Path,
+    args: &[&str],
+    max_bytes: u64,
+) -> DriverResult<Vec<u8>> {
+    use tracing::Instrument as _;
+    let subcommand = args
+        .iter()
+        .take_while(|arg| !arg.starts_with('-'))
+        .take(2)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let span = tracing::info_span!(
+        "databricks_cli",
+        otel.name = format!("databricks {subcommand}"),
+        otel.kind = "client",
+        process.executable.name = executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("databricks"),
+        process.exit.code = tracing::field::Empty,
+        jykre.cli.command = subcommand,
+        error.type = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+    );
+    let result = cli_output_in(executable, config_file, args, max_bytes)
+        .instrument(span.clone())
+        .await;
+    if let Err(failure) = &result {
+        span.record("error.type", super::runtime::error_type(failure.code));
+        span.record("otel.status_code", "error");
+    }
+    result
+}
+
+async fn cli_output_in(
     executable: &Path,
     config_file: &Path,
     args: &[&str],
@@ -96,12 +136,11 @@ async fn cli_output(
     if bytes.len() as u64 > max_bytes {
         return Err(super::runtime::protocol());
     }
-    if !child
-        .wait()
-        .await
-        .map_err(|_| super::runtime::protocol())?
-        .success()
-    {
+    let status = child.wait().await.map_err(|_| super::runtime::protocol())?;
+    if let Some(code) = status.code() {
+        tracing::Span::current().record("process.exit.code", code);
+    }
+    if !status.success() {
         return Err(DriverError::new(
             ErrorCode::Authentication,
             "Databricks CLI command failed; check the CLI installation and authenticate the selected profile",

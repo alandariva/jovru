@@ -20,6 +20,7 @@ mod saved_query_dialog;
 mod scope_picker;
 mod sql_editor;
 mod state;
+mod telemetry_settings;
 mod ui;
 mod workspace;
 
@@ -291,6 +292,7 @@ struct AppView {
     sidebar_open: bool,
     /// Preferences > Assistant (ADR-0028).
     assistant_settings: Entity<assistant_settings::AssistantSettingsView>,
+    telemetry_settings: Entity<telemetry_settings::TelemetrySettingsView>,
     schema_open: bool,
     tables_open: bool,
     orders_open: bool,
@@ -573,6 +575,8 @@ impl AppView {
             sidebar_open: true,
             assistant_settings: cx
                 .new(|cx| assistant_settings::AssistantSettingsView::new(window, cx)),
+            telemetry_settings: cx
+                .new(|cx| telemetry_settings::TelemetrySettingsView::new(window, cx)),
             schema_open: true,
             tables_open: true,
             orders_open: true,
@@ -670,10 +674,14 @@ impl AppView {
                 cx.on_app_quit(|this, cx| {
                     let state = this.save_state_now(cx);
                     let reports = this.save_reports_now();
-                    async move {
-                        state.await;
-                        reports.await;
-                    }
+                    let span = tracing::info_span!("quit");
+                    tracing::Instrument::instrument(
+                        async move {
+                            state.await;
+                            reports.await;
+                        },
+                        span,
+                    )
                 }),
                 tab_subscription,
                 search_subscription,
@@ -822,6 +830,8 @@ impl AppView {
         app.filter_library(cx);
         app.load_connections(window, cx);
         assistant_settings::load(cx);
+        telemetry_settings::load(cx);
+        jykre::telemetry::startup_finished();
         app
     }
 
@@ -2370,6 +2380,8 @@ impl AppView {
             .child(label(tr!("The log keeps the last 7 days, without passwords, SQL or values.")))
             .child(button("open-log-folder", I::FolderOpen, tr!("Open log folder"))
                 .on_click(cx.listener(|this, _, _, cx| this.open_log_folder(cx))))
+            .child(div().mt_3().child(label(tr!("Telemetry (OpenTelemetry)"))))
+            .child(self.telemetry_settings.clone())
             .child(div().mt_3().child(label(tr!("Preferences saved on this computer."))))
     }
 

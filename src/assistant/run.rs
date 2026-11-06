@@ -326,10 +326,22 @@ impl Conversation {
 
 /// Runs every tool call of a round against the cache, in order.
 pub async fn run_tools(tools: &CacheTools, calls: &[ToolCall]) -> Vec<ToolStep> {
+    use tracing::Instrument as _;
     let mut steps = Vec::with_capacity(calls.len());
     for call in calls {
         let started = Instant::now();
-        let output = tools.call(call).await;
+        // The name comes from the model: only a plain tool name is recorded.
+        let plain = !call.name.is_empty()
+            && call.name.len() <= 40
+            && call
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
+        let span = tracing::info_span!(
+            "assistant_tool",
+            jykre.assistant.tool = if plain { call.name.as_str() } else { "other" }
+        );
+        let output = tools.call(call).instrument(span).await;
         steps.push(ToolStep {
             call: call.clone(),
             output,
@@ -346,8 +358,44 @@ pub async fn send(
     events: &UnboundedSender<RoundEvent>,
     cancel: &CancellationToken,
 ) -> (DriverResult<RoundResult>, u64) {
+    use tracing::Instrument as _;
+    let config = assistant.config();
+    let span = crate::client_span!(
+        "chat",
+        otel.name = format!("chat {}", config.model),
+        gen_ai.operation.name = "chat",
+        gen_ai.provider.name = config.kind.key(),
+        gen_ai.request.model = config.model.as_str(),
+        gen_ai.usage.input_tokens = tracing::field::Empty,
+        gen_ai.usage.output_tokens = tracing::field::Empty,
+        jykre.assistant.tool_calls = tracing::field::Empty
+    );
     let started = Instant::now();
-    let result = assistant.send(request, events, cancel).await;
+    let result = assistant
+        .send(request, events, cancel)
+        .instrument(span.clone())
+        .await;
+    match &result {
+        Ok(round) => {
+            if let Some(input) = round.usage.input {
+                span.record(
+                    "gen_ai.usage.input_tokens",
+                    crate::telemetry::attributes::count(input),
+                );
+            }
+            if let Some(output) = round.usage.output {
+                span.record(
+                    "gen_ai.usage.output_tokens",
+                    crate::telemetry::attributes::count(output),
+                );
+            }
+            span.record(
+                "jykre.assistant.tool_calls",
+                crate::telemetry::attributes::count(round.tool_calls.len()),
+            );
+        }
+        Err(error) => crate::telemetry::attributes::record_error(&span, error),
+    }
     (result, started.elapsed().as_millis() as u64)
 }
 

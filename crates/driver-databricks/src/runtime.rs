@@ -157,7 +157,43 @@ impl Client {
         }
         self.auth.token(rejected).await
     }
+    /// One REST call, inside an HTTP client span that records the method,
+    /// the path as a template ([`url_template`]), the status and a repeat
+    /// after a 401; never the host, the query, the body or the token.
     async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<Value>,
+    ) -> DriverResult<Value> {
+        use tracing::Instrument as _;
+        let template = url_template(path);
+        let span = tracing::info_span!(
+            "http_request",
+            otel.name = format!("{method} {template}"),
+            otel.kind = "client",
+            http.request.method = %method,
+            url.template = template,
+            http.response.status_code = tracing::field::Empty,
+            http.request.resend_count = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        let result = self
+            .request_in(method, path, query, body)
+            .instrument(span.clone())
+            .await;
+        if let Err(failure) = &result {
+            span.record("error.type", error_type(failure.code));
+            if failure.code != ErrorCode::Cancelled {
+                span.record("otel.status_code", "error");
+            }
+        }
+        result
+    }
+
+    async fn request_in(
         &self,
         method: Method,
         path: &str,
@@ -175,6 +211,7 @@ impl Client {
         // A 401 means the request was not processed, so repeating it is safe.
         let (mut response, mut generation) = self.send(&method, &url, query, &body, None).await?;
         if response.status().as_u16() == 401 {
+            tracing::Span::current().record("http.request.resend_count", 1);
             (response, generation) = self
                 .send(&method, &url, query, &body, Some(generation))
                 .await?;
@@ -182,6 +219,10 @@ impl Client {
                 self.auth.invalidate(generation).await;
             }
         }
+        tracing::Span::current().record(
+            "http.response.status_code",
+            i64::from(response.status().as_u16()),
+        );
         if !response.status().is_success() {
             let status = response.status().as_u16();
             // Only the start of the body: an error is a short JSON object,
@@ -1412,6 +1453,40 @@ impl Session for DatabricksSession {
     }
 }
 
+/// The path of a REST call with every segment that is not a fixed word of
+/// the API (an identifier, a number, an object's name) replaced by `{id}`,
+/// so a span never names a statement, a table or a workspace object.
+pub(crate) fn url_template(path: &str) -> String {
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    path.split('/')
+        .map(|segment| {
+            let word = !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-' || byte == b'_')
+                && segment.as_bytes()[0].is_ascii_lowercase();
+            let version = segment.split('.').count() == 2
+                && segment
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+            if segment.is_empty() || word || version {
+                segment
+            } else {
+                "{id}"
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `error.type` of a failed call: the error code's own name.
+pub(crate) fn error_type(code: ErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "other".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1422,6 +1497,29 @@ mod tests {
 
     // Native CLI coverage is separate from the credential-free portable gate.
     // This test lists synthetic profiles only; it never authenticates or queries.
+    #[test]
+    fn url_templates_keep_only_the_words_of_the_api() {
+        for (path, template) in [
+            ("/api/2.0/sql/statements", "/api/2.0/sql/statements"),
+            (
+                "/api/2.0/sql/statements/01ef-abc-123/result/chunks/3",
+                "/api/2.0/sql/statements/{id}/result/chunks/{id}",
+            ),
+            (
+                "/api/2.0/sql/statements/abcdef/cancel?x=1",
+                "/api/2.0/sql/statements/abcdef/cancel",
+            ),
+            (
+                "/api/2.1/unity-catalog/tables/main.sales.Orders_2024",
+                "/api/2.1/unity-catalog/tables/{id}",
+            ),
+            ("/api/1.2/commands/status", "/api/1.2/commands/status"),
+        ] {
+            assert_eq!(url_template(path), template, "{path}");
+        }
+        assert_eq!(error_type(ErrorCode::PermissionDenied), "permission_denied");
+    }
+
     #[tokio::test]
     #[ignore = "requires native Databricks CLI; cargo test -p jykre-driver-databricks native_cli_profile_syntax -- --ignored"]
     async fn native_cli_profile_syntax_resolves_bom_and_section_comments() {

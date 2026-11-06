@@ -64,6 +64,15 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "json", "tracing-log"] }
 tracing-appender = "0.2"
+# Telemetry over OTLP (ADR-0029, approved 2026-11-06): logs and traces sent
+# to the collector chosen in Preferences, off by default. HTTP uses the
+# reqwest 0.13 already in the tree (TLS on ring, no provider of its own);
+# gRPC uses tonic with ring and the system's roots. No metrics.
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "logs", "internal-logs"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "logs", "http-proto", "reqwest-client", "grpc-tonic", "tls-ring", "tls-roots", "internal-logs"] }
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
+opentelemetry-appender-tracing = { version = "0.33.1", default-features = false }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 # SQL formatting by dialect (N010), behind jykre-sql-language's `sqruff`
 # feature; it has no default features to turn off.
@@ -93,6 +102,17 @@ dirs = "7"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+# Telemetry over OTLP (ADR-0029); only `jykre::telemetry` uses them.
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+opentelemetry-appender-tracing.workspace = true
+reqwest-genai.workspace = true
+rustls.workspace = true
+uuid.workspace = true
+# The collector's headers are a secret, exposed only by the exporters.
+secrecy.workspace = true
 # Export to XLSX (approved 2026-11-04). Constant memory mode writes each row
 # to a temporary file as it is added, so an export never holds the sheet.
 rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["constant_memory"] }
@@ -102,6 +122,7 @@ workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 # Hot paths with criterion (ADR-0010). `cargo xtask check --full` runs them in
 # quick mode; compare a change with `--save-baseline main` / `--baseline main`.

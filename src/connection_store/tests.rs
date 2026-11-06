@@ -660,12 +660,23 @@ fn a_session_without_a_remembered_password_asks_for_one() {
 async fn a_vault_that_does_not_answer_counts_as_unavailable() {
     let limit = std::time::Duration::from_millis(20);
     let started = std::time::Instant::now();
-    let stuck = vault_within(limit, std::future::pending::<DriverResult<()>>()).await;
+    let stuck = vault_within(
+        VaultCall::new("connection_password", "get"),
+        limit,
+        std::future::pending::<DriverResult<()>>(),
+    )
+    .await;
     assert_eq!(stuck.map_err(|error| error.code), Err(ErrorCode::Timeout));
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
     // An answer within the limit passes through, success or failure.
-    assert!(vault_within(limit, async { Ok(()) }).await.is_ok());
-    let refused = vault_within(limit, async {
+    assert!(
+        vault_within(VaultCall::new("connection_password", "get"), limit, async {
+            Ok(())
+        })
+        .await
+        .is_ok()
+    );
+    let refused = vault_within(VaultCall::new("connection_password", "get"), limit, async {
         Err::<(), _>(DriverError::new(ErrorCode::Authentication, "refused"))
     })
     .await;

@@ -45,7 +45,10 @@ touches that path.
 
 1. **Nothing remote on the interactive path.** The explorer and search read
    the local metadata cache. The network is used only for explicit actions:
-   test, run, refresh.
+   test, run, refresh; and, only when the user turns it on, for telemetry,
+   sent in batches by background threads, never by the UI thread
+   ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)). High-frequency
+   UI events (mouse, selection, frames) are never exported.
 2. **Load on demand.** The explorer reads children page by page; results are
    bounded by the row limit while they are read.
 3. **Stream, do not buffer everything.** Drivers deliver rows to a `RowSink`

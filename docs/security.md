@@ -14,6 +14,7 @@ document is the engineering standard.
 | PostgreSQL/MySQL password, with **Remember password** | OS vault through `jykre-secrets`: service `JykreStudio`, account `connection:<connection-id>:password` ([ADR-0004](adr/0004-os-vault-for-credentials.md)) |
 | PostgreSQL/MySQL password, without it | Memory only, for the session |
 | Assistant API key (Anthropic, OpenAI, OpenAI-compatible endpoint) | Only in the OS vault through `jykre-secrets` (`ApiKeyStore`): service `JykreStudio`, accounts `assistant:anthropic:api-key`, `assistant:openai:api-key` and `assistant:openai-compatible:api-key`. The accounts are fixed (`ApiKeyAccount`); the UI never names one. Never in `config.db`, settings or logs |
+| OpenTelemetry collector headers (usually its authentication) | Only in the OS vault through `jykre-secrets` (`ApiKeyStore`): service `JykreStudio`, account `telemetry:otlp:headers` (`ApiKeyAccount::telemetry_headers`). Never in `config.db`, settings or logs, never shown back ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)) |
 | Databricks token | **Not stored by Jykre Studio.** Resolved by the Databricks CLI when needed and kept in memory ([ADR-0005](adr/0005-databricks-through-cli-and-rest.md)) |
 
 ### Rules
@@ -132,6 +133,34 @@ sends requests to the provider the user chose. What a request may carry:
   never a prompt, an answer, schema text or a key. The provider library's
   own log is off (`genai=off`), as its warnings can quote answers.
 
+## Telemetry
+
+Telemetry is off by default; the user turns logs and traces on separately in
+**Preferences › Diagnostics › Telemetry**
+([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)). What may leave:
+
+- **Sent:** span names, kinds and times; the database system and namespace
+  (database, catalog, schema), the statement's first keyword from a fixed
+  list (otherwise `OTHER`), row counts, sizes, SQLSTATE and error codes; the
+  HTTP method, status and URL template with every identifier replaced by
+  `{id}`; the Databricks CLI subcommand and exit code; the AI provider,
+  model and token counts; the connection's identifier; the vault item kind
+  and call; and the log's events as the local log keeps them, without the
+  ones below.
+- **Never sent:** SQL text, even sanitized; values and bound parameters;
+  credentials and headers; hosts, ports, users and connection options;
+  paths; request and response bodies; server error messages; the computer's
+  or the user's name; `trace` events; events with a free-text field (`sql`,
+  `file`, `path`, `url`, `error`, `account`), which stay in the local log.
+- Enforced by an allowlist of span attributes applied before export
+  (`jykre::telemetry::attributes::ALLOWED`), per-layer filters on the
+  bridges, and tests that run a statement with a synthetic password, SQL,
+  values and host and check none is exported.
+- The collector's address is HTTPS, or plain HTTP on this computer; it
+  never carries a user, a password, a query or a fragment. Redirects are
+  not followed. The trace context is not sent to databases, Databricks or
+  AI providers.
+
 ## Logs and diagnostics
 
 These rules apply to any output, including the logs ([Reliability](reliability.md#logs)):
@@ -202,6 +231,8 @@ and a review date in `deny.toml`.
       by the driver.
 - [ ] External processes run without a shell and with a timeout.
 - [ ] New network calls use HTTPS/TLS as configured, with an explicit timeout.
+- [ ] A new external call has a `client` span; a new span attribute that
+      may leave is in the telemetry allowlist and holds no free text.
 - [ ] Database content is rendered as text.
 - [ ] A new way to open a session (another database, another context) keeps
       the profile's user, credentials and TLS, and the production check

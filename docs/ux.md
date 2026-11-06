@@ -68,6 +68,13 @@ Report tabs are not reopened after a restart.
 Dividers are adjustable with the mouse and the arrow keys. The assistant panel opens to the
 right of the query area ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
 
+- **Telemetry** in Preferences › Diagnostics: **Send logs** and **Send
+  traces** (both off by default), the protocol (HTTP/protobuf or gRPC), the
+  collector's address and headers for its authentication (kept in the
+  system vault and never shown again). **Save** applies at once; turning a
+  signal off stops capturing it immediately. **Test** sends one span and
+  says how the collector answered, with a way to cancel. A note lists what
+  is sent and never sent ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)).
 - **Set up** in Preferences › Assistant: provider (Anthropic, OpenAI,
   OpenAI-compatible, Ollama or off), model, address, API key (kept in the
   system vault and never shown again), when to review requests, and prices

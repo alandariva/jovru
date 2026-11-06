@@ -496,9 +496,22 @@ pub fn now_utc() -> String {
     crate::error_report::utc(seconds)
 }
 
-/// Writes the document where the user chose.
+/// Writes the document where the user chose. Its telemetry span records the
+/// size, never the path.
 pub async fn write(path: PathBuf, contents: String) -> std::io::Result<()> {
-    tokio::fs::write(path, contents).await
+    use tracing::Instrument as _;
+    let span = crate::client_span!(
+        "write_file",
+        jykre.bytes = crate::telemetry::attributes::count(contents.len())
+    );
+    let written = tokio::fs::write(path, contents)
+        .instrument(span.clone())
+        .await;
+    if written.is_err() {
+        span.record("error.type", "io");
+        span.record("otel.status_code", "error");
+    }
+    written
 }
 
 #[cfg(test)]

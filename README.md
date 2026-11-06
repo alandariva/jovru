@@ -170,6 +170,14 @@ day, keeping the last seven; **Open log folder** in Preferences shows them.
 `JYKRE_LOG=jykre=debug`); SQL text is logged only at `trace` and passwords
 never. `JYKRE_PROBE=1` adds frame-time measurements to the log.
 
+Telemetry is off by default. **Preferences › Diagnostics › Telemetry** can
+send the log and traces of every external call (databases, Databricks, the
+AI provider, the system vault, files) to an OpenTelemetry collector over OTLP
+(HTTP/protobuf or gRPC), logs and traces each on their own. Only metadata
+leaves: operations, database names, durations, row counts and error codes;
+never SQL, values, credentials, file paths or connection settings. Headers
+for the collector's authentication are kept in the system vault.
+
 Credentials are never serialized: SQLite and JSON files hold only non-sensitive
 configuration. Databricks tokens are resolved by the CLI at runtime and kept in
 memory. The SQLite files are not encrypted; they contain object names and types

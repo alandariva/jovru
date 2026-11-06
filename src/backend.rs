@@ -3,6 +3,9 @@ use crate::drivers::*;
 use crate::logging;
 use crate::metadata_scope::{EtaEstimator, MetadataScope, RefreshPhase, RefreshProgress};
 use crate::result::{ResultBuilder, ResultData, ResultLimit};
+use crate::telemetry::attributes::{
+    db_system, namespace, operation_name, path_namespace, record_error, record_outcome,
+};
 use crate::tr;
 use jykre_storage::{
     ChildPage, MetadataRepository, PageCursor, PageRequest, PendingRefresh, RefreshStatus,
@@ -307,6 +310,20 @@ pub async fn cached_relations(
 /// is missing, larger than `max_bytes` or not UTF-8 is `None`; one that exists
 /// but cannot be used is logged.
 pub async fn read_text_files(dir: &Path, files: &[String], max_bytes: u64) -> Vec<Option<String>> {
+    let span = crate::client_span!(
+        "read_files",
+        jykre.files = crate::telemetry::attributes::count(files.len()),
+        jykre.bytes = tracing::field::Empty
+    );
+    let texts = read_text_files_in(dir, files, max_bytes)
+        .instrument(span.clone())
+        .await;
+    let bytes: usize = texts.iter().flatten().map(String::len).sum();
+    span.record("jykre.bytes", crate::telemetry::attributes::count(bytes));
+    texts
+}
+
+async fn read_text_files_in(dir: &Path, files: &[String], max_bytes: u64) -> Vec<Option<String>> {
     let mut texts = Vec::with_capacity(files.len());
     for file in files {
         let path = dir.join(file);
@@ -358,6 +375,48 @@ pub async fn relation_columns(
     }
 }
 
+/// **Test connection**: connects with the form's settings and asks the
+/// server who it is.
+pub async fn test_connection(
+    input: ResolvedConnection,
+    cancel: CancellationToken,
+) -> DriverResult<ServerInfo> {
+    let span = crate::client_span!(
+        "test_connection",
+        db.system.name = db_system(input.config.driver)
+    );
+    let result = async {
+        let driver = builtin_registry()?.get(input.config.driver)?;
+        driver.test(&input, cancel).await
+    }
+    .instrument(span.clone())
+    .await;
+    record_outcome(&span, &result);
+    result
+}
+
+/// The namespaces under `parent` on the server, one level, for the choice of
+/// what to introspect.
+pub async fn discover_namespaces(
+    input: ResolvedConnection,
+    parent: ObjectPath,
+    cancel: CancellationToken,
+) -> DriverResult<Vec<MetadataObject>> {
+    let span = crate::client_span!(
+        "discover_namespaces",
+        db.system.name = db_system(input.config.driver),
+        db.namespace = path_namespace(&parent)
+    );
+    let result = async {
+        let driver = builtin_registry()?.get(input.config.driver)?;
+        driver.discover_namespaces(&input, &parent, cancel).await
+    }
+    .instrument(span.clone())
+    .await;
+    record_outcome(&span, &result);
+    result
+}
+
 /// What the object at `path` has beyond the refreshed tree, read from the
 /// server when the user asks (**Inspect**); never cached.
 pub async fn inspect_object(
@@ -365,8 +424,19 @@ pub async fn inspect_object(
     path: ObjectPath,
     cancel: CancellationToken,
 ) -> DriverResult<Inspection> {
-    let driver = builtin_registry()?.get(input.config.driver)?;
-    driver.inspect(&input, &path, cancel).await
+    let span = crate::client_span!(
+        "inspect_object",
+        db.system.name = db_system(input.config.driver),
+        db.namespace = path_namespace(&path)
+    );
+    let result = async {
+        let driver = builtin_registry()?.get(input.config.driver)?;
+        driver.inspect(&input, &path, cancel).await
+    }
+    .instrument(span.clone())
+    .await;
+    record_outcome(&span, &result);
+    result
 }
 
 /// The DDL or source of the object at `path`, read when the user asks.
@@ -375,8 +445,19 @@ pub async fn object_definition(
     path: ObjectPath,
     cancel: CancellationToken,
 ) -> DriverResult<String> {
-    let driver = builtin_registry()?.get(input.config.driver)?;
-    driver.definition(&input, &path, cancel).await
+    let span = crate::client_span!(
+        "object_definition",
+        db.system.name = db_system(input.config.driver),
+        db.namespace = path_namespace(&path)
+    );
+    let result = async {
+        let driver = builtin_registry()?.get(input.config.driver)?;
+        driver.definition(&input, &path, cancel).await
+    }
+    .instrument(span.clone())
+    .await;
+    record_outcome(&span, &result);
+    result
 }
 
 /// Searches the connection's cache by name (Unicode, case-insensitive),
@@ -483,11 +564,15 @@ pub async fn refresh_metadata(
     scope: ObjectPath,
     cancel: CancellationToken,
 ) -> DriverResult<i64> {
-    let span = tracing::info_span!(
+    let span = crate::client_span!(
         "refresh_metadata",
         connection_id = %id,
         driver = ?input.config.driver,
-        depth = scope.0.len()
+        depth = scope.0.len(),
+        db.system.name = db_system(input.config.driver),
+        db.namespace = path_namespace(&scope),
+        jykre.connection.id = %id,
+        jykre.metadata.depth = crate::telemetry::attributes::count(scope.0.len())
     );
     let started = Instant::now();
     let result = async {
@@ -498,6 +583,7 @@ pub async fn refresh_metadata(
     }
     .instrument(span.clone())
     .await;
+    record_outcome(&span, &result);
     let _entered = span.enter();
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &result {
@@ -720,10 +806,14 @@ async fn apply_selection_with(
         selection,
         read,
     } = target;
-    let span = tracing::info_span!(
+    let span = crate::client_span!(
         "apply_selection",
         connection_id = %id,
         driver = ?input.config.driver,
+        db.system.name = db_system(input.config.driver),
+        jykre.connection.id = %id,
+        jykre.namespaces.refreshed = tracing::field::Empty,
+        jykre.namespaces.failed = tracing::field::Empty
     );
     let started = Instant::now();
     let send = |update: RefreshProgress| {
@@ -791,15 +881,34 @@ async fn apply_selection_with(
                     break;
                 };
                 let (driver, input, cancel) = (driver.clone(), input.clone(), cancel.clone());
-                reads.spawn(async move {
-                    let started = Instant::now();
-                    let mut sink = Collected::default();
-                    let read = driver
-                        .introspect_level(&input, &unit, level, &mut sink, cancel)
-                        .await
-                        .map(|report| (sink.0, report));
-                    (unit, level, read, started.elapsed())
-                });
+                let read_span = crate::client_span!(
+                    "read_namespace",
+                    db.system.name = db_system(input.config.driver),
+                    db.namespace = path_namespace(&unit),
+                    jykre.metadata.objects = tracing::field::Empty
+                );
+                reads.spawn(
+                    async move {
+                        let started = Instant::now();
+                        let mut sink = Collected::default();
+                        let read = driver
+                            .introspect_level(&input, &unit, level, &mut sink, cancel)
+                            .await
+                            .map(|report| (sink.0, report));
+                        let span = tracing::Span::current();
+                        match &read {
+                            Ok((objects, _)) => {
+                                span.record(
+                                    "jykre.metadata.objects",
+                                    crate::telemetry::attributes::count(objects.len()),
+                                );
+                            }
+                            Err(error) => record_error(&span, error),
+                        }
+                        (unit, level, read, started.elapsed())
+                    }
+                    .instrument(read_span),
+                );
             }
             let Some(joined) = reads.join_next().await else {
                 break;
@@ -900,6 +1009,19 @@ async fn apply_selection_with(
     }
     .instrument(span.clone())
     .await;
+    match &result {
+        Ok(outcome) => {
+            span.record(
+                "jykre.namespaces.refreshed",
+                crate::telemetry::attributes::count(outcome.refreshed),
+            );
+            span.record(
+                "jykre.namespaces.failed",
+                crate::telemetry::attributes::count(outcome.failures.len()),
+            );
+        }
+        Err(error) => record_error(&span, error),
+    }
     let _entered = span.enter();
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &result {
@@ -935,11 +1057,14 @@ fn runtime() -> DriverResult<&'static tokio::runtime::Runtime> {
 pub async fn run<T: Send + 'static>(
     work: impl Future<Output = DriverResult<T>> + Send + 'static,
 ) -> DriverResult<T> {
-    runtime()?.spawn(work).await.map_err(|error| {
-        // The panic hook already recorded a panic with its backtrace.
-        tracing::error!(panicked = error.is_panic(), "database task failed");
-        DriverError::new(ErrorCode::Internal, tr!("Database task failed"))
-    })?
+    runtime()?
+        .spawn(work.in_current_span())
+        .await
+        .map_err(|error| {
+            // The panic hook already recorded a panic with its backtrace.
+            tracing::error!(panicked = error.is_panic(), "database task failed");
+            DriverError::new(ErrorCode::Internal, tr!("Database task failed"))
+        })?
 }
 
 /// One statement's result, built while the driver reads it.
@@ -1003,8 +1128,10 @@ pub struct SessionRun {
 /// error code; SQL text only at `trace`.
 ///
 /// `progress`, when given, receives the position of each statement as it is
-/// sent to the server, so the UI can tell which one is running.
+/// sent to the server, so the UI can tell which one is running. `connection`
+/// only labels the run's telemetry span.
 pub async fn query(
+    connection: Option<ConnectionId>,
     input: ResolvedConnection,
     session: Option<Box<dyn Session>>,
     requests: Vec<QueryRequest>,
@@ -1019,39 +1146,9 @@ pub async fn query(
             return Err(error);
         }
     };
-    query_with(
+    Ok(run_query(
         driver,
-        input,
-        session,
-        requests,
-        memory_ceiling,
-        cancel,
-        progress,
-    )
-    .await
-}
-
-/// Positions of the statements of a run, sent as each one starts.
-pub type Progress = tokio::sync::mpsc::UnboundedSender<usize>;
-
-/// [`query`] with a given driver.
-pub async fn query_with(
-    driver: Arc<dyn Driver>,
-    input: ResolvedConnection,
-    session: Option<Box<dyn Session>>,
-    requests: Vec<QueryRequest>,
-    memory_ceiling: usize,
-    cancel: CancellationToken,
-    progress: Option<Progress>,
-) -> DriverResult<SessionRun> {
-    let span = tracing::info_span!(
-        "query",
-        driver = ?input.config.driver,
-        statements = requests.len()
-    );
-    let started = Instant::now();
-    let run = run_statements(
-        driver,
+        connection,
         input,
         session,
         Statements {
@@ -1062,10 +1159,55 @@ pub async fn query_with(
         },
         cancel,
     )
-    .instrument(span.clone())
-    .await;
+    .await)
+}
+
+/// Positions of the statements of a run, sent as each one starts.
+pub type Progress = tokio::sync::mpsc::UnboundedSender<usize>;
+
+/// [`query`] with a given driver, for no saved connection in particular.
+pub async fn query_with(
+    driver: Arc<dyn Driver>,
+    input: ResolvedConnection,
+    session: Option<Box<dyn Session>>,
+    requests: Vec<QueryRequest>,
+    memory_ceiling: usize,
+    cancel: CancellationToken,
+    progress: Option<Progress>,
+) -> DriverResult<SessionRun> {
+    Ok(run_query(
+        driver,
+        None,
+        input,
+        session,
+        Statements {
+            requests,
+            memory_ceiling,
+            progress,
+            settle: false,
+        },
+        cancel,
+    )
+    .await)
+}
+
+/// A run inside its span, logged when it ends; `connection` only labels
+/// the span.
+async fn run_query(
+    driver: Arc<dyn Driver>,
+    connection: Option<ConnectionId>,
+    input: ResolvedConnection,
+    session: Option<Box<dyn Session>>,
+    statements: Statements,
+    cancel: CancellationToken,
+) -> SessionRun {
+    let span = run_span(connection, &input, &statements.requests);
+    let started = Instant::now();
+    let run = run_statements(driver, input, session, statements, cancel)
+        .instrument(span.clone())
+        .await;
     log_run(&span, started, &run);
-    Ok(run)
+    run
 }
 
 /// [`query`] for a report panel, whose session belongs to one `context`
@@ -1078,6 +1220,7 @@ pub async fn query_with(
 /// names resolve discards that result, and a `USE` the panel ran is undone
 /// for the next panel of the same session.
 pub async fn query_in_context(
+    connection: Option<ConnectionId>,
     input: ResolvedConnection,
     context: SessionContext,
     session: Option<Box<dyn Session>>,
@@ -1092,51 +1235,11 @@ pub async fn query_in_context(
             return Err(error);
         }
     };
-    query_in_context_with(
+    in_context(
         driver,
+        connection,
         input,
         context,
-        session,
-        requests,
-        memory_ceiling,
-        cancel,
-    )
-    .await
-}
-
-/// [`query_in_context`] with a given driver.
-pub async fn query_in_context_with(
-    driver: Arc<dyn Driver>,
-    input: ResolvedConnection,
-    context: SessionContext,
-    session: Option<Box<dyn Session>>,
-    requests: Vec<QueryRequest>,
-    memory_ceiling: usize,
-    cancel: CancellationToken,
-) -> DriverResult<SessionRun> {
-    let input = match driver.session_connection(&input, &context) {
-        Ok(input) => input,
-        Err(error) => {
-            close_session(session).await;
-            return Err(error);
-        }
-    };
-    let requests = requests
-        .into_iter()
-        .map(|mut request| {
-            request.options.context = context.clone();
-            request
-        })
-        .collect::<Vec<_>>();
-    let span = tracing::info_span!(
-        "query",
-        driver = ?input.config.driver,
-        statements = requests.len()
-    );
-    let started = Instant::now();
-    let run = run_statements(
-        driver,
-        input,
         session,
         Statements {
             requests,
@@ -1146,14 +1249,115 @@ pub async fn query_in_context_with(
         },
         cancel,
     )
-    .instrument(span.clone())
-    .await;
-    log_run(&span, started, &run);
-    Ok(run)
+    .await
 }
 
-/// Logs how a run ended, with its duration, rows and error code.
+/// [`query_in_context`] with a given driver, for no saved connection in
+/// particular.
+pub async fn query_in_context_with(
+    driver: Arc<dyn Driver>,
+    input: ResolvedConnection,
+    context: SessionContext,
+    session: Option<Box<dyn Session>>,
+    requests: Vec<QueryRequest>,
+    memory_ceiling: usize,
+    cancel: CancellationToken,
+) -> DriverResult<SessionRun> {
+    in_context(
+        driver,
+        None,
+        input,
+        context,
+        session,
+        Statements {
+            requests,
+            memory_ceiling,
+            progress: None,
+            settle: true,
+        },
+        cancel,
+    )
+    .await
+}
+
+async fn in_context(
+    driver: Arc<dyn Driver>,
+    connection: Option<ConnectionId>,
+    input: ResolvedConnection,
+    context: SessionContext,
+    session: Option<Box<dyn Session>>,
+    mut statements: Statements,
+    cancel: CancellationToken,
+) -> DriverResult<SessionRun> {
+    let input = match driver.session_connection(&input, &context) {
+        Ok(input) => input,
+        Err(error) => {
+            close_session(session).await;
+            return Err(error);
+        }
+    };
+    for request in &mut statements.requests {
+        request.options.context = context.clone();
+    }
+    Ok(run_query(driver, connection, input, session, statements, cancel).await)
+}
+
+/// The span of a run: the local log's fields (`driver`, `statements`) and,
+/// for telemetry, the database system, the connection and the namespace the
+/// statements start in (replaced by where they ended, see [`log_run`]).
+fn run_span(
+    connection: Option<ConnectionId>,
+    input: &ResolvedConnection,
+    requests: &[QueryRequest],
+) -> tracing::Span {
+    let span = crate::client_span!(
+        "query",
+        driver = ?input.config.driver,
+        statements = requests.len(),
+        db.system.name = db_system(input.config.driver),
+        db.namespace = tracing::field::Empty,
+        db.response.returned_rows = tracing::field::Empty,
+        jykre.connection.id = tracing::field::Empty,
+        jykre.statements = crate::telemetry::attributes::count(requests.len()),
+        jykre.statements.completed = tracing::field::Empty,
+        jykre.session.reopened = tracing::field::Empty
+    );
+    if let Some(connection) = connection {
+        span.record("jykre.connection.id", connection.to_string());
+    }
+    if let Some(namespace) = requests
+        .first()
+        .and_then(|request| namespace(&request.options.context))
+    {
+        span.record("db.namespace", namespace);
+    }
+    span
+}
+
+/// Logs how a run ended, with its duration, rows and error code, and
+/// records it on the run's span.
 fn log_run(span: &tracing::Span, started: Instant, run: &SessionRun) {
+    if let Some(namespace) = run.context.as_ref().and_then(namespace) {
+        span.record("db.namespace", namespace);
+    }
+    span.record("jykre.session.reopened", run.reopened);
+    match &run.batch {
+        Ok(batch) => {
+            let rows: usize = batch.completed.iter().map(|r| r.data.row_count()).sum();
+            span.record(
+                "db.response.returned_rows",
+                crate::telemetry::attributes::count(rows),
+            );
+            span.record(
+                "jykre.statements.completed",
+                crate::telemetry::attributes::count(batch.completed.len()),
+            );
+            if let Some(error) = &batch.error {
+                record_error(span, error);
+            }
+        }
+        Err(error) => record_error(span, error),
+    }
     let _entered = span.enter();
     let elapsed_ms = started.elapsed().as_millis() as u64;
     match &run.batch {
@@ -1221,6 +1425,7 @@ async fn run_statements(
     };
     let mut results = Vec::new();
     let mut failure = None;
+    let descriptor = driver.descriptor();
     for (index, request) in requests.into_iter().enumerate() {
         tracing::trace!(statement = index, sql = %request.sql, "statement");
         if let Some(progress) = &progress {
@@ -1229,12 +1434,37 @@ async fn run_statements(
         }
         let start = Instant::now();
         let mut builder = ResultBuilder::new(request.options.max_rows, memory_ceiling);
-        match session
+        let operation = operation_name(&request.sql, Some(descriptor.dialect));
+        let span = crate::client_span!(
+            "statement",
+            otel.name = operation,
+            db.system.name = db_system(descriptor.kind),
+            db.operation.name = operation,
+            db.namespace = tracing::field::Empty,
+            db.response.returned_rows = tracing::field::Empty,
+            db.response.status_code = tracing::field::Empty,
+            jykre.bytes = tracing::field::Empty,
+            jykre.rows.limit = crate::telemetry::attributes::count(request.options.max_rows)
+        );
+        if let Some(namespace) = namespace(&request.options.context) {
+            span.record("db.namespace", namespace);
+        }
+        let executed = session
             .execute(&request, &mut builder, cancel.clone())
-            .await
-        {
+            .instrument(span.clone())
+            .await;
+        let _entered = span.enter();
+        match executed {
             Ok(outcome) => {
                 let (data, limit) = page_limit(builder, &outcome, request.options.max_rows);
+                span.record(
+                    "db.response.returned_rows",
+                    crate::telemetry::attributes::count(data.row_count()),
+                );
+                span.record(
+                    "jykre.bytes",
+                    crate::telemetry::attributes::count(data.memory_bytes()),
+                );
                 tracing::debug!(
                     statement = index,
                     sql_len = request.sql.len(),
@@ -1253,6 +1483,7 @@ async fn run_statements(
                 });
             }
             Err(error) => {
+                record_error(&span, &error);
                 tracing::debug!(
                     statement = index,
                     sql_len = request.sql.len(),
@@ -1293,17 +1524,29 @@ async fn session_for_run(
     cancel: &CancellationToken,
 ) -> (DriverResult<Box<dyn Session>>, bool) {
     let mut reopened = false;
+    let system = db_system(input.config.driver);
     if let Some(mut session) = session {
-        match session.ping().await {
+        let span = crate::client_span!("ping", db.system.name = system);
+        let pinged = session.ping().instrument(span.clone()).await;
+        match pinged {
             Ok(()) if session.is_open() => return (Ok(session), false),
             _ => {
+                if let Err(error) = &pinged {
+                    record_error(&span, error);
+                }
                 tracing::debug!("kept session no longer answers; opening another");
                 close_session(Some(session)).await;
                 reopened = true;
             }
         }
     }
-    (driver.open_session(input, cancel.clone()).await, reopened)
+    let span = crate::client_span!("open_session", db.system.name = system);
+    let opened = driver
+        .open_session(input, cancel.clone())
+        .instrument(span.clone())
+        .await;
+    record_outcome(&span, &opened);
+    (opened, reopened)
 }
 
 /// The page's data and the limit that ended it: the memory ceiling when the
@@ -1339,9 +1582,15 @@ async fn session_context(
     session: &mut dyn Session,
     cancel: &CancellationToken,
 ) -> Option<SessionContext> {
-    match session.context(cancel.clone()).await {
+    let span = crate::client_span!("session_context");
+    match session
+        .context(cancel.clone())
+        .instrument(span.clone())
+        .await
+    {
         Ok(context) => Some(context),
         Err(error) => {
+            record_error(&span, &error);
             tracing::debug!(error_code = ?error.code, "session context unavailable");
             None
         }
@@ -1354,9 +1603,15 @@ async fn transaction_status(
     session: &mut dyn Session,
     cancel: &CancellationToken,
 ) -> Option<TransactionStatus> {
-    match session.transaction(cancel.clone()).await {
+    let span = crate::client_span!("transaction_state");
+    match session
+        .transaction(cancel.clone())
+        .instrument(span.clone())
+        .await
+    {
         Ok(status) => status,
         Err(error) => {
+            record_error(&span, &error);
             tracing::debug!(error_code = ?error.code, "transaction state unavailable");
             None
         }
@@ -1375,24 +1630,45 @@ pub async fn fetch(
 ) -> DriverResult<PageRun> {
     let start = Instant::now();
     let mut builder = ResultBuilder::page(columns, options.max_rows, memory_ceiling);
-    let page = session
+    let span = crate::client_span!(
+        "fetch",
+        db.namespace = tracing::field::Empty,
+        db.response.returned_rows = tracing::field::Empty,
+        jykre.bytes = tracing::field::Empty,
+        jykre.rows.limit = crate::telemetry::attributes::count(options.max_rows)
+    );
+    if let Some(namespace) = namespace(&options.context) {
+        span.record("db.namespace", namespace);
+    }
+    let fetched = session
         .fetch(&options, &mut builder, cancel.clone())
-        .await
-        .map(|outcome| {
-            let (data, limit) = page_limit(builder, &outcome, options.max_rows);
-            tracing::debug!(
-                rows = data.row_count(),
-                bytes = data.memory_bytes(),
-                "page read"
-            );
-            QueryResult {
-                has_more: outcome.has_more,
-                data,
-                outcome,
-                elapsed_ms: start.elapsed().as_millis(),
-                limit,
-            }
-        });
+        .instrument(span.clone())
+        .await;
+    record_outcome(&span, &fetched);
+    let page = fetched.map(|outcome| {
+        let _entered = span.enter();
+        let (data, limit) = page_limit(builder, &outcome, options.max_rows);
+        span.record(
+            "db.response.returned_rows",
+            crate::telemetry::attributes::count(data.row_count()),
+        );
+        span.record(
+            "jykre.bytes",
+            crate::telemetry::attributes::count(data.memory_bytes()),
+        );
+        tracing::debug!(
+            rows = data.row_count(),
+            bytes = data.memory_bytes(),
+            "page read"
+        );
+        QueryResult {
+            has_more: outcome.has_more,
+            data,
+            outcome,
+            elapsed_ms: start.elapsed().as_millis(),
+            limit,
+        }
+    });
     let (context, transaction) =
         if session.is_open() && page.as_ref().is_ok_and(|page| !page.has_more) {
             (
@@ -1419,12 +1695,20 @@ pub async fn fetch(
 /// Closes a tab's session within a short deadline; a close failure only
 /// means the server drops the connection on its own.
 pub async fn close_session(session: Option<Box<dyn Session>>) {
-    if let Some(session) = session
-        && tokio::time::timeout(Duration::from_secs(5), session.close())
-            .await
-            .is_err()
-    {
-        tracing::debug!("session close timed out");
+    let Some(session) = session else {
+        return;
+    };
+    let span = crate::client_span!("close_session");
+    let closed = tokio::time::timeout(Duration::from_secs(5), session.close())
+        .instrument(span.clone())
+        .await;
+    match closed {
+        Ok(result) => record_outcome(&span, &result),
+        Err(_) => {
+            record_error(&span, &DriverError::new(ErrorCode::Timeout, ""));
+            let _entered = span.enter();
+            tracing::debug!("session close timed out");
+        }
     }
 }
 
@@ -1796,6 +2080,100 @@ mod tests {
         assert!(text.contains("synthetic-sql-marker"), "{text}");
         assert!(!text.contains("synthetic-password-1234"), "{text}");
         assert!(!text.contains("synthetic-cell-value"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn telemetry_of_a_run_carries_metadata_only() {
+        let (subscriber, capture) = crate::telemetry::testing::capture("jykre=debug");
+        let _default = tracing::subscriber::set_default(subscriber);
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({"host":"synthetic-host.internal","user":"fixture","database":"fixture","sslMode":"disable"}),
+            },
+            credentials: Credentials {
+                password: Some(SecretString::from("synthetic-password-1234")),
+            },
+        };
+        let context = SessionContext {
+            catalog: None,
+            schema: Some("sales".into()),
+        };
+        let requests = ["SELECT 'synthetic-sql-marker'", "UPDATE t SET a = 'x'"]
+            .into_iter()
+            .map(|sql| QueryRequest {
+                parameters: Vec::new(),
+                sql: sql.into(),
+                options: ExecutionOptions {
+                    context: context.clone(),
+                    ..ExecutionOptions::default()
+                },
+            })
+            .collect();
+        let connection = ConnectionId::new();
+        let batch = run_query(
+            Arc::new(EchoDriver { rows: 2 }),
+            Some(connection),
+            input,
+            None,
+            Statements {
+                requests,
+                memory_ceiling: crate::result::DEFAULT_MEMORY_CEILING,
+                progress: None,
+                settle: false,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .batch
+        .unwrap();
+        assert_eq!(batch.completed.len(), 2);
+        let text = capture.exported_text();
+        for secret in [
+            "synthetic-password-1234",
+            "synthetic-sql-marker",
+            "synthetic-cell-value",
+            "synthetic-host.internal",
+        ] {
+            assert!(
+                !text.contains(secret),
+                "{secret} reached the collector: {text}"
+            );
+        }
+        let spans = capture.spans.get_finished_spans().unwrap();
+        let named = |name: &str| spans.iter().filter(|span| span.name == name).count();
+        assert_eq!(named("query"), 1, "{text}");
+        assert_eq!(named("open_session"), 1, "{text}");
+        assert_eq!((named("SELECT"), named("UPDATE")), (1, 1), "{text}");
+        for expected in [
+            "db.system.name=postgresql",
+            "db.operation.name=SELECT",
+            "db.namespace=sales",
+            "db.response.returned_rows=2 ",
+            "db.response.returned_rows=4 ",
+            "jykre.statements=2 ",
+            &format!("jykre.connection.id={connection}"),
+        ] {
+            assert!(text.contains(expected), "{expected} missing: {text}");
+        }
+        let run = spans.iter().find(|span| span.name == "query").unwrap();
+        let statement = spans.iter().find(|span| span.name == "SELECT").unwrap();
+        assert_eq!(statement.parent_span_id, run.span_context.span_id());
+        let rows = run
+            .attributes
+            .iter()
+            .find(|pair| pair.key.as_str() == "db.response.returned_rows")
+            .map(|pair| pair.value.clone());
+        assert_eq!(
+            rows,
+            Some(opentelemetry::Value::I64(4)),
+            "counts are integers"
+        );
+        assert_eq!(statement.span_kind, opentelemetry::trace::SpanKind::Client);
+        assert!(
+            text.contains("run finished"),
+            "the run's log is exported too: {text}"
+        );
     }
 
     async fn rows_and_limit(available: u32, max_rows: u32) -> (usize, Option<ResultLimit>) {

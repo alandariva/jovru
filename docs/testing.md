@@ -239,6 +239,15 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   received, and that rounds are never logged with their text or the key.
   Real providers are checked by hand: record the provider, model and
   outcome, never the key.
+- Telemetry ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)) is
+  tested with the SDK's in-memory exporters behind the same bridges and
+  filters as the application (`jykre::telemetry::testing::capture`): a run
+  with a synthetic password, SQL text, values and host exports none of them,
+  only allowlisted attributes, and its logs carry the run's trace. The OTLP
+  transport is tested against a fake collector on port 0 (protobuf, the
+  configured headers, a 401 as an authentication failure) and a closed gRPC
+  port. A real collector is checked by hand, with an isolated
+  `JYKRE_CONFIG_DIR`.
 - UI changes require opening the app and checking the affected flow, tabs,
   content preservation, shortcuts, focus and dividers where relevant. Record
   that check separately. Use `JYKRE_CONFIG_DIR` with an isolated folder and

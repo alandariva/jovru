@@ -78,6 +78,15 @@ unknown value takes its default (off, review every request). The API key is
 never here: it is in the OS vault ([Security](security.md#where-they-live)).
 Conversations are not saved.
 
+`telemetry.preferences` keeps the telemetry choices
+(`jykre::telemetry::TelemetryPreferences`, [ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)):
+`{"logs": false, "traces": false, "protocol": "http", "endpoint": ""}`.
+`protocol` is `http` (OTLP over HTTP/protobuf) or `grpc`. It is read once at
+start and written from Preferences, the last write asked for winning. A
+missing or unknown value takes its default (off). The collector's headers
+are never here: they are in the OS vault
+([Security](security.md#where-they-live)).
+
 `copy.preferences` keeps the choices of the copy menu
 (`jykre::copy_as::CopyOptions`): `{"format": "text", "header": false,
 "separator": ";", "quoting": "all", "null": "empty"}`, the format being the

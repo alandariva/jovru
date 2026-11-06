@@ -697,12 +697,7 @@ impl AppView {
 async fn write_reports(value: serde_json::Value) -> DriverResult<()> {
     let dir = connection_store::data_dir();
     backend::run(async move {
-        let repository = ConfigRepository::open(&dir).await?;
-        let result = repository
-            .set_setting(jykre::reports::SETTINGS_KEY, &value)
-            .await;
-        repository.close().await;
-        result
+        connection_store::write_setting(&dir, jykre::reports::SETTINGS_KEY, &value, "reports").await
     })
     .await
 }

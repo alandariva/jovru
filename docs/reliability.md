@@ -80,6 +80,10 @@
 | AI assistant: **Test** in Preferences | 30 s, cancellable |
 | AI assistant: one tool reading the metadata cache | 10 s; past it the model is told so and the round goes on |
 | AI assistant: reading, saving or removing the API key in the OS vault | 10 s, as passwords |
+| Telemetry: one export of a batch of spans or log records to the collector | 10 s, then the batch is retried at most three times with backoff, as OpenTelemetry recommends; past the queue (2,048), new items are dropped |
+| Telemetry: what is queued when the application exits | 3 s |
+| Telemetry: **Test** in Preferences | 10 s, cancellable |
+| Telemetry: reading, saving or removing the collector's headers in the OS vault | 10 s, as passwords |
 
 A new network operation gets an explicit timeout and a row in this table.
 
@@ -127,6 +131,12 @@ up by `jykre::logging::init` when the application starts:
 - SQLx statement logging is off in the drivers and in local storage, and
   `reqwest` never logs headers. A unit test runs a batch with a password and
   SQL text and checks neither appears in the logs above `trace`.
+- When the user turns it on, the same events (except `trace`, the frame
+  probe, UI-thread timings below a warning and events with a free-text
+  field) and the spans of external calls are also sent to an OpenTelemetry
+  collector ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md),
+  [Security](security.md#telemetry)). UI-thread timings use the target
+  `jykre::ui_thread`.
 
 ### Levels
 
@@ -144,6 +154,15 @@ Use them whenever they exist in context: `connection_id`, `driver`,
 `execution_id`, `operation`, `elapsed_ms`, `rows`, `error_code`. Spans
 (`#[instrument(skip_all, fields(...))]`) propagate them; `skip_all` prevents
 logging arguments by accident.
+
+A span around an external call (a database, a server, a program, the vault,
+a file) is a `client` span, `jykre::client_span!` in the library, with
+OpenTelemetry semantic-convention names for what telemetry may export
+(`db.system.name`, `db.namespace`, `db.operation.name`,
+`db.response.returned_rows`, `error.type`, `http.request.method`,
+`url.template`, `process.exit.code`, `gen_ai.*`) and `jykre.*` for the rest.
+It records how it ended with `telemetry::attributes::record_outcome`.
+`backend::run` carries the caller's span into the runtime.
 
 ### Never logged
 

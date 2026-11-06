@@ -19,6 +19,9 @@ serde_json.workspace = true
 reqwest.workspace = true
 secrecy.workspace = true
 tokio.workspace = true
+# Spans around each HTTP request and CLI run, exported by the application
+# when telemetry is on (ADR-0029); never a host, token, body or argument.
+tracing.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

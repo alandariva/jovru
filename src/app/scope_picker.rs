@@ -130,13 +130,7 @@ impl ScopePicker {
         let path = parent.clone();
         cx.spawn(async move |weak, cx| {
             let listing = cancel;
-            let result = backend::run(async move {
-                builtin_registry()?
-                    .get(input.config.driver)?
-                    .discover_namespaces(&input, &path, listing)
-                    .await
-            })
-            .await;
+            let result = backend::run(backend::discover_namespaces(input, path, listing)).await;
             let _ = weak.update(cx, |this, cx| {
                 if this.revision != revision {
                     return;

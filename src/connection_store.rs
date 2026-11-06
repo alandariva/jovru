@@ -14,6 +14,7 @@ use std::{
     ffi::OsString,
     path::{Path, PathBuf},
 };
+use tracing::Instrument as _;
 
 /// Folder name inside the platform data directory, following each OS convention.
 const APP_DIR: &str = if cfg!(any(windows, target_os = "macos")) {
@@ -106,6 +107,18 @@ pub struct LoadedConnections {
 /// five most recent distinct copies are kept), so a start that finds it
 /// damaged can offer to restore it.
 pub async fn load(dir: &Path, secrets: &dyn SecretStore) -> DriverResult<LoadedConnections> {
+    let span = crate::client_span!("config_read", jykre.config.operation = "connections");
+    let result = load_connections(dir, secrets)
+        .instrument(span.clone())
+        .await;
+    crate::telemetry::attributes::record_outcome(&span, &result);
+    result
+}
+
+async fn load_connections(
+    dir: &Path,
+    secrets: &dyn SecretStore,
+) -> DriverResult<LoadedConnections> {
     let repository = ConfigRepository::open(dir).await?;
     let mut result = load_from(dir, secrets, &repository).await;
     if let Ok(loaded) = &mut result
@@ -224,7 +237,7 @@ async fn load_from(
         let credentials = if profile.remember_password
             && signs_in_with_password(profile.config.driver)
         {
-            match vault(secrets.get(profile.id)).await {
+            match vault("get", secrets.get(profile.id)).await {
                 Ok(value) => {
                     if value.password.is_none() {
                         add_warning(
@@ -358,9 +371,16 @@ pub async fn save(
         .get(profile.config.driver)?
         .validate_connection(&profile.config)?;
     validate_row_limit(preferences.row_limit)?;
-    let repository = ConfigRepository::open(dir).await?;
-    let result = save_to(dir, profile, credentials, preferences, secrets, &repository).await;
-    repository.close().await;
+    let span = crate::client_span!("config_write", jykre.config.operation = "connection");
+    let result = async {
+        let repository = ConfigRepository::open(dir).await?;
+        let result = save_to(dir, profile, credentials, preferences, secrets, &repository).await;
+        repository.close().await;
+        result
+    }
+    .instrument(span.clone())
+    .await;
+    crate::telemetry::attributes::record_outcome(&span, &result);
     result
 }
 async fn save_to(
@@ -393,7 +413,7 @@ async fn save_to(
     let mut stored = false;
     if signs_in_with_password(profile.config.driver) && profile.remember_password {
         match credentials.password.clone() {
-            Some(password) => match vault(secrets.set(profile.id, password)).await {
+            Some(password) => match vault("set", secrets.set(profile.id, password)).await {
                 Ok(()) => stored = true,
                 Err(error) => {
                     profile.remember_password = false;
@@ -409,7 +429,7 @@ async fn save_to(
             // Nothing new to store: the vault may still hold the password,
             // only for the same server and user.
             None if remembered_before
-                && vault(secrets.get(profile.id))
+                && vault("get", secrets.get(profile.id))
                     .await
                     .is_ok_and(|stored| stored.password.is_some()) => {}
             None => {
@@ -448,7 +468,7 @@ async fn save_to(
             // A new connection that was not saved must not leave its
             // password behind.
             if stored && previous.is_none() {
-                let _ = vault(secrets.delete(profile.id)).await;
+                let _ = vault("delete", secrets.delete(profile.id)).await;
             }
             return Err(error);
         }
@@ -458,7 +478,10 @@ async fn save_to(
         .is_some_and(|previous| previous.remember_password);
     // Remember turned off (by the user or above): the old entry goes, so a
     // password for another server or user is never read back.
-    if had_entry && !profile.remember_password && vault(secrets.delete(profile.id)).await.is_err() {
+    if had_entry
+        && !profile.remember_password
+        && vault("delete", secrets.delete(profile.id)).await.is_err()
+    {
         add_warning(
             &mut warning,
             tr!(
@@ -505,14 +528,21 @@ pub async fn delete(
     profile: &ConnectionProfile,
     secrets: &dyn SecretStore,
 ) -> DriverResult<Option<String>> {
-    let repository = ConfigRepository::open(dir).await?;
-    let result = repository.delete(profile.id, profile.revision).await;
-    repository.close().await;
+    let span = crate::client_span!("config_write", jykre.config.operation = "connection_delete");
+    let result = async {
+        let repository = ConfigRepository::open(dir).await?;
+        let result = repository.delete(profile.id, profile.revision).await;
+        repository.close().await;
+        result
+    }
+    .instrument(span.clone())
+    .await;
+    crate::telemetry::attributes::record_outcome(&span, &result);
     result?;
     let mut warning = None;
     // Removed even when Remember password is off: an entry an earlier
     // version left must not outlive its connection.
-    if let Err(error) = vault(secrets.delete(profile.id)).await {
+    if let Err(error) = vault("delete", secrets.delete(profile.id)).await {
         add_warning(
             &mut warning,
             tr!(
@@ -534,6 +564,27 @@ pub async fn delete(
         );
     }
     Ok(warning)
+}
+
+/// Writes one setting of `config.db` in the data folder `dir`; `operation`
+/// names it in its telemetry span (`workspace_state`, `reports`).
+pub async fn write_setting(
+    dir: &Path,
+    key: &str,
+    value: &serde_json::Value,
+    operation: &'static str,
+) -> DriverResult<()> {
+    let span = crate::client_span!("config_write", jykre.config.operation = operation);
+    let result = async {
+        let repository = ConfigRepository::open(dir).await?;
+        let result = repository.set_setting(key, value).await;
+        repository.close().await;
+        result
+    }
+    .instrument(span.clone())
+    .await;
+    crate::telemetry::attributes::record_outcome(&span, &result);
+    result
 }
 
 /// Writes of one preference where the last one asked for wins: a write that
@@ -569,7 +620,10 @@ impl LatestWrite {
         if self.asked.load(std::sync::atomic::Ordering::SeqCst) != ticket {
             return None;
         }
-        Some(write.await)
+        let span = crate::client_span!("config_write", jykre.config.operation = "preference");
+        let result = write.instrument(span.clone()).await;
+        crate::telemetry::attributes::record_outcome(&span, &result);
+        Some(result)
     }
 }
 
@@ -604,18 +658,49 @@ pub async fn save_font_size(dir: &Path, size: f32, ticket: u64) -> DriverResult<
 /// as unavailable, so the connection dialog is never stuck saving.
 pub const VAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Runs a vault operation within [`VAULT_TIMEOUT`].
-async fn vault<T>(operation: impl Future<Output = DriverResult<T>>) -> DriverResult<T> {
-    vault_within(VAULT_TIMEOUT, operation).await
+/// Runs a vault operation on a connection password within [`VAULT_TIMEOUT`];
+/// `call` is `get`, `set` or `delete`.
+async fn vault<T>(
+    call: &'static str,
+    operation: impl Future<Output = DriverResult<T>>,
+) -> DriverResult<T> {
+    vault_within(
+        VaultCall::new("connection_password", call),
+        VAULT_TIMEOUT,
+        operation,
+    )
+    .await
+}
+
+/// What a vault operation does, for its telemetry span: which kind of item
+/// (`connection_password`, `api_key`, `telemetry_headers`) and which call
+/// (`get`, `set`, `delete`). Never the account itself.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VaultCall {
+    item: &'static str,
+    operation: &'static str,
+}
+
+impl VaultCall {
+    pub(crate) const fn new(item: &'static str, operation: &'static str) -> Self {
+        Self { item, operation }
+    }
 }
 
 /// Runs a vault operation within `limit`; past it the vault counts as
 /// unavailable, as when it refuses.
 pub(crate) async fn vault_within<T>(
+    call: VaultCall,
     limit: std::time::Duration,
     operation: impl Future<Output = DriverResult<T>>,
 ) -> DriverResult<T> {
-    tokio::time::timeout(limit, operation)
+    let span = crate::client_span!(
+        "vault",
+        jykre.vault.item = call.item,
+        jykre.vault.operation = call.operation
+    );
+    let result = tokio::time::timeout(limit, operation)
+        .instrument(span.clone())
         .await
         .unwrap_or_else(|_| {
             tracing::warn!(
@@ -628,7 +713,9 @@ pub(crate) async fn vault_within<T>(
                     "The system vault did not answer in time. The password will be used only in this session."
                 ),
             ))
-        })
+        });
+    crate::telemetry::attributes::record_outcome(&span, &result);
+    result
 }
 
 /// Adds `text` to the warnings already collected, so a later one does not
