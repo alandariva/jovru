@@ -9,7 +9,9 @@ use tokio::time::Instant;
 pub(super) fn decode_response(bytes: &[u8]) -> DriverResult<Value> {
     serde_json::from_slice::<serde::de::IgnoredAny>(bytes).map_err(|_| protocol())?;
     let result = field(bytes, "results")?;
-    let Some(result) = result else {
+    // A command still queued or running reports `"results": null`: only an
+    // object can hold a table whose cells need rewriting.
+    let Some(result) = result.filter(|range| bytes.get(range.start) == Some(&b'{')) else {
         return serde_json::from_slice(bytes).map_err(|_| protocol());
     };
     let object = bytes.get(result.clone()).ok_or_else(protocol)?;
@@ -856,6 +858,19 @@ mod tests {
                 ["cause"],
             "bad"
         );
+    }
+    #[test]
+    fn cluster_status_without_results_yet_is_not_a_protocol_error() {
+        // A command still queued or running reports `"results": null`.
+        for raw in [
+            &br#"{"id":"c","status":"Running","results":null}"#[..],
+            br#"{"id":"c","status":"Queued","results": null }"#,
+            br#"{"id":"c","status":"Running"}"#,
+        ] {
+            let value = decode_response(raw).unwrap();
+            assert!(value["status"].is_string());
+            assert!(value["results"].is_null());
+        }
     }
     fn parameter(name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
         QueryParameter {
