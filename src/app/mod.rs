@@ -2981,32 +2981,19 @@ impl Render for AppView {
                     .border_t_1()
                     .border_color(rgb(BORDER))
                     .justify_between()
-                    .child(
-                        row()
-                            .gap_3()
-                            .child(
-                                row()
-                                    .gap_1()
-                                    .child(icon(I::Folder, FAINT))
-                                    .child(label(tr!("Personal workspace"))),
-                            )
-                            .child(divider())
-                            .child(label(match self.connections.len() {
-                                1 => tr!("1 connection").to_string(),
-                                count => tr!("{0} connections", count),
-                            })),
-                    )
+                    .child(label(match self.connections.len() {
+                        1 => tr!("1 connection").to_string(),
+                        count => tr!("{0} connections", count),
+                    }))
                     .child(
                         row()
                             .gap_3()
                             .child(label(tr!("Local data · optional vault")))
                             .child(divider())
-                            .child(
-                                row()
-                                    .gap_1()
-                                    .child(dot(MINT))
-                                    .child(label("Jykre Studio · v0.1")),
-                            ),
+                            .child(label(format!(
+                                "Jykre Studio · v{}",
+                                env!("CARGO_PKG_VERSION")
+                            ))),
                     ),
             )
             .when(self.command_open, |s| s.child(self.command_palette(cx)))
