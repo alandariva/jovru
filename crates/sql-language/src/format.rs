@@ -43,7 +43,8 @@ fn formatter(
 ) -> Option<&'static sqruff_lib::core::linter::core::Linter> {
     use sqruff_lib::core::{config::FluffConfig, linter::core::Linter};
     use std::sync::OnceLock;
-    static FORMATTERS: [OnceLock<Option<Linter>>; 4] = [
+    static FORMATTERS: [OnceLock<Option<Linter>>; 5] = [
+        OnceLock::new(),
         OnceLock::new(),
         OnceLock::new(),
         OnceLock::new(),
@@ -53,6 +54,7 @@ fn formatter(
         Some(SqlDialect::Postgres) => (0, "postgres"),
         Some(SqlDialect::MySql) => (1, "mysql"),
         Some(SqlDialect::DatabricksSql) => (2, "databricks"),
+        Some(SqlDialect::Sqlite) => (4, "sqlite"),
         _ => (3, "ansi"),
     };
     FORMATTERS[slot]
@@ -270,6 +272,23 @@ mod tests {
 
     fn formatted(sql: &str, dialect: Option<SqlDialect>) -> String {
         format(sql, dialect).expect("the formatter runs").sql
+    }
+
+    #[test]
+    fn sqlite_keeps_its_bracket_names_and_parameters() {
+        const SQLITE: Option<SqlDialect> = Some(SqlDialect::Sqlite);
+        let bracketed = formatted(
+            "select [order id], \"b\" from t where c = :who and d = ?2 and e = @x",
+            SQLITE,
+        );
+        for kept in ["[order id]", "\"b\"", ":who", "?2", "@x"] {
+            assert!(bracketed.contains(kept), "{kept:?} in {bracketed:?}");
+        }
+        // Without brackets, which sqruff's SQLite grammar may not read, the
+        // whole statement is laid out.
+        let plain = formatted("select a, \"b\" from t where c = :who", SQLITE);
+        assert!(plain.starts_with("SELECT"), "{plain:?}");
+        assert!(plain.contains(":who"), "{plain:?}");
     }
 
     #[test]

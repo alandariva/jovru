@@ -1,9 +1,9 @@
 # Jykre Studio development documentation
 
 This folder is the source of truth for how Jykre Studio is built: a native
-Rust and GPUI desktop workspace for PostgreSQL, MySQL and Databricks. The root
-[README](../README.md) describes the product for users; these documents
-describe the rules for changing it.
+Rust and GPUI desktop workspace for PostgreSQL, MySQL, Databricks and SQLite.
+The root [README](../README.md) describes the product for users; these
+documents describe the rules for changing it.
 
 > If what you need to do contradicts these documents, do not improvise: stop
 > and ask the maintainer. When a change is accepted, update the document (or

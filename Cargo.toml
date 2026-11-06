@@ -1,6 +1,6 @@
 [package]
 name = "jykre"
-description = "Native Rust and GPUI desktop workspace for PostgreSQL, MySQL and Databricks"
+description = "Native Rust and GPUI desktop workspace for PostgreSQL, MySQL, Databricks and SQLite"
 readme = "README.md"
 keywords = ["database", "sql", "gpui", "postgresql", "databricks"]
 categories = ["database", "gui"]
@@ -70,6 +70,7 @@ jykre-core = { path = "crates/core" }
 jykre-driver-postgres = { path = "crates/driver-postgres" }
 jykre-driver-mysql = { path = "crates/driver-mysql" }
 jykre-driver-databricks = { path = "crates/driver-databricks" }
+jykre-driver-sqlite = { path = "crates/driver-sqlite" }
 jykre-storage = { path = "crates/storage" }
 jykre-secrets = { path = "crates/secrets" }
 jykre-sql = { path = "crates/sql" }

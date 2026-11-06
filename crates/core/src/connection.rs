@@ -46,6 +46,7 @@ pub enum DriverKind {
     Postgres,
     MySql,
     Databricks,
+    Sqlite,
 }
 
 #[non_exhaustive]
@@ -55,6 +56,7 @@ pub enum SqlDialect {
     Postgres,
     MySql,
     DatabricksSql,
+    Sqlite,
 }
 
 /// Serializable, non-sensitive options. Each driver owns their schema and validation.

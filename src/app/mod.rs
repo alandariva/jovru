@@ -327,6 +327,10 @@ struct AppView {
     connection_search_path: Entity<InputState>,
     /// PostgreSQL: offer the server's other databases to introspect.
     all_databases: bool,
+    /// SQLite: the full path of the database file.
+    connection_file: Entity<InputState>,
+    /// SQLite: open the file read-only.
+    sqlite_read_only: bool,
     /// Hours after which opening the connection reads its chosen namespaces
     /// again; empty or 0 never does.
     connection_revalidate: Entity<InputState>,
@@ -598,6 +602,11 @@ impl AppView {
                 InputState::new(window, cx).placeholder(tr!("Server default, e.g. sales, public"))
             }),
             all_databases: false,
+            connection_file: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(tr!("Full path of an existing database file"))
+            }),
+            sqlite_read_only: false,
             connection_revalidate: cx
                 .new(|cx| InputState::new(window, cx).placeholder(tr!("Never"))),
             connection_databricks: cx
@@ -2469,7 +2478,7 @@ impl AppView {
             .child(icon(I::Database, MINT))
             .child(div().text_size(px(16.)).child(tr!("Connect to a database")))
             .child(label(tr!(
-                "Add a PostgreSQL, MySQL or Databricks connection to explore its metadata and run SQL."
+                "Add a PostgreSQL, MySQL, Databricks or SQLite connection to explore its metadata and run SQL."
             )))
             .child(
                 primary_button("welcome-add-connection", I::Plus, tr!("New connection")).on_click(

@@ -30,13 +30,15 @@ pub enum TokenKind {
     Executable,
     String,
     /// A name in the dialect's identifier quotes: `"x"` in PostgreSQL,
-    /// `` `x` `` in MySQL and Databricks, both without a dialect.
+    /// `` `x` `` in MySQL and Databricks, both without a dialect, and
+    /// `"x"`, `` `x` `` and `[x]` in SQLite.
     QuotedIdentifier,
     Number,
     /// A keyword, a function or a name.
     Word,
     /// A placeholder or a variable: `$1` (PostgreSQL), `?` (MySQL and
-    /// Databricks), `:name` (Databricks), `@var` and `@@var` (MySQL).
+    /// Databricks), `:name` (Databricks), `@var` and `@@var` (MySQL);
+    /// `?`, `?NNN`, `:name`, `@name` and `$name` (SQLite).
     Parameter,
     Symbol,
 }
@@ -61,17 +63,23 @@ impl Rules {
         matches!(self.dialect, Some(SqlDialect::DatabricksSql))
     }
 
+    fn sqlite(self) -> bool {
+        matches!(self.dialect, Some(SqlDialect::Sqlite))
+    }
+
     /// PostgreSQL quotes strings with `$$ … $$` and `$tag$ … $tag$`.
     fn dollar_quotes(self) -> bool {
-        !self.mysql() && !self.databricks()
+        !self.mysql() && !self.databricks() && !self.sqlite()
     }
 
     /// Whether a backslash escapes the next character inside `quote`.
     /// PostgreSQL treats it as an escape only in `E'…'` strings
-    /// (`standard_conforming_strings`, on by default).
+    /// (`standard_conforming_strings`, on by default); SQLite never does.
     fn backslash(self, quote: u8, escape_string: bool) -> bool {
         if self.postgres() {
             escape_string
+        } else if self.sqlite() {
+            false
         } else {
             quote != b'`'
         }
@@ -82,9 +90,9 @@ impl Rules {
         self.mysql()
     }
 
-    /// MySQL block comments do not nest; the others do.
+    /// MySQL and SQLite block comments do not nest; the others do.
     fn nested_comments(self) -> bool {
-        !self.mysql()
+        !self.mysql() && !self.sqlite()
     }
 
     /// MySQL identifiers may contain `$`.
@@ -109,9 +117,16 @@ impl Rules {
         !self.postgres()
     }
 
-    /// `:name` is a named parameter in Databricks (and without a dialect).
+    /// `:name` is a named parameter in Databricks and SQLite (and without
+    /// a dialect).
     fn colon_parameters(self) -> bool {
-        self.databricks() || self.dialect.is_none()
+        self.databricks() || self.sqlite() || self.dialect.is_none()
+    }
+
+    /// SQLite quotes names in brackets too (`[order]`), as MS Access does;
+    /// there are no arrays to confuse them with.
+    fn bracket_identifiers(self) -> bool {
+        self.sqlite()
     }
 }
 
@@ -229,6 +244,28 @@ fn next_token(sql: &str, mut pos: usize, rules: Rules) -> Option<(Range<usize>, 
             quoted_end(sql, start + 1, b'\'', rules.backslash(b'\'', true)),
             TokenKind::String,
         )
+    } else if ch == '[' && rules.bracket_identifiers() {
+        // No escape inside brackets: the first `]` closes the name.
+        let end = sql[start + 1..]
+            .find(']')
+            .map_or(sql.len(), |close| start + 1 + close + 1);
+        (end, TokenKind::QuotedIdentifier)
+    } else if matches!(ch, '$' | '@') && rules.sqlite() {
+        // SQLite's named parameters `$name` and `@name`.
+        let len = rest[1..]
+            .find(|c: char| !rules.word_char(c))
+            .unwrap_or(rest.len() - 1);
+        if len > 0 {
+            (start + 1 + len, TokenKind::Parameter)
+        } else {
+            (start + 1, TokenKind::Symbol)
+        }
+    } else if ch == '?' && rules.sqlite() {
+        // `?` or a numbered `?NNN`.
+        let len = rest[1..]
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len() - 1);
+        (start + 1 + len, TokenKind::Parameter)
     } else if ch == '$' && rules.dollar_quotes() {
         let tag = &sql[start + 1..];
         let tag_len = tag
@@ -408,7 +445,9 @@ impl Pending {
             "BEGIN" => {
                 let opens = if self.depth > 0 {
                     !rules.postgres()
-                } else if rules.mysql() {
+                } else if rules.mysql() || rules.sqlite() {
+                    // A trigger body (SQLite has no procedures); a `BEGIN`
+                    // on its own opens a transaction.
                     self.routine
                 } else if rules.postgres() {
                     following().as_deref() == Some("ATOMIC")
@@ -619,7 +658,8 @@ pub enum ExplainRefused {
 ///
 /// PostgreSQL, MySQL and Databricks all show the plan of `EXPLAIN
 /// <statement>` without running the statement (unlike `EXPLAIN ANALYZE`).
-/// Only queries and data changes are explained, so the words after
+/// SQLite's `EXPLAIN` lists the bytecode instead, so SQLite gets `EXPLAIN
+/// QUERY PLAN`, which does not run the statement either. Only queries and data changes are explained, so the words after
 /// `EXPLAIN` can never be read as one of its options.
 pub fn explain(
     sql: &str,
@@ -667,6 +707,9 @@ pub fn explain(
         return Err(ExplainRefused::NotExplainable);
     }
     let body = statement.trim_end().trim_end_matches(';').trim_end();
+    if rules.sqlite() {
+        return Ok(format!("EXPLAIN QUERY PLAN {body}"));
+    }
     Ok(format!("EXPLAIN {body}"))
 }
 
@@ -855,10 +898,11 @@ pub fn named_markers(sql: &str, dialect: Option<SqlDialect>) -> Vec<NamedMarker>
 mod named_marker_tests {
     use super::{SqlDialect, named_markers};
 
-    const DIALECTS: [Option<SqlDialect>; 4] = [
+    const DIALECTS: [Option<SqlDialect>; 5] = [
         Some(SqlDialect::Postgres),
         Some(SqlDialect::MySql),
         Some(SqlDialect::DatabricksSql),
+        Some(SqlDialect::Sqlite),
         None,
     ];
 
@@ -1382,5 +1426,97 @@ SELECT 'a;b' FROM t{index};
             .collect();
         assert_eq!(kinds[1], ("a$b", TokenKind::Word));
         assert_eq!(kinds[2], ("# note", TokenKind::Comment));
+    }
+}
+
+#[cfg(test)]
+mod sqlite_tests {
+    use super::{
+        SqlDialect, TokenKind, explain, named_markers, statements, string_literal, tokens,
+    };
+
+    const SQLITE: Option<SqlDialect> = Some(SqlDialect::Sqlite);
+
+    fn kinds(sql: &str) -> Vec<(&str, TokenKind)> {
+        tokens(sql, SQLITE)
+            .into_iter()
+            .map(|(range, kind)| (&sql[range], kind))
+            .collect()
+    }
+
+    #[test]
+    fn names_are_quoted_three_ways_and_backslashes_do_not_escape() {
+        assert_eq!(
+            kinds(r#"SELECT [order], "a""b", `c`, 'C:\' FROM t"#),
+            [
+                ("SELECT", TokenKind::Word),
+                ("[order]", TokenKind::QuotedIdentifier),
+                (",", TokenKind::Symbol),
+                (r#""a""b""#, TokenKind::QuotedIdentifier),
+                (",", TokenKind::Symbol),
+                ("`c`", TokenKind::QuotedIdentifier),
+                (",", TokenKind::Symbol),
+                (r"'C:\'", TokenKind::String),
+                ("FROM", TokenKind::Word),
+                ("t", TokenKind::Word),
+            ]
+        );
+        assert_eq!(string_literal(r"it's C:\", SQLITE), r"'it''s C:\'");
+    }
+
+    #[test]
+    fn every_parameter_form_is_one_token() {
+        let found: Vec<_> = kinds("SELECT ?, ?12, :a, @b, $c, $")
+            .into_iter()
+            .filter(|(_, kind)| *kind == TokenKind::Parameter)
+            .map(|(text, _)| text)
+            .collect();
+        assert_eq!(found, ["?", "?12", ":a", "@b", "$c"]);
+        let names: Vec<_> = named_markers("SELECT :a, [x:y], ':b' WHERE c = :c", SQLITE)
+            .into_iter()
+            .map(|marker| marker.name)
+            .collect();
+        assert_eq!(names, ["a", "c"]);
+    }
+
+    #[test]
+    fn block_comments_do_not_nest() {
+        assert_eq!(
+            statements("/* a /* b */ SELECT 1; SELECT 2;", SQLITE).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_trigger_body_keeps_its_semicolons_and_begin_alone_is_a_transaction() {
+        let sql = "CREATE TRIGGER t AFTER INSERT ON a BEGIN\n  UPDATE b SET n = n + 1;\n  \
+                   SELECT CASE WHEN 1 THEN 2 END;\nEND;\nBEGIN;\nINSERT INTO a VALUES (1);\nCOMMIT;";
+        let found: Vec<_> = statements(sql, SQLITE)
+            .into_iter()
+            .map(|range| &sql[range])
+            .collect();
+        assert_eq!(found.len(), 4, "{found:?}");
+        assert!(found[0].starts_with("CREATE TRIGGER") && found[0].ends_with("END;"));
+        assert_eq!(
+            &found[1..],
+            ["BEGIN;", "INSERT INTO a VALUES (1);", "COMMIT;"]
+        );
+    }
+
+    #[test]
+    fn explain_asks_for_the_query_plan() {
+        assert_eq!(
+            explain("SELECT * FROM t", 0..0, SQLITE).as_deref(),
+            Ok("EXPLAIN QUERY PLAN SELECT * FROM t")
+        );
+    }
+
+    #[test]
+    fn bracketed_names_are_read_without_their_brackets() {
+        use crate::names::{Part, parts};
+        assert_eq!(
+            parts("[my table]", SQLITE),
+            [Part::Quoted("my table".into())]
+        );
     }
 }

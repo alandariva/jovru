@@ -1,8 +1,10 @@
 # Database drivers
 
-The three adapters have `Ready` status and provide connection testing, SQL
+The four adapters have `Ready` status and provide connection testing, SQL
 sessions and metadata. PostgreSQL and MySQL use SQLx 0.9 with rustls TLS;
-Databricks uses the authenticated CLI and HTTPS with redirects disabled. The UI
+Databricks uses the authenticated CLI and HTTPS with redirects disabled; SQLite
+opens a database file through SQLx's bundled SQLite
+([ADR-0027](adr/0027-sqlite-driver.md)). The UI
 uses this backend and persists non-sensitive configuration and caches in
 SQLite. Passwords stay in the session or, if the user chooses, in the system
 vault.
@@ -15,9 +17,10 @@ vault.
 | `jykre-driver-postgres` | PostgreSQL configuration and adapter |
 | `jykre-driver-mysql` | MySQL configuration and adapter |
 | `jykre-driver-databricks` | CLI profile configuration and Databricks adapter |
+| `jykre-driver-sqlite` | Database file configuration and SQLite adapter |
 | `jykre-storage` | SQLite repositories for configuration, preferences and per-connection metadata |
 | `jykre-secrets` | Native vault; no fallback to a password file |
-| `jykre` | GPUI components and composition of the three drivers in `drivers::builtin_registry()` |
+| `jykre` | GPUI components and composition of the four drivers in `drivers::builtin_registry()` |
 
 Each adapter depends on core; core depends neither on the adapters nor on
 GPUI. The application knows the adapters only to build the registry. `backend`
@@ -31,7 +34,9 @@ PostgreSQL lists the configured database at the root and its schemas below
 it (without `pg_catalog`, `information_schema`, TOAST and temporary schemas);
 MySQL lists the visible databases, without the system ones; Databricks lists
 Unity Catalog catalogs (without `hive_metastore`) and the schemas of a
-catalog, calling only the listing endpoints. Below the last namespace level
+catalog, calling only the listing endpoints; SQLite lists the schemas of
+`pragma_database_list` without `temp` (`main`, and attached databases, which
+a fresh metadata connection does not have). Below the last namespace level
 the list is empty. `DriverCapabilities::namespace_levels` names those levels
 from the hierarchy; the application derives everything from it.
 
@@ -39,19 +44,20 @@ from the hierarchy; the application derives everything from it.
 reads the whole connection; database/catalog, schema, table/view and column
 read only the requested subset. PostgreSQL reads `pg_catalog` and MySQL
 `information_schema`, with parameterized filters; Databricks uses the
-individual Unity Catalog endpoints when an object is selected.
+individual Unity Catalog endpoints when an object is selected. SQLite reads
+the pragma table functions with bound arguments.
 
 What each driver reads ([ADR-0016](adr/0016-keys-defaults-and-relation-kinds.md)):
 
-| | PostgreSQL | MySQL | Databricks |
-| --- | --- | --- | --- |
-| Relation kinds | Tables (ordinary, partitioned, foreign), views, materialized views | Tables, views | Tables, views, materialized views (`table_type`) |
-| Column type | `format_type` (`character varying(80)`, `integer[]`, enum names) | `column_type` (`varchar(80)`, `enum('a','b')`) | `type_text` |
-| Default | `pg_get_expr` (the expression) | `column_default` (the value as MySQL reports it) | Not read |
-| Comments | Relations and columns | Relations and columns (empty means none; a view's `VIEW` is not a comment) | Relations and columns |
-| Primary key | Position of each column | Position of each column | `table_constraints` [NV with a real workspace] |
-| Foreign keys | A node per key, with its columns and the referenced table | Same | `table_constraints` [NV with a real workspace] |
-| Partitions | Listed under their root table (same schema), without columns; a partition in another schema is a table | Not listed | Not applicable |
+| | PostgreSQL | MySQL | Databricks | SQLite |
+| --- | --- | --- | --- | --- |
+| Relation kinds | Tables (ordinary, partitioned, foreign), views, materialized views | Tables, views | Tables, views, materialized views (`table_type`) | Tables (virtual ones too), views; SQLite's own `sqlite_` tables are left out |
+| Column type | `format_type` (`character varying(80)`, `integer[]`, enum names) | `column_type` (`varchar(80)`, `enum('a','b')`) | `type_text` | The declared type, as written (`VARCHAR(80)`); none for a column declared without one |
+| Default | `pg_get_expr` (the expression) | `column_default` (the value as MySQL reports it) | Not read | The expression as written (`'anonymous'`) |
+| Comments | Relations and columns | Relations and columns (empty means none; a view's `VIEW` is not a comment) | Relations and columns | SQLite has none |
+| Primary key | Position of each column | Position of each column | `table_constraints` [NV with a real workspace] | Position of each column |
+| Foreign keys | A node per key, with its columns and the referenced table | Same | `table_constraints` [NV with a real workspace] | Same; SQLite keeps no key names, so a key is named `(columns) → table`, and a key that names no columns references the parent's primary key |
+| Partitions | Listed under their root table (same schema), without columns; a partition in another schema is a table | Not listed | Not applicable | Not applicable |
 
 PostgreSQL shows a relation under the same rule as `information_schema`: the
 user owns it or has a privilege on it. Keys and partitions are only listed
@@ -59,16 +65,16 @@ under a relation the user can see.
 
 `Driver::default_namespaces` suggests the first choice of what to
 introspect: `public` of the configured PostgreSQL database, the configured
-MySQL database, or the Databricks profile's default catalog and schema when
-both are set. The dialog checks them, marked **Default**, when the list
+MySQL database, the Databricks profile's default catalog and schema when
+both are set, or SQLite's `main`. The dialog checks them, marked **Default**, when the list
 shows them and nothing was chosen yet; nothing is read until the user saves. The application publishes the read after
 success, replacing only that scope and keeping subtrees that have permission
 warnings.
 
 `DriverRegistry::register` takes an `Arc<dyn Driver>` and rejects duplicates
 without replacing the original driver. `get` returns a shared reference or
-`DriverNotRegistered`. `descriptors` lists PostgreSQL, MySQL and Databricks in
-that order, regardless of registration order. Consumers must check
+`DriverNotRegistered`. `descriptors` lists PostgreSQL, MySQL, Databricks and
+SQLite in that order, regardless of registration order. Consumers must check
 `DriverDescriptor.status`: a stub's capabilities describe planned support.
 
 ```rust
@@ -134,6 +140,34 @@ connections. MySQL authentication methods that require RSA must use TLS.
 Credentials and `ResolvedConnection` do not implement serialization; only the
 non-sensitive configuration can cross the persistence boundary. Passwords stay
 out of `options`. Validation errors do not echo the received values.
+
+### SQLite
+
+A connection names an existing database file by its full path; `readOnly`
+is optional and left out when off:
+
+```json
+{
+  "driver": "sqlite",
+  "options": {
+    "path": "C:\\data\\shop.sqlite",
+    "readOnly": true
+  }
+}
+```
+
+The path must be absolute and is never created: a missing file fails with
+`NotFound` instead of opening an empty database. `:memory:`, `file:` URIs and
+connection URLs are rejected. Every connection reads the schema table when it
+opens, so a file that is not a database fails at the test. A read-only
+connection refuses statements that write (`PermissionDenied`). SQLite needs
+no password: the dialog shows none, the vault is never written and opening a
+session never asks for one (`connection_store::signs_in_with_password`).
+Connections keep SQLx's defaults, including `PRAGMA foreign_keys = ON`, and
+wait up to 4 seconds for a lock another connection holds.
+
+The dialog's **Browse…** opens the system's file dialog to fill the path.
+The explorer shows the path beside the connection's name.
 
 ### Databricks
 
@@ -244,7 +278,10 @@ fresh token.
   the next statement. PostgreSQL puts the chosen schema first in
   `search_path` (`"schema", "$user", public`) and refuses another database;
   MySQL runs `USE`; Databricks sends the catalog and schema with each
-  statement (warehouses) or switches the cluster's SQL context.
+  statement (warehouses) or switches the cluster's SQL context. SQLite has
+  no statement that changes where unqualified names resolve (`temp`, `main`,
+  then the attached databases): it accepts `main` and refuses another schema
+  with `Validation`, asking to qualify the names instead.
 - `Driver::session_connection` ([ADR-0025](adr/0025-report-panels.md))
   gives the connection a session opens with so that names resolve in a
   context from its first statement; report panels open their sessions with
@@ -256,7 +293,8 @@ fresh token.
   error otherwise.
 - `Session::context` reports where unqualified names resolve now:
   `current_database()` and `current_schema()` in PostgreSQL, `DATABASE()` in
-  MySQL (as the schema), the followed catalog and schema in Databricks.
+  MySQL (as the schema), the followed catalog and schema in Databricks,
+  always `main` in SQLite.
   Asking discards a result still open for paging, so the application asks
   after a run whose last result is complete, or after its last page. The
   default implementation reports an empty context. In PostgreSQL, right
@@ -277,6 +315,9 @@ fresh token.
   - MySQL reports only `autocommit = 0` (`@@autocommit`): whether a `BEGIN`
     is open needs privileges a user may not have.
   - Databricks reports nothing.
+  - SQLite reports nothing: `sqlite3_get_autocommit` is private to SQLx
+    ([ADR-0027](adr/0027-sqlite-driver.md)), so the application infers the
+    state, including `BEGIN IMMEDIATE`/`EXCLUSIVE` and `END`.
 
   The protocol carries the exact state, but SQLx keeps it private; see
   [technical debt TD-001](technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
@@ -291,7 +332,7 @@ fresh token.
   defaults that keep the previous behaviour:
   - `cache_identity`: the options that decide which catalog a cache
     describes. PostgreSQL: host, port, database and user; MySQL: host,
-    port and user; Databricks: the CLI profile.
+    port and user; Databricks: the CLI profile; SQLite: the file's path.
   - `introspect_level` with `IntrospectionLevel::Names` (namespaces and
     relations only) or `Full`. A namespace read for the first time is
     published at `Names` and then `Full`.
@@ -379,11 +420,12 @@ commands) asks the driver how to write names:
 The backend tests do not compile GPUI:
 
 ```bash
-cargo test -p jykre-core -p jykre-driver-postgres -p jykre-driver-mysql -p jykre-driver-databricks --locked
+cargo test -p jykre-core -p jykre-driver-postgres -p jykre-driver-mysql -p jykre-driver-databricks -p jykre-driver-sqlite --locked
 ```
 
 They cover registration and duplicates, configuration, errors before I/O
-starts, prior cancellation, Databricks metadata without a warehouse,
+starts, prior cancellation, Databricks metadata without a warehouse, the
+SQLite driver against real files it creates in a temporary folder,
 credential protection, metadata paths and contract consumption by test
 implementations. The negative compilation doctests check that credentials and
 resolved connections cannot be serialized. The test implementations only
@@ -428,6 +470,28 @@ PostgreSQL inspects the configured database; MySQL inspects the visible
 databases, excluding internal schemas. Both read only the namespaces the user
 chose, and respect what the user is allowed to see.
 
+SQLite sends user SQL as written, through `RawSql`. Columns come from
+preparing the statement, so a query without rows still has them; their type
+is the declared type's affinity (`TEXT`, `INTEGER`, `REAL`, `BLOB`,
+`NUMERIC`), or none for an expression. Cells follow each value's storage
+class: `INTEGER` is `Cell::Integer`, `REAL` `Cell::Float` (SQLite stores a
+double, so nothing is rounded on the way), `TEXT` `Cell::Text`, or
+`Cell::Binary` when its bytes are not UTF-8, `BLOB` `Cell::Binary`, `NULL`
+`Cell::Null`. Rows affected are counted only for a statement that changed
+rows (`total_changes()` before and after), since SQLite's `changes()` keeps
+the last write's count. `:name` parameters become `?N`, bound in order;
+numbers are bound as their text and read as `CAST(?N AS NUMERIC)`, booleans
+as `1`/`0`, dates and timestamps as text. A cancellation or a timeout
+interrupts the statement through SQLite's progress handler and waits up to 5
+seconds for the connection to be idle; a result cut short is first left to
+end on its own, since interrupting a write inside a transaction rolls the
+transaction back. If the connection is not idle in time, the session is
+closed. A page kept open holds its statement, and a read lock on the file,
+until the result ends or another statement runs. Errors keep SQLite's message
+and its extended result code as the vendor code; `SQLITE_READONLY`,
+`SQLITE_PERM` and `SQLITE_AUTH` are `PermissionDenied`, `SQLITE_CANTOPEN`
+`NotFound`. **Explain** runs `EXPLAIN QUERY PLAN`.
+
 Databricks reads `DATABRICKS_CONFIG_FILE` or `.databrickscfg` in the home
 directory. Authenticate first with `databricks auth login --profile DEV`. The
 connection test checks Unity Catalog and configured compute access (classic
@@ -458,6 +522,9 @@ Real tests with dedicated disposable fixtures:
 ```bash
 cargo xtask check --full
 ```
+
+The SQLite tests need no fixture service: they create synthetic files in
+the system's temporary folder and run in the basic gate.
 
 The gate starts PostgreSQL 14/18 and MySQL 8.4/9.7 and removes the services at
 the end. They use only localhost and database/user `jykre`, with the public

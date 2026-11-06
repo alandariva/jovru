@@ -36,6 +36,7 @@ flowchart TB
         PG[jykre-driver-postgres]
         MY[jykre-driver-mysql]
         DBX[jykre-driver-databricks]
+        LITE[jykre-driver-sqlite]
         SqlCrate[jykre-sql: tokens, splitting]
         Language[jykre-sql-language: completion, format]
     end
@@ -53,11 +54,13 @@ flowchart TB
     Drivers --> PG
     Drivers --> MY
     Drivers --> DBX
+    Drivers --> LITE
     Storage --> Core
     Secrets --> Core
     PG --> Core
     MY --> Core
     DBX --> Core
+    LITE --> Core
 ```
 
 ## Layers and responsibilities
@@ -117,6 +120,7 @@ checked in review.
 │   ├── driver-postgres/    # jykre-driver-postgres
 │   ├── driver-mysql/       # jykre-driver-mysql
 │   ├── driver-databricks/  # jykre-driver-databricks
+│   ├── driver-sqlite/      # jykre-driver-sqlite
 │   ├── storage/            # jykre-storage
 │   ├── secrets/            # jykre-secrets
 │   ├── sql/                # jykre-sql
@@ -148,7 +152,7 @@ The full types live in `jykre-core`.
 | Type | Description |
 | --- | --- |
 | `ConnectionId` | Newtype over a UUID. Do not pass raw strings or UUIDs between layers. |
-| `DriverKind` | `Postgres`, `MySql`, `Databricks`; `#[non_exhaustive]`. |
+| `DriverKind` | `Postgres`, `MySql`, `Databricks`, `Sqlite`; `#[non_exhaustive]`. |
 | `ConnectionConfig` | Driver identity plus non-sensitive JSON options owned by the driver. Serializable. |
 | `Credentials`, `ResolvedConnection` | Configuration plus resolved secrets. In memory only; not serializable (checked by `compile_fail` doctests). |
 | `DriverDescriptor`, `DriverStatus` | What a driver is and supports. Consumers check status and capabilities, not the kind. |
@@ -192,9 +196,10 @@ sequenceDiagram
 - Splitting and highlighting share one tokenizer whose rules follow the
   connection's `SqlDialect` (`jykre::sql`): MySQL backslash escapes, `#`
   comments, `DELIMITER` and routine bodies; PostgreSQL `E''` strings, dollar
-  quotes and `BEGIN ATOMIC`; Databricks compound statements. It also tells
+  quotes and `BEGIN ATOMIC`; Databricks compound statements; SQLite `[x]`
+  names, strings without backslash escapes and trigger bodies. It also tells
   quoted names (`"x"`, `` `x` ``) from strings and finds parameters (`$1`,
-  `?`, `:name`, `@var`) by dialect. A tab without a connection uses generic
+  `?`, `:name`, `@var`, `$name`) by dialect. A tab without a connection uses generic
   rules.
 - The tokenizer only knows words; whether a word is a keyword, a function or
   a type comes from the dialect's catalog

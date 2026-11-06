@@ -651,8 +651,9 @@ fn a_session_without_a_remembered_password_asks_for_one() {
     // An empty password typed in the prompt is an answer too.
     assert!(!needs_password(&input(DriverKind::Postgres, Some(""))));
     assert!(!needs_password(&input(DriverKind::MySql, Some("secret"))));
-    // Databricks signs in through the CLI.
+    // Databricks signs in through the CLI; a SQLite file needs no password.
     assert!(!needs_password(&input(DriverKind::Databricks, None)));
+    assert!(!needs_password(&input(DriverKind::Sqlite, None)));
 }
 
 #[tokio::test]

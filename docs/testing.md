@@ -21,7 +21,9 @@ formatting, Clippy with warnings treated as errors and
 `cargo test --workspace --locked`, then Clippy and the tests of
 `jykre-sql-language` without its default features (the built-in formatter
 instead of sqruff). It includes binary, library, contract,
-local Databricks HTTP and gate tests, plus the `compile_fail` credential
+local Databricks HTTP, SQLite file (synthetic databases created in the system's
+temporary folder, `crates/driver-sqlite/tests/file.rs`) and gate tests, plus
+the `compile_fail` credential
 doctests. Clippy also checks the examples. `live` tests are compiled but
 ignored in basic mode; Cargo prints their names and counts. No database,
 Docker or Databricks profile is needed in this mode.

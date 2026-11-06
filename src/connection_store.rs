@@ -222,7 +222,7 @@ async fn load_from(
         }
         let mut warning = migration_warning.clone();
         let credentials = if profile.remember_password
-            && profile.config.driver != DriverKind::Databricks
+            && signs_in_with_password(profile.config.driver)
         {
             match vault(secrets.get(profile.id)).await {
                 Ok(value) => {
@@ -391,7 +391,7 @@ async fn save_to(
         previous.remember_password && keeps_password(&previous.config, &profile.config)
     });
     let mut stored = false;
-    if profile.config.driver != DriverKind::Databricks && profile.remember_password {
+    if signs_in_with_password(profile.config.driver) && profile.remember_password {
         match credentials.password.clone() {
             Some(password) => match vault(secrets.set(profile.id, password)).await {
                 Ok(()) => stored = true,
@@ -641,11 +641,18 @@ fn add_warning(warning: &mut Option<String>, text: impl Into<String>) {
     });
 }
 
+/// Whether connections of `driver` sign in with a password the user types:
+/// not Databricks, which signs in through the CLI, nor SQLite, whose file
+/// needs none.
+pub fn signs_in_with_password(driver: DriverKind) -> bool {
+    !matches!(driver, DriverKind::Databricks | DriverKind::Sqlite)
+}
+
 /// Whether opening a session needs a password the application does not
-/// have: a driver that signs in with one (not Databricks, which uses the
-/// CLI) and no password in memory, because it was not remembered.
+/// have: a driver that [signs in with one](signs_in_with_password) and no
+/// password in memory, because it was not remembered.
 pub fn needs_password(input: &ResolvedConnection) -> bool {
-    input.config.driver != DriverKind::Databricks && input.credentials.password.is_none()
+    signs_in_with_password(input.config.driver) && input.credentials.password.is_none()
 }
 
 /// Whether a password kept for `previous` may be sent to `next`: the same

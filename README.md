@@ -4,8 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 A native desktop workspace written in Rust and [GPUI](https://www.gpui.rs/) to
-register PostgreSQL, MySQL and Databricks connections, explore metadata and run
-real SQL.
+register PostgreSQL, MySQL, Databricks and SQLite connections, explore metadata
+and run real SQL.
 
 > **Status:** early prototype (`0.1.0`). Windows is the primary and only
 > validated platform. The AI assistant panel is simulated.
@@ -53,6 +53,9 @@ Demo connections and results are labelled as such and never reach a server.
   classic all-purpose clusters must already be running.
   **Load CLI profiles** populates the profile select from the Databricks CLI;
   profile discovery skips authentication until the selected profile is used.
+  SQLite takes the full path of an existing database file (**Browse…** opens
+  the system's file dialog) and an optional **Open read-only**; it needs no
+  password, and a missing file is never created.
 - **Remember password** is optional and uses the operating system vault
   (Windows Credential Manager, macOS Keychain, Linux Secret Service). Without
   it, the password lives only in the session. If the vault fails, the UI says
@@ -178,7 +181,9 @@ The GPUI-independent backend implements PostgreSQL and MySQL with SQLx, SQL
 execution in sessions kept per tab and metadata via `information_schema`.
 Databricks uses CLI profiles, Statement Execution for warehouses, Command
 Execution for classic all-purpose clusters, and Unity Catalog REST for metadata.
-`jykre::drivers::builtin_registry()` registers the three adapters.
+SQLite opens a database file through SQLx's bundled SQLite and reads metadata
+from its pragma functions. `jykre::drivers::builtin_registry()` registers the
+four adapters.
 
 ```bash
 cargo run --example drivers --locked
@@ -194,6 +199,7 @@ cargo run --example connect --locked
 ```
 
 For Databricks use `"driver":"databricks"` and `"options":{"profile":"DEV"}`.
+For SQLite use `"driver":"sqlite"` and `"options":{"path":"C:\\data\\shop.sqlite"}`.
 SQL also needs `warehouseId`, or `"compute":"cluster"` with `clusterId`;
 metadata does not. `JYKRE_METADATA=1` enables
 metadata reading in the example. Nothing is persisted.

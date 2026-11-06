@@ -52,6 +52,9 @@
 | PostgreSQL/MySQL: connect, test, open a session | 15 s per step |
 | Statement execution (all drivers), and each further page | `ExecutionOptions.timeout`, chosen per tab: default 300 s; `None` disables it |
 | PostgreSQL/MySQL introspection | 300 s |
+| SQLite: open the file and read its header, test, open a session | 15 s per step |
+| SQLite: wait for a lock another connection holds (busy timeout) | 4 s, below the 5 s recovery, since the busy wait does not see an interrupt |
+| SQLite introspection | 300 s; namespace discovery 60 s |
 | Server-side cancel attempt after cancellation or timeout | 5 s |
 | Bringing a session back to a known state after a failure, or pinging a kept session | 5 s |
 | Databricks: test, warehouse open or initial classic authentication/compute check | 90 s |

@@ -49,3 +49,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0024](0024-reports.md) | Reports, with stored definitions, tabs of their own and a print HTML the user saves | Proposed (amended by 0025) |
 | [0025](0025-report-panels.md) | Report panels, each with its connection, database, SQL and chart, run on a session per connection and database (amends 0024 and, for reports, 0014) | Proposed |
 | [0026](0026-named-parameters-in-sql-tabs.md) | Named parameters in SQL tabs, and typed literals on classic Databricks clusters (amends 0023 and 0005) | Proposed |
+| [0027](0027-sqlite-driver.md) | SQLite database files through SQLx's bundled SQLite | Proposed |

@@ -333,12 +333,12 @@ impl AppView {
             .unwrap_or_default();
         let (name, config) = index.and_then(|index| self.connections[index].input.as_ref().map(|input| (self.connections[index].name.clone(), input.config.clone())))
             .unwrap_or_else(|| (String::new(), ConnectionConfig { driver: DriverKind::Postgres, options: serde_json::json!({"host":"localhost","port":5432,"database":"","user":"postgres","sslMode":"prefer"}) }));
-        self.driver = match config.driver {
-            DriverKind::MySql => 1,
-            DriverKind::Databricks => 2,
-            _ => 0,
-        };
+        self.driver = FORM_DRIVERS
+            .iter()
+            .position(|(kind, _)| *kind == config.driver)
+            .unwrap_or(0);
         self.all_databases = config.options["allDatabases"].as_bool().unwrap_or(false);
+        self.sqlite_read_only = config.options["readOnly"].as_bool().unwrap_or(false);
         for (field, value) in [
             (&self.connection_name, name),
             (
@@ -368,6 +368,10 @@ impl AppView {
                     .into(),
             ),
             (&self.connection_password, String::new()),
+            (
+                &self.connection_file,
+                config.options["path"].as_str().unwrap_or("").into(),
+            ),
             (
                 &self.connection_row_limit,
                 index
@@ -444,7 +448,7 @@ impl AppView {
             .get(driver)?
             .validate_connection(&config)?;
         let password = self.connection_password.read(cx).unmask_value().to_string();
-        let credentials = if driver == DriverKind::Databricks {
+        let credentials = if !connection_store::signs_in_with_password(driver) {
             Credentials::default()
         } else if password.is_empty() {
             // An empty password keeps the previous one only for the same
@@ -484,13 +488,20 @@ impl AppView {
 
     /// The driver and options typed in the form, before validation.
     fn form_config(&self, cx: &App) -> DriverResult<ConnectionConfig> {
-        let driver = [
-            DriverKind::Postgres,
-            DriverKind::MySql,
-            DriverKind::Databricks,
-        ][self.driver];
+        let driver = FORM_DRIVERS
+            .get(self.driver)
+            .map_or(DriverKind::Postgres, |(kind, _)| *kind);
         let mut options = if driver == DriverKind::Databricks {
             self.connection_databricks.read(cx).options(cx)?
+        } else if driver == DriverKind::Sqlite {
+            let mut options =
+                serde_json::json!({"path": self.connection_file.read(cx).value().trim()});
+            // Off is left out, as the driver writes it, so an unchanged form
+            // matches the saved configuration.
+            if self.sqlite_read_only {
+                options["readOnly"] = serde_json::Value::Bool(true);
+            }
+            options
         } else {
             let port: u16 = self
                 .connection_port
@@ -1094,7 +1105,8 @@ impl AppView {
             });
         profile.name = name;
         profile.config = input.config.clone();
-        profile.remember_password = self.driver != 2 && self.remember_password;
+        profile.remember_password =
+            connection_store::signs_in_with_password(input.config.driver) && self.remember_password;
         let scope = self.connection_scope.read(cx).selection();
         let previous_scope = editing
             .map(|index| self.connections[index].scope.clone())
@@ -3321,26 +3333,19 @@ impl AppView {
                                             })),
                                     ),
                             )
-                            .child(
-                                row().children(
-                                    ["PostgreSQL", "MySQL", "Databricks"]
-                                        .into_iter()
-                                        .enumerate()
-                                        .map(|(index, name)| {
-                                            button(("select-driver", index), I::Database, name)
-                                                .flex_1()
-                                                .aria_selected(self.driver == index)
-                                                .when(self.driver == index, |s| {
-                                                    s.bg(rgb(HOVER)).text_color(rgb(MINT))
-                                                })
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.select_driver(index, window, cx)
-                                                    },
-                                                ))
-                                        }),
-                                ),
-                            )
+                            .child(row().children(FORM_DRIVERS.into_iter().enumerate().map(
+                                |(index, (_, name))| {
+                                    button(("select-driver", index), I::Database, name)
+                                        .flex_1()
+                                        .aria_selected(self.driver == index)
+                                        .when(self.driver == index, |s| {
+                                            s.bg(rgb(HOVER)).text_color(rgb(MINT))
+                                        })
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.select_driver(index, window, cx)
+                                        }))
+                                },
+                            )))
                             .child(
                                 row()
                                     .id("connection-sections")
@@ -3638,7 +3643,7 @@ impl AppView {
         column()
             .gap_3()
             .child(field(tr!("Connection name"), &self.connection_name))
-            .when(self.driver != 2, |s| {
+            .when(self.driver < 2, |s| {
                 s.child(
                     row()
                         .gap_3()
@@ -3735,6 +3740,120 @@ impl AppView {
             .when(self.driver == 2, |s| {
                 s.child(self.connection_databricks.clone())
             })
+            .when(self.driver == 3, |s| s.child(self.sqlite_fields(cx)))
+    }
+
+    /// SQLite: the database file and whether it opens read-only.
+    fn sqlite_fields(&self, cx: &mut Context<Self>) -> Div {
+        column()
+            .gap_3()
+            .child(
+                column()
+                    .gap_1()
+                    .child(label(tr!("Database file")))
+                    .child(
+                        row()
+                            .gap_2()
+                            .child(
+                                Input::new(&self.connection_file)
+                                    .flex_1()
+                                    .disabled(self.connection_saving)
+                                    .aria_label(tr!("Database file")),
+                            )
+                            .child(
+                                button("browse-database-file", I::FolderOpen, tr!("Browse…"))
+                                    .flex_none()
+                                    .when(self.connection_saving, |s| {
+                                        s.opacity(0.6).cursor_default()
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.browse_database_file(window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(label(tr!(
+                        "An existing SQLite file. A missing file is never created, so a mistyped path cannot open an empty database."
+                    ))),
+            )
+            .child(
+                column()
+                    .gap_1()
+                    .child(
+                        button(
+                            "sqlite-read-only",
+                            if self.sqlite_read_only {
+                                I::SquareCheck
+                            } else {
+                                I::Square
+                            },
+                            tr!("Open read-only"),
+                        )
+                        .role(Role::CheckBox)
+                        .aria_toggled(if self.sqlite_read_only {
+                            Toggled::True
+                        } else {
+                            Toggled::False
+                        })
+                        .when(self.sqlite_read_only, |s| s.text_color(rgb(MINT)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.connection_saving {
+                                this.sqlite_read_only = !this.sqlite_read_only;
+                                this.invalidate_connection_test();
+                                cx.notify();
+                            }
+                        })),
+                    )
+                    .child(label(tr!(
+                        "Statements that write fail, whatever the file's permissions. The file needs no password."
+                    ))),
+            )
+    }
+
+    /// **Browse…** for the SQLite file: the system's open dialog fills the
+    /// path field. Closing the dialog leaves the field as it was.
+    fn browse_database_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connection_saving {
+            return;
+        }
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(tr!("Choose").into()),
+        });
+        cx.spawn_in(window, async move |weak, cx| {
+            let chosen = chosen.await;
+            let _ = weak.update_in(cx, |this, window, cx| {
+                if !this.connection_open || this.connection_saving {
+                    return;
+                }
+                match chosen {
+                    Ok(Ok(Some(paths))) => {
+                        let Some(path) = paths.into_iter().next() else {
+                            return;
+                        };
+                        let path = path.to_string_lossy().into_owned();
+                        this.connection_file
+                            .update(cx, |input, cx| input.set_value(path, window, cx));
+                        this.invalidate_connection_test();
+                        cx.notify();
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "open dialog failed");
+                        this.connection_status = Some(Feedback::new(
+                            Tone::Error,
+                            tr!(
+                                "The open dialog could not open. Type the file's full path instead."
+                            ),
+                        ));
+                        cx.notify();
+                    }
+                    // Closed without a file.
+                    _ => {}
+                }
+            });
+        })
+        .detach();
     }
 
     /// Switches the form to another driver. Re-selecting the current one
@@ -3749,11 +3868,9 @@ impl AppView {
             .update(cx, |form, _| form.cancel_discovery());
         // Another driver has other namespaces; the edited connection's own
         // choice comes back with its driver.
-        let kind = [
-            DriverKind::Postgres,
-            DriverKind::MySql,
-            DriverKind::Databricks,
-        ][index];
+        let kind = FORM_DRIVERS
+            .get(index)
+            .map_or(DriverKind::Postgres, |(kind, _)| *kind);
         let selection = self
             .editing_connection
             .filter(|editing| {
@@ -4060,11 +4177,21 @@ fn progress_bar(index: usize, progress: &RefreshProgress) -> impl IntoElement {
         })
 }
 
+/// The drivers the connection dialog offers, in the order of its buttons;
+/// `AppView::driver` is an index into it.
+const FORM_DRIVERS: [(DriverKind, &str); 4] = [
+    (DriverKind::Postgres, "PostgreSQL"),
+    (DriverKind::MySql, "MySQL"),
+    (DriverKind::Databricks, "Databricks"),
+    (DriverKind::Sqlite, "SQLite"),
+];
+
 // Resource labels are presentation only. The driver executes using the ID.
 fn connection_detail(config: &ConnectionConfig) -> String {
     let base = config.options["host"]
         .as_str()
         .or(config.options["profile"].as_str())
+        .or(config.options["path"].as_str())
         .unwrap_or("");
     let id = config.options["clusterId"]
         .as_str()
@@ -4092,6 +4219,7 @@ fn connection_shade(
         .unwrap_or(match driver {
             DriverKind::MySql => BLUE,
             DriverKind::Databricks => PURPLE,
+            DriverKind::Sqlite => TEAL,
             _ => MINT,
         })
 }

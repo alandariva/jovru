@@ -3671,6 +3671,7 @@ dependencies = [
  "jykre-driver-databricks",
  "jykre-driver-mysql",
  "jykre-driver-postgres",
+ "jykre-driver-sqlite",
  "jykre-secrets",
  "jykre-sql",
  "jykre-sql-language",
@@ -3731,6 +3732,18 @@ dependencies = [
  "futures-util",
  "jykre-core",
  "secrecy",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
+name = "jykre-driver-sqlite"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "jykre-core",
  "serde",
  "serde_json",
  "sqlx",

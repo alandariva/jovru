@@ -7,7 +7,7 @@
 | Language | Rust stable, edition 2024, minimum 1.95 | The minimum is checked in CI (`msrv` job) |
 | UI | GPUI through `gpui-kit` 0.9 (`gpui-pre-*` crates, `gpui-component`) | [ADR-0001](adr/0001-native-ui-with-gpui.md). `gpui-kit` pins a matching set of GPUI crates; upgrade them together |
 | Async runtime | Tokio 1, multi-thread, owned by `backend::run` | GPUI's own executors drive the UI; Tokio drives I/O |
-| PostgreSQL, MySQL, local SQLite | SQLx 0.9 without default features, `runtime-tokio`, rustls with native roots | [ADR-0002](adr/0002-sqlx-for-postgres-and-mysql.md), [ADR-0003](adr/0003-sqlite-for-local-storage.md) |
+| PostgreSQL, MySQL, SQLite (local storage and the SQLite driver) | SQLx 0.9 without default features, `runtime-tokio`, rustls with native roots; `sqlite` with its bundled SQLite | [ADR-0002](adr/0002-sqlx-for-postgres-and-mysql.md), [ADR-0003](adr/0003-sqlite-for-local-storage.md), [ADR-0027](adr/0027-sqlite-driver.md). Another SQLite binding (`rusqlite`) cannot be linked beside it |
 | Databricks | `reqwest` 0.12 with rustls, plus the Databricks CLI as an external program | [ADR-0005](adr/0005-databricks-through-cli-and-rest.md) |
 | Credentials | `keyring` 3 with the native backend of each platform; `secrecy` for in-memory secrets | [ADR-0004](adr/0004-os-vault-for-credentials.md) |
 | Errors | `thiserror` 2 | One classified `DriverError` across crates |
@@ -31,6 +31,7 @@ Databricks CLI.
 | PostgreSQL | 14 and 18 | `cargo xtask check --full` |
 | MySQL | 8.4 and 9.7 | `cargo xtask check --full` |
 | Databricks | SQL Warehouses or running classic all-purpose clusters, with Unity Catalog | Local HTTP tests plus manual check with an authenticated CLI ([Testing](testing.md)) |
+| SQLite | The version SQLx bundles (`libsqlite3-sys` in `Cargo.lock`) | `cargo xtask check`, against synthetic files |
 
 ## Policy for new dependencies
 
