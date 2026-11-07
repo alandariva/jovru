@@ -1,6 +1,7 @@
 # ADR-0030: Transaction state read from the protocol through a pinned SQLx fork (amends 0002 and 0027)
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented on 2026-11-07; accepted by the
+  maintainer on 2026-11-07)
 - **Date:** 2026-11-07
 - **Authors:** Alan de Oliveira (with an AI agent)
 
@@ -72,8 +73,10 @@ Until now the drivers made up for it, with gaps:
   - What a driver leaves unknown (whether a MySQL or SQLite transaction
     wrote) and drivers that report nothing (Databricks) keep the inference
     of `jykre::transaction`, which also learns `AND CHAIN`.
-- The patch is temporary. The same API is to be proposed upstream
-  (transact-rs/sqlx), rebased on its `main`. When a SQLx release has these
+- The patch is temporary. The same API is proposed upstream, rebased on
+  its `main`, in
+  [transact-rs/sqlx#4512](https://github.com/transact-rs/sqlx/pull/4512)
+  (opened 2026-11-07). When a SQLx release has these
   readers, under these names or others, the drivers move to it and the
   patch and the `allow-git` entry are removed.
 

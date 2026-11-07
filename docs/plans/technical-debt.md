@@ -18,7 +18,7 @@ own, across areas.
 
 | ID | Severity | Area | Debt | Status |
 | --- | --- | --- | --- | --- |
-| TD-001 | Critical | Transactions, drivers | The transaction state is not read from the database protocol, and the probes that replace it can change what the session's statements see | Fix in place through a pinned SQLx fork (ADR-0030, proposed); open until upstream |
+| TD-001 | Critical | Transactions, drivers | The transaction state is not read from the database protocol, and the probes that replace it can change what the session's statements see | Fix in place through a pinned SQLx fork (ADR-0030); open until upstream |
 | TD-002 | Low | Reports, query tabs, PostgreSQL driver | Binding `:name` parameters runs a `SELECT set_config(...)` before the statement, which can take the snapshot of a transaction the report panel's or the query tab's SQL opened | Open |
 
 ## TD-001 — Transaction state is not read from the protocol
@@ -28,9 +28,10 @@ own, across areas.
   `jykre-driver-mysql`, `jykre-driver-sqlite`, `jykre::transaction`
 - **Registered:** 2026-11-04
 - **Status:** Fix in place through a pinned SQLx fork (see *Way out*,
-  step 2, and [ADR-0030](../adr/0030-transaction-state-through-a-pinned-sqlx-fork.md),
-  proposed); open until a SQLx release has the readers. The *Problem* below
-  describes the state before that fix.
+  step 2, and [ADR-0030](../adr/0030-transaction-state-through-a-pinned-sqlx-fork.md));
+  open until a SQLx release has the readers
+  ([transact-rs/sqlx#4512](https://github.com/transact-rs/sqlx/pull/4512)).
+  The *Problem* below describes the state before that fix.
 
 ### Problem
 
@@ -118,7 +119,9 @@ What the application does instead, and why each falls short:
    - Whether a MySQL or SQLite transaction wrote is inferred from the
      statements.
    - The fork goes away only once a SQLx release has the readers; the
-     upstream pull request is not open yet.
+     upstream pull request,
+     [transact-rs/sqlx#4512](https://github.com/transact-rs/sqlx/pull/4512),
+     was opened on 2026-11-07.
 
 ### Done when
 

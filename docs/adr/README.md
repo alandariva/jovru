@@ -49,7 +49,7 @@ something is the way it is, and so a decision is not undone by accident.
 | [0024](0024-reports.md) | Reports, with stored definitions, tabs of their own and a print HTML the user saves | Proposed (amended by 0025) |
 | [0025](0025-report-panels.md) | Report panels, each with its connection, database, SQL and chart, run on a session per connection and database (amends 0024 and, for reports, 0014) | Proposed |
 | [0026](0026-named-parameters-in-sql-tabs.md) | Named parameters in SQL tabs, and typed literals on classic Databricks clusters (amends 0023 and 0005) | Proposed |
-| [0027](0027-sqlite-driver.md) | SQLite database files through SQLx's bundled SQLite | Proposed |
+| [0027](0027-sqlite-driver.md) | SQLite database files through SQLx's bundled SQLite | Proposed (amended by 0030) |
 | [0028](0028-agentic-ai-assistant-over-the-metadata-cache.md) | An agentic AI assistant over the metadata cache, with every request reviewable | Proposed |
 | [0029](0029-otlp-export-of-logs-and-traces.md) | Optional export of logs and traces over OTLP, with metadata only (amends 0009) | Accepted (implemented) |
-| [0030](0030-transaction-state-through-a-pinned-sqlx-fork.md) | Transaction state read from the protocol through a pinned SQLx fork (amends 0002 and 0027) | Proposed |
+| [0030](0030-transaction-state-through-a-pinned-sqlx-fork.md) | Transaction state read from the protocol through a pinned SQLx fork (amends 0002 and 0027) | Accepted (implemented) |
