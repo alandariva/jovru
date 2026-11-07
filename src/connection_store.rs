@@ -656,7 +656,7 @@ pub async fn save_font_size(dir: &Path, size: f32, ticket: u64) -> DriverResult<
 }
 
 /// How long a read, write or removal in the operating system vault may take
-/// ([Reliability](../docs/reliability.md#timeouts)). A vault that does not
+/// ([Reliability](../docs/standards/reliability.md#timeouts)). A vault that does not
 /// answer (a locked keyring waiting for an unlock nobody sees) is reported
 /// as unavailable, so the connection dialog is never stuck saving.
 pub const VAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

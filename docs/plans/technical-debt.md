@@ -46,7 +46,7 @@ MySQL in the status flags of each OK packet (`SERVER_STATUS_IN_TRANS`,
 transactions opened through SQLx's own API, so it is wrong for a `BEGIN` the
 user typed. The drivers therefore cannot read the state that the protocol
 already carries. SQLite keeps it in `sqlite3_get_autocommit`, which SQLx
-reaches only through `unsafe` FFI ([ADR-0027](adr/0027-sqlite-driver.md)), so
+reaches only through `unsafe` FFI ([ADR-0027](../adr/0027-sqlite-driver.md)), so
 the SQLite driver reports nothing and only the inference applies.
 
 What the application does instead, and why each falls short:
@@ -95,7 +95,7 @@ What the application does instead, and why each falls short:
    request, or a `[patch]` until a release has it). Then the drivers return
    it from `Session::transaction` with no query at all, the probes go away
    and the contract does not change. Adding or patching a dependency needs
-   the maintainer's approval ([Stack and dependencies](stack-and-dependencies.md)).
+   the maintainer's approval ([Stack and dependencies](../standards/stack-and-dependencies.md)).
 
 ### Done when
 
@@ -118,15 +118,15 @@ What the application does instead, and why each falls short:
 A report or query tab statement with parameters is preceded, in the same
 session, by
 `SELECT set_config(name, value, false) FROM unnest($1, $2)`, which binds the
-values ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md),
-[ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)). In a
+values ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md),
+[ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)). In a
 transaction that the tab's SQL opened (`BEGIN` before the statement) and
 that has no snapshot yet, that query takes the snapshot just before the
 statement would. It runs only for statements that carry parameters, which
 are queries that take a snapshot anyway, so what they read does not change;
 but a parameterized statement that must come first in a transaction cannot
 have parameters. The values also stay in the report's sessions (one per
-database its panels use, [ADR-0025](adr/0025-report-panels.md)) until their
+database its panels use, [ADR-0025](../adr/0025-report-panels.md)) until their
 next run, and in a query tab's session until its next run. Query tabs make
 this more likely than reports, since users open transactions there.
 

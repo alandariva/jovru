@@ -7,7 +7,7 @@ How query results are read, kept, shown and copied.
 A result is **bounded** while it is read, **converted off the UI thread**, and
 **rendered only where it is visible**. The UI thread receives display-ready
 data and builds the rows on screen, so a frame costs the same for ten rows or
-the largest result the limits allow ([Performance](performance.md)).
+the largest result the limits allow ([Performance](../standards/performance.md)).
 
 ## Value types
 
@@ -62,7 +62,7 @@ alignment only; the value itself is never converted.
 
 - `jykre::result::ResultData` holds the columns (name and database type) once,
   all cell text in one UTF-8 buffer, the end offset of each cell and a NULL
-  bitmap ([ADR-0008](adr/0008-compact-result-storage.md)). Cells are read
+  bitmap ([ADR-0008](../adr/0008-compact-result-storage.md)). Cells are read
   through `value(row, column)`, which returns `None` for NULL. Its size in
   memory is exact (`memory_bytes`).
 - `ResultBuilder` is the `RowSink` that `backend::query` hands the driver: it
@@ -79,7 +79,7 @@ alignment only; the value itself is never converted.
   when its key changes: the result version, the filter text, the sort or the
   number format. Hover, scroll and selection never rebuild it.
 - The grid on screen is `ResultGrid`, its own entity embedded in the workspace
-  with `.cached(...)` ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)).
+  with `.cached(...)` ([ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md)).
   It shares the tab's `Rc<ResultData>`, owns the selection, focus and scroll,
   and reports the selected count and copy notices to the workspace through
   `ResultGridEvent`. Selection and copy rules live in `jykre::grid`.
@@ -181,7 +181,7 @@ alignment only; the value itself is never converted.
   Up to 20,000 cells are summarized at once; a larger selection shows
   "Calculating…" while it is summarized off the UI thread, which reads the
   shared page in place
-  ([ADR-0022](adr/0022-result-pages-shared-across-threads.md)). A drag is
+  ([ADR-0022](../adr/0022-result-pages-shared-across-threads.md)). A drag is
   summarized when it ends.
 - A header's right edge resizes its column (48 to 1,600 px); a double click on
   it, or **Fit the column to its values** in the menu, fits the column to its
@@ -330,7 +330,7 @@ system's save dialog (`jykre::export`, `backend::export`).
   `""`, numbers are written as the database wrote them (a JSON number only
   when valid), strings are escaped by the dialect, nothing is converted
   between time zones or changed to defend spreadsheets from formulas
-  ([Security](security.md#exported-files)).
+  ([Security](../standards/security.md#exported-files)).
 - **XLSX** writes one sheet, `Result`, in constant memory (each row goes to a
   temporary file as soon as the next starts). A number column's value is a
   number cell only when it has at most 15 significant digits, which Excel
@@ -367,12 +367,12 @@ system's save dialog (`jykre::export`, `backend::export`).
   folder**.
 - Each part is converted and written on the runtime's blocking pool, never
   the UI thread; the held pages are shared with the export, not copied
-  ([ADR-0022](adr/0022-result-pages-shared-across-threads.md)).
+  ([ADR-0022](../adr/0022-result-pages-shared-across-threads.md)).
 
 ## Reports
 
-A report ([ADR-0024](adr/0024-reports.md),
-[ADR-0025](adr/0025-report-panels.md)) shows, in each panel, the last result
+A report ([ADR-0024](../adr/0024-reports.md),
+[ADR-0025](../adr/0025-report-panels.md)) shows, in each panel, the last result
 of the panel's SQL up to its connection's row limit, without paging, in the
 same grid. A panel's result may also take the memory ceiling divided by the
 report's number of panels (`jykre::reports::run::memory_ceiling`), so a

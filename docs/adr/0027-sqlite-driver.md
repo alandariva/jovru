@@ -73,7 +73,7 @@ Decisions made by the maintainer on 2026-11-06:
 - Negative or costs:
   - `Session::transaction` reports nothing (SQLx keeps
     `sqlite3_get_autocommit` private); the application infers the state from
-    the statements, as for MySQL's `BEGIN` ([TD-001](../technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)).
+    the statements, as for MySQL's `BEGIN` ([TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)).
   - Errors carry no position (SQLx does not expose `sqlite3_error_offset`).
   - Interrupting a write inside an explicit transaction makes SQLite roll
     the whole transaction back.

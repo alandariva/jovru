@@ -2,7 +2,7 @@
 
 A SQL client holds the keys to its users' databases. Security mistakes here
 have a high impact and are hard to undo once a secret has reached a file or a
-log. How to report a vulnerability is in [SECURITY.md](../SECURITY.md); this
+log. How to report a vulnerability is in [SECURITY.md](../../SECURITY.md); this
 document is the engineering standard.
 
 ## Credentials
@@ -11,11 +11,11 @@ document is the engineering standard.
 
 | Credential | Storage |
 | --- | --- |
-| PostgreSQL/MySQL password, with **Remember password** | OS vault through `jykre-secrets`: service `JykreStudio`, account `connection:<connection-id>:password` ([ADR-0004](adr/0004-os-vault-for-credentials.md)) |
+| PostgreSQL/MySQL password, with **Remember password** | OS vault through `jykre-secrets`: service `JykreStudio`, account `connection:<connection-id>:password` ([ADR-0004](../adr/0004-os-vault-for-credentials.md)) |
 | PostgreSQL/MySQL password, without it | Memory only, for the session |
 | Assistant API key (Anthropic, OpenAI, OpenAI-compatible endpoint) | Only in the OS vault through `jykre-secrets` (`ApiKeyStore`): service `JykreStudio`, accounts `assistant:anthropic:api-key`, `assistant:openai:api-key` and `assistant:openai-compatible:api-key`. The accounts are fixed (`ApiKeyAccount`); the UI never names one. Never in `config.db`, settings or logs |
-| OpenTelemetry collector headers (usually its authentication) | Only in the OS vault through `jykre-secrets` (`ApiKeyStore`): service `JykreStudio`, account `telemetry:otlp:headers` (`ApiKeyAccount::telemetry_headers`). Never in `config.db`, settings or logs, never shown back ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)) |
-| Databricks token | **Not stored by Jykre Studio.** Resolved by the Databricks CLI when needed and kept in memory ([ADR-0005](adr/0005-databricks-through-cli-and-rest.md)) |
+| OpenTelemetry collector headers (usually its authentication) | Only in the OS vault through `jykre-secrets` (`ApiKeyStore`): service `JykreStudio`, account `telemetry:otlp:headers` (`ApiKeyAccount::telemetry_headers`). Never in `config.db`, settings or logs, never shown back ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)) |
+| Databricks token | **Not stored by Jykre Studio.** Resolved by the Databricks CLI when needed and kept in memory ([ADR-0005](../adr/0005-databricks-through-cli-and-rest.md)) |
 
 ### Rules
 
@@ -61,14 +61,14 @@ document is the engineering standard.
   elevate privileges or work around a permission error.
 - Introspection with partial permissions does not fail: unreadable subtrees
   are kept from the last read and marked with a warning
-  ([Persistence](persistence.md#atomic-metadata-refresh)).
+  ([Persistence](../reference/persistence.md#atomic-metadata-refresh)).
 - Databricks requests run with the token of the CLI profile; Unity Catalog
   permissions are enforced by the server.
 - A report panel in another PostgreSQL database of the server opens its
   session there with the profile's own user, credentials and TLS, and only
   when the profile offers the server's other databases (`allDatabases`);
   otherwise the panel fails with a validation error
-  ([ADR-0025](adr/0025-report-panels.md)). The server decides what that user
+  ([ADR-0025](../adr/0025-report-panels.md)). The server decides what that user
   may read in it.
 - A report's panels may run on several connections: each connection that
   needs a password asks for it before the run, one after another, and the
@@ -82,19 +82,19 @@ document is the engineering standard.
   it or appends to it, with one exception: in a report or a query tab, the
   PostgreSQL and MySQL drivers replace each `:name` parameter marker with a
   fixed reference to a value they bind, never with the value itself
-  ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)), and on a
+  ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)), and on a
   classic Databricks cluster, which cannot bind, each marker becomes a typed
   literal: text only as the hexadecimal of its bytes
   (`decode(X'…', 'UTF-8')`), the other types only after checking that they
   hold nothing but their own characters
-  ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)). SQL warehouses bind
+  ([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)). SQL warehouses bind
   the values themselves and get the SQL unchanged.
 - A query tab keeps the values typed in its parameter fields in `config.db`
   with the tab, as it keeps the SQL (a report keeps only its defaults). They
   are never logged nor written to the history. **Explain**
   is an explicit action that sends `EXPLAIN` followed by the chosen query or
   data change, never `EXPLAIN ANALYZE`, so the statement does not run
-  ([Architecture](architecture.md#run-a-query)). Opening a table runs
+  ([Architecture](../reference/architecture.md#run-a-query)). Opening a table runs
   `SELECT * FROM` it, quoted by the driver, which is written in the editor
   before it runs and only reads; the row limit bounds each page.
 - SQL generated by the application binds values as parameters and quotes
@@ -102,7 +102,7 @@ document is the engineering standard.
 
 ## AI assistant
 
-The assistant ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md))
+The assistant ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md))
 sends requests to the provider the user chose. What a request may carry:
 
 - **Sent:** the SQL as the user wrote it (the failed statement, the editor's
@@ -154,7 +154,7 @@ sends requests to the provider the user chose. What a request may carry:
 
 Telemetry is off by default; the user turns logs and traces on separately in
 **Preferences › Diagnostics › Telemetry**
-([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)). What may leave:
+([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)). What may leave:
 
 - **Sent:** span names, kinds and times; the database system and namespace
   (database, catalog, schema), the statement's first keyword from a fixed
@@ -223,7 +223,7 @@ commands.
 - Values are written as the database returned them. Nothing is changed to
   stop a spreadsheet from reading a value that starts with `=`, `+`, `-` or
   `@` as a formula, since changing values would break
-  [golden rule 9](README.md#golden-rules) (approved 2026-11-04). Quotes in a
+  [golden rule 9](../README.md#golden-rules) (approved 2026-11-04). Quotes in a
   CSV do not stop a spreadsheet from evaluating such a value: a file exported
   from data others wrote is as untrusted as that data when opened in one. In
   XLSX every value is a string, a number or a boolean cell, never a formula.

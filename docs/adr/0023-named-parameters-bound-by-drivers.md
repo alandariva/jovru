@@ -17,8 +17,8 @@ for each run: a date range, a customer code, a status. Three written rules
 apply:
 
 - Values are always bound parameters, never interpolated into the text
-  ([Rust guidelines](../rust-guidelines.md#sql-generated-by-the-application)).
-- The SQL the user wrote is sent as written ([Security](../security.md#sql-sent-to-servers)).
+  ([Rust guidelines](../standards/rust-guidelines.md#sql-generated-by-the-application)).
+- The SQL the user wrote is sent as written ([Security](../standards/security.md#sql-sent-to-servers)).
 - User SQL runs through the text protocol (`RawSql`) and every value arrives
   as text ([ADR-0002](0002-sqlx-for-postgres-and-mysql.md)). The PostgreSQL
   and MySQL drivers decode rows with `value.as_str()`
@@ -184,7 +184,7 @@ path and still keeps every value out of the SQL text.
   - A driver that cannot bind refuses the request; it never falls back to
     interpolation.
   - Parameter values are never logged, like any query parameter
-    ([Security](../security.md#logs-and-diagnostics)).
+    ([Security](../standards/security.md#logs-and-diagnostics)).
 
 ## How to validate
 

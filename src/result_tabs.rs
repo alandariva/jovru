@@ -201,7 +201,7 @@ impl ResultTab {
         self.released
     }
 
-    /// What an export of this tab can read ([Results](../docs/results.md#export)).
+    /// What an export of this tab can read ([Results](../docs/reference/results.md#export)).
     pub fn export_source(&self) -> ExportSource {
         if self.state != ResultState::Done
             || self

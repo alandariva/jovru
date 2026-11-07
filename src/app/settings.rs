@@ -628,7 +628,7 @@ fn sql_preview() -> StyledText {
 }
 
 /// Every shortcut of the window, by where it works
-/// ([User experience](../../docs/ux.md#keyboard-shortcuts)).
+/// ([User experience](../../docs/reference/ux.md#keyboard-shortcuts)).
 fn shortcuts_page() -> Div {
     let groups: [(&'static str, &[(&'static str, &'static str)]); 4] = [
         (

@@ -4,7 +4,7 @@ The four adapters have `Ready` status and provide connection testing, SQL
 sessions and metadata. PostgreSQL and MySQL use SQLx 0.9 with rustls TLS;
 Databricks uses the authenticated CLI and HTTPS with redirects disabled; SQLite
 opens a database file through SQLx's bundled SQLite
-([ADR-0027](adr/0027-sqlite-driver.md)). The UI
+([ADR-0027](../adr/0027-sqlite-driver.md)). The UI
 uses this backend and persists non-sensitive configuration and caches in
 SQLite. Passwords stay in the session or, if the user chooses, in the system
 vault.
@@ -29,7 +29,7 @@ demo stays separate and is enabled with `JYKRE_DEMO=1`.
 
 `Driver::discover_namespaces` lists the namespaces directly below a parent
 without reading relations or columns, so the user can choose what to
-introspect ([ADR-0015](adr/0015-introspect-only-what-the-user-chooses.md)).
+introspect ([ADR-0015](../adr/0015-introspect-only-what-the-user-chooses.md)).
 PostgreSQL lists the configured database at the root and its schemas below
 it (without `pg_catalog`, `information_schema`, TOAST and temporary schemas);
 MySQL lists the visible databases, without the system ones; Databricks lists
@@ -47,7 +47,7 @@ read only the requested subset. PostgreSQL reads `pg_catalog` and MySQL
 individual Unity Catalog endpoints when an object is selected. SQLite reads
 the pragma table functions with bound arguments.
 
-What each driver reads ([ADR-0016](adr/0016-keys-defaults-and-relation-kinds.md)):
+What each driver reads ([ADR-0016](../adr/0016-keys-defaults-and-relation-kinds.md)):
 
 | | PostgreSQL | MySQL | Databricks | SQLite |
 | --- | --- | --- | --- | --- |
@@ -230,7 +230,7 @@ readiness and destroys it on close. Context defaults are applied using quoted
 the command API cannot bind values: text as `decode(X'<hex>', 'UTF-8')`,
 numbers as `CAST('…' AS DECIMAL(p,s))` (or `DOUBLE` with an exponent),
 `TRUE`/`FALSE`, `DATE'…'`, `TIMESTAMP'…'` and a typed `CAST(NULL AS …)`
-([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)). Warehouses send the
+([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)). Warehouses send the
 statement unchanged with the Statement API's typed `parameters`. Metadata uses Unity
 Catalog REST without opening a SQL session or starting compute. Jobs clusters,
 non-warehouse serverless compute and OAuth implemented inside the app remain
@@ -282,7 +282,7 @@ fresh token.
   no statement that changes where unqualified names resolve (`temp`, `main`,
   then the attached databases): it accepts `main` and refuses another schema
   with `Validation`, asking to qualify the names instead.
-- `Driver::session_connection` ([ADR-0025](adr/0025-report-panels.md))
+- `Driver::session_connection` ([ADR-0025](../adr/0025-report-panels.md))
   gives the connection a session opens with so that names resolve in a
   context from its first statement; report panels open their sessions with
   it, one per context. The default returns the connection unchanged, since
@@ -316,11 +316,11 @@ fresh token.
     is open needs privileges a user may not have.
   - Databricks reports nothing.
   - SQLite reports nothing: `sqlite3_get_autocommit` is private to SQLx
-    ([ADR-0027](adr/0027-sqlite-driver.md)), so the application infers the
+    ([ADR-0027](../adr/0027-sqlite-driver.md)), so the application infers the
     state, including `BEGIN IMMEDIATE`/`EXCLUSIVE` and `END`.
 
   The protocol carries the exact state, but SQLx keeps it private; see
-  [technical debt TD-001](technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
+  [technical debt TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
 - `Session::close` consumes the session and can report close failures.
   Relational sessions keep physical state (`USE`, `SET`, temporary tables,
   transactions). Databricks warehouses keep a logical catalog/schema context sent with
@@ -328,7 +328,7 @@ fresh token.
   `USE [SCHEMA | DATABASE]` statements, without promising transactions or
   other SQL state between statements. Classic clusters keep their actual SQL
   execution context, including successful context changes, between runs.
-- [ADR-0017](adr/0017-driver-metadata-contract-batch.md) adds, all with
+- [ADR-0017](../adr/0017-driver-metadata-contract-batch.md) adds, all with
   defaults that keep the previous behaviour:
   - `cache_identity`: the options that decide which catalog a cache
     describes. PostgreSQL: host, port, database and user; MySQL: host,
@@ -531,7 +531,7 @@ the system's temporary folder and run in the basic gate.
 
 The gate starts PostgreSQL 14/18 and MySQL 8.4/9.7 and removes the services at
 the end. They use only localhost and database/user `jykre`, with the public
-fixture password `jykre-test`. Ports and policy: [testing](testing.md). The
+fixture password `jykre-test`. Ports and policy: [testing](../standards/testing.md). The
 Databricks HTTP tests use a local mock server; the real CLI and workspace must
 be validated in an authenticated environment.
 

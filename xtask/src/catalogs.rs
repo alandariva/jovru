@@ -1,6 +1,6 @@
 //! `cargo xtask catalogs`: generates the SQL dialect catalogs in `catalog/`
 //! and checks them against the format of
-//! `docs/especificacao-catalogo-sql.md`.
+//! `docs/plans/sql-catalog-proposal.md`.
 //!
 //! The catalogs stand in for an external data repository: the application
 //! reads them at run time from a directory, and nothing in it depends on how

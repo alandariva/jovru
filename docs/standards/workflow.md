@@ -11,7 +11,7 @@ whole batch before it is committed.
 
 ## How work flows
 
-1. Read [docs/README.md](README.md) and the documents of the areas you will
+1. Read [docs/README.md](../README.md) and the documents of the areas you will
    change.
 2. Make the changes, with their tests, and update `docs/` when behaviour, a
    contract, the schema or configuration changes.
@@ -44,7 +44,7 @@ Never:
 - Make the gate pass around a problem: `#[allow(...)]` to silence a lint,
   `#[ignore]` or deleting a failing test, weakening an assertion, a
   "temporary" `unwrap()`.
-- Edit a released migration ([Persistence](persistence.md#migrations)).
+- Edit a released migration ([Persistence](../reference/persistence.md#migrations)).
 - Invent library APIs; check the documentation or the source of the version
   in `Cargo.lock` (`~/.cargo/registry`).
 - Use production databases, real credentials or real customer data
@@ -68,7 +68,7 @@ Never:
 ## Review checklist
 
 - [ ] Logic is in the right place, and crate dependency rules hold
-      ([Architecture](architecture.md)).
+      ([Architecture](../reference/architecture.md)).
 - [ ] No new `unwrap`/`expect`/`panic` on production paths (the workspace
       lints catch them) and no new `#[allow]` for those lints without
       approval; errors carry the right `ErrorCode`.
@@ -117,8 +117,8 @@ changed, and the maintainer reviewed the diff.
 
 ## Architecture decisions
 
-- Changing what an ADR or [Architecture](architecture.md) decides needs a new
-  ADR ([template](adr/0000-template.md)).
+- Changing what an ADR or [Architecture](../reference/architecture.md) decides needs a new
+  ADR ([template](../adr/0000-template.md)).
 - Agents may **propose** an ADR; only the maintainer accepts it. Accepted ADRs
   are not rewritten; a later one supersedes them.
 - A change needs an ADR when it affects more than one crate, a core contract,

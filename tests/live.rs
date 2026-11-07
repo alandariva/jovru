@@ -1,4 +1,4 @@
-//! Exports against the gate's databases ([Testing](../docs/testing.md#full-mode)).
+//! Exports against the gate's databases ([Testing](../docs/standards/testing.md#full-mode)).
 //!
 //! `cargo xtask check --full` runs these for every fixture with
 //! `JYKRE_TEST_DRIVER` (`postgres` or `mysql`) and `JYKRE_TEST_PORT`; they
@@ -23,11 +23,11 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let port: u16 = std::env::var("JYKRE_TEST_PORT")
-        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/testing.md)")
+        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/standards/testing.md)")
         .parse()
         .expect("JYKRE_TEST_PORT must be a valid port");
     let driver = std::env::var("JYKRE_TEST_DRIVER")
-        .expect("JYKRE_TEST_DRIVER must be postgres or mysql (see docs/testing.md)");
+        .expect("JYKRE_TEST_DRIVER must be postgres or mysql (see docs/standards/testing.md)");
     let credentials = Credentials {
         password: Some(SecretString::from("jykre-test".to_owned())),
     };

@@ -278,7 +278,7 @@ fn metadata_paging(c: &mut Criterion) {
 }
 
 /// Encoding a page for an export, as each part is before it reaches the
-/// file ([Results](../docs/results.md#export)).
+/// file ([Results](../docs/reference/results.md#export)).
 fn export_encoding(c: &mut Criterion) {
     use jykre::export::{Encoder, ExportFormat, ExportOptions, SqlTarget};
     let result = event_log(100_000);

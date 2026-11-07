@@ -49,8 +49,8 @@ application runs. **Light** or **Dark** stay chosen across restarts, and
 choosing **System** again follows the system once more. The choice applies
 at once to every part of the window.
 
-A **report** ([ADR-0024](adr/0024-reports.md),
-[ADR-0025](adr/0025-report-panels.md)) opens in a tab of its own, in a tab
+A **report** ([ADR-0024](../adr/0024-reports.md),
+[ADR-0025](../adr/0025-report-panels.md)) opens in a tab of its own, in a tab
 group of its own named after the report and drawn without a colour (grey),
 since it belongs to no connection: the group offers no new tab, takes
 no other tab and goes away with the report's tab, since the report's panels
@@ -81,7 +81,7 @@ tab's connection and database. Nothing is stored until **Save report**.
 Report tabs are not reopened after a restart.
 
 Dividers are adjustable with the mouse and the arrow keys. The assistant panel opens to the
-right of the query area ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
+right of the query area ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
 
 - **Telemetry** in Preferences › Diagnostics: **Send logs** and **Send
   traces** (both off by default), the protocol (HTTP/protobuf or gRPC), the
@@ -89,7 +89,7 @@ right of the query area ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metad
   system vault and never shown again). **Save** applies at once; turning a
   signal off stops capturing it immediately. **Test** sends one span and
   says how the collector answered, with a way to cancel. A note lists what
-  is sent and never sent ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)).
+  is sent and never sent ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)).
 - **Set up** in Preferences › Assistant: provider (Anthropic, OpenAI,
   OpenAI-compatible, Ollama or off), model, address, API key (kept in the
   system vault and never shown again), when to review requests, whether
@@ -223,9 +223,9 @@ Each state has one consistent representation.
 | Tags of saved queries | Library, under the search | Each tag once, as `#tag`; choosing one lists only the queries with it, choosing it again lists them all. The search finds tags too, and `#word` asks for a tag that starts with `word` |
 | Saved queries in the palette | **Ctrl+Shift+P** | Saved queries that match the text (name, tags, SQL, connection; `#tag` filters) are listed above the tables and views; Enter or a click opens the one highlighted. A search of tags alone lists no tables. Without text it lists at most 10 rows, and a search at most 50; when more matched, a line under the list says to type to search or to narrow it. In each row, the text typed (and each `#tag` filter, in the tags) is marked where it appears, ignoring case: brighter text on a faint mint wash (`MATCH_TEXT`, `MATCH_BG`) |
 | History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
-| Query parameters | Above a query tab's editor, under its header | One field per `:name` of the SQL (none without markers): the name, its type (**Automatic**, which shows the type it reads from the value, or one chosen) and **NULL**, which disables the field. A missing or malformed value of a statement being run is outlined in red with what is expected, and nothing runs. **Run again** binds the current values; an export that runs a statement again binds those its result ran with. The fields come back with the tab after a restart. The values are bound by the driver ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)) |
+| Query parameters | Above a query tab's editor, under its header | One field per `:name` of the SQL (none without markers): the name, its type (**Automatic**, which shows the type it reads from the value, or one chosen) and **NULL**, which disables the field. A missing or malformed value of a statement being run is outlined in red with what is expected, and nothing runs. **Run again** binds the current values; an export that runs a statement again binds those its result ran with. The fields come back with the tab after a restart. The values are bound by the driver ([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)) |
 | Saved report | Report toolbar, Reports list, tab group | The save icon is a filled bookmark while the tab holds the stored definition, and saving renames the report's tab group; the list shows each report's title, its connections (by name, or "N connections" past two), its number of panels and the start of its SQL, with its chart type as icon (a dashboard for several panels); a search filters by title, description, or a panel's title, connection or SQL |
-| Report parameters | The report's form | One field per `:name` of any panel, labelled as the definition says (`*` when required) with a placeholder for its type; a list parameter shows a menu of its choices (and **No value** when optional). A missing, malformed or unlisted value of a panel that runs is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)) |
+| Report parameters | The report's form | One field per `:name` of any panel, labelled as the definition says (`*` when required) with a placeholder for its type; a list parameter shows a menu of its choices (and **No value** when optional). A missing, malformed or unlisted value of a panel that runs is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)) |
 | Run of a report | Report toolbar, panel headers, footer, tab bar | **Run** turns into **Stop** while any panel runs; a connection without its password asks for it first, one after another; each panel shows **Waiting** (for its connection and database's session or a free place: at most four run at once), a spinner while it runs, **Failed** or **Stopped**, and its error in place of its result (a panel whose connection is gone says so and the others run); the tab shows the worst outcome; a panel's footer shows its rows, its time and "Stopped at the row limit" when more rows exist, and a panel whose session was lost says it was opened again |
 | Where a report panel runs | Panel header | A badge "connection · database" (just the connection for the session default), amber when the connection or database is no longer listed; while the report is edited, a menu of the connections with their namespaces, with a warning icon for one no longer listed |
 | Report chart | Above a panel's table | Bars (one small chart per value column), lines (one per value column on a shared scale), a pie or a number (the first row's value of one column, large, as the database wrote it); at most 50 bars, 1,000 points or 10 slices plus "Other", and a line says how many rows it shows when it leaves some out. A chart that cannot be drawn says why (a column missing, a column without numbers, no rows). A new panel takes the chart its first result suggests |
@@ -357,7 +357,7 @@ Rules:
 | Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
 | Tab bar: move between tabs | Arrows, `Home`, `End` |
 
-Shortcuts are GPUI actions in one keymap ([UI guidelines](ui-guidelines.md#actions-and-shortcuts)).
+Shortcuts are GPUI actions in one keymap ([UI guidelines](../standards/ui-guidelines.md#actions-and-shortcuts)).
 A new shortcut updates this table, avoids keys the editor already uses, and
 works without the mouse.
 
@@ -372,7 +372,7 @@ Every error follows the same shape:
 3. A **suggested action** when one exists ("Check the user and password",
    "Run `databricks auth login --profile DEV`", "Set a SQL Warehouse on the
    connection").
-4. **Copy details** ([Reliability](reliability.md#diagnostics-for-users)).
+4. **Copy details** ([Reliability](../standards/reliability.md#diagnostics-for-users)).
 
 When the database reports the position of a syntax error, the editor marks
 it and moves the cursor there. Avoid generic messages ("Unknown error"),
@@ -392,7 +392,7 @@ stack traces and modal dialogs for query errors.
 ## Theme and motion
 
 - A light and a dark theme with the same colour tokens of `ui.rs`
-  ([UI guidelines](ui-guidelines.md#colours-and-theme)); result values use the
+  ([UI guidelines](../standards/ui-guidelines.md#colours-and-theme)); result values use the
   colours in [Results](results.md#value-presentation).
 - The SQL font size is adjustable (12 to 24 px) and remembered.
 - Motion is reserved for work in progress (spinners). No decorative
@@ -402,7 +402,7 @@ stack traces and modal dialogs for query errors.
 
 Every essential flow works with the keyboard, focus is always visible, and
 interactive elements expose a role, a label and their state. Details are in
-[UI guidelines](ui-guidelines.md#accessibility-and-keyboard).
+[UI guidelines](../standards/ui-guidelines.md#accessibility-and-keyboard).
 
 ## Known deviations
 
@@ -410,4 +410,4 @@ interactive elements expose a role, a label and their state. Details are in
 | --- | --- |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Elapsed time and cancel for work over 2 s | **Format** runs off the UI thread and the editor stays usable, but the first format per dialect (building its grammar) or a long script can take seconds, and it cannot be cancelled; a result for SQL edited meanwhile is dropped |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines and the explorer's context menu and quick search mode are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines and the explorer's context menu and quick search mode are actions ([UI guidelines](../standards/ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |

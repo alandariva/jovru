@@ -44,7 +44,7 @@ rest of this document is checked in review.
   `jykre-secrets` does.
 - CPU work above about 1 ms (converting a result, building an index, sorting
   thousands of items) does not run on the UI thread; see
-  [Architecture](architecture.md#concurrency).
+  [Architecture](../reference/architecture.md#concurrency).
 - Traits used as objects (`dyn Driver`, `dyn Session`, `dyn SecretStore`) use
   `#[async_trait]`, re-exported by `jykre-core`.
 - A future never holds a `std::sync::MutexGuard`, a `RefCell` borrow or an
@@ -74,12 +74,12 @@ rest of this document is checked in review.
 
 The application generates SQL only for metadata introspection, previews
 and table Data views, session commands and the statements that bind a
-report's parameters ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)).
+report's parameters ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)).
 
 - Values are **always** bound parameters, never interpolated into the text.
   A report's parameter values are bound by the driver too, and never appear
   in any SQL text, not even quoted
-  ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)).
+  ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)).
 - Identifiers that must appear in the text are quoted by the driver's quoting
   rules. Never `format!("SELECT * FROM {name}")` with an unquoted name.
 - SQL typed by the user is sent **as written**. The application does not
@@ -88,7 +88,7 @@ report's parameters ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)).
   `:name` markers: the PostgreSQL and MySQL drivers replace each one with a
   fixed reference to the bound value, such as
   `(current_setting('jykre.p_0')::date)`, and change nothing else
-  ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)).
+  ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)).
 
 ## Secrets
 
@@ -99,7 +99,7 @@ report's parameters ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)).
 
 ## Logs
 
-Production code logs through `tracing` ([ADR-0009](adr/0009-structured-logging-and-timings.md))
+Production code logs through `tracing` ([ADR-0009](../adr/0009-structured-logging-and-timings.md))
 and never prints to stdout or stderr. The rules in
 [Reliability](reliability.md#logs) apply: structured fields, spans with
 `skip_all` or explicit fields, SQL only at `trace`, and nothing from
@@ -120,7 +120,7 @@ and never prints to stdout or stderr. The rules in
 
 ## Lints
 
-These rules are enforced by workspace lints ([ADR-0011](adr/0011-workspace-lints.md))
+These rules are enforced by workspace lints ([ADR-0011](../adr/0011-workspace-lints.md))
 declared in the root `Cargo.toml`; every crate opts in with
 `[lints] workspace = true`, and Clippy in the gate fails on them:
 
@@ -145,7 +145,7 @@ Tests opt out of `unwrap_used`/`expect_used` with
 crate root and integration test file. Development tools allow only what their
 job needs, with a comment: `xtask` and the command-line examples may print,
 and the benchmarks may `expect` on their setup (approved by the maintainer on
-2026-11-02, [ADR-0011](adr/0011-workspace-lints.md#implementation-notes)). A lint is never silenced in
+2026-11-02, [ADR-0011](../adr/0011-workspace-lints.md#implementation-notes)). A lint is never silenced in
 production code to make the gate pass; an exception needs the maintainer's
 approval and a comment.
 

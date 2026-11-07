@@ -12,7 +12,7 @@ their signatures, and data types. Until now the tokenizer knew 33 keywords
 and 12 functions, the same for every dialect.
 
 The data changes with database releases, not with the application.
-[The catalog specification](../especificacao-catalogo-sql.md) defines it as
+[The catalog specification](../plans/sql-catalog-proposal.md) defines it as
 text files, one JSON line per entry, with the range of versions each entry is
 valid for, so that a new release only adds or closes the lines that changed.
 The data is meant to live, later, in a repository of its own that other tools

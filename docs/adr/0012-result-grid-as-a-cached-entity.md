@@ -73,7 +73,7 @@ Workspace
   formatting) stays in plain functions with unit tests.
 - Grid behaviour does not change: selection, copy, tooltips, `↵`,
   `name : type` headers and the footer work as described in
-  [Results](../results.md).
+  [Results](../reference/results.md).
 
 ## Alternatives considered
 
@@ -95,12 +95,12 @@ Workspace
 
 ## How to validate
 
-With the [frame probe](../performance.md#how-to-measure), in release and with
+With the [frame probe](../standards/performance.md#how-to-measure), in release and with
 the dev databases:
 
 - Hovering, scrolling and selecting in a 1,000-row and a 100,000-row result
   run `ResultGrid::render` only, not `Workspace::render`, and stay within the
-  [frame budget](../performance.md#budgets).
+  [frame budget](../standards/performance.md#budgets).
 - Typing in the editor with a 100,000-row result open does not run
   `ResultGrid::render`.
 - A visual check of the whole grid flow: selection by click, Shift+click,
@@ -117,4 +117,4 @@ Implemented on 2026-11-02 (`src/app/result_grid.rs`, `jykre::grid`).
   grid (24 `Workspace` renders, 1 `ResultGrid`). Hover, scroll and selection
   in the grid still re-render `Workspace`, because GPUI marks every ancestor of
   a notified view dirty, so the first validation above does not hold as
-  written ([Performance](../performance.md#known-deviations)).
+  written ([Performance](../standards/performance.md#known-deviations)).

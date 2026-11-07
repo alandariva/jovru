@@ -10,7 +10,7 @@ Users run the same queries again and again with different filters, and want
 the result in a form they can hand on: a table, sometimes a chart, pasted into
 a message or a spreadsheet, or printed to PDF. Today the application has SQL
 tabs, saved queries and the history, all kept in the `workspace.state`
-setting ([Persistence](../persistence.md#schema-configdb)).
+setting ([Persistence](../reference/persistence.md#schema-configdb)).
 
 A new "Reports" section in the left rail builds reports from saved SQL with
 named parameters ([ADR-0023](0023-named-parameters-bound-by-drivers.md)). It
@@ -19,13 +19,13 @@ runs into these constraints:
 - `WorkspaceState::to_value` (`src/workspace_state.rs`) writes back only the
   fields it knows. A version that does not know a field would erase it on its
   next save.
-- Query results are never written to disk ([Persistence](../persistence.md)).
+- Query results are never written to disk ([Persistence](../reference/persistence.md)).
 - Each tab owns one session ([ADR-0014](0014-a-session-per-tab.md)), and every
   place in `AppView` that handles tabs assumes they are SQL `Workspace`s.
 - A frame costs what is on screen (golden rule 7), and exact numbers never
   pass through floating point (golden rule 9) ([golden rules](../README.md#golden-rules)).
 - Adding a dependency needs the maintainer's approval
-  ([Stack and dependencies](../stack-and-dependencies.md)).
+  ([Stack and dependencies](../standards/stack-and-dependencies.md)).
 
 ## Decision
 
@@ -98,7 +98,7 @@ runs into these constraints:
   `cell_format::result_csv` and `cell_format::copy_cells`, with the existing
   confirmation above 50 MiB (`grid::COPY_CONFIRM_BYTES`). Reports write no CSV
   file.
-- **Print HTML.** Like a result export ([Results](../results.md#export)), it
+- **Print HTML.** Like a result export ([Results](../reference/results.md#export)), it
   writes a result to disk only where the user chose, when they ask:
   - "Export for print…" opens the system's save dialog
     (`cx.prompt_for_new_path`). The application writes one HTML file, only at

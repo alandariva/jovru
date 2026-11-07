@@ -1,4 +1,4 @@
-//! Writing a result to a file the user chose ([Results](../docs/results.md#export)).
+//! Writing a result to a file the user chose ([Results](../docs/reference/results.md#export)).
 //!
 //! Every format is written row by row, so an export never holds more than
 //! the page it is writing. [`ExportFile`] writes into a temporary file next
@@ -12,7 +12,7 @@
 //! floats (XLSX, whose cells are floats, gets a number only when no digit can
 //! change), NULL stays distinct from empty text wherever the format can tell
 //! them apart, and nothing is changed to defend spreadsheets from formulas
-//! ([Security](../docs/security.md#untrusted-content)).
+//! ([Security](../docs/standards/security.md#untrusted-content)).
 //!
 //! The functions of [`ExportFile`] block on disk I/O; callers run them on the
 //! runtime's blocking pool ([`crate::backend::export`]).
@@ -795,7 +795,7 @@ fn temp_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
 /// A file name for an export of `stem` (a table or a tab title) in
 /// `format`. Names from the database are never read as paths: characters
 /// that a file name cannot hold become `_`, and names Windows reserves get a
-/// `_` in front ([Security](../docs/security.md#untrusted-content)).
+/// `_` in front ([Security](../docs/standards/security.md#untrusted-content)).
 pub fn suggested_file_name(stem: &str, format: ExportFormat) -> String {
     let cleaned: String = stem
         .chars()

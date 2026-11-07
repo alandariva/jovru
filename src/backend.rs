@@ -27,7 +27,7 @@ pub use exporting::{
 };
 
 /// How long a read from the local metadata cache is expected to take
-/// ([Performance](../docs/performance.md#budgets)).
+/// ([Performance](../docs/standards/performance.md#budgets)).
 const CACHE_READ_BUDGET: Duration = Duration::from_millis(50);
 
 /// Children read per page when a node is expanded or "Load more" is used.

@@ -63,4 +63,4 @@ application would add a flow to maintain and tokens to store.
 - Negative: the CLI must be installed and logged in; SQL needs a Warehouse ID or
   a running classic all-purpose Cluster ID. The classic API can truncate results.
 - Required: real changes are validated with an authenticated CLI and a test
-  workspace ([Testing](../testing.md)).
+  workspace ([Testing](../standards/testing.md)).

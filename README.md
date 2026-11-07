@@ -90,7 +90,7 @@ Started without the entry, the window keeps the desktop's generic icon.
   the page on screen. It reads the rest of the result from the server when
   the session still has it, or runs a read-only statement again after
   asking; the file appears only once complete, and cancelling leaves the
-  chosen file as it was. See [Results](docs/results.md#export).
+  chosen file as it was. See [Results](docs/reference/results.md#export).
 - The metadata cache is stored locally, read page by page and browsable offline
   after a restart. Search also queries the local cache.
 - Double-click a table or view (or press Enter) for a new query on it, with
@@ -227,7 +227,7 @@ SQL also needs `warehouseId`, or `"compute":"cluster"` with `clusterId`;
 metadata does not. `JYKRE_METADATA=1` enables
 metadata reading in the example. Nothing is persisted.
 
-See [architecture, configuration and adding drivers](docs/drivers.md).
+See [architecture, configuration and adding drivers](docs/reference/drivers.md).
 
 ## Grouped tabs component
 
@@ -288,7 +288,7 @@ cargo xtask check
 cargo xtask check --full
 ```
 
-See the [testing policy](docs/testing.md) for prerequisites, offline runs, the
+See the [testing policy](docs/standards/testing.md) for prerequisites, offline runs, the
 pre-commit hook and manual UI/Databricks checks. The same gate runs in GitHub
 Actions on every push and pull request.
 

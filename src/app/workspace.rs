@@ -95,7 +95,7 @@ pub struct Workspace {
     next_lease: u64,
     /// The next page of a result is being read; runs wait for it.
     fetching: bool,
-    /// The export bar and the export it runs ([Results](../../docs/results.md#export)).
+    /// The export bar and the export it runs ([Results](../../docs/reference/results.md#export)).
     export: ExportBar,
     /// The fields of the SQL's `:name` parameters, above the editor.
     parameters: ParameterForm,
@@ -810,7 +810,7 @@ impl Workspace {
 
     /// **Copy this page as CSV**. A copy estimated above 50 MiB asks first
     /// before generation, since building and holding it takes time and
-    /// memory ([Results](../../docs/results.md#copying)).
+    /// memory ([Results](../../docs/reference/results.md#copying)).
     fn copy_page_csv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.current_page().filter(|_| self.has_results()).is_none() {
             self.notice = Some(Feedback::new(
@@ -1482,7 +1482,7 @@ impl Workspace {
     }
 
     /// Puts the cursor where the server stopped, when the editor still holds
-    /// the statement ([UX](../../docs/ux.md#error-messages)). Nothing is
+    /// the statement ([UX](../../docs/reference/ux.md#error-messages)). Nothing is
     /// selected, so the next key never replaces text.
     fn mark_error(&mut self, id: ResultId, cx: &mut Context<Self>) {
         if let Some(at) = self.error_offset(id) {
@@ -2586,7 +2586,7 @@ impl Workspace {
         let state = self.run.state();
         // After two seconds a run shows how long it has taken, and a
         // cancellation that takes long says the server has not stopped yet
-        // ([UX](../../docs/ux.md#always-visible-states)).
+        // ([UX](../../docs/reference/ux.md#always-visible-states)).
         let elapsed = |duration: Duration| {
             (duration >= Duration::from_secs(2))
                 .then(|| cell_format::duration(duration.as_millis() as u64))

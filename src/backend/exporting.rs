@@ -1,5 +1,5 @@
 //! Export of a result to a file, on the database runtime
-//! ([Results](../../docs/results.md#export)).
+//! ([Results](../../docs/reference/results.md#export)).
 //!
 //! The rows go to the file in parts: first the pages the tab already holds,
 //! then the rest of the result, read from the session in parts of about
@@ -21,7 +21,7 @@ use tracing::Instrument as _;
 
 /// How long writing one part to disk may take. A disk that stops answering
 /// (a network share that went away) fails the export instead of holding it
-/// ([Reliability](../../docs/reliability.md#timeouts)).
+/// ([Reliability](../../docs/standards/reliability.md#timeouts)).
 pub const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// About how much one part read from the session holds.

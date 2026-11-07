@@ -6,7 +6,7 @@
 
 ## Context
 
-[Persistence](../persistence.md#migrations) sets the standard for schema
+[Persistence](../reference/persistence.md#migrations) sets the standard for schema
 changes: numbered, forward-only steps applied in one transaction that also
 sets `PRAGMA user_version`. Its *Known deviations* record that only version 1
 exists and that the first schema change must introduce the mechanism.

@@ -26,7 +26,7 @@ numbers.
 | Expand an explorer node from the local cache | ≤ 50 ms p95 | 0.65 ms for a first page and 0.68 ms for the page after 4,800 children, in a cache of 500,000 objects kept open, with paths rebuilt from compact keys (benchmark, release, 2026-11-03); opening the file costs about 680 ms, once per connection at start. Not measured in the app | Timing around the cache read, benchmark |
 | Longest UI-thread stall while an export runs | ≤ 16 ms | Not measured: the machine ran other heavy work during the export's check (2026-11-04) | Heartbeat |
 | Encoding an export part, off the UI thread | No budget; it bounds how fast an export writes | 13 ms as CSV, 26 ms as JSON Lines, 30 ms as `INSERT` for 100,000 × 5 cells (benchmark, release, 2026-11-04); a unit test keeps 100,000 × 10 CSV cells under 3 s in debug | Benchmark, unit test budget |
-| Metadata search (`Ctrl Shift P`) over the local cache | ≤ 50 ms p95 | 7.4 ms for a name of three characters or more among 500,000 objects (trigram index); 93 ms for one or two characters (benchmark, release, 2026-11-03, after the compact keys of [ADR-0019](adr/0019-compact-metadata-cache-keys.md)) | Timing around the search, benchmark |
+| Metadata search (`Ctrl Shift P`) over the local cache | ≤ 50 ms p95 | 7.4 ms for a name of three characters or more among 500,000 objects (trigram index); 93 ms for one or two characters (benchmark, release, 2026-11-03, after the compact keys of [ADR-0019](../adr/0019-compact-metadata-cache-keys.md)) | Timing around the search, benchmark |
 
 The numbers are initial targets. Changing a budget is a maintainer decision
 recorded in this table. "Not measured" rows are measured the first time a task
@@ -39,7 +39,7 @@ touches that path.
 | Saved connections | 200 |
 | Metadata objects per connection | 500,000 (paged from the local cache) |
 | Open query tabs | 50 |
-| Rows per result | The connection's row limit (up to 100,000), within the memory ceiling in [Results](results.md#limits) |
+| Rows per result | The connection's row limit (up to 100,000), within the memory ceiling in [Results](../reference/results.md#limits) |
 
 ## Principles
 
@@ -47,7 +47,7 @@ touches that path.
    the local metadata cache. The network is used only for explicit actions:
    test, run, refresh; and, only when the user turns it on, for telemetry,
    sent in batches by background threads, never by the UI thread
-   ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)). High-frequency
+   ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)). High-frequency
    UI events (mouse, selection, frames) are never exported.
 2. **Load on demand.** The explorer reads children page by page; results are
    bounded by the row limit while they are read.
@@ -58,7 +58,7 @@ touches that path.
 5. **The UI thread only does UI.** Network, disk, conversion and dropping of
    large data happen on the Tokio runtime or a background executor.
 6. **Compact data in memory.** Results use a compact representation
-   ([ADR-0008](adr/0008-compact-result-storage.md)).
+   ([ADR-0008](../adr/0008-compact-result-storage.md)).
 
 ## Rejected patterns
 
@@ -129,7 +129,7 @@ The existing frame probe below remains the tool for the frame budget.
   budget (ten times the measured time or more), such as
   `a_large_result_builds_its_grid_view_within_budget`. They catch complexity
   regressions, not small slowdowns.
-- **Benchmarks.** `benches/hot_paths.rs` ([ADR-0010](adr/0010-benchmarks-with-criterion.md))
+- **Benchmarks.** `benches/hot_paths.rs` ([ADR-0010](../adr/0010-benchmarks-with-criterion.md))
   measures building the grid view at 100,000 rows (unfiltered, filtered and sorted by a header), converting 100,000 × 30
   driver rows to result data, splitting a 10,000-statement script and, in a
   cache of 500,000 objects, opening the file to read a first page (what every
@@ -160,6 +160,6 @@ off the UI thread. These measure encoding, not the OS clipboard handoff.
 | --- | --- |
 | Long collections are virtualized | The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`). Saved queries and history are virtualized |
 | Metadata search within budget at any length | A query of one or two characters, which the trigram index cannot match, scans the name index: about 93 ms at 500,000 objects. Three characters or more take about 7.4 ms |
-| Frequently changing regions are cached entities | The result grid is (`ResultGrid`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); so is the assistant panel (`src/app/assistant_panel.rs`, [ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)). The editor still renders inside `Workspace` |
-| A grid interaction renders only the grid ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md#how-to-validate)) | Not possible in GPUI 0.3.11: a notified view renders with all its ancestors, so hover, scroll and selection also render `AppView`, `GroupedTabs` and `Workspace`, about 1.5 ms of a 3.6–4.4 ms p50 grid frame. `.cached(...)` spares the grid when only the workspace changes: typing 15 characters rendered `Workspace` 15 times and `ResultGrid` never (frame probe, release, Windows, 2026-11-02). [ADR-0013](adr/0013-thin-ancestors-of-frequently-notified-views.md) (Proposed) replaces this validation with the frame budget and keeps the ancestors thin. The editor gutter no longer splits the script on every frame, which took grid frames to 57 ms with 1,000 statements |
+| Frequently changing regions are cached entities | The result grid is (`ResultGrid`, [ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md)); so is the assistant panel (`src/app/assistant_panel.rs`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)). The editor still renders inside `Workspace` |
+| A grid interaction renders only the grid ([ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md#how-to-validate)) | Not possible in GPUI 0.3.11: a notified view renders with all its ancestors, so hover, scroll and selection also render `AppView`, `GroupedTabs` and `Workspace`, about 1.5 ms of a 3.6–4.4 ms p50 grid frame. `.cached(...)` spares the grid when only the workspace changes: typing 15 characters rendered `Workspace` 15 times and `ResultGrid` never (frame probe, release, Windows, 2026-11-02). [ADR-0013](../adr/0013-thin-ancestors-of-frequently-notified-views.md) (Proposed) replaces this validation with the frame budget and keeps the ancestors thin. The editor gutter no longer splits the script on every frame, which took grid frames to 57 ms with 1,000 statements |
 | Filters are debounced | The result filter rebuilds the grid view on every keystroke |

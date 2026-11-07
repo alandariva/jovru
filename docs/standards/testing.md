@@ -130,7 +130,7 @@ additional scenarios before the guarantees are extended.
 ## SQL catalogs
 
 `catalog/` holds the SQL dialect catalogs the editor reads at run time
-([ADR-0021](adr/0021-sql-catalogs-read-at-run-time.md)). The basic gate only
+([ADR-0021](../adr/0021-sql-catalogs-read-at-run-time.md)). The basic gate only
 checks them, offline. Regenerating them is a task of its own, reviewed in
 the diff:
 
@@ -250,7 +250,7 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   when the model answered with one.
   Real providers are checked by hand: record the provider, model and
   outcome, never the key.
-- Telemetry ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)) is
+- Telemetry ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)) is
   tested with the SDK's in-memory exporters behind the same bridges and
   filters as the application (`jykre::telemetry::testing::capture`): a run
   with a synthetic password, SQL text, values and host exports none of them,

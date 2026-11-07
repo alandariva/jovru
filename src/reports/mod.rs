@@ -2,7 +2,7 @@
 //! with its own connection, database and chart (ADR-0024, ADR-0025).
 //!
 //! The library is one JSON value under its own `config.db` setting
-//! ([Persistence](../docs/persistence.md)). It holds definitions only: never
+//! ([Persistence](../../docs/reference/persistence.md)). It holds definitions only: never
 //! a result, and never the values typed for a run, only each parameter's
 //! default. Reading tolerates missing fields and keeps the ones it does not
 //! know, so a version that writes the value back loses nothing another

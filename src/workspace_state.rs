@@ -2,7 +2,7 @@
 //! queries and the history.
 //!
 //! The state is stored as one JSON value in `config.db` settings
-//! ([Persistence](../docs/persistence.md)). Reading tolerates missing or
+//! ([Persistence](../docs/reference/persistence.md)). Reading tolerates missing or
 //! unknown fields, so a file written by another version still opens.
 use crate::drivers::ObjectPath;
 use crate::parameters::{KindChoice, TabParameter};

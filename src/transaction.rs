@@ -9,7 +9,7 @@
 //! makes every statement wait for a commit and its DDL commits implicitly,
 //! and a failure inside a PostgreSQL transaction leaves it failed until
 //! `ROLLBACK`. Inference alone does not see a transaction opened inside a
-//! procedure ([technical debt TD-001](../docs/technical-debt.md)).
+//! procedure ([technical debt TD-001](../docs/plans/technical-debt.md)).
 use crate::drivers::{SqlDialect, TransactionStatus};
 use crate::sql::{self, TokenKind};
 

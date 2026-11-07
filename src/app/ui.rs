@@ -7,7 +7,7 @@ pub use super::fonts::fonts;
 
 /// The colour tokens of one theme. Views name a token
 /// (`rgb(colors().text)`), never a raw value, so both themes follow
-/// ([UI guidelines](../../docs/ui-guidelines.md#colours-and-theme)).
+/// ([UI guidelines](../../docs/standards/ui-guidelines.md#colours-and-theme)).
 #[derive(Debug)]
 pub struct Palette {
     pub bg: u32,
@@ -77,7 +77,7 @@ pub struct Palette {
     pub grid_focus: u32,
     pub grid_header_text: u32,
     pub grid_type_text: u32,
-    // Values by type family ([Results](../../docs/results.md#value-presentation)).
+    // Values by type family ([Results](../../docs/reference/results.md#value-presentation)).
     pub value_text: u32,
     pub value_number: u32,
     pub value_temporal: u32,
@@ -404,7 +404,7 @@ pub fn shortcut(value: &'static str) -> Div {
 
 /// A focusable control with `on_click`: GPUI turns Enter and Space on the
 /// focused element into the same click, so a mouse-only handler is never
-/// needed ([UI guidelines](../../docs/ui-guidelines.md#accessibility-and-keyboard)).
+/// needed ([UI guidelines](../../docs/standards/ui-guidelines.md#accessibility-and-keyboard)).
 fn base_button(
     id: impl Into<ElementId>,
     name: IconName,

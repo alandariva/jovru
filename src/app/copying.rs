@@ -1,6 +1,6 @@
 //! The copy menu's choices, shared by every result grid of the window: the
 //! format `Ctrl C` copies in and how the delimited formats write their
-//! fields ([Results](../../docs/results.md#copying)). What each format writes
+//! fields ([Results](../../docs/reference/results.md#copying)). What each format writes
 //! lives in [`jykre::copy_as`]; this module keeps the choices, saves them and
 //! owns the cancellation/publication helpers shared by grid copy jobs.
 use gpui_kit::*;

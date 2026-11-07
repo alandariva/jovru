@@ -1,7 +1,7 @@
 //! The copy formats of a result's selection: tab-separated text, CSV, JSON,
 //! JSON Lines, a Markdown or HTML table, `INSERT` statements, an `IN` list,
 //! values separated by commas and the column names
-//! ([Results](../docs/results.md#copying)).
+//! ([Results](../docs/reference/results.md#copying)).
 //!
 //! Values are written from the database's text, never reinterpreted: a
 //! number of a number column is written as the database wrote it, a
@@ -12,7 +12,7 @@
 //!
 //! [`CopyOptions`] are the choices of the copy menu: the format `Ctrl C`
 //! copies in and how the delimited formats write their fields. They are kept
-//! in the settings as `copy.preferences` ([Persistence](../docs/persistence.md)).
+//! in the settings as `copy.preferences` ([Persistence](../docs/reference/persistence.md)).
 use crate::cell_format::{self, ValueFamily};
 use crate::decimal;
 use crate::drivers::DriverResult;

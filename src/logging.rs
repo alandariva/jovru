@@ -7,7 +7,7 @@
 //! dependencies; `JYKRE_LOG` overrides it with `EnvFilter` syntax.
 //!
 //! Never log passwords, tokens, headers, connection URLs, cell values, query
-//! parameters or SQL above `trace` ([Reliability](../docs/reliability.md#never-logged)).
+//! parameters or SQL above `trace` ([Reliability](../docs/standards/reliability.md#never-logged)).
 //!
 //! The same events, and Jykre's spans, can also be sent to an OpenTelemetry
 //! collector when the user turns it on ([`crate::telemetry`], ADR-0029).

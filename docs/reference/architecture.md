@@ -3,10 +3,10 @@
 ## Overview
 
 Jykre Studio is a single native process. The interface is drawn by
-[GPUI](https://www.gpui.rs/) through `gpui-kit` ([ADR-0001](adr/0001-native-ui-with-gpui.md));
+[GPUI](https://www.gpui.rs/) through `gpui-kit` ([ADR-0001](../adr/0001-native-ui-with-gpui.md));
 there is no WebView and no IPC layer. Database access, local persistence and
 credentials live in UI-independent crates
-([ADR-0006](adr/0006-layered-crates-independent-of-the-ui.md)).
+([ADR-0006](../adr/0006-layered-crates-independent-of-the-ui.md)).
 
 ```mermaid
 flowchart TB
@@ -71,13 +71,13 @@ flowchart TB
 | Layer | Location | Does | Does not |
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
-| **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)) | Depend on a specific view; use the editor's language features |
+| **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
 | **Drivers** | `crates/driver-*` | Validate configuration, connect, execute, cancel, introspect and classify errors for one database | Persist; talk to the UI; know another driver |
-| **AI providers** | `crates/assistant` (`jykre-assistant`) | The canonical request of a round, one streamed round against Anthropic, OpenAI, OpenAI-compatible servers or Ollama (through `genai`, private to its transport), error classification, prices and the SQL blocks of an answer ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)) | Know the cache, the vault, sessions or the UI; decide what a request contains |
+| **AI providers** | `crates/assistant` (`jykre-assistant`) | The canonical request of a round, one streamed round against Anthropic, OpenAI, OpenAI-compatible servers or Ollama (through `genai`, private to its transport), error classification, prices and the SQL blocks of an answer ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)) | Know the cache, the vault, sessions or the UI; decide what a request contains |
 | **SQL text** | `crates/sql` (`jykre-sql`) | Tokens by dialect, statement splitting, `EXPLAIN`, position mapping and qualified names: what execution and the editor share | I/O; depend on an editor engine |
 | **Language features** | `crates/sql-language` (`jykre-sql-language`) | What the editor suggests and explains (`completion`, which reads each statement's queries and the relations they bind from its tokens), Format (`format`, sqruff-lib behind the `sqruff` feature) and the line comments **Ctrl+/** toggles (`comment`) | I/O, GPUI, `lsp-types` or translations; be used by the library |
 | **Tooling** | `xtask` | Local gate, architecture check, translation catalogs | Ship in the application |
@@ -98,7 +98,7 @@ edge, including dev and build dependencies:
 5. `jykre-sql` depends on no internal crate other than `jykre-core` and on no
    editor engine (`sqruff-lib`, `tree-sitter*`); `jykre-sql-language` depends
    only on `jykre-core` and `jykre-sql`; neither depends on `lsp-types`
-   ([ADR-0020](adr/0020-editor-language-features-in-their-own-crates.md)).
+   ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)).
 6. No file of the `jykre` library (`src/` outside `src/app/` and
    `src/main.rs`) uses `jykre_sql_language`, so the editor's features can be
    removed without touching what runs queries. `jykre-sql-language` is also
@@ -109,7 +109,7 @@ edge, including dev and build dependencies:
    may tell comes from `assistant::facts` and the metadata cache, and a
    query's result only through `src/assistant/released.rs`, the one file
    allowed to name a result
-   ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)).
+   ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)).
 
 Transitive dependencies and where logic lives inside the `jykre` crate are
 checked in review.
@@ -254,12 +254,12 @@ sequenceDiagram
   becomes a request with the parameters its markers use
   (`jykre::parameters::tab_request`); a missing or malformed value stops the
   run before anything is sent. The drivers bind the values as for a report
-  ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)), and the result tab
+  ([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)), and the result tab
   keeps them for an export that runs the statement again.
-- Each tab keeps one session between runs ([ADR-0014](adr/0014-a-session-per-tab.md)).
+- Each tab keeps one session between runs ([ADR-0014](../adr/0014-a-session-per-tab.md)).
   Databricks warehouses keep logical catalog/schema state; classic clusters keep
   a server SQL context. CLI authentication and HTTP pools are shared across
-  sessions by authentication identity ([ADR-0005](adr/0005-databricks-through-cli-and-rest.md)).
+  sessions by authentication identity ([ADR-0005](../adr/0005-databricks-through-cli-and-rest.md)).
   The workspace hands it to the run and takes it back with the result; a
   session that comes back from a superseded run, or after the connection
   changed, is closed.
@@ -294,7 +294,7 @@ still current. See [Results](results.md#copying).
    user confirms; otherwise only the rows held are written.
 2. The system's save dialog (`App::prompt_for_new_path`) picks the file. The
    view hands `backend::export` the held pages (shared as
-   `Arc<ResultData>`, [ADR-0022](adr/0022-result-pages-shared-across-threads.md)),
+   `Arc<ResultData>`, [ADR-0022](../adr/0022-result-pages-shared-across-threads.md)),
    and the tab's session when the rest is read from it or the statement runs
    again; the session is leased as for a page read, so nothing else uses it
    meanwhile.
@@ -314,7 +314,7 @@ still current. See [Results](results.md#copying).
 
 A report is a set of panels, each with its connection, its SQL, its context
 (the database, schema or catalog of that connection) and its chart
-([ADR-0025](adr/0025-report-panels.md)). The host gives the report view one
+([ADR-0025](../adr/0025-report-panels.md)). The host gives the report view one
 `ReportSource` per connection (what runs it, its row limit, environment,
 dialect, databases and name index) whenever a connection, a password or the
 metadata changes; a connection whose settings changed, or that is gone, stops
@@ -329,7 +329,7 @@ its panels and closes its sessions.
    `jykre_sql::named_markers`, checks only the values the panel's SQL uses
    (a list parameter takes one of its choices) and puts them in the request
    with the byte ranges of their markers. The values never go into the SQL
-   text ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md)). The jobs
+   text ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)). The jobs
    are grouped by `run::SessionKey` (connection and context), in the report's
    order. A panel whose connection is gone or cannot run fails alone, saying
    why.
@@ -350,7 +350,7 @@ its panels and closes its sessions.
    `parameters`) and replaces each marker with a fixed reference to its value
    (`QueryRequest::with_references`). Classic Databricks clusters, which
    cannot bind, replace each marker with a typed literal that never holds
-   the value's text ([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)).
+   the value's text ([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)).
 4. Inside the same runtime task, `run::settle` keeps the last statement's
    result, drops the others, and computes the number columns, the suggested
    chart and what the panel draws (`jykre::reports::chart::visual`), so the
@@ -361,7 +361,7 @@ its panels and closes its sessions.
 ### Refresh metadata
 
 A connection introspects only what the user chose in the connection dialog
-(`jykre::metadata_scope::MetadataScope`, [ADR-0015](adr/0015-introspect-only-what-the-user-chooses.md)).
+(`jykre::metadata_scope::MetadataScope`, [ADR-0015](../adr/0015-introspect-only-what-the-user-chooses.md)).
 The dialog lists namespaces with `Driver::discover_namespaces`, one level at
 a time; until something is chosen, nothing is introspected.
 
@@ -391,8 +391,9 @@ a time; until something is chosen, nothing is introspected.
 
 What each dialect has built in (keywords and whether they are reserved,
 functions with their signatures, types) comes from `catalog/`, read at run
-time as if it came from outside ([ADR-0021](adr/0021-sql-catalogs-read-at-run-time.md),
-[specification](especificacao-catalogo-sql.md)).
+time as if it came from outside ([ADR-0021](../adr/0021-sql-catalogs-read-at-run-time.md),
+[catalog reference](sql-catalogs.md),
+[format proposal](../plans/sql-catalog-proposal.md)).
 
 1. At start, `sql_editor::load_catalogs` looks in `JYKRE_SQL_CATALOG_DIR`,
    then `catalog` next to the executable and, in a development build, the
@@ -409,7 +410,7 @@ time as if it came from outside ([ADR-0021](adr/0021-sql-catalogs-read-at-run-ti
 
 Logs and spans go through `tracing`. When the user turns them on in
 Preferences, `jykre::telemetry` also sends them to an OpenTelemetry
-collector ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)):
+collector ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)):
 
 1. `logging::init` adds two bridges behind per-layer filters: spans of
    Jykre's crates become traces, log events become OTLP logs. Until the
@@ -483,4 +484,4 @@ Technical debt the maintainer accepted for now:
 | Standard | Current code |
 | --- | --- |
 | Statements are split as the database splits them | `sql::statements` follows each dialect's rules in the application, not a splitter provided by the driver. Blocks are recognised by their keywords (`CREATE PROCEDURE/FUNCTION/TRIGGER/EVENT … BEGIN … END`, `BEGIN ATOMIC`, a Databricks `BEGIN … END`); other constructs that hold semicolons are split on them |
-| The UI shows the server's transaction state, read from the protocol | Drivers report it through `Session::transaction` with a probe query (PostgreSQL) or only `autocommit = 0` (MySQL), because SQLx keeps the protocol's state private. What a driver cannot tell is inferred from the statements a tab ran (`jykre::transaction`), so under MySQL a `BEGIN` inside a procedure is not shown ([TD-001](technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)) |
+| The UI shows the server's transaction state, read from the protocol | Drivers report it through `Session::transaction` with a probe query (PostgreSQL) or only `autocommit = 0` (MySQL), because SQLx keeps the protocol's state private. What a driver cannot tell is inferred from the statements a tab ran (`jykre::transaction`), so under MySQL a `BEGIN` inside a procedure is not shown ([TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)) |

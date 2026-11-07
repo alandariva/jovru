@@ -311,7 +311,7 @@ impl Session for DatabaseSession {
     /// the `PROCESS` privilege (`information_schema.innodb_trx`) or a
     /// `performance_schema` consumer a user may not have, and the protocol's
     /// status flags are private to SQLx, so that is left to the caller
-    /// ([technical debt TD-001](../../../docs/technical-debt.md)).
+    /// ([technical debt TD-001](../../../docs/plans/technical-debt.md)).
     async fn transaction(
         &mut self,
         cancel: CancellationToken,

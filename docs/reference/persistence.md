@@ -1,11 +1,11 @@
 # Persistence
 
 Local data lives in SQLite files owned by `jykre-storage`
-([ADR-0003](adr/0003-sqlite-for-local-storage.md)). Passwords are never stored
-here ([Security](security.md)). The application never writes query results
+([ADR-0003](../adr/0003-sqlite-for-local-storage.md)). Passwords are never stored
+here ([Security](../standards/security.md)). The application never writes query results
 to disk on its own: only an export the user asks for writes them, to the
 file the user chose ([Results](results.md#export)), and so does a report's
-print HTML ([ADR-0024](adr/0024-reports.md)). Report definitions live in the
+print HTML ([ADR-0024](../adr/0024-reports.md)). Report definitions live in the
 `reports` setting ([below](#schema-configdb)).
 
 ## Files
@@ -23,7 +23,7 @@ isolated folder for tests and manual checks).
 | `metadata/<connection-id>.db.corrupt-<stamp>` | A cache set aside after confirmed corruption | Kept for diagnosis; safe to delete |
 | `backups/config-v<version>-<millis>.db` | Copies of `config.db`: one each start whose configuration opened and was read, unless it equals the newest copy; the five most recent are kept | Rotated automatically; restored from when `config.db` cannot be opened |
 | `config.db.broken-<millis>` | A configuration set aside when a backup was restored in its place | Kept for diagnosis; safe to delete |
-| `logs/jykre.<date>.log` | JSON log lines, one file per day; the last 7 are kept ([Reliability](reliability.md#logs)) | Rotated automatically; safe to delete |
+| `logs/jykre.<date>.log` | JSON log lines, one file per day; the last 7 are kept ([Reliability](../standards/reliability.md#logs)) | Rotated automatically; safe to delete |
 | `connections.json` (legacy) | Profiles from earlier builds | Imported once into `config.db` in a single transaction, deleted only after the import is verified |
 
 ## SQLite configuration
@@ -66,7 +66,7 @@ asked for winning across tabs. A missing or unknown value takes its default
 (CSV with `;`, every value quoted, headers, no BOM, the Downloads folder).
 
 `assistant.preferences` keeps the AI assistant's choices
-(`jykre::assistant::AssistantPreferences`, [ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
+(`jykre::assistant::AssistantPreferences`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
 `{"provider": "anthropic", "model": "…", "endpoint": null, "review":
 "every-request", "queries": true, "prices": {"<model>": {"input_per_mtok":
 3.0, "output_per_mtok": 15.0, "cache_read_per_mtok": 0.3,
@@ -78,17 +78,17 @@ user entered them. It is read once at start and written from Preferences,
 the last write asked for winning. A missing or unknown value takes its
 default (off, review every request, queries offered). Columns hidden in a
 conversation are not saved. The API key is
-never here: it is in the OS vault ([Security](security.md#where-they-live)).
+never here: it is in the OS vault ([Security](../standards/security.md#where-they-live)).
 Conversations are not saved.
 
 `telemetry.preferences` keeps the telemetry choices
-(`jykre::telemetry::TelemetryPreferences`, [ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)):
+(`jykre::telemetry::TelemetryPreferences`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)):
 `{"logs": false, "traces": false, "protocol": "http", "endpoint": ""}`.
 `protocol` is `http` (OTLP over HTTP/protobuf) or `grpc`. It is read once at
 start and written from Preferences, the last write asked for winning. A
 missing or unknown value takes its default (off). The collector's headers
 are never here: they are in the OS vault
-([Security](security.md#where-they-live)).
+([Security](../standards/security.md#where-they-live)).
 
 `copy.preferences` keeps the choices of the copy menu
 (`jykre::copy_as::CopyOptions`): `{"format": "text", "header": false,
@@ -108,7 +108,7 @@ name, SQL, the SQL last saved to the library and the identity of that saved
 query, the table or view the tab was opened for, its context, the
 statement timeout and its `:name` parameter fields: name, type chosen
 (`auto` or a type), the text typed and whether it binds NULL,
-[ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)), the tab on screen, the saved queries, each with a stable
+[ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)), the tab on screen, the saved queries, each with a stable
 numeric `id` (its title is only a label; `next_id` is the next one) and its
 `tags` (labels without `#`, each once ignoring case), and the
 last 200 history entries, each with when it ended, how (`succeeded`,
@@ -123,8 +123,8 @@ the connections are loaded. A tab whose connection no longer
 exists reopens in a group of its own, without a connection. A value that
 cannot be read starts an empty workspace. Results are never stored.
 
-`reports` keeps the report definitions ([ADR-0024](adr/0024-reports.md),
-[ADR-0025](adr/0025-report-panels.md), `jykre::reports`):
+`reports` keeps the report definitions ([ADR-0024](../adr/0024-reports.md),
+[ADR-0025](../adr/0025-report-panels.md), `jykre::reports`):
 `{"version": 3, "next_id": n, "reports": [...]}`, each report with a stable
 numeric `id`, its title, description, parameters (name, label, kind,
 default, required, choices), panels (`id`, title, connection as
@@ -165,7 +165,7 @@ one shown.
 | Table | Purpose |
 | --- | --- |
 | `metadata_info` | Single row: identity of the connection configuration the cache belongs to, and the cache version |
-| `objects` | Published objects. `path_key` is the only copy of the structural path: each segment's JSON with `%` and `/` escaped, joined by `/`, so dots, slashes, wildcards and case cannot collide and a node's descendants are one key range ([ADR-0019](adr/0019-compact-metadata-cache-keys.md)). `object_json` holds the object without its path, which reads rebuild from the key. `parent_key` plus the `objects_parent` index serve paged child reads |
+| `objects` | Published objects. `path_key` is the only copy of the structural path: each segment's JSON with `%` and `/` escaped, joined by `/`, so dots, slashes, wildcards and case cannot collide and a node's descendants are one key range ([ADR-0019](../adr/0019-compact-metadata-cache-keys.md)). `object_json` holds the object without its path, which reads rebuild from the key. `parent_key` plus the `objects_parent` index serve paged child reads |
 | `refresh_runs` | Refresh attempts; a partial unique index allows only one `running` run |
 | `staging_objects` | Objects of a run in progress |
 | `protected_scopes` | Subtrees the run could not read (permission warnings) and must keep |
@@ -183,7 +183,7 @@ with `quick_check`, at start, after the profile's identity changed and after
 a failed read.
 
 A cache is keyed by the driver's identity of the catalog
-(`Driver::cache_identity`, [ADR-0017](adr/0017-driver-metadata-contract-batch.md)),
+(`Driver::cache_identity`, [ADR-0017](../adr/0017-driver-metadata-contract-batch.md)),
 not by the whole profile: changing compute, defaults or TLS keeps it. A
 cache an earlier version keyed by the whole profile is adopted under the
 narrower identity without being emptied (`MetadataRepository::adopt`).
@@ -244,7 +244,7 @@ again instead of mixing two reads.
 
 Each file's schema version is `PRAGMA user_version`. `config.db` is at
 version 1. The metadata files are at version 3
-([ADR-0018](adr/0018-metadata-cache-migrations.md)): a new file is created at
+([ADR-0018](../adr/0018-metadata-cache-migrations.md)): a new file is created at
 version 1 and then migrated, and an older one gets only the steps it lacks.
 A file with a higher version is refused ("created by a newer version of the
 application").
@@ -254,7 +254,7 @@ Metadata steps (`jykre-storage`, `metadata.rs`):
 | Step | Change |
 | --- | --- |
 | 2 | `objects.search_name` and `staging_objects.search_name`: the name in Unicode lower case, written with every object and filled for existing rows by the step; the index `objects_search` and the FTS5 trigram table `objects_fts`, kept in step with `objects` by triggers; `scope_status.last_published_at`: when a refresh last published the scope, complete or partial |
-| 3 | Compact keys ([ADR-0019](adr/0019-compact-metadata-cache-keys.md)): every `path_key`, `parent_key` and `scope_key` rewritten from hex to escaped JSON, `object_json` stored without the path, `path_json` dropped from `objects` and `staging_objects`; refreshes left running are dropped and their scopes marked interrupted. The step runs with foreign keys off, checks them before committing and vacuums the file afterwards. A cache of 500,000 objects goes from 892 MB to 461 MB (1.5 GB to 753 MB as a refresh leaves it) in about 20 s, once |
+| 3 | Compact keys ([ADR-0019](../adr/0019-compact-metadata-cache-keys.md)): every `path_key`, `parent_key` and `scope_key` rewritten from hex to escaped JSON, `object_json` stored without the path, `path_json` dropped from `objects` and `staging_objects`; refreshes left running are dropped and their scopes marked interrupted. The step runs with foreign keys off, checks them before committing and vacuums the file afterwards. A cache of 500,000 objects goes from 892 MB to 461 MB (1.5 GB to 753 MB as a refresh leaves it) in about 20 s, once |
 
 The standard for schema changes:
 
@@ -298,7 +298,7 @@ The standard for schema changes:
 - Reads for the UI are paged (children of a node, search with a limit).
 - Nothing secret is stored, and no query result is written to disk, apart
   from a report's print HTML at the path the user picks
-  ([ADR-0024](adr/0024-reports.md)).
+  ([ADR-0024](../adr/0024-reports.md)).
 - A schema change follows [Migrations](#migrations) and needs an ADR when it
   changes what is stored.
 

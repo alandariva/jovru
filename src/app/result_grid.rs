@@ -2695,7 +2695,7 @@ impl ResultGrid {
     }
 }
 
-/// The text colour of a value, by its family ([Results](../../docs/results.md#value-presentation)).
+/// The text colour of a value, by its family ([Results](../../docs/reference/results.md#value-presentation)).
 fn value_color(raw: Option<&str>, family: ValueFamily) -> u32 {
     if raw.is_none() {
         colors().value_null
