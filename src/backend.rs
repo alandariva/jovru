@@ -2688,6 +2688,9 @@ mod tests {
         cancel_after: Option<(usize, CancellationToken)>,
         /// How long each read takes, like a remote server.
         latency: Option<Duration>,
+        /// Reads under way now, and the most there ever were at once.
+        in_flight: Arc<std::sync::atomic::AtomicUsize>,
+        peak: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl CatalogDriver {
@@ -2770,7 +2773,11 @@ mod tests {
                 read.len()
             };
             if let Some(latency) = self.latency {
+                use std::sync::atomic::Ordering::SeqCst;
+                let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+                self.peak.fetch_max(now, SeqCst);
                 tokio::time::sleep(latency).await;
+                self.in_flight.fetch_sub(1, SeqCst);
             }
             if let Some((after, cancel)) = &self.cancel_after
                 && count > *after
@@ -3003,7 +3010,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("jykre-parallel-{}", ConnectionId::new()));
         let id = ConnectionId::new();
         // 4 catalogs × 5 schemas, plus the system catalog, each read taking
-        // 40 ms: 40 reads (names, then full) would take 1.6 s one at a time.
+        // 40 ms, long enough for the reads started together to overlap. How
+        // many overlap is counted rather than timed, so a slow machine does
+        // not decide the result.
         let names = ["s1", "s2", "s3", "s4", "s5"];
         let driver = CatalogDriver {
             latency: Some(Duration::from_millis(40)),
@@ -3016,7 +3025,6 @@ mod tests {
             ])
         };
         let everything = MetadataScope::everything();
-        let started = Instant::now();
         let (outcome, updates) = apply(
             &driver,
             &dir,
@@ -3026,9 +3034,10 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        let took = started.elapsed();
         assert_eq!(outcome.refreshed, 20);
-        assert!(took < Duration::from_millis(1_200), "took {took:?}");
+        // As many reads at once as allowed, and never more.
+        let peak = driver.peak.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(peak, PARALLEL_READS);
         assert_eq!(updates.last().map(|update| update.done), Some(20));
         assert!(
             !driver

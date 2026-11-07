@@ -9,6 +9,7 @@ use std::cmp::Ordering;
 /// A number as the database wrote it (`-12.50`, `1.5e-05`), read without
 /// floating point: `0.<digits> × 10^exponent`, where the digits are those
 /// of `integer` then `fraction` after their leading zeros.
+#[derive(Clone, Copy)]
 pub(crate) struct Decimal<'a> {
     pub(crate) negative: bool,
     integer: &'a str,
@@ -112,23 +113,63 @@ impl<'a> Decimal<'a> {
 /// digit, never through floating point. Values that are not decimals
 /// (`NaN`, `Infinity`) sort after them, by their text.
 pub fn compare_numbers(left: &str, right: &str) -> Ordering {
-    // Negative, zero (with or without a sign), positive.
-    let class = |number: &Decimal| match (number.is_zero(), number.negative) {
-        (true, _) => 1,
-        (false, true) => 0,
-        (false, false) => 2,
-    };
-    match (Decimal::parse(left), Decimal::parse(right)) {
-        (Some(left), Some(right)) => match (class(&left), class(&right)) {
-            (1, 1) => Ordering::Equal,
-            (0, 0) => left.magnitude(&right).reverse(),
-            (2, 2) => left.magnitude(&right),
-            (left, right) => left.cmp(&right),
-        },
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => left.cmp(right),
+    Number::new(left).cmp(&Number::new(right))
+}
+
+/// A value read once for [`compare_numbers`]' order, so that ordering many
+/// values (a minimum, a median) does not parse each one at every
+/// comparison.
+#[derive(Clone, Copy)]
+pub(crate) struct Number<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) decimal: Option<Decimal<'a>>,
+}
+
+impl<'a> Number<'a> {
+    pub(crate) fn new(text: &'a str) -> Self {
+        Self {
+            text,
+            decimal: Decimal::parse(text),
+        }
     }
+
+    /// The order of [`compare_numbers`].
+    pub(crate) fn cmp(&self, other: &Self) -> Ordering {
+        // Negative, zero (with or without a sign), positive.
+        let class = |number: &Decimal| match (number.is_zero(), number.negative) {
+            (true, _) => 1,
+            (false, true) => 0,
+            (false, false) => 2,
+        };
+        match (&self.decimal, &other.decimal) {
+            (Some(left), Some(right)) => match (class(left), class(right)) {
+                (1, 1) => Ordering::Equal,
+                (0, 0) => left.magnitude(right).reverse(),
+                (2, 2) => left.magnitude(right),
+                (left, right) => left.cmp(&right),
+            },
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => self.text.cmp(other.text),
+        }
+    }
+}
+
+/// The smallest and largest of `values` in [`compare_numbers`]' order, each
+/// value read once: the first of equal smallest values and the last of equal
+/// largest ones, as `Iterator::min_by` and `max_by` choose.
+pub fn min_max_numbers<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+) -> Option<(&'a str, &'a str)> {
+    let mut values = values.into_iter().map(Number::new);
+    let first = values.next()?;
+    let (min, max) = values.fold((first, first), |(min, max), value| {
+        (
+            if value.cmp(&min).is_lt() { value } else { min },
+            if value.cmp(&max).is_ge() { value } else { max },
+        )
+    });
+    Some((min.text, max.text))
 }
 
 /// Whether `text` is a decimal [`compare_numbers`] orders by value.
@@ -165,14 +206,20 @@ impl Sum {
         let Some(number) = Decimal::parse(text) else {
             return false;
         };
+        self.add_decimal(&number);
+        true
+    }
+
+    /// Adds a value already read.
+    pub(crate) fn add_decimal(&mut self, number: &Decimal) {
         self.count += 1;
         if number.is_zero() {
-            return true;
+            return;
         }
         let (digits, scale) = number.coefficient();
         if scale.abs() > MAX_SCALE {
             self.overflow = true;
-            return true;
+            return;
         }
         // A value with more decimals widens the sum: its digits move up.
         let scale_u = scale.max(0) as u32;
@@ -193,7 +240,6 @@ impl Sum {
             &mut self.positive
         };
         add_at(total, &digits, offset);
-        true
     }
 
     /// How many decimals were added (zeros included, other text not).
