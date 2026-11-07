@@ -1,3 +1,5 @@
+<img src="assets/icon/jykre.svg" alt="" width="96">
+
 # Jykre Studio
 
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
@@ -44,6 +46,16 @@ $env:JYKRE_DEMO='1'; cargo run --locked  # PowerShell
 ```
 
 Demo connections and results are labelled as such and never reach a server.
+
+### Linux applications menu and icon
+
+The Linux release archive includes `install.sh`, which adds Jykre Studio
+to the desktop's applications, with its icon, for the current user (under
+`~/.local/share`). The window then shows the icon on Wayland and X11: the
+desktop matches it to the entry by its app ID,
+`io.github.alandariva.JykreStudio`. Run the script from the extracted folder,
+and again after moving it; `./install.sh --uninstall` removes the entry.
+Started without the entry, the window keeps the desktop's generic icon.
 
 ## Features
 
@@ -283,6 +295,14 @@ Actions on every push and pull request.
 The [development documentation](docs/README.md) covers architecture, coding
 and UI guidelines, performance budgets, persistence, security, reliability,
 the workflow and the architecture decision records.
+
+The official icon is [`assets/icon/jykre.svg`](assets/icon/jykre.svg); the
+title bar draws it. [`assets/icon/jykre.ico`](assets/icon/jykre.ico) is the
+same drawing rasterized with resvg at 16 to 256 px, one image per size, that
+`build.rs` embeds in the Windows executable for its window, the taskbar and
+Explorer, with the Windows SDK's resource compiler (part of the MSVC build
+tools Rust already needs). On Linux, the release job ships the SVG with the
+desktop entry and the script in [`assets/linux/`](assets/linux).
 
 ## Security
 

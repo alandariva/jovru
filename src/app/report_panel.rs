@@ -1365,7 +1365,7 @@ impl Render for ReportPanel {
                         .overflow_y_scroll()
                         .px_2()
                         .py_1()
-                        .font_family("Cascadia Code")
+                        .font_family(fonts().code.clone())
                         .text_size(px(12.))
                         .text_color(rgb(colors().muted))
                         .child(self.statements.join("\n"))

@@ -94,6 +94,14 @@ See [Performance](performance.md) for budgets and how to measure.
 - After adding or changing strings, run `cargo xtask i18n pt-BR` and fill in
   the new entries (empty entries fall back to English).
 - Terminology is fixed; see [User experience](ux.md#text-and-terminology).
+- Fonts come from roles, `ui::fonts()`: `ui` for the interface, `code` for
+  SQL (ligatures allowed), `mono` for values and messages, shown as typed.
+  Views never name a family. `fonts::resolve` picks each role once at
+  startup, the first of its platform's candidates that is installed (Segoe
+  UI and Cascadia on Windows; the desktop's sans family and Cascadia, Noto
+  Sans Mono, DejaVu Sans Mono, Liberation Mono or Ubuntu Mono on Linux),
+  else GPUI's `.SystemUIFont`. A family that is not installed would let GPUI
+  draw code in a proportional font.
 
 ## Colours and theme
 

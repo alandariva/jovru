@@ -2099,7 +2099,7 @@ impl Workspace {
                                 Editor::new(&self.editor)
                                     .appearance(false)
                                     .bordered(false)
-                                    .font_family("Cascadia Code")
+                                    .font_family(fonts().code.clone())
                                     .text_size(cx.theme().mono_font_size)
                                     .w_full()
                                     .h_full()
@@ -2551,7 +2551,7 @@ impl Workspace {
             .child(
                 div()
                     .pl(px(24.))
-                    .font_family("Cascadia Mono")
+                    .font_family(fonts().mono.clone())
                     .text_size(px(12.))
                     .line_height(relative(1.5))
                     .text_color(rgb(colors().text))
@@ -3957,7 +3957,7 @@ fn log_entry(index: usize, entry: &LogEntry, now: SystemTime) -> Stateful<Div> {
                 .pl(px(24.))
                 .text_size(px(12.))
                 .text_color(rgb(colors().faint))
-                .font_family("Cascadia Code")
+                .font_family(fonts().code.clone())
                 .truncate()
                 .child(entry.sql.clone()),
         )

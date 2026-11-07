@@ -119,6 +119,9 @@ checked in review.
 ```text
 .
 ├── Cargo.toml              # workspace, shared dependency versions, the jykre crate
+├── build.rs                # embeds the icon and version details in the Windows executable
+├── assets/icon/            # the official icon: jykre.svg (title bar), jykre.ico (executable)
+├── assets/linux/           # desktop entry and its install.sh, shipped in the Linux release
 ├── src/
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,

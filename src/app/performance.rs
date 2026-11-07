@@ -85,6 +85,7 @@ impl Render for PerformanceView {
 pub fn run() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
+        super::fonts::resolve(cx);
         Theme::change(ThemeMode::Dark, None, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(

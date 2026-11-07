@@ -6,6 +6,7 @@ mod copying;
 mod databricks_connection;
 mod demo;
 mod exit_writes;
+mod fonts;
 mod layout;
 mod password;
 pub mod performance;
@@ -2268,7 +2269,7 @@ impl AppView {
                                     .truncate()
                                     .text_size(px(14.))
                                     .when(!saved, |s| {
-                                        s.font_family("Cascadia Code").text_size(px(13.))
+                                        s.font_family(fonts().code.clone()).text_size(px(13.))
                                     })
                                     .child(headline),
                             ),
@@ -2467,25 +2468,12 @@ impl AppView {
             .pr_3()
             .gap_3()
             .child(
-                row()
-                    .flex_none()
-                    .gap_2()
-                    .child(
-                        div()
-                            .size(px(21.))
-                            .rounded(px(5.))
-                            .bg(rgb(colors().mint))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon(I::Database, colors().on_accent)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(14.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Jykre Studio"),
-                    ),
+                row().flex_none().gap_2().child(app_mark(px(21.))).child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Jykre Studio"),
+                ),
             )
             .child(divider())
             .child(
@@ -2878,7 +2866,7 @@ impl Render for AppView {
             .overflow_hidden()
             .bg(rgb(colors().bg))
             .text_color(rgb(colors().text))
-            .font_family("Segoe UI")
+            .font_family(fonts().ui.clone())
             .text_size(px(14.))
             .on_action(cx.listener(|this, _: &ExecuteCurrentQuery, window, cx| {
                 this.run_shortcut(Workspace::execute_current, false, window, cx);
@@ -3120,9 +3108,15 @@ impl Render for AppView {
     }
 }
 
+/// The application's identity on Linux: the Wayland app ID and the X11
+/// `WM_CLASS`. The desktop finds the window's name and icon in
+/// `<APP_ID>.desktop`, which `assets/linux/install.sh` installs.
+const APP_ID: &str = "io.github.alandariva.JykreStudio";
+
 pub fn run() {
     application().with_assets(assets::AllAssets).run(|cx| {
         init(cx);
+        fonts::resolve(cx);
         probe::start(cx);
         exit_writes::install(cx);
         // The editor binds Ctrl+Enter itself; a binding in its own, deeper
@@ -3181,6 +3175,7 @@ pub fn run() {
                 cx,
             ))),
             window_min_size: Some(size(px(1100.), px(700.))),
+            app_id: Some(APP_ID.to_owned()),
             ..TitleBar::window_options()
         };
         let opened = open_window(options, cx, |window, cx| {
@@ -3192,4 +3187,26 @@ pub fn run() {
             cx.quit();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::APP_ID;
+
+    const DESKTOP_ENTRY: &str =
+        include_str!("../../assets/linux/io.github.alandariva.JykreStudio.desktop");
+
+    /// The desktop matches the window to its entry by the app ID, and the
+    /// entry names the icon `install.sh` installs under the same ID.
+    #[test]
+    fn the_desktop_entry_names_the_app_id() {
+        let keys: Vec<&str> = DESKTOP_ENTRY.lines().collect();
+        assert!(keys.contains(&format!("Icon={APP_ID}").as_str()));
+        assert!(keys.contains(&format!("StartupWMClass={APP_ID}").as_str()));
+        let install = include_str!("../../assets/linux/install.sh");
+        assert!(install.contains(&format!(
+            "APP_ID={APP_ID}
+"
+        )));
+    }
 }

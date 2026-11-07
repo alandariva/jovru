@@ -1512,7 +1512,7 @@ impl ResultGrid {
                             .when(self.sales && !self.widths.contains_key(&col), |s| {
                                 s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col])
                             })
-                            .font_family("Cascadia Mono")
+                            .font_family(fonts().mono.clone())
                             .text_size(px(13.))
                             .when(is_null, |s| s.italic())
                             .when(family == ValueFamily::Boolean, |s| s.justify_center())
@@ -1725,7 +1725,7 @@ impl ResultGrid {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(colors().grid_hover)))
                             .when(inspected, |s| s.bg(rgb(colors().grid_selected)))
-                            .font_family("Cascadia Mono")
+                            .font_family(fonts().mono.clone())
                             .text_size(px(13.))
                             .when(raw.is_none(), |s| s.italic())
                             .when(family == ValueFamily::Number, |s| s.justify_end())
@@ -2141,7 +2141,7 @@ impl ResultGrid {
                             .h_full()
                             .readonly(true)
                             .aria_label(tr!("Full value"))
-                            .font_family("Cascadia Mono")
+                            .font_family(fonts().mono.clone())
                             .text_size(px(13.)),
                     )
                     .into_any_element(),
@@ -2374,7 +2374,7 @@ impl ResultGrid {
                                     div()
                                         .min_w_0()
                                         .truncate()
-                                        .font_family("Cascadia Mono")
+                                        .font_family(fonts().mono.clone())
                                         .text_size(px(13.))
                                         .text_color(rgb(value_color(Some(text), family)))
                                         .child(value(text).replace(['\n', '\r'], "↵")),
@@ -2552,7 +2552,7 @@ fn stat_line(name: &'static str, value: String) -> Div {
         div()
             .min_w_0()
             .truncate()
-            .font_family("Cascadia Mono")
+            .font_family(fonts().mono.clone())
             .text_size(px(13.))
             .text_color(rgb(colors().text))
             .child(value),
@@ -2581,7 +2581,7 @@ fn swatch_line(name: &'static str, value: String, color: u32) -> Div {
             div()
                 .min_w_0()
                 .truncate()
-                .font_family("Cascadia Mono")
+                .font_family(fonts().mono.clone())
                 .text_size(px(13.))
                 .text_color(rgb(colors().text))
                 .child(value),

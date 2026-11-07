@@ -1421,7 +1421,7 @@ impl ReportView {
                     .child(
                         div()
                             .w(px(120.))
-                            .font_family("Cascadia Code")
+                            .font_family(fonts().code.clone())
                             .text_size(px(13.))
                             .text_color(rgb(colors().sql_parameter))
                             .truncate()
