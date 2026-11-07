@@ -265,8 +265,10 @@ sequenceDiagram
   changed, is closed.
 - Statements run in order and stop at the first failure. Whether earlier
   statements are committed depends on the session's transaction, which the
-  workspace infers from the statements it ran (`jykre::transaction`) and
-  shows in the toolbar; the failure message claims nothing about it.
+  driver reports after the run (`Session::transaction`) and the workspace
+  completes from the statements it ran where the driver cannot tell
+  (`jykre::transaction`), then shows in the toolbar; the failure message
+  claims nothing about it.
 - Every statement that ends is logged in the tab's `run_log::RunLog`, shown
   in Messages, independently of the result tabs.
 - A tab without a connection runs nothing outside the demo
@@ -484,4 +486,4 @@ Technical debt the maintainer accepted for now:
 | Standard | Current code |
 | --- | --- |
 | Statements are split as the database splits them | `sql::statements` follows each dialect's rules in the application, not a splitter provided by the driver. Blocks are recognised by their keywords (`CREATE PROCEDURE/FUNCTION/TRIGGER/EVENT … BEGIN … END`, `BEGIN ATOMIC`, a Databricks `BEGIN … END`); other constructs that hold semicolons are split on them |
-| The UI shows the server's transaction state, read from the protocol | Drivers report it through `Session::transaction` with a probe query (PostgreSQL) or only `autocommit = 0` (MySQL), because SQLx keeps the protocol's state private. What a driver cannot tell is inferred from the statements a tab ran (`jykre::transaction`), so under MySQL a `BEGIN` inside a procedure is not shown ([TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)) |
+| The UI shows the server's transaction state, read from the protocol | PostgreSQL, MySQL and SQLite read it from the protocol or the connection through a pinned SQLx fork until a release exposes it ([ADR-0030](../adr/0030-transaction-state-through-a-pinned-sqlx-fork.md), proposed). PostgreSQL still queries whether an open transaction with a snapshot wrote; whether a MySQL or SQLite transaction wrote, and everything under Databricks, is inferred from the statements a tab ran (`jykre::transaction`) ([TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)) |

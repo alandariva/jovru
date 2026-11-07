@@ -77,6 +77,21 @@ async fn resynchronize(connection: &mut MySqlConnection) -> Result<(), sqlx::Err
         }
     }
 }
+
+/// The transaction state from the status flags of the server's last OK or
+/// EOF packet. An error packet carries none, but every failed or cut
+/// statement ends with [`resynchronize`], whose ping reads them again, so
+/// they are current. Autocommit off is reported first: every statement then
+/// waits for a `COMMIT`, whether or not one ran.
+fn transaction_status(connection: &MySqlConnection) -> TransactionStatus {
+    if !connection.server_autocommit() {
+        TransactionStatus::Manual
+    } else if connection.server_in_transaction() {
+        TransactionStatus::Open { changes: None }
+    } else {
+        TransactionStatus::Idle
+    }
+}
 async fn bounded<T>(
     cancel: &CancellationToken,
     timeout: Option<Duration>,
@@ -307,11 +322,9 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
-    /// Only `autocommit = 0` is reported. Whether a `BEGIN` is open needs
-    /// the `PROCESS` privilege (`information_schema.innodb_trx`) or a
-    /// `performance_schema` consumer a user may not have, and the protocol's
-    /// status flags are private to SQLx, so that is left to the caller
-    /// ([technical debt TD-001](../../../docs/plans/technical-debt.md)).
+    /// Read from the status flags of the server's last response, so it
+    /// runs nothing. Whether a transaction wrote is not in them, so an open
+    /// one leaves `changes` unknown.
     async fn transaction(
         &mut self,
         cancel: CancellationToken,
@@ -450,33 +463,8 @@ impl Server {
                     }
                 }
                 Command::Transaction { reply } => {
-                    // Reading a system variable reads no table, so no
-                    // consistent snapshot is taken.
-                    let autocommit = tokio::time::timeout(
-                        RECOVERY,
-                        sqlx::raw_sql("SELECT CAST(@@autocommit AS CHAR)")
-                            .fetch_one(&mut connection),
-                    )
-                    .await
-                    .map(|row| row.and_then(|row| sqlx::Row::try_get::<String, _>(&row, 0)));
-                    match autocommit {
-                        Ok(Ok(value)) => {
-                            let manual = value.trim() == "0";
-                            let _ = reply.send(Ok(manual.then_some(TransactionStatus::Manual)));
-                            Flow::Ready
-                        }
-                        Ok(Err(error)) => {
-                            let _ = reply.send(Err(map_error(error)));
-                            Flow::Ready
-                        }
-                        Err(_) => {
-                            let _ = reply.send(Err(DriverError::new(
-                                ErrorCode::Timeout,
-                                "Database operation timed out",
-                            )));
-                            Flow::Broken
-                        }
-                    }
+                    let _ = reply.send(Ok(Some(transaction_status(&connection))));
+                    Flow::Ready
                 }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);

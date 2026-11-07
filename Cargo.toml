@@ -135,3 +135,17 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 [[bench]]
 name = "hot_paths"
 harness = false
+
+# SQLx 0.9.0 plus public readers of the transaction state the server reports
+# (ADR-0030, TD-001), from a fork pinned to one revision of its branch
+# `jykre/transaction-status` until a SQLx release has them. Every SQLx crate
+# is patched, so the tree keeps one `sqlx-core`; the revision is allowed in
+# `deny.toml`.
+[patch.crates-io]
+sqlx = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-core = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-macros = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-macros-core = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-mysql = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-postgres = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-sqlite = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }

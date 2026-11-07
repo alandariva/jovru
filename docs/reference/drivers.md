@@ -298,28 +298,36 @@ fresh token.
   Asking discards a result still open for paging, so the application asks
   after a run whose last result is complete, or after its last page. The
   default implementation reports an empty context. In PostgreSQL, right
-  after `BEGIN` or `START TRANSACTION` (and until a statement other than
-  `SET`, `SHOW`, `SAVEPOINT` or `RELEASE` runs) it answers from what the
-  session knows instead of querying, so it takes no snapshot.
+  after a transaction opens without a snapshot (`BEGIN`, `START
+  TRANSACTION`, or ending one `AND CHAIN`), and until a statement other than
+  `SET`, `SHOW`, `SAVEPOINT`, `RELEASE` or `ROLLBACK TO` runs, it answers
+  from what the session knows instead of querying, so it takes no snapshot.
 - `Session::transaction` reports the transaction state as the server sees
   it (`TransactionStatus`: idle, open with or without changes, failed, or
   MySQL's manual commit), or `None` when the driver cannot tell; the
   application then infers it. It is asked when the context is. Asking must
-  not change what the session's statements see:
-  - PostgreSQL probes with the simple query protocol
-    (`transaction_timestamp() <> statement_timestamp()`,
-    `pg_current_xact_id_if_assigned()`); a failed transaction answers with
-    SQLSTATE 25P02. Right after `BEGIN` it answers "open, nothing written"
-    without querying, under the same rule as the context, so `SET
-    TRANSACTION` and the isolation level's snapshot keep working.
-  - MySQL reports only `autocommit = 0` (`@@autocommit`): whether a `BEGIN`
-    is open needs privileges a user may not have.
+  not change what the session's statements see. The PostgreSQL, MySQL and
+  SQLite drivers read the state the database keeps, through public readers
+  that a pinned SQLx fork adds
+  ([ADR-0030](../adr/0030-transaction-state-through-a-pinned-sqlx-fork.md)):
+  - PostgreSQL reads the status of the last `ReadyForQuery` (idle, open,
+    failed) with no query. Whether an open transaction wrote is read with
+    `pg_current_xact_id_if_assigned()` over the simple query protocol, only
+    once the transaction has a snapshot; before that, under the same rule as
+    the context, it answers "nothing written", so `SET TRANSACTION` and the
+    isolation level's snapshot keep working.
+  - MySQL reads the status flags of the last OK or EOF packet with no query:
+    autocommit off is `Manual`, otherwise an open transaction (including one
+    begun in a procedure) is open with unknown changes. An error packet
+    carries no flags, but every failed or cut statement ends with a ping,
+    which reads them again, so a deadlock's rollback shows.
+  - SQLite reads `sqlite3_get_autocommit` from the connection, so a
+    transaction SQLite ended on its own (an interrupted write,
+    `OR ROLLBACK`) shows as idle; changes are unknown.
   - Databricks reports nothing.
-  - SQLite reports nothing: `sqlite3_get_autocommit` is private to SQLx
-    ([ADR-0027](../adr/0027-sqlite-driver.md)), so the application infers the
-    state, including `BEGIN IMMEDIATE`/`EXCLUSIVE` and `END`.
 
-  The protocol carries the exact state, but SQLx keeps it private; see
+  Whether a MySQL or SQLite transaction wrote is still inferred from the
+  statements; see
   [technical debt TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
 - `Session::close` consumes the session and can report close failures.
   Relational sessions keep physical state (`USE`, `SET`, temporary tables,

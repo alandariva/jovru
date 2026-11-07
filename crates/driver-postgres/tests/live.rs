@@ -763,6 +763,47 @@ async fn live_the_transaction_state_is_reported_without_taking_a_snapshot() {
 
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_commit_and_chain_opens_a_transaction_without_taking_its_snapshot() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let none = SessionContext::default();
+        text_in(&mut session, "BEGIN", &none).await;
+        text_in(&mut session, "SELECT 1", &none).await;
+        // The chained transaction is open, and neither the state nor the
+        // context took its snapshot: SET TRANSACTION still works.
+        text_in(&mut session, "COMMIT AND CHAIN", &none).await;
+        assert_eq!(
+            state(&mut session).await,
+            Some(TransactionStatus::Open {
+                changes: Some(false)
+            })
+        );
+        session.context(CancellationToken::new()).await.unwrap();
+        text_in(
+            &mut session,
+            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            &none,
+        )
+        .await;
+        assert_eq!(
+            text_in(&mut session, "SHOW transaction_isolation", &none).await,
+            "serializable"
+        );
+        // AND NO CHAIN leaves nothing open.
+        text_in(&mut session, "COMMIT AND NO CHAIN", &none).await;
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_levels_partitions_inspection_permissions_and_databases() {
     tokio::time::timeout(Duration::from_secs(90), async {
         let driver = PostgresDriver;

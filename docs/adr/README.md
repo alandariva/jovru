@@ -52,3 +52,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0027](0027-sqlite-driver.md) | SQLite database files through SQLx's bundled SQLite | Proposed |
 | [0028](0028-agentic-ai-assistant-over-the-metadata-cache.md) | An agentic AI assistant over the metadata cache, with every request reviewable | Proposed |
 | [0029](0029-otlp-export-of-logs-and-traces.md) | Optional export of logs and traces over OTLP, with metadata only (amends 0009) | Accepted (implemented) |
+| [0030](0030-transaction-state-through-a-pinned-sqlx-fork.md) | Transaction state read from the protocol through a pinned SQLx fork (amends 0002 and 0027) | Proposed |

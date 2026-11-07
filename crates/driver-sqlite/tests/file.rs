@@ -311,6 +311,77 @@ async fn a_failed_statement_keeps_the_session_and_its_transaction() {
     session.close().await.unwrap();
 }
 
+/// The transaction state the session reports.
+async fn state(session: &mut Box<dyn Session>) -> Option<TransactionStatus> {
+    session.transaction(CancellationToken::new()).await.unwrap()
+}
+
+#[tokio::test]
+async fn the_transaction_state_is_read_from_the_connection() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let folder = Folder::new();
+        let path = seeded(&folder).await;
+        let mut session = SqliteDriver
+            .open_session(&input(&path, false), CancellationToken::new())
+            .await
+            .unwrap();
+        let open = Some(TransactionStatus::Open { changes: None });
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        run(&mut session, "BEGIN IMMEDIATE").await.unwrap();
+        assert_eq!(state(&mut session).await, open);
+        run(&mut session, "END").await.unwrap();
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+
+        // A conflict with OR ROLLBACK ends the whole transaction, which the
+        // statements alone would not show.
+        run(&mut session, "BEGIN").await.unwrap();
+        run(
+            &mut session,
+            "INSERT INTO customers (id, name) VALUES (3, 'Cy')",
+        )
+        .await
+        .unwrap();
+        run(
+            &mut session,
+            "INSERT OR ROLLBACK INTO customers (id, name) VALUES (3, 'again')",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+
+        // So does interrupting a write inside a transaction.
+        run(&mut session, "BEGIN").await.unwrap();
+        run(
+            &mut session,
+            "INSERT INTO customers (id, name) VALUES (4, 'Di')",
+        )
+        .await
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let trigger = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            trigger.cancel();
+        });
+        let endless_write = "INSERT INTO orders (customer_id, note) \
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n) \
+             SELECT 1, 'n' || i FROM n";
+        let error = session
+            .execute(&request(endless_write), &mut Sink::default(), cancel)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        let (_, sink) = run(&mut session, "SELECT count(*) FROM customers")
+            .await
+            .unwrap();
+        assert_eq!(sink.rows, vec![vec![Cell::Integer(2)]]);
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn a_read_only_connection_refuses_to_write() {
     let folder = Folder::new();
