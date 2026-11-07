@@ -1,13 +1,67 @@
 //! The copy menu's choices, shared by every result grid of the window: the
 //! format `Ctrl C` copies in and how the delimited formats write their
 //! fields ([Results](../../docs/results.md#copying)). What each format writes
-//! lives in [`jykre::copy_as`]; this module only keeps the choices and saves
-//! them.
+//! lives in [`jykre::copy_as`]; this module keeps the choices, saves them and
+//! owns the cancellation/publication helpers shared by grid copy jobs.
 use gpui_kit::*;
 use jykre::copy_as::{self, CopyFormat, CopyOptions, NullText};
+use jykre::drivers::CancellationToken;
 use jykre::drivers::DriverResult;
 use jykre::export::Separator;
 use jykre::{backend, connection_store, tr};
+use std::sync::Arc;
+use std::time::Instant;
+
+/// Only the latest request in the window may publish to the clipboard.
+#[derive(Default)]
+pub(super) struct CopyGeneration(pub u64, pub CancellationToken);
+impl Global for CopyGeneration {}
+
+pub(super) fn next_generation(cx: &mut App) -> u64 {
+    if let Some(current) = cx.try_global::<CopyGeneration>() {
+        current.1.cancel();
+    }
+    let next = cx
+        .try_global::<CopyGeneration>()
+        .map_or(1, |current| current.0 + 1);
+    cx.set_global(CopyGeneration(next, CancellationToken::new()));
+    next
+}
+
+pub(super) fn set_cancel(generation: u64, cancel: CancellationToken, cx: &mut App) {
+    cx.set_global(CopyGeneration(generation, cancel));
+}
+
+pub(super) fn is_current(generation: u64, cx: &App) -> bool {
+    cx.try_global::<CopyGeneration>()
+        .is_some_and(|current| current.0 == generation)
+}
+
+/// Cancels CPU work when its owning grid closes or starts another copy.
+pub(super) struct CopyJob {
+    pub generation: u64,
+    pub cancel: CancellationToken,
+    pub started: Instant,
+    pub progress: copy_as::Progress,
+}
+
+impl Drop for CopyJob {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+/// A dialog may outlive the page. Release its snapshot on the blocking pool
+/// even when Cancel/Escape closes it after that page has gone away.
+pub(super) struct CopySnapshot(pub copy_as::CopyRequest);
+
+impl Drop for CopySnapshot {
+    fn drop(&mut self) {
+        let data = std::mem::replace(&mut self.0.result, Arc::new(Default::default()));
+        let source = std::mem::replace(&mut self.0.source, copy_as::CopySource::Page);
+        backend::release((data, source));
+    }
+}
 
 /// The copy options of the window, read at start from `copy.preferences`.
 #[derive(Clone, Copy, Debug, Default)]

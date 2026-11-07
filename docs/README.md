@@ -42,6 +42,7 @@ purpose, never as a side effect of an unrelated change.
 | [Testing](testing.md) | Local gate, fixtures and testing policy |
 | [Drivers](drivers.md) | Driver contracts, configuration and adding a database |
 | [Technical debt](technical-debt.md) | Accepted debts across areas, their severity and the way out |
+| [Version 0.2.0](0.2.0.md) | Milestones that close 0.2.0 (daily-use hardening, app icon, Linux validation) |
 | [ADRs](adr/README.md) | Architecture decision records |
 
 ## Golden rules

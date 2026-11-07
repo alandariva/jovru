@@ -549,5 +549,3 @@ References: [SQLx RawSql](https://docs.rs/sqlx/latest/sqlx/struct.RawSql.html) a
 [Databricks Statement Execution](https://docs.databricks.com/api/statement-execution/v1/statement-execution).
 Classic execution: [Command Execution](https://docs.databricks.com/api/command-execution/v2/create).
 Profile discovery: [Databricks CLI auth profiles implementation](https://github.com/databricks/cli/blob/main/cmd/auth/profiles.go).
-See the [2026-11-03 validation report](databricks-validation-2026-11-03.md) for
-completed checks, measurements and remaining visual/authenticated checks.

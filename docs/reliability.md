@@ -73,6 +73,7 @@
 | Databricks CLI (token resolution) | 60 s |
 | Export: each part read from the session | `ExecutionOptions.timeout` of the tab, as any page |
 | Export: creating, writing one part (about 16 MB) or finishing the file | 60 s (`backend::FILE_TIMEOUT`), so a network share that stops answering fails the export |
+| Clipboard: estimating or encoding a grid selection/query page | 60 s per phase, checked between rows/cells on the blocking pool; cancellable, with no partial clipboard update |
 | AI assistant: connecting to the provider | 15 s |
 | AI assistant: first byte of an answer | 120 s |
 | AI assistant: silence between pieces of a streamed answer | 60 s |

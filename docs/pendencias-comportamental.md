@@ -26,7 +26,7 @@ As divergências que pesam ficam nas bordas desse núcleo:
 4. **Fluxos de conexão sem diálogo.** Senha não lembrada nunca é pedida (A e B pedem ao conectar). Salvar o perfil derruba os runs abertos sem avisar.
 5. **Abrir tabela não mostra dados.** Nas três ferramentas, abrir uma tabela leva aos dados (ou ao editor do objeto) com paginação. No Jykre, cria uma aba com `SELECT … LIMIT 100` que não é executada.
 
-São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, sem nenhuma crítica. Dessas, 15 são reconfirmações do backlog anterior. **46 estão aprovadas**. N001–N016 foram aprovadas em 3 de novembro de 2026 e estão **implementadas** (`f18136c`, de 3 de novembro, com `8208602` para N008 e `66f262b` para N010, de 4 de novembro). N017–N047, exceto N043, foram aprovadas em 4 de novembro de 2026: 29 estão **implementadas** (alterações locais não commitadas de 4 de novembro; N040 e N044 já eram atendidas pelo código atual e foram só conferidas) e N031 está **parcial** (a confirmação acima de 50 MiB foi feita; gerar a cópia fora da thread da UI depende de uma decisão sobre o ADR-0012). N043 foi **reprovada**.
+São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, sem nenhuma crítica. Dessas, 15 são reconfirmações do backlog anterior. **46 estão aprovadas**. N001–N016 foram aprovadas em 3 de novembro de 2026 e estão **implementadas** (`f18136c`, de 3 de novembro, com `8208602` para N008 e `66f262b` para N010, de 4 de novembro). N017–N047, exceto N043, foram aprovadas em 4 de novembro de 2026: 29 foram implementadas naquele recorte (N040 e N044 já eram atendidas pelo código atual e foram só conferidas). N031 foi implementada para a seleção da grade e a página de consulta no M2 da 0.2.0, em 7 de novembro de 2026; os outros botões de cópia ainda síncronos estão nomeados em `docs/results.md`. N043 foi **reprovada**.
 
 ---
 
@@ -473,17 +473,17 @@ São 47 divergências relevantes: 10 de prioridade alta, 22 média e 15 baixa, s
 - **Evidência no projeto:** `src/sql.rs` — `normalized_statements`; `src/query.rs` — `sync`.
 - **Confiança:** Confirmado.
 
-### N031 — Cópias grandes rodam na thread da UI, sem confirmação (Backlog: N033)
+### N031 — Cópias grandes da grade na thread da UI (Backlog: N033)
 - **Prioridade:** Média
 - **Aprovação:** Aprovada (4 de novembro de 2026)
-- **Status:** Parcial (4 de novembro de 2026; alterações locais não commitadas). O tamanho é estimado pelo comprimento das células antes de gerar o texto (`grid::selection_bytes`, `grid::csv_bytes`), e acima de 50 MiB a cópia da seleção (`Ctrl C`, menu) e “Copy this page as CSV” pedem confirmação. Bloqueado: gerar o texto fora da thread da UI. O resultado é compartilhado como `Rc<ResultData>`, como registra o [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md), e não pode ir para outra thread; a mudança proposta é compartilhá-lo como `Arc<ResultData>` (ou gerar a cópia no runtime a partir de um `Arc`), o que pede um novo ADR ou a aprovação do mantenedor. O desvio de `docs/results.md` foi atualizado. Atualização (4 de novembro de 2026): a exportação para arquivo trouxe o [ADR-0022](adr/0022-result-pages-shared-across-threads.md) (proposto, decisão aprovada pelo mantenedor), e as páginas passaram a ser `Arc<ResultData>`; gerar a cópia fora da thread da UI deixou de estar bloqueado, mas ainda não foi feito.
+- **Status:** Implementada no recorte da grade e da página de consulta (7 de novembro de 2026; 0.2.0 M2, alterações locais não commitadas). `copy_as::CopyRequest` compartilha a página e a ordem exibida por `Arc`, estima o tamanho e gera os 11 formatos fora da thread da UI. Acima de 50 MiB continua a pedir confirmação, sobre o snapshot original. Após 100 ms mostra progresso e cancelamento (botão ou `Esc`); cada fase tem limite de 60 s. Uma cópia cancelada, de uma página trocada ou substituída por outro pedido não publica texto. O **Copy** do inspetor de valor e os menus próprios dos painéis de relatório ainda são síncronos, registrados em `docs/results.md`; não são os caminhos desta pendência.
 - **Funcionalidade:** Clipboard
-- **Comportamento atual:** “Copy this page as CSV” e `Ctrl+C` materializam o texto no thread da UI e escrevem direto no clipboard. É um desvio registrado em `docs/results.md`.
+- **Comportamento atual:** “Copy this page as CSV”, `Ctrl+C`, `Ctrl+Shift+C` e os formatos do menu da grade estimam e geram no blocking pool. Só a entrega do texto completo ao clipboard do sistema fica na UI.
 - **Comportamento de referência:** Princípio, e a regra do próprio Jykre: confirmar acima de 50 MiB e copiar fora da thread da UI.
-- **Diferença identificada:** Não há limite operacional.
+- **Diferença identificada:** Resolvida nos caminhos acima; os outros botões de cópia ainda síncronos estão nomeados em `docs/results.md`.
 - **Por que o comportamento atual é inferior:** A janela pode congelar.
 - **Comportamento recomendado:** Estimar o tamanho, confirmar acima de 50 MiB e gerar fora da UI.
-- **Evidência no projeto:** `src/app/result_grid.rs` — `copy_selection`; `src/app/workspace.rs` — `export-results`.
+- **Evidência no projeto:** `src/copy_as/job.rs`; `src/app/result_grid.rs` — `start_copy`, `encode_copy`; `src/app/workspace.rs` — `copy_page_csv`.
 - **Confiança:** Confirmado.
 
 ### N032 — A execução longa não mostra tempo decorrido (Backlog: N036)
@@ -735,7 +735,7 @@ Na coluna **Referência**, as letras indicam as ferramentas cuja documentação 
 | N028 | Conexão | Teste sem cancelamento | Usuário preso | A, P | Média | Aprovada · Implementada |
 | N029 | Persistência | Save não atômico | Estado pela metade | P | Média | Aprovada · Implementada |
 | N030 | Gutter | Whitespace em literal | ✓ falso | P | Média | Aprovada · Implementada |
-| N031 | Clipboard | Cópia grande na UI | Congelamento | P | Média | Aprovada · Parcial |
+| N031 | Clipboard | Cópia grande na UI | Congelamento | P | Média | Aprovada · Implementada (grade/página de consulta) |
 | N032 | Progresso | Sem tempo decorrido | Timeout invisível | A, P | Média | Aprovada · Implementada |
 | N033 | Busca | Pendente invisível | Abre match velho | P | Baixa | Aprovada · Implementada |
 | N034 | Abas | Abas duplicadas | Barra poluída | C, A~ | Baixa | Aprovada · Implementada |

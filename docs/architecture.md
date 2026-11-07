@@ -276,6 +276,15 @@ sequenceDiagram
   server-side work and keeps the session when it can bring it back to a known
   state, or closes it.
 
+### Copy a result
+
+Clipboard copies of grid selections and query pages use `copy_as::CopyRequest`:
+an `Arc<ResultData>` and, for a selection, an `Arc<GridView>` freeze the page
+and display order without a data-sized UI-thread clone. Estimation and encoding
+run on the runtime's blocking pool, with cancellation and bounded progress
+notifications. The grid publishes a complete string only while its request is
+still current. See [Results](results.md#copying).
+
 ### Export a result
 
 1. The export bar (`src/app/workspace/export.rs`) asks the result tab where

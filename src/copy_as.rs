@@ -24,6 +24,9 @@ use jykre_core::SqlDialect;
 use std::collections::HashSet;
 use std::path::Path;
 
+mod job;
+pub use job::{CopyRequest, CopySource, Progress, generate};
+
 /// The formats a selection copies in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CopyFormat {

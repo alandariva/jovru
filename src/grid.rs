@@ -8,7 +8,7 @@
 use crate::cell_format::{self, ValueFamily};
 use crate::decimal::compare_numbers;
 use crate::result::ResultData;
-use std::{cell::RefCell, ops::RangeInclusive, rc::Rc};
+use std::{cell::RefCell, ops::RangeInclusive, sync::Arc};
 
 /// A rectangular block of result cells, from the cell clicked first (anchor)
 /// to the one reached with Shift (focus). Rows are indices into the result
@@ -173,17 +173,17 @@ impl GridView {
 
 /// The last [`GridView`], reused while its key is unchanged.
 #[derive(Default)]
-pub struct GridCache(RefCell<Option<Rc<GridView>>>);
+pub struct GridCache(RefCell<Option<Arc<GridView>>>);
 
 impl GridCache {
-    pub fn get(&self, result: &ResultData, key: GridKey) -> Rc<GridView> {
+    pub fn get(&self, result: &ResultData, key: GridKey) -> Arc<GridView> {
         let mut cached = self.0.borrow_mut();
         match cached.as_ref() {
             Some(grid) if grid.key == key => grid.clone(),
             _ => {
                 // Rebuilt on the UI thread once per change, never per frame.
                 let _timer = crate::logging::UiTimer::start("grid view");
-                cached.insert(Rc::new(GridView::new(result, key))).clone()
+                cached.insert(Arc::new(GridView::new(result, key))).clone()
             }
         }
     }
@@ -637,7 +637,7 @@ mod tests {
         let cache = GridCache::default();
         let first = cache.get(&result, key(1, "", None));
         // Hover, scroll and selection frames change none of the inputs.
-        assert!(Rc::ptr_eq(&first, &cache.get(&result, key(1, "", None))));
+        assert!(Arc::ptr_eq(&first, &cache.get(&result, key(1, "", None))));
         for changed in [
             key(2, "", None),
             key(1, "info", None),
@@ -648,7 +648,7 @@ mod tests {
             },
         ] {
             let rebuilt = cache.get(&result, changed.clone());
-            assert!(!Rc::ptr_eq(&first, &rebuilt));
+            assert!(!Arc::ptr_eq(&first, &rebuilt));
             assert_eq!(rebuilt.key, changed);
         }
     }

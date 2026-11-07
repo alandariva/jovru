@@ -69,7 +69,7 @@ alignment only; the value itself is never converted.
   converts each row as it arrives, on the Tokio runtime, and drops the driver
   cells there. It stops reading at the memory ceiling and records which limit
   applied.
-- A tab shares its result as `Rc<ResultData>`. A new run releases the previous
+- A tab shares its result as `Arc<ResultData>`. A new run releases the previous
   result before the next one arrives; a result that is no longer held is freed
   on the runtime's blocking pool (`backend::release`), never on the UI thread.
   Closing a tab releases everything.
@@ -294,9 +294,19 @@ alignment only; the value itself is never converted.
 - **Copy this page as CSV** copies the page on screen with headers, `;` as the
   separator and every value quoted, using the original values regardless of
   presentation; NULL becomes an empty field. The copy settings do not apply.
-- Copies estimated above 50 MiB (from the length of the cells, before they
-  are built) ask for confirmation, and copying runs off the UI thread
-  when it would exceed a frame.
+- Grid selections (every menu format) and **Copy this page as CSV** estimate
+  their size and generate their text on the runtime's blocking pool, sharing
+  the immutable page and display order rather than cloning the cells. Copies
+  estimated above 50 MiB ask for confirmation before generating the text.
+  The confirmation keeps the selection/page that was requested.
+- Past the 100 ms copy budget, the grid shows progress and **Cancel copy**;
+  `Esc` cancels too. Encoding reports rows at most every 100 ms. Estimation
+  and encoding each have a 60 s deadline, checked between rows/cells.
+  Cancellation, closing the grid, changing its page, or requesting a newer
+  result copy prevents the old text from reaching the clipboard. Partial text
+  is never published; large discarded text and snapshots are freed off the UI
+  thread. Only handing the completed text to the OS clipboard stays on the UI
+  thread.
 
 ## Export
 
@@ -414,4 +424,4 @@ format ([User experience](ux.md#feedback)).
 
 | Standard | Current code |
 | --- | --- |
-| Copy off the UI thread when large | Copies above 50 MiB ask first, but the text is still built on the UI thread (about 85 ms for 500,000 cells). Pages are now shared as `Arc<ResultData>` ([ADR-0022](adr/0022-result-pages-shared-across-threads.md), Proposed), which lets the copy move off the UI thread; that change is not made yet |
+| Copy off the UI thread when large | Grid selections and **Copy this page as CSV** run off the UI thread, with cancellation and progress (0.2.0 M2). The full-value inspector's **Copy** and the report panel's own **Copy as CSV** / **Copy for a spreadsheet** menu still build text synchronously; report menus keep the 50 MiB confirmation |

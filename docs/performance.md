@@ -152,6 +152,10 @@ The existing frame probe below remains the tool for the frame budget.
 
 ## Known deviations
 
+M2 clipboard encoding measurements (release, Windows, 2026-11-07): 49 ms for
+500,000 text cells and 57 ms for CSV, plus 4–5 ms to estimate the size, all
+off the UI thread. These measure encoding, not the OS clipboard handoff.
+
 | Standard | Current code |
 | --- | --- |
 | Long collections are virtualized | The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`). Saved queries and history are virtualized |

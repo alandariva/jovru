@@ -809,47 +809,19 @@ impl Workspace {
     }
 
     /// **Copy this page as CSV**. A copy estimated above 50 MiB asks first
-    /// (unless `confirmed`), since building and holding it takes time and
+    /// before generation, since building and holding it takes time and
     /// memory ([Results](../../docs/results.md#copying)).
-    fn copy_page_csv(&mut self, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = self.current_page().filter(|_| self.has_results()) else {
+    fn copy_page_csv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_page().filter(|_| self.has_results()).is_none() {
             self.notice = Some(Feedback::new(
                 Tone::Info,
                 tr!("Run a query before copying the results."),
             ));
             cx.notify();
             return;
-        };
-        let bytes = jykre::grid::csv_bytes(&page.data);
-        if !confirmed && bytes > jykre::grid::COPY_CONFIRM_BYTES {
-            let workspace = cx.entity().downgrade();
-            super::confirm(
-                window,
-                cx,
-                super::Confirmation {
-                    title: tr!("Copy about {0} MB?", bytes / (1024 * 1024)),
-                    description: tr!(
-                        "The page is large: copying it can take a moment and holds all of it in the clipboard."
-                    )
-                    .to_string(),
-                    ok: tr!("Copy"),
-                    cancel: tr!("Cancel"),
-                    focus: super::ConfirmFocus::Dialog,
-                },
-                move |window, cx| {
-                    let _ = workspace.update(cx, |this, cx| this.copy_page_csv(true, window, cx));
-                },
-            );
-            return;
         }
-        let _timer = jykre::logging::UiTimer::start("copy CSV");
-        let csv = cell_format::result_csv(&page.data);
-        cx.write_to_clipboard(ClipboardItem::new_string(csv));
-        self.notice = Some(Feedback::new(
-            Tone::Success,
-            tr!("CSV copied. Paste it into a spreadsheet or file."),
-        ));
-        cx.notify();
+        self.grid
+            .update(cx, |grid, cx| grid.copy_page_csv(window, cx));
     }
 
     /// The table or view this tab was opened for.
@@ -2382,9 +2354,11 @@ impl Workspace {
                                     I::Sheet,
                                     tr!("Copy this page as CSV"),
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| this.copy_page_csv(false, window, cx),
-                                )),
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.copy_page_csv(window, cx)
+                                    }),
+                                ),
                             )
                             .child({
                                 let open = !matches!(self.export.state, ExportState::Closed);

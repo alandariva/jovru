@@ -66,9 +66,8 @@ impl Workspace {
                 let copy = |headers: bool| {
                     let grid = grid.clone();
                     move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                        let _ = grid.update(cx, |grid, cx| {
-                            grid.copy_selection(headers, false, window, cx)
-                        });
+                        let _ =
+                            grid.update(cx, |grid, cx| grid.copy_selection(headers, window, cx));
                     }
                 };
                 let menu = menu
