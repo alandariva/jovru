@@ -28,7 +28,7 @@ impl DriverRegistry {
         })
     }
 
-    /// Stable order: PostgreSQL, MySQL, Databricks. Includes explicit stub status.
+    /// Stable order: PostgreSQL, MySQL, Databricks, SQLite. Includes explicit stub status.
     pub fn descriptors(&self) -> Vec<DriverDescriptor> {
         self.drivers
             .values()

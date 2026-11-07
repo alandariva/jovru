@@ -1,6 +1,6 @@
 [package]
 name = "jykre"
-description = "Native Rust and GPUI desktop workspace for PostgreSQL, MySQL and Databricks"
+description = "Native Rust and GPUI desktop workspace for PostgreSQL, MySQL, Databricks and SQLite"
 readme = "README.md"
 keywords = ["database", "sql", "gpui", "postgresql", "databricks"]
 categories = ["database", "gui"]
@@ -52,11 +52,27 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time",
 futures-util = "0.3"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# AI assistant (ADR-0028, approved 2026-11-06): genai talks to the
+# providers. It needs reqwest 0.13, so a second reqwest sits beside the 0.12
+# of the Databricks driver; TLS stays on ring (no aws-lc-rs) by installing
+# rustls' ring provider and leaving reqwest without one.
+genai = { version = "0.7.3", default-features = false }
+reqwest-genai = { package = "reqwest", version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "json", "tracing-log"] }
 tracing-appender = "0.2"
+# Telemetry over OTLP (ADR-0029, approved 2026-11-06): logs and traces sent
+# to the collector chosen in Preferences, off by default. HTTP uses the
+# reqwest 0.13 already in the tree (TLS on ring, no provider of its own);
+# gRPC uses tonic with ring and the system's roots. No metrics.
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace", "logs"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "logs", "internal-logs"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["trace", "logs", "http-proto", "reqwest-client", "grpc-tonic", "tls-ring", "tls-roots", "internal-logs"] }
+tracing-opentelemetry = { version = "0.34.0", default-features = false }
+opentelemetry-appender-tracing = { version = "0.33.1", default-features = false }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 # SQL formatting by dialect (N010), behind jykre-sql-language's `sqruff`
 # feature; it has no default features to turn off.
@@ -70,19 +86,33 @@ jykre-core = { path = "crates/core" }
 jykre-driver-postgres = { path = "crates/driver-postgres" }
 jykre-driver-mysql = { path = "crates/driver-mysql" }
 jykre-driver-databricks = { path = "crates/driver-databricks" }
+jykre-driver-sqlite = { path = "crates/driver-sqlite" }
 jykre-storage = { path = "crates/storage" }
 jykre-secrets = { path = "crates/secrets" }
+jykre-assistant = { path = "crates/assistant" }
 jykre-sql = { path = "crates/sql" }
 # The editor's language features, used only by the editor adapter
 # (src/app/sql_editor); query execution never depends on them.
 jykre-sql-language = { path = "crates/sql-language" }
 tokio.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 sys-locale = "0.3"
 dirs = "7"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
+# Telemetry over OTLP (ADR-0029); only `jykre::telemetry` uses them.
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+opentelemetry-appender-tracing.workspace = true
+reqwest-genai.workspace = true
+rustls.workspace = true
+uuid.workspace = true
+# The collector's headers are a secret, exposed only by the exporters.
+secrecy.workspace = true
 # Export to XLSX (approved 2026-11-04). Constant memory mode writes each row
 # to a temporary file as it is added, so an export never holds the sheet.
 rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["constant_memory"] }
@@ -92,6 +122,7 @@ workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 # Hot paths with criterion (ADR-0010). `cargo xtask check --full` runs them in
 # quick mode; compare a change with `--save-baseline main` / `--baseline main`.

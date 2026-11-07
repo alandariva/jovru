@@ -24,7 +24,7 @@ is visible, and the keyboard reaches everything.
 │  │              │ Footer: 1,000 rows · row limit reached · 18 ms       │
 │  │              │ Notice bar (user actions: copied, saved, formatted)  │
 ├──┴──────────────┴──────────────────────────────────────────────────────┤
-│ Status bar: workspace · connections · local data · version             │
+│ Status bar: connections · version                                      │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -35,9 +35,24 @@ report's tab has a group of its own (below).
 The rail holds, from the top: Explorer, Saved queries, Reports, History and,
 at the bottom, Preferences.
 
+**Preferences** is a dialog over the window (the rail's gear or `Ctrl ,`),
+with its categories listed on the left: **Appearance** (the theme and
+**Reset widths**), **SQL editor** (the SQL font size from 12 to 24 px, with
+a preview in the editor's colours, and the SQL catalogs read), **Assistant**,
+**Diagnostics** (the log folder and telemetry), **Shortcuts** and **About**
+(the version and the data folder). `Esc` or its close button closes it and
+gives the keyboard back to the tab; Tab stays inside while it is open.
+
+The **theme** is **System** until the user chooses: it follows the
+operating system's light or dark appearance, also when it changes while the
+application runs. **Light** or **Dark** stay chosen across restarts, and
+choosing **System** again follows the system once more. The choice applies
+at once to every part of the window.
+
 A **report** ([ADR-0024](adr/0024-reports.md),
 [ADR-0025](adr/0025-report-panels.md)) opens in a tab of its own, in a tab
-group of its own named after the report: the group offers no new tab, takes
+group of its own named after the report and drawn without a colour (grey),
+since it belongs to no connection: the group offers no new tab, takes
 no other tab and goes away with the report's tab, since the report's panels
 may run on several connections. The tab has a toolbar (title, **Edit**,
 **Add a panel**, save, **Export for printing or PDF…**, **Run**), the
@@ -65,9 +80,70 @@ panel of any saved report, chosen in a dialog with a search; both keep the
 tab's connection and database. Nothing is stored until **Save report**.
 Report tabs are not reopened after a restart.
 
-Dividers are adjustable with the mouse and the arrow keys. The assistant panel (simulated today)
-opens to the right of the query area, and says at its top that it is pending
-implementation and its answers are simulated.
+Dividers are adjustable with the mouse and the arrow keys. The assistant panel opens to the
+right of the query area ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
+
+- **Telemetry** in Preferences › Diagnostics: **Send logs** and **Send
+  traces** (both off by default), the protocol (HTTP/protobuf or gRPC), the
+  collector's address and headers for its authentication (kept in the
+  system vault and never shown again). **Save** applies at once; turning a
+  signal off stops capturing it immediately. **Test** sends one span and
+  says how the collector answered, with a way to cancel. A note lists what
+  is sent and never sent ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)).
+- **Set up** in Preferences › Assistant: provider (Anthropic, OpenAI,
+  OpenAI-compatible, Ollama or off), model, address, API key (kept in the
+  system vault and never shown again), when to review requests, whether
+  the model may ask to run queries (**Ask me each time** or **Off**), and
+  prices per million tokens for the costs shown. **Test** asks the model a tiny
+  question with one tool declared. Until it is set up, the panel offers to
+  open Preferences.
+- **Fix with AI**, next to **Copy details** on a failed statement, sends the
+  statement and the server's error. **Ask** sends a question, with the row
+  counts of the tab's last result; **Write SQL** sends a description, with
+  the selection or the statement at the cursor.
+- Each request appears as a card (**Request N**: model, estimated tokens,
+  the estimated tokens that are new, and cost) with its messages, tools and
+  JSON. Messages show what is new since the last request sent; a **…** row
+  says what is the same (the system prompt, N messages) and shows everything
+  when chosen. When the review mode asks, it
+  waits with **Send** and **Cancel**, saying nothing has been sent yet.
+  Each tool the model calls is a step showing its arguments and the answer
+  the next request carries. After 300 ms a round shows **Thinking…**, after
+  2 s its elapsed time, and **Stop** (or the composer's stop button)
+  cancels it. After 8 rounds the request stops until **Continue**.
+- When the model asks to run a query, a card says why (its purpose), shows
+  the statement, marks one that changes or deletes data and a production
+  connection, and says where it runs: **Decline** or **Run** (**Run on
+  production** for a risky statement there). It runs in the assistant's own
+  session, with **Running…** and **Stop**. Then the card shows a toggle per
+  column (focusable buttons that wrap, so every column is reachable in a
+  narrow panel), up to 50 rows and, below,
+  the exact text the model would receive, updated as columns are hidden;
+  it says nothing of the result has been sent: **Don't send** or **Send
+  result**. A decided card folds to one line (sent, with rows and hidden
+  columns; ran, not sent; declined) that opens on the statement and what
+  the model was told. Columns hidden once start hidden in the next result
+  of the conversation.
+- Answers are plain text; each SQL block has Copy, **Insert at the cursor**
+  and, for a fix, **Replace the failed statement**, which replaces it only
+  where it still is unchanged, as one undo step. A block that changes or
+  deletes every row is marked. Nothing runs without the user's approval.
+- Each answer shows its tokens (input, output, cached), cost and time.
+  Below the header, the **Session** summary shows three tiles (spent in the
+  session, tokens in the context, the share of input from the provider's
+  cache with a bar) and a line with rounds, input and output, and cache
+  hits and misses; its chevron folds it to one line (spent · tokens ·
+  cache), and it stays as left. The gear (**Assistant options**) says what
+  is sent and holds **Compact the context**: **Prune long tool results**
+  and **Summarize with the model** (a request reviewed like any other),
+  available when nothing is on its way. Each compaction shows in the
+  conversation with the context's estimated size before and after, and
+  that the next request starts the provider's cache again. A request the
+  provider rejects suggests compacting. **Copy the whole trace** exports
+  every request, answer and tool step as JSON. **New conversation** starts
+  over; choosing another connection does too. A failure shows inline with
+  **Try again**, never in a dialog.
+- The demo (`JYKRE_DEMO`) answers with canned text marked **Simulated**.
 
 ## Always-visible states
 
@@ -124,8 +200,10 @@ Each state has one consistent representation.
 | Inspection | **Inspect** in a relation's or a schema's menu | A panel with indexes, constraints and triggers (relations) or functions, procedures with their parameters, sequences and types (schemas), read from the server when asked; `Esc` closes it |
 | Definition | **Show definition** in a relation's menu | A new tab with the view's source or the table's DDL, read from the server |
 | Revalidation | Connection dialog, **Options** | Hours after which opening the application reads the chosen namespaces again, once; empty or 0 never does |
-| Editor suggestions | The SQL editor | After `FROM` or `JOIN`, the relations of the tab's context (or of the schema written before the dot), its CTEs and namespaces; after `alias.`, the columns of that relation (inside a subquery, an alias of the enclosing query too); elsewhere, the columns of the relations of the query around the cursor: the statement, a subquery, a CTE body or one side of a `UNION`, never those of a subquery the cursor is not in. A CTE or a derived table offers the columns its `SELECT` names (renamed by a column list written after it; `*` brings the columns of what it reads), with the type of the column each one reads when that is a plain column. Without a qualifier, an expression also suggests the dialect's functions (with their signature and description; choosing one inserts `name(`) and keywords (`WHERE`, `CASE`), after the columns; after `::`, the dialect's types. Names that start exactly as typed come first. Keywords, functions and types come from the SQL catalogs, so they show even before the cache is read. Only the tab's own connection is suggested. Columns not read yet show "Loading columns…" and are read in the background; typing never waits. A name the dialect reserves (`order`, `user`) is inserted quoted. Hovering a column shows its type, nullability, key, default and comment (for a CTE's or a derived table's column, those of the column it reads), and hovering a function before its `(` its signatures, description and page; `Ctrl`-click on a relation or column shows it in the explorer |
+| Editor suggestions | The SQL editor | After `FROM` or `JOIN`, the relations of the tab's context (or of the namespace written before the dot), its CTEs and namespaces: a catalog or database first, and the schemas below it once the context gives it or the cache holds only one (without a catalog chosen, a Databricks connection offers its catalogs, and `catalog.` its schemas). A level the tab's context does not give yet (no run reported it) matches any name of the cache, so `sales.` still finds the `sales` schema; after `alias.`, the columns of that relation (inside a subquery, an alias of the enclosing query too); elsewhere, the columns of the relations of the query around the cursor: the statement, a subquery, a CTE body or one side of a `UNION`, never those of a subquery the cursor is not in. A CTE or a derived table offers the columns its `SELECT` names (renamed by a column list written after it; `*` brings the columns of what it reads), with the type of the column each one reads when that is a plain column. Without a qualifier, an expression also suggests the dialect's functions (with their signature and description; choosing one inserts `name(`) and keywords (`WHERE`, `CASE`), after the columns; after `::`, the dialect's types. Names that start exactly as typed come first. Keywords, functions and types come from the SQL catalogs, so they show even before the cache is read. Only the tab's own connection is suggested. Columns not read yet show "Loading columns…" and are read in the background; typing never waits. A name the dialect reserves (`order`, `user`) is inserted quoted. Hovering a column shows its type, nullability, key, default and comment (for a CTE's or a derived table's column, those of the column it reads), and hovering a function before its `(` its signatures, description and page; `Ctrl`-click on a relation or column shows it in the explorer |
 | Structure changed by SQL | The explorer | A `CREATE`, `ALTER`, `DROP`, `RENAME` or `COMMENT` that ran queues a refresh of the namespaces it touched, when they are chosen to be introspected, about 300 ms later |
+| Quick search in the explorer | A field over the tree, opened by typing while the tree has the keyboard | The text typed, how many shown nodes hold it (amber "No matches"), **Highlight** or **Filter**, and a button that closes it. It searches only the nodes shown, in their order, ignoring case and without reading the cache: the selection stays on a node that still matches, otherwise goes to the next match, scrolled into view. The part of each name that matches is marked (`MATCH_TEXT`, `MATCH_BG`), as the explorer search's text is. **Filter** hides the nodes that do not match, keeping their ancestors and what is expanded under a match. The keyboard stays on the tree, so the arrows move the selection without changing the text and typing goes on after `Enter` opens a table. Closing it shows the whole tree again with the node found selected; the mode is kept for the next search |
+| Explorer search | The field above the connections | Searches the whole local cache and shows the matches with their ancestors until cleared, also while other sections are shown. What is expanded does not change; clearing it gives back the selection from before when the node chosen meanwhile is not in the tree |
 | Explorer expansion | The explorer | The nodes left expanded come back after a restart, read from the local cache; "Load more" after a node reads its next page only |
 | What a node is | Explorer node | Icon by kind (table, view, materialized view, column, key column, foreign key, partition), the column's type or what a key references after the name, and a tooltip with nullability, primary key position, default and comment |
 | Demo versus server data | Footer badge | `MOCK` or `SQL`; a tab without a connection outside the demo shows "No connection" and runs nothing |
@@ -195,7 +273,8 @@ Rules:
 - Moving a tab to another connection (dragging it to another group, or
   choosing a connection in the editor toolbar) asks first: its results and
   session belong to the previous connection, and an open transaction is
-  rolled back. A report's tab never leaves its own group, and no other tab is
+  rolled back. A tab without a connection moves without asking: it has no
+  session or results to lose. A report's tab never leaves its own group, and no other tab is
   dropped into it.
 - Saving changed connection settings asks first when a tab of that
   connection runs a query or holds an open transaction: applying them cancels
@@ -249,16 +328,22 @@ Rules:
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |
 | New query on the active connection | `Ctrl N` |
+| New query tab on the connection of the query tab on screen; without one (no tab, a report or a tab without a connection), a tab without a connection whose results area offers the connections to choose from | `Ctrl T` |
+| Open or close Preferences | `Ctrl ,` |
 | Close the query tab (asks when it runs or has unsaved SQL) | `Ctrl W`, `Ctrl F4`, or a middle click on the tab |
 | Next or previous query tab, from anywhere in the window | `Ctrl Tab`, `Ctrl Shift Tab` (or `Ctrl Page Down`, `Ctrl Page Up`) |
 | Show or hide the explorer | `Ctrl B` |
 | Show or hide the assistant | `Ctrl Shift B` |
 | SQL font size: larger, smaller, reset | `Ctrl +`, `Ctrl -`, `Ctrl 0` |
-| Close the search or the connection dialog | `Esc` |
+| Close the search, the connection dialog or Preferences | `Esc` |
 | Refresh the focused explorer node | `F5` |
 | Delete the focused connection (asks first) | `Delete` |
 | Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
 | Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
+| Explorer: the selected node's context menu | `Shift F10` |
+| Explorer: quick search, typing a name while the tree has the keyboard: the next or previous match (wrapping; every node while nothing is typed), open the selected match as `Enter` does, take back a character, close | Letters, `↓`, `↑`, `Enter`, `Backspace`, `Esc` |
+| Explorer: the quick search marks its matches or shows only them (opens it when closed) | `Ctrl F` |
+| Explorer search field: clear the text, then give the keyboard to the tree; go to the tree | `Esc`, `↓` |
 | Explorer: the table's Data view, which reads its rows at once (`SELECT * FROM` it, without a `LIMIT`, page by page); a Data view already open for the table is shown instead (**New query for table** in its menu opens another tab with `SELECT * … LIMIT` the row limit, not run). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` |
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
 | Grid: first or last cell of the row, first or last cell of the page, a screen up or down (`Shift` extends) | `Home`, `End`, `Ctrl Home`, `Ctrl End`, `Page Up`, `Page Down` |
@@ -304,7 +389,8 @@ stack traces and modal dialogs for query errors.
 
 ## Theme and motion
 
-- A dark theme with the colour tokens of `ui.rs`; result values use the
+- A light and a dark theme with the same colour tokens of `ui.rs`
+  ([UI guidelines](ui-guidelines.md#colours-and-theme)); result values use the
   colours in [Results](results.md#value-presentation).
 - The SQL font size is adjustable (12 to 24 px) and remembered.
 - Motion is reserved for work in progress (spinners). No decorative
@@ -322,4 +408,4 @@ interactive elements expose a role, a label and their state. Details are in
 | --- | --- |
 | Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
 | Elapsed time and cancel for work over 2 s | **Format** runs off the UI thread and the editor stays usable, but the first format per dialect (building its grammar) or a long script can take seconds, and it cannot be cancelled; a result for SQL edited meanwhile is dropped |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, moving to the next or previous tab, the export bar and commenting lines are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines and the explorer's context menu and quick search mode are actions ([UI guidelines](ui-guidelines.md#known-deviations)). There is no shortcut of its own for cancelling a run; the Run button (Stop) and the confirmation after a run shortcut cancel it |

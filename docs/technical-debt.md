@@ -25,7 +25,7 @@ own, across areas.
 
 - **Severity:** Critical
 - **Area:** Transactions; `jykre-core` (`Session`), `jykre-driver-postgres`,
-  `jykre-driver-mysql`, `jykre::transaction`
+  `jykre-driver-mysql`, `jykre-driver-sqlite`, `jykre::transaction`
 - **Registered:** 2026-11-04
 - **Status:** Mitigated (see *Way out*, step 1); the fix is open
 
@@ -45,7 +45,9 @@ MySQL in the status flags of each OK packet (`SERVER_STATUS_IN_TRANS`,
 `pub(crate)`). Its public `Connection::is_in_transaction` counts only
 transactions opened through SQLx's own API, so it is wrong for a `BEGIN` the
 user typed. The drivers therefore cannot read the state that the protocol
-already carries.
+already carries. SQLite keeps it in `sqlite3_get_autocommit`, which SQLx
+reaches only through `unsafe` FFI ([ADR-0027](adr/0027-sqlite-driver.md)), so
+the SQLite driver reports nothing and only the inference applies.
 
 What the application does instead, and why each falls short:
 

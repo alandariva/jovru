@@ -8,6 +8,9 @@
 //!
 //! Never log passwords, tokens, headers, connection URLs, cell values, query
 //! parameters or SQL above `trace` ([Reliability](../docs/reliability.md#never-logged)).
+//!
+//! The same events, and Jykre's spans, can also be sent to an OpenTelemetry
+//! collector when the user turns it on ([`crate::telemetry`], ADR-0029).
 use crate::drivers::{DriverError, DriverResult, ErrorCode};
 use std::{
     path::Path,
@@ -22,10 +25,12 @@ use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::Subscribe
 /// The environment variable that overrides the log filter.
 pub const FILTER_VARIABLE: &str = "JYKRE_LOG";
 
-/// `info` for Jykre's crates, `warn` for everything else.
+/// `info` for Jykre's crates, `warn` for everything else, and nothing from
+/// the AI provider library: some of its warnings carry streamed answers,
+/// which are payloads (ADR-0028). The assistant logs its own rounds.
 pub const DEFAULT_FILTER: &str = "warn,jykre=info,jykre_core=info,jykre_storage=info,\
 jykre_secrets=info,jykre_driver_postgres=info,jykre_driver_mysql=info,\
-jykre_driver_databricks=info";
+jykre_driver_databricks=info,jykre_assistant=info,genai=off";
 
 /// UI-thread work longer than this is logged as a warning.
 pub const UI_THREAD_WARNING: Duration = Duration::from_millis(100);
@@ -33,10 +38,18 @@ pub const UI_THREAD_WARNING: Duration = Duration::from_millis(100);
 /// Days of log files kept.
 const KEPT_FILES: usize = 7;
 
-/// Keeps the background log writer alive; dropping it flushes pending lines.
+/// Keeps the background log writer alive; dropping it sends what telemetry
+/// still has queued (within [`crate::telemetry::SHUTDOWN_TIMEOUT`]) and
+/// flushes pending lines.
 #[must_use = "dropping the guard stops writing logs"]
 pub struct LogGuard {
     _writer: WorkerGuard,
+}
+
+impl Drop for LogGuard {
+    fn drop(&mut self) {
+        crate::telemetry::shutdown(crate::telemetry::SHUTDOWN_TIMEOUT);
+    }
 }
 
 /// The folder that holds the log files.
@@ -75,6 +88,7 @@ pub fn init(data_dir: &Path) -> DriverResult<LogGuard> {
     });
     tracing_subscriber::registry()
         .with(file.and_then(console).with_filter(filter()))
+        .with(crate::telemetry::install(filter()))
         .try_init()
         .map_err(|_| DriverError::new(ErrorCode::Internal, "Logging is already initialised."))?;
     install_panic_hook();
@@ -123,14 +137,22 @@ impl Drop for UiTimer {
     fn drop(&mut self) {
         let elapsed = self.started.elapsed();
         let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+        // A target of their own: telemetry exports only the warnings
+        // (crate::telemetry::filter::UI_THREAD_TARGET).
         if elapsed > UI_THREAD_WARNING {
             tracing::warn!(
+                target: "jykre::ui_thread",
                 operation = self.operation,
                 elapsed_ms,
                 "slow UI-thread work"
             );
         } else {
-            tracing::debug!(operation = self.operation, elapsed_ms, "UI-thread work");
+            tracing::debug!(
+                target: "jykre::ui_thread",
+                operation = self.operation,
+                elapsed_ms,
+                "UI-thread work"
+            );
         }
     }
 }
@@ -216,12 +238,17 @@ pub(crate) mod capture {
         }
     }
 
-    /// A JSON subscriber at `level` writing into the returned buffer.
-    pub fn subscriber(level: tracing::Level) -> (impl tracing::Subscriber + Send + Sync, Captured) {
+    /// Installs [`AskEveryEvent`] as the global default, once.
+    pub fn install_global_default() {
         GLOBAL_DEFAULT.call_once(|| {
             tracing::subscriber::set_global_default(AskEveryEvent)
                 .expect("tests install no other global subscriber");
         });
+    }
+
+    /// A JSON subscriber at `level` writing into the returned buffer.
+    pub fn subscriber(level: tracing::Level) -> (impl tracing::Subscriber + Send + Sync, Captured) {
+        install_global_default();
         let captured = Captured::default();
         let subscriber = tracing_subscriber::fmt()
             .json()
@@ -247,9 +274,11 @@ mod tests {
             "jykre_driver_postgres",
             "jykre_driver_mysql",
             "jykre_driver_databricks",
+            "jykre_assistant",
         ] {
             assert!(DEFAULT_FILTER.contains(&format!("{krate}=info")), "{krate}");
         }
+        assert!(DEFAULT_FILTER.contains("genai=off"));
     }
 
     #[test]

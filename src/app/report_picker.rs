@@ -142,7 +142,7 @@ impl AppView {
                 .aria_label(tr!("Add to the report {0}", report.title))
                 .focusable()
                 .tab_index(0)
-                .focus_visible(|s| s.bg(rgb(HOVER)).border_color(rgb(MINT)))
+                .focus_visible(|s| s.bg(rgb(colors().hover)).border_color(rgb(colors().mint)))
                 .border_1()
                 .border_color(transparent_black())
                 .w_full()
@@ -152,16 +152,19 @@ impl AppView {
                 .gap_1()
                 .rounded(px(6.))
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(HOVER)))
+                .hover(|s| s.bg(rgb(colors().hover)))
                 .child(
-                    row().min_w_0().child(icon(I::FileChartColumn, MINT)).child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(14.))
-                            .child(report.title.clone()),
-                    ),
+                    row()
+                        .min_w_0()
+                        .child(icon(I::FileChartColumn, colors().mint))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(14.))
+                                .child(report.title.clone()),
+                        ),
                 )
                 .child(
                     div()
@@ -169,7 +172,7 @@ impl AppView {
                         .min_w_0()
                         .truncate()
                         .text_size(px(12.))
-                        .text_color(rgb(FAINT))
+                        .text_color(rgb(colors().faint))
                         .child(detail),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| this.pick_report(id, window, cx))),
@@ -195,9 +198,9 @@ impl AppView {
                     .p_5()
                     .gap_3()
                     .rounded(px(10.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(colors().panel))
                     .border_1()
-                    .border_color(rgb(0x424c57))
+                    .border_color(rgb(colors().border_strong))
                     .shadow_lg()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .child(
@@ -219,7 +222,7 @@ impl AppView {
                         div()
                             .p_3()
                             .text_size(px(14.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(colors().muted))
                             .child(if no_reports {
                                 tr!(
                                     "There is no saved report yet. Save the query as a new report instead."

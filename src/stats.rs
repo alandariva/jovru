@@ -8,7 +8,7 @@
 //! [`column`] summarizes it on another thread. Numbers are added, averaged
 //! and ordered exactly ([`crate::decimal`]), never as floats.
 use crate::cell_format::ValueFamily;
-use crate::decimal::{self, Sum, compare_numbers};
+use crate::decimal::{self, Number, Sum, compare_numbers};
 use crate::result::ResultData;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -165,36 +165,29 @@ pub struct NumberSummary {
 /// as `NaN` is skipped.
 pub fn numbers<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<NumberSummary> {
     let mut sum = Sum::default();
-    let mut decimals: Vec<&str> = Vec::new();
+    // Each decimal is read once; ordering them compares what was read.
+    let mut decimals: Vec<Number> = Vec::new();
     for value in values {
-        if sum.add(value) {
-            decimals.push(value);
+        let number = Number::new(value);
+        if let Some(decimal) = &number.decimal {
+            sum.add_decimal(decimal);
+            decimals.push(number);
         }
     }
     let count = decimals.len();
     if count == 0 {
         return None;
     }
-    let min = decimals
-        .iter()
-        .copied()
-        .min_by(|left, right| compare_numbers(left, right))?;
-    let max = decimals
-        .iter()
-        .copied()
-        .max_by(|left, right| compare_numbers(left, right))?;
+    let min = decimals.iter().min_by(|left, right| left.cmp(right))?.text;
+    let max = decimals.iter().max_by(|left, right| left.cmp(right))?.text;
     let middle = count / 2;
-    let (lower, upper, _) =
-        decimals.select_nth_unstable_by(middle, |left, right| compare_numbers(left, right));
-    let upper: &str = upper;
+    let (lower, upper, _) = decimals.select_nth_unstable_by(middle, |left, right| left.cmp(right));
+    let upper = upper.text;
     let median = if count % 2 == 1 {
         Some(upper.trim().to_owned())
     } else {
         // The mean of the two middle values; `lower` holds the one below.
-        let below = lower
-            .iter()
-            .copied()
-            .max_by(|left, right| compare_numbers(left, right))?;
+        let below = lower.iter().max_by(|left, right| left.cmp(right))?.text;
         let mut pair = Sum::default();
         pair.add(below);
         pair.add(upper);
@@ -363,12 +356,11 @@ pub struct ColumnSummary {
 /// A summary of one column's values, compared as its family sorts them.
 pub fn column(sample: &Sample, family: ValueFamily) -> ColumnSummary {
     let number = family == ValueFamily::Number;
-    let order = |left: &&str, right: &&str| -> Ordering {
-        if number {
-            compare_numbers(left, right)
-        } else {
-            left.cmp(right)
-        }
+    // In the order the header sorts by.
+    let min_max = if number {
+        decimal::min_max_numbers(sample.values())
+    } else {
+        sample.values().min().zip(sample.values().max())
     };
     let mut counts: HashMap<String, (usize, usize, &str)> = HashMap::new();
     let (mut empty, mut shortest, mut longest) = (0, None::<usize>, None::<usize>);
@@ -393,8 +385,8 @@ pub fn column(sample: &Sample, family: ValueFamily) -> ColumnSummary {
         nulls: sample.nulls(),
         empty,
         distinct: counts.len(),
-        min: sample.values().min_by(order).map(str::to_owned),
-        max: sample.values().max_by(order).map(str::to_owned),
+        min: min_max.map(|(min, _)| min.to_owned()),
+        max: min_max.map(|(_, max)| max.to_owned()),
         shortest,
         longest,
         numbers: if number {

@@ -281,7 +281,7 @@ impl AppView {
         // A report may run on several connections: its tab has a group of
         // its own, which offers no new tab.
         let group = self.tabs.update(cx, |tabs, cx| {
-            let group = tabs.add_group(title.clone(), rgb(MINT).into(), cx);
+            let group = tabs.add_group(title.clone(), rgb(colors().neutral).into(), cx);
             let _ = tabs.set_group_new_tab(group, false, cx);
             group
         });
@@ -544,7 +544,7 @@ impl AppView {
                         .aria_label(tr!("Open the report {0}", report.title))
                         .focusable()
                         .tab_index(0)
-                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                        .focus_visible(|s| s.bg(rgb(colors().hover)))
                         .flex_1()
                         .min_w_0()
                         .h_full()
@@ -553,9 +553,9 @@ impl AppView {
                         .gap_1()
                         .rounded(px(6.))
                         .cursor_pointer()
-                        .hover(|s| s.bg(rgb(HOVER)))
+                        .hover(|s| s.bg(rgb(colors().hover)))
                         .child(
-                            row().min_w_0().child(icon(symbol, MINT)).child(
+                            row().min_w_0().child(icon(symbol, colors().mint)).child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
@@ -570,7 +570,7 @@ impl AppView {
                                 .min_w_0()
                                 .truncate()
                                 .text_size(px(12.))
-                                .text_color(rgb(FAINT))
+                                .text_color(rgb(colors().faint))
                                 .child(detail),
                         )
                         .on_click(
@@ -614,7 +614,7 @@ impl AppView {
                         div()
                             .p_3()
                             .text_size(px(14.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(colors().muted))
                             .child(tr!(
                                 "Create a report with the + button, or make one from a query tab. A report holds panels, each with its SQL, its database and its chart; use :name in the SQL for values to fill in before each run."
                             )),
@@ -624,7 +624,7 @@ impl AppView {
                         div()
                             .p_3()
                             .text_size(px(14.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(colors().muted))
                             .child(tr!("Nothing matches the search.")),
                     )
                 } else {
@@ -697,12 +697,7 @@ impl AppView {
 async fn write_reports(value: serde_json::Value) -> DriverResult<()> {
     let dir = connection_store::data_dir();
     backend::run(async move {
-        let repository = ConfigRepository::open(&dir).await?;
-        let result = repository
-            .set_setting(jykre::reports::SETTINGS_KEY, &value)
-            .await;
-        repository.close().await;
-        result
+        connection_store::write_setting(&dir, jykre::reports::SETTINGS_KEY, &value, "reports").await
     })
     .await
 }

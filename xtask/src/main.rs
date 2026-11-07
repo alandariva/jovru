@@ -97,6 +97,7 @@ fn gate(root: &Path, full: bool, id: &str, data: &Path) -> Result<(), String> {
     let metadata: Value = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
     architecture(&metadata)?;
     library_without_language_features(root)?;
+    assistant_privacy(root)?;
     println!("[OK] Architecture (direct dependencies, including dev and build)");
     catalogs::check(&root.join("catalog"))?;
     command(root, "cargo", &["fmt", "--all", "--check"])?;
@@ -290,9 +291,13 @@ fn architecture(metadata: &Value) -> Result<(), String> {
             let target = dependency["name"]
                 .as_str()
                 .ok_or("Dependency name missing")?;
+            // The assistant crate talks to AI providers (ADR-0028) the way a
+            // driver talks to a database: it knows the core contracts only,
+            // never the UI, the cache or the vault.
             let adapter = name.starts_with("jykre-driver-")
                 || name == "jykre-storage"
-                || name == "jykre-secrets";
+                || name == "jykre-secrets"
+                || name == "jykre-assistant";
             let backend = name == "jykre-core" || adapter;
             let internal = target == "jykre" || target == "xtask" || target.starts_with("jykre-");
             let ui = target.starts_with("gpui") || target == "tauri";
@@ -304,7 +309,8 @@ fn architecture(metadata: &Value) -> Result<(), String> {
             let language = name == "jykre-sql-language";
             let editor_engine = target == "sqruff-lib" || target.starts_with("tree-sitter");
             let forbidden = (backend && ui)
-                || (name == "jykre-core" && (internal || target == "sqlx" || target == "reqwest"))
+                || (name == "jykre-core"
+                    && (internal || matches!(target, "sqlx" | "reqwest" | "genai")))
                 || (adapter && internal && target != "jykre-core")
                 || ((sql || language) && (ui || target == "lsp-types"))
                 || (sql && ((internal && target != "jykre-core") || editor_engine))
@@ -344,6 +350,73 @@ fn library_without_language_features(root: &Path) -> Result<(), String> {
                     ));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// What the AI assistant's code may not touch (ADR-0028): result values,
+/// bound parameter values, sessions, credentials and server reads. Its
+/// requests are built from the allow-list in `src/assistant/facts.rs` and
+/// the metadata cache only, and from a query's result only through
+/// `src/assistant/released.rs` ([`RELEASED_MAY_NAME`]). Test files may
+/// build fixtures with them.
+const ASSISTANT_FORBIDDEN: [&str; 11] = [
+    "ResultData",
+    "QueryBatch",
+    "QueryResult",
+    ".parameters",
+    "inspect_object",
+    "object_definition",
+    "ResolvedConnection",
+    "Credentials",
+    "backend::query",
+    "backend::fetch",
+    "held_pages",
+];
+
+/// What `src/assistant/released.rs` alone may name: a query's result, which
+/// it cuts to what may be sent once the user sends it.
+const RELEASED_MAY_NAME: [&str; 3] = ["ResultData", "QueryBatch", "QueryResult"];
+
+fn assistant_privacy(root: &Path) -> Result<(), String> {
+    let mut pending = vec![root.join("src").join("assistant")];
+    let mut files = Vec::new();
+    for single in ["assistant_panel.rs", "assistant_settings.rs"] {
+        let path = root.join("src").join("app").join(single);
+        if path.exists() {
+            files.push(path);
+        }
+    }
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && path.file_name().is_some_and(|name| name != "tests.rs")
+            {
+                files.push(path);
+            }
+        }
+    }
+    for path in files {
+        let source = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let released = path.file_name().is_some_and(|name| name == "released.rs")
+            && path
+                .parent()
+                .is_some_and(|dir| dir == root.join("src").join("assistant"));
+        if let Some(name) = ASSISTANT_FORBIDDEN
+            .iter()
+            .find(|name| source.contains(**name) && !(released && RELEASED_MAY_NAME.contains(name)))
+        {
+            return Err(format!(
+                "{} uses {name}; the assistant may read only the facts allow-list and the metadata cache",
+                path.display()
+            ));
         }
     }
     Ok(())
@@ -556,6 +629,13 @@ mod tests {
             ("jykre-sql-language", "jykre-driver-postgres"),
             ("jykre-sql-language", "gpui-kit"),
             ("jykre-sql-language", "lsp-types"),
+            ("jykre-core", "genai"),
+            ("jykre-assistant", "gpui-kit"),
+            ("jykre-assistant", "jykre"),
+            ("jykre-assistant", "jykre-storage"),
+            ("jykre-assistant", "jykre-secrets"),
+            ("jykre-assistant", "jykre-sql-language"),
+            ("jykre-assistant", "jykre-driver-postgres"),
         ] {
             for kind in [Value::Null, json!("dev"), json!("build")] {
                 assert!(architecture(&json!({"packages":[{"name":name,"dependencies":[{"name":target,"kind":kind}]}]})).is_err());
@@ -571,7 +651,9 @@ mod tests {
             {"name":"jykre-storage","dependencies":[{"name":"jykre-core"},{"name":"sqlx"}]},
             {"name":"jykre-secrets","dependencies":[{"name":"jykre-core"},{"name":"keyring"}]},
             {"name":"jykre-sql","dependencies":[{"name":"jykre-core"}]},
-            {"name":"jykre-sql-language","dependencies":[{"name":"jykre-core"},{"name":"jykre-sql"},{"name":"sqruff-lib"}]}
+            {"name":"jykre-sql-language","dependencies":[{"name":"jykre-core"},{"name":"jykre-sql"},{"name":"sqruff-lib"}]},
+            {"name":"jykre-assistant","dependencies":[{"name":"jykre-core"},{"name":"genai"},{"name":"reqwest"}]},
+            {"name":"jykre","dependencies":[{"name":"jykre-assistant"}]}
         ]})).is_ok());
     }
 
@@ -599,6 +681,51 @@ mod tests {
         let refused = library_without_language_features(&root);
         fs::remove_dir_all(&root).unwrap();
         assert!(refused.is_err_and(|error| error.contains("names.rs")));
+    }
+
+    #[test]
+    fn the_assistant_never_reads_values_sessions_or_credentials() {
+        let root = env::temp_dir().join(format!("xtask-assistant-{}", std::process::id()));
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("src/assistant/mod.rs", "pub mod facts;");
+        write(
+            "src/assistant/facts.rs",
+            "pub fn rows(tab: &ResultTab) -> usize { tab.rows_read() }",
+        );
+        // Fixtures in tests may build results.
+        write(
+            "src/assistant/tests.rs",
+            "let data = ResultData::from_rows(columns, rows);",
+        );
+        // A query's result is cut to what may be sent in one file only.
+        write(
+            "src/assistant/released.rs",
+            "pub fn from_batch(batch: &QueryBatch) { let data: &ResultData = &batch.completed[0].data; }",
+        );
+        assert!(assistant_privacy(&root).is_ok());
+        write(
+            "src/app/assistant_panel.rs",
+            "let values = tab.parameters.clone();",
+        );
+        let refused = assistant_privacy(&root);
+        assert!(refused.is_err_and(|error| error.contains("assistant_panel.rs")));
+        fs::remove_file(root.join("src/app/assistant_panel.rs")).unwrap();
+        // Nowhere else, and not even there for anything else.
+        write("src/assistant/run.rs", "fn rows(batch: &QueryBatch) {}");
+        let refused = assistant_privacy(&root);
+        assert!(refused.is_err_and(|error| error.contains("run.rs")));
+        fs::remove_file(root.join("src/assistant/run.rs")).unwrap();
+        write(
+            "src/assistant/released.rs",
+            "fn bound(request: &QueryRequest) { request.parameters.len(); }",
+        );
+        let refused = assistant_privacy(&root);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(refused.is_err_and(|error| error.contains("released.rs")));
     }
 
     #[test]

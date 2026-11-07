@@ -172,12 +172,12 @@ impl Render for PanelDragPreview {
             .px_3()
             .rounded(px(6.))
             .border_1()
-            .border_color(rgb(MINT))
-            .bg(rgb(SURFACE))
+            .border_color(rgb(colors().mint))
+            .bg(rgb(colors().surface))
             .shadow_md()
             .text_size(px(13.))
-            .text_color(rgb(TEXT))
-            .child(icon(I::GripVertical, MINT))
+            .text_color(rgb(colors().text))
+            .child(icon(I::GripVertical, colors().mint))
             .child(div().min_w_0().truncate().child(self.title.clone()))
     }
 }
@@ -760,9 +760,9 @@ impl ReportPanel {
             .px_2()
             .gap_1()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .when(self.arranging, |s| s.child(self.grip(&title)))
-            .child(icon(self.symbol(), MINT))
+            .child(icon(self.symbol(), colors().mint))
             .child(
                 div()
                     .flex_1()
@@ -778,7 +778,11 @@ impl ReportPanel {
                 } else {
                     s.child(badge(
                         self.source_label(),
-                        if self.source_known() { BLUE } else { AMBER },
+                        if self.source_known() {
+                            colors().blue
+                        } else {
+                            colors().amber
+                        },
                     ))
                 }
             })
@@ -819,22 +823,26 @@ impl ReportPanel {
                 .role(Role::Status)
                 .aria_label(tr!("Running"))
                 .gap_1()
-                .child(spinning_icon("panel-spinner", I::LoaderCircle, AMBER))
+                .child(spinning_icon(
+                    "panel-spinner",
+                    I::LoaderCircle,
+                    colors().amber,
+                ))
                 .into_any_element(),
             PanelPhase::Queued => div()
                 .id("panel-queued")
                 .role(Role::Status)
-                .child(badge(tr!("Waiting"), FAINT))
+                .child(badge(tr!("Waiting"), colors().faint))
                 .into_any_element(),
             PanelPhase::Failed => div()
                 .id("panel-failed")
                 .role(Role::Status)
-                .child(badge(tr!("Failed"), RED))
+                .child(badge(tr!("Failed"), colors().red))
                 .into_any_element(),
             PanelPhase::Cancelled => div()
                 .id("panel-cancelled")
                 .role(Role::Status)
-                .child(badge(tr!("Stopped"), AMBER))
+                .child(badge(tr!("Stopped"), colors().amber))
                 .into_any_element(),
             PanelPhase::Idle | PanelPhase::Succeeded => div().into_any_element(),
         }
@@ -916,7 +924,7 @@ impl ReportPanel {
             .gap_2()
             .p_2()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(
                 row().child(
                     div().w(px(260.)).child(
@@ -931,7 +939,7 @@ impl ReportPanel {
                     .h(px(EDITOR_HEIGHT))
                     .rounded(px(6.))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     .key_context(SQL_EDITOR_CONTEXT)
                     .on_action(cx.listener(|this, _: &super::ToggleComment, window, cx| {
                         if let Some(editor) = &this.editor {
@@ -990,11 +998,11 @@ impl ReportPanel {
             .justify_center()
             .rounded(px(4.))
             .cursor_grab()
-            .hover(|s| s.bg(rgb(HOVER)))
+            .hover(|s| s.bg(rgb(colors().hover)))
             .tooltip(move |window, cx| {
                 Tooltip::new(tr!("Drag to move the panel")).build(window, cx)
             })
-            .child(icon(I::GripVertical, FAINT))
+            .child(icon(I::GripVertical, colors().faint))
             .on_drag(drag, |drag, _, _, cx| {
                 cx.new(|_| PanelDragPreview {
                     title: drag.title.clone(),
@@ -1146,9 +1154,9 @@ impl ReportPanel {
                                 .aria_selected(on)
                                 .focusable()
                                 .tab_index(0)
-                                .focus_visible(|s| s.border_color(rgb(MINT)))
+                                .focus_visible(|s| s.border_color(rgb(colors().mint)))
                                 .border_1()
-                                .border_color(rgb(if on { MINT } else { BORDER }))
+                                .border_color(rgb(if on { colors().mint } else { colors().border }))
                                 .rounded(px(4.))
                                 .px_2()
                                 .h(px(24.))
@@ -1156,7 +1164,7 @@ impl ReportPanel {
                                 .items_center()
                                 .cursor_pointer()
                                 .text_size(px(12.))
-                                .text_color(rgb(if on { MINT } else { MUTED }))
+                                .text_color(rgb(if on { colors().mint } else { colors().muted }))
                                 .child(shown)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     let mut spec = current.clone();
@@ -1217,9 +1225,9 @@ impl ReportPanel {
                 _ => tr!("Run the report to see this panel.").to_owned(),
             };
             let tone = if self.error.is_some() && !self.phase.is_active() {
-                RED
+                colors().red
             } else {
-                MUTED
+                colors().muted
             };
             return div()
                 .flex_1()
@@ -1256,7 +1264,7 @@ impl ReportPanel {
                         .flex_none()
                         .px_2()
                         .text_size(px(12.))
-                        .text_color(rgb(AMBER))
+                        .text_color(rgb(colors().amber))
                         .child(problem),
                 )
             })
@@ -1288,11 +1296,11 @@ impl ReportPanel {
             .flex_none()
             .px_2()
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(label(parts.join(" · ")))
             .when(
                 self.shown.as_ref().is_some_and(|shown| shown.limited),
-                |s| s.child(badge(tr!("Stopped at the row limit"), AMBER)),
+                |s| s.child(badge(tr!("Stopped at the row limit"), colors().amber)),
             )
             .child(div().flex_1())
             .when(!self.statements.is_empty(), |s| {
@@ -1326,8 +1334,8 @@ impl Render for ReportPanel {
             .size_full()
             .rounded(px(8.))
             .border_1()
-            .border_color(rgb(if self.editing { MINT } else { BORDER }))
-            .bg(rgb(PANEL))
+            .border_color(rgb(if self.editing { colors().mint } else { colors().border }))
+            .bg(rgb(colors().panel))
             .overflow_hidden()
             .child(self.header(cx))
             .when(self.editing, |s| s.child(self.definition_rows(cx)))
@@ -1359,9 +1367,9 @@ impl Render for ReportPanel {
                         .py_1()
                         .font_family("Cascadia Code")
                         .text_size(px(12.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(colors().muted))
                         .child(self.statements.join("\n"))
-                        .child(div().pt_1().text_color(rgb(FAINT)).child(tr!(
+                        .child(div().pt_1().text_color(rgb(colors().faint)).child(tr!(
                             "Parameter values are sent apart from the SQL and bound by the database."
                         ))),
                 )

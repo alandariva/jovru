@@ -304,6 +304,8 @@ impl ClusterSession {
             self.client
                 .request(Method::POST, "/api/1.2/commands/cancel", &[], Some(body))
                 .await?;
+            // Within the five seconds of cleanup: 200 ms, doubling.
+            let mut wait = Duration::from_millis(200);
             loop {
                 let status = self
                     .client
@@ -312,7 +314,8 @@ impl ClusterSession {
                 match status["status"].as_str() {
                     Some("Cancelled" | "Finished" | "Error") => return Ok::<_, DriverError>(()),
                     Some("Queued" | "Running" | "Cancelling") => {
-                        tokio::time::sleep(Duration::from_millis(200)).await
+                        tokio::time::sleep(wait).await;
+                        wait *= 2;
                     }
                     _ => return Err(protocol()),
                 }
@@ -355,21 +358,21 @@ impl ClusterSession {
             self.destroy_best_effort().await;
             return Err(protocol());
         };
+        let submitted = Instant::now();
         let mut query = self.query();
         query.push(("commandId".into(), id.into()));
         let work = async {
-            let mut wait = Duration::from_millis(200);
             loop {
+                // A command is never finished as soon as it is submitted:
+                // the first poll also waits (see `poll_wait`).
+                poll_pause(submitted.elapsed()).await;
                 let response = self
                     .client
                     .request(Method::GET, "/api/1.2/commands/status", &query, None)
                     .await?;
                 match response["status"].as_str() {
                     Some("Finished" | "Error" | "Cancelled") => return Ok(response),
-                    Some("Queued" | "Running" | "Cancelling") => {
-                        tokio::time::sleep(wait).await;
-                        wait = (wait * 2).min(POLL_MAX);
-                    }
+                    Some("Queued" | "Running" | "Cancelling") => {}
                     _ => return Err(protocol()),
                 }
             }
@@ -1074,7 +1077,8 @@ mod tests {
         let (client,task) = client(vec![
             (200,json!({"id":"context"})),(200,json!({"status":"Running"})),
             (200,json!({"id":"bad"})),(200,json!({"status":"Finished","results":{"resultType":"error","cause":"syntax error SQLSTATE: 42601"}})),
-            (200,json!({"id":"slow"})),(200,json!({"status":"Running"})),
+            // The deadline passes before the first poll of `slow`.
+            (200,json!({"id":"slow"})),
             (200,json!({})),(200,json!({"status":"Cancelled"})),
             (200,json!({"id":"next"})),(200,finished()),(200,json!({})),
         ]).await;
@@ -1119,8 +1123,8 @@ mod tests {
                 .count(),
             1
         );
-        assert!(requests[6].starts_with("POST /api/1.2/commands/cancel"));
-        assert!(requests[7].starts_with("GET /api/1.2/commands/status"));
+        assert!(requests[5].starts_with("POST /api/1.2/commands/cancel"));
+        assert!(requests[6].starts_with("GET /api/1.2/commands/status"));
     }
     #[tokio::test]
     async fn failed_recovery_closes_the_context() {

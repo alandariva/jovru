@@ -3,7 +3,7 @@
 //! providers ask this module what the SQL around the cursor means, and read
 //! the names it needs from a [`NameIndex`] built off the UI thread.
 use crate::catalog::DialectCatalog;
-use jykre_core::{MetadataObject, ObjectKind, ObjectPath, SessionContext, SqlDialect};
+use jykre_core::{MetadataObject, ObjectKind, ObjectPath, PathSegment, SessionContext, SqlDialect};
 use jykre_sql::names::{Name, Part, name_at, parts, stored};
 use scopes::{Binding, Output, Read, Scopes};
 use std::collections::HashMap;
@@ -78,41 +78,115 @@ impl NameIndex {
     }
 
     /// The relation a written name refers to, resolving unqualified parts in
-    /// `context`.
+    /// `context`. A name more than one namespace of the cache may hold
+    /// resolves to none.
     pub fn resolve(&self, name: &[Name], context: &SessionContext) -> Option<&Relation> {
         let (relation, qualifier) = name.split_last()?;
-        let namespace = self.namespace(qualifier, context)?;
         let wanted = stored(relation, self.dialect());
-        self.relations
-            .get(&namespace)?
-            .iter()
-            .find(|candidate| candidate.name() == wanted)
+        let mut found = self
+            .namespaces_for(qualifier, context)
+            .into_iter()
+            .filter_map(|namespace| {
+                self.relations_in(namespace)
+                    .iter()
+                    .find(|candidate| candidate.name() == wanted)
+            });
+        let first = found.next()?;
+        found.next().is_none().then_some(first)
     }
 
-    /// The last-level namespace a qualifier names, filling the levels it
-    /// leaves out from `context`.
-    fn namespace(&self, qualifier: &[Name], context: &SessionContext) -> Option<ObjectPath> {
+    /// The name `context` gives each namespace level, from the top; `None`
+    /// where the tab has none (no run reported it and none was chosen).
+    fn defaults(&self, context: &SessionContext) -> Vec<Option<String>> {
+        let filled = [context.catalog.clone(), context.schema.clone()];
+        let levels = self.levels.len();
+        let mut defaults = vec![None; levels.saturating_sub(filled.len())];
+        defaults.extend_from_slice(&filled[filled.len().saturating_sub(levels)..]);
+        defaults
+    }
+
+    /// The last-level namespaces of the cache a qualifier may name: it
+    /// names the last levels, and those it leaves out are the context's.
+    /// A level the context does not give matches any name, since the
+    /// session has a default the tab does not know yet. Without a
+    /// qualifier, only a namespace that leaves no doubt.
+    fn namespaces_for(&self, qualifier: &[Name], context: &SessionContext) -> Vec<&ObjectPath> {
+        let levels = self.levels.len();
+        if qualifier.len() > levels {
+            return Vec::new();
+        }
+        let mut wanted = self.defaults(context);
+        for (slot, name) in wanted[levels - qualifier.len()..].iter_mut().zip(qualifier) {
+            *slot = Some(stored(name, self.dialect()));
+        }
+        let found: Vec<_> =
+            self.namespaces
+                .iter()
+                .filter(|namespace| {
+                    namespace.0.iter().zip(&wanted).all(|(part, wanted)| {
+                        wanted.as_ref().is_none_or(|wanted| part.name == *wanted)
+                    })
+                })
+                .collect();
+        if qualifier.is_empty() && found.len() > 1 {
+            return Vec::new();
+        }
+        found
+    }
+
+    /// The namespaces one level below the one `qualifier` names from the
+    /// top (`main.` before a schema of the catalog `main`).
+    fn children(&self, qualifier: &[Name]) -> Vec<&PathSegment> {
         let written: Vec<String> = qualifier
             .iter()
             .map(|name| stored(name, self.dialect()))
             .collect();
-        let levels = self.levels.len();
-        let filled = [context.catalog.clone(), context.schema.clone()];
-        let known = &filled[filled.len().saturating_sub(levels)..];
-        let take = written.len().min(levels);
-        let mut names = Vec::with_capacity(levels);
-        for value in &known[..levels - take] {
-            names.push(value.clone()?);
-        }
-        names.extend(written[written.len() - take..].iter().cloned());
-        Some(
-            self.levels
+        let mut found: Vec<&PathSegment> = Vec::new();
+        for namespace in &self.namespaces {
+            let Some(child) = namespace.0.get(written.len()) else {
+                continue;
+            };
+            let within = namespace
+                .0
                 .iter()
-                .zip(names)
-                .fold(ObjectPath::default(), |path, (kind, name)| {
-                    path.child(*kind, name)
-                }),
-        )
+                .zip(&written)
+                .all(|(part, name)| part.name == *name);
+            if within && !found.iter().any(|known| known.name == child.name) {
+                found.push(child);
+            }
+        }
+        found
+    }
+
+    /// The namespaces a name may start with: each level whose upper levels
+    /// are known, from the context or because the cache holds a single name
+    /// there. Without a catalog in the context, a cache with several
+    /// catalogs offers only them.
+    fn first_names(&self, context: &SessionContext) -> Vec<&PathSegment> {
+        let defaults = self.defaults(context);
+        let mut within: Vec<&ObjectPath> = self.namespaces.iter().collect();
+        let mut found = Vec::new();
+        for (level, default) in defaults.iter().enumerate() {
+            let mut names: Vec<&PathSegment> = Vec::new();
+            for namespace in &within {
+                if let Some(part) = namespace.0.get(level)
+                    && !names.iter().any(|known| known.name == part.name)
+                {
+                    names.push(part);
+                }
+            }
+            let next = match default {
+                Some(name) => name.clone(),
+                None if names.len() == 1 => names[0].name.clone(),
+                None => {
+                    found.extend(names);
+                    break;
+                }
+            };
+            found.extend(names);
+            within.retain(|namespace| namespace.0.get(level).is_some_and(|part| part.name == next));
+        }
+        found
     }
 
     fn relations_in(&self, namespace: &ObjectPath) -> &[Relation] {
@@ -665,9 +739,12 @@ pub fn candidates(
     let mut missing = Vec::new();
     match &request.wanted {
         Wanted::Relations { qualifier } => {
-            if let Some(namespace) = index.namespace(qualifier, context) {
-                for relation in index.relations_in(&namespace) {
-                    if matches_prefix(relation.name(), &request.prefix) {
+            for namespace in index.namespaces_for(qualifier, context) {
+                for relation in index.relations_in(namespace) {
+                    let known = found
+                        .iter()
+                        .any(|candidate: &Candidate| candidate.label == relation.name());
+                    if !known && matches_prefix(relation.name(), &request.prefix) {
                         found.push(Candidate {
                             label: relation.name().to_owned(),
                             insert: quoted(relation.name(), dialect, quote, catalog),
@@ -694,27 +771,23 @@ pub fn candidates(
                         });
                     }
                 }
-                // Namespaces, to qualify the name.
-                for namespace in &index.namespaces {
-                    let Some(name) = namespace.0.last().map(|part| part.name.as_str()) else {
-                        continue;
-                    };
-                    let parent_matches = index
-                        .namespace(&[], context)
-                        .is_none_or(|current| current.parent() == namespace.parent());
-                    if parent_matches && matches_prefix(name, &request.prefix) {
-                        found.push(Candidate {
-                            label: name.to_owned(),
-                            insert: quoted(name, dialect, quote, catalog),
-                            detail: namespace
-                                .0
-                                .last()
-                                .map(|part| kind_detail(part.kind))
-                                .unwrap_or_default(),
-                            documentation: None,
-                            kind: CandidateKind::Namespace,
-                        });
-                    }
+            }
+            // Namespaces, to qualify the name: those it may start with, or
+            // those below the one written (`catalog.` before a schema).
+            let namespaces = if qualifier.is_empty() {
+                index.first_names(context)
+            } else {
+                index.children(qualifier)
+            };
+            for part in namespaces {
+                if matches_prefix(&part.name, &request.prefix) {
+                    found.push(Candidate {
+                        label: part.name.clone(),
+                        insert: quoted(&part.name, dialect, quote, catalog),
+                        detail: kind_detail(part.kind),
+                        documentation: None,
+                        kind: CandidateKind::Namespace,
+                    });
                 }
             }
         }
@@ -1339,5 +1412,112 @@ mod tests {
         let sql = "SELECT amount FROM (SELECT o.total AS amount FROM orders o) d";
         let (symbol, _) = symbol_at(sql, 9, &index, &context(), &columns).unwrap();
         assert_eq!(symbol, total);
+    }
+
+    /// The labels suggested at the end of `sql` in `context`.
+    fn suggested(sql: &str, index: &NameIndex, context: &SessionContext) -> Vec<String> {
+        let asked = request(sql, sql.len(), index, context).expect("a request");
+        let (found, _) = candidates(
+            &asked,
+            index,
+            context,
+            '`',
+            &DialectCatalog::builtin(),
+            &columns,
+        );
+        found.into_iter().map(|candidate| candidate.label).collect()
+    }
+
+    #[test]
+    fn a_schema_qualifier_suggests_its_relations_before_the_tab_has_a_context() {
+        // A new tab knows no database or schema until a run reports them:
+        // `sales.` still names the cache's only `sales` schema.
+        let index = index();
+        let none = SessionContext::default();
+        assert_eq!(
+            suggested("SELECT * FROM sales.", &index, &none),
+            ["Totals", "order_lines", "orders"]
+        );
+        assert_eq!(
+            suggested("SELECT * FROM crm.c", &index, &none),
+            ["customers"]
+        );
+        // The cache holds one database, so its schemas qualify a name too.
+        assert_eq!(
+            suggested("SELECT * FROM ", &index, &none),
+            ["shop", "crm", "sales"]
+        );
+        // The relation the qualified name reads gives its columns.
+        let sql = "SELECT o. FROM sales.orders o";
+        let asked = request(sql, 9, &index, &none).unwrap();
+        assert_eq!(
+            asked.wanted,
+            Wanted::Columns {
+                sources: vec![Source::Relation(
+                    schema("sales").child(ObjectKind::Table, "orders")
+                )],
+                qualified: true,
+            }
+        );
+        // An unqualified name is not guessed among several schemas.
+        assert!(suggested("SELECT * FROM ord", &index, &none).is_empty());
+    }
+
+    #[test]
+    fn without_a_catalog_names_start_with_a_catalog() {
+        let relation = |catalog: &str, schema: &str, name: &str| Relation {
+            path: ObjectPath::default()
+                .child(ObjectKind::Catalog, catalog)
+                .child(ObjectKind::Schema, schema)
+                .child(ObjectKind::Table, name),
+            kind: ObjectKind::Table,
+        };
+        let index = NameIndex::new(
+            1,
+            vec![ObjectKind::Catalog, ObjectKind::Schema],
+            SqlDialect::DatabricksSql,
+            vec![
+                relation("main", "sales", "orders"),
+                relation("main", "crm", "customers"),
+                relation("dev", "scratch", "tmp"),
+                relation("dev", "crm", "leads"),
+            ],
+        );
+        let none = SessionContext::default();
+        assert_eq!(suggested("select * from ", &index, &none), ["dev", "main"]);
+        // `catalog.` offers its schemas, `catalog.schema.` its relations.
+        assert_eq!(
+            suggested("select * from main.", &index, &none),
+            ["crm", "sales"]
+        );
+        assert_eq!(
+            suggested("select * from main.sales.", &index, &none),
+            ["orders"]
+        );
+        // A schema only one catalog has still resolves; one both have offers
+        // the relations of both.
+        assert_eq!(suggested("select * from sales.", &index, &none), ["orders"]);
+        assert_eq!(
+            suggested("select * from crm.", &index, &none),
+            ["leads", "customers"]
+        );
+        // With a catalog chosen, its schemas and relations come too.
+        let main = SessionContext {
+            catalog: Some("main".into()),
+            schema: None,
+        };
+        assert_eq!(
+            suggested("select * from ", &index, &main),
+            ["dev", "main", "crm", "sales"]
+        );
+        assert_eq!(
+            suggested("select * from crm.", &index, &main),
+            ["customers"]
+        );
+        let in_sales = SessionContext {
+            catalog: Some("main".into()),
+            schema: Some("sales".into()),
+        };
+        assert_eq!(suggested("select * from o", &index, &in_sales), ["orders"]);
     }
 }

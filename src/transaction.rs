@@ -75,6 +75,7 @@ impl Transaction {
         let word = |index: usize| words.get(index).map(String::as_str);
         let postgres = matches!(dialect, Some(SqlDialect::Postgres));
         let mysql = matches!(dialect, Some(SqlDialect::MySql));
+        let sqlite = matches!(dialect, Some(SqlDialect::Sqlite));
         let manual = match self {
             Self::AutoCommit => false,
             Self::Open { manual, .. } | Self::Failed { manual } => manual,
@@ -90,7 +91,8 @@ impl Transaction {
         };
         let ends = match word(0) {
             Some("COMMIT" | "ABORT") => true,
-            Some("END") => postgres,
+            // `END [TRANSACTION]` commits in PostgreSQL and SQLite.
+            Some("END") => postgres || sqlite,
             Some("ROLLBACK") => word(1) != Some("TO") && word(2) != Some("TO"),
             Some("PREPARE") => word(1) == Some("TRANSACTION"),
             _ => false,
@@ -120,6 +122,7 @@ impl Transaction {
             (Some("START"), Some("TRANSACTION")) => true,
             (Some("BEGIN"), None | Some("WORK" | "TRANSACTION")) => true,
             (Some("BEGIN"), Some("ISOLATION" | "READ" | "NOT" | "DEFERRABLE")) => postgres,
+            (Some("BEGIN"), Some("DEFERRED" | "IMMEDIATE" | "EXCLUSIVE")) => sqlite,
             _ => false,
         };
         if opens {
@@ -273,6 +276,25 @@ mod tests {
             run(&[("-- x\nBEGIN ATOMIC SELECT 1; END", true)], POSTGRES),
             AutoCommit
         );
+    }
+
+    #[test]
+    fn sqlite_begin_modes_open_and_end_commits() {
+        const SQLITE: Option<SqlDialect> = Some(SqlDialect::Sqlite);
+        for begin in [
+            "BEGIN IMMEDIATE",
+            "begin exclusive transaction",
+            "BEGIN DEFERRED",
+        ] {
+            let open = run(&[(begin, true), ("INSERT INTO t VALUES (1)", true)], SQLITE);
+            assert!(open.is_open() && open.has_changes(), "{begin}");
+            assert_eq!(open.after("END TRANSACTION", true, SQLITE), AutoCommit);
+        }
+        // A failed statement leaves the transaction usable, as in MySQL.
+        let kept = run(&[("BEGIN", true), ("SELECT x", false)], SQLITE);
+        assert!(matches!(kept, Open { .. }));
+        // The words mean nothing else in MySQL.
+        assert_eq!(run(&[("BEGIN IMMEDIATE", true)], MYSQL), AutoCommit);
     }
 
     #[test]

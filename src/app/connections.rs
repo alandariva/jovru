@@ -1,6 +1,7 @@
 use super::*;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
+use jykre::explorer::QuickMode;
 use jykre::metadata_scope::{MetadataScope, RefreshPhase, RefreshProgress, format_eta};
 use jykre::refresh_queue::{Queued, RefreshJob};
 use jykre::result::{DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT};
@@ -210,7 +211,7 @@ impl AppView {
         let group = connection.group;
         if self.tabs.read(cx).group_ids().any(|id| id == group) {
             let _ = self.tabs.update(cx, |tabs, cx| {
-                tabs.set_group_color(group, rgb(FAINT).into(), cx)
+                tabs.set_group_color(group, rgb(colors().faint).into(), cx)
             });
             self.orphan_groups.push((connection.name.clone(), group));
         }
@@ -332,12 +333,12 @@ impl AppView {
             .unwrap_or_default();
         let (name, config) = index.and_then(|index| self.connections[index].input.as_ref().map(|input| (self.connections[index].name.clone(), input.config.clone())))
             .unwrap_or_else(|| (String::new(), ConnectionConfig { driver: DriverKind::Postgres, options: serde_json::json!({"host":"localhost","port":5432,"database":"","user":"postgres","sslMode":"prefer"}) }));
-        self.driver = match config.driver {
-            DriverKind::MySql => 1,
-            DriverKind::Databricks => 2,
-            _ => 0,
-        };
+        self.driver = FORM_DRIVERS
+            .iter()
+            .position(|(kind, _)| *kind == config.driver)
+            .unwrap_or(0);
         self.all_databases = config.options["allDatabases"].as_bool().unwrap_or(false);
+        self.sqlite_read_only = config.options["readOnly"].as_bool().unwrap_or(false);
         for (field, value) in [
             (&self.connection_name, name),
             (
@@ -367,6 +368,10 @@ impl AppView {
                     .into(),
             ),
             (&self.connection_password, String::new()),
+            (
+                &self.connection_file,
+                config.options["path"].as_str().unwrap_or("").into(),
+            ),
             (
                 &self.connection_row_limit,
                 index
@@ -443,7 +448,7 @@ impl AppView {
             .get(driver)?
             .validate_connection(&config)?;
         let password = self.connection_password.read(cx).unmask_value().to_string();
-        let credentials = if driver == DriverKind::Databricks {
+        let credentials = if !connection_store::signs_in_with_password(driver) {
             Credentials::default()
         } else if password.is_empty() {
             // An empty password keeps the previous one only for the same
@@ -483,13 +488,20 @@ impl AppView {
 
     /// The driver and options typed in the form, before validation.
     fn form_config(&self, cx: &App) -> DriverResult<ConnectionConfig> {
-        let driver = [
-            DriverKind::Postgres,
-            DriverKind::MySql,
-            DriverKind::Databricks,
-        ][self.driver];
+        let driver = FORM_DRIVERS
+            .get(self.driver)
+            .map_or(DriverKind::Postgres, |(kind, _)| *kind);
         let mut options = if driver == DriverKind::Databricks {
             self.connection_databricks.read(cx).options(cx)?
+        } else if driver == DriverKind::Sqlite {
+            let mut options =
+                serde_json::json!({"path": self.connection_file.read(cx).value().trim()});
+            // Off is left out, as the driver writes it, so an unchanged form
+            // matches the saved configuration.
+            if self.sqlite_read_only {
+                options["readOnly"] = serde_json::Value::Bool(true);
+            }
+            options
         } else {
             let port: u16 = self
                 .connection_port
@@ -620,13 +632,7 @@ impl AppView {
         })
         .detach();
         cx.spawn(async move |weak, cx| {
-            let result = backend::run(async move {
-                builtin_registry()?
-                    .get(input.config.driver)?
-                    .test(&input, cancel)
-                    .await
-            })
-            .await;
+            let result = backend::run(backend::test_connection(input, cancel)).await;
             let _ = weak.update(cx, |this, cx| {
                 if this.connection_revision != revision {
                     return;
@@ -667,30 +673,34 @@ impl AppView {
                     Err(_) => connection_store::latest_backup(&dir).await,
                     Ok(_) => None,
                 };
-                let (font_size, copy, state, reports) = match ConfigRepository::open(&dir).await {
-                    Ok(repository) => {
-                        let font_size = repository.setting("editor.font_size").await;
-                        let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
-                        let state = super::state::read_state(&repository).await;
-                        let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
-                        repository.close().await;
-                        (font_size, copy, state, reports)
-                    }
-                    Err(error) => (
-                        Err(error.clone()),
-                        Err(error.clone()),
-                        Err(error.clone()),
-                        Err(error),
-                    ),
-                };
-                Ok((connections, font_size, copy, state, reports, backup))
+                let (font_size, copy, state, reports, theme) =
+                    match ConfigRepository::open(&dir).await {
+                        Ok(repository) => {
+                            let font_size = repository.setting("editor.font_size").await;
+                            let theme = repository.setting(jykre::theme::SETTINGS_KEY).await;
+                            let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
+                            let state = super::state::read_state(&repository).await;
+                            let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
+                            repository.close().await;
+                            (font_size, copy, state, reports, theme)
+                        }
+                        Err(error) => (
+                            Err(error.clone()),
+                            Err(error.clone()),
+                            Err(error.clone()),
+                            Err(error.clone()),
+                            Err(error),
+                        ),
+                    };
+                Ok((connections, font_size, copy, state, reports, theme, backup))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connections_loading = false;
-                let (connections, font_size, copy, state, reports, backup) = match result {
+                let (connections, font_size, copy, state, reports, theme, backup) = match result {
                     Ok(parts) => parts,
                     Err(error) => (
+                        Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
@@ -712,6 +722,16 @@ impl AppView {
                     }
                     Err(error) => problems.push(tr!(
                         "Could not read the editor font size; the default is used: {0}",
+                        error
+                    )),
+                }
+                match theme {
+                    Ok(value) => {
+                        let choice = jykre::theme::ThemeChoice::from_value(value.as_ref());
+                        this.set_theme(choice, window, cx);
+                    }
+                    Err(error) => problems.push(tr!(
+                        "Could not read the theme; the system's is used: {0}",
                         error
                     )),
                 }
@@ -856,6 +876,84 @@ impl AppView {
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Draws the theme `choice` and gives the tab groups the shades of
+    /// their colours in it.
+    pub(super) fn set_theme(
+        &mut self,
+        choice: jykre::theme::ThemeChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        super::theme::apply(choice, Some(window), cx);
+        self.recolor_groups(cx);
+        cx.notify();
+    }
+
+    /// Gives every tab group the shade of its colour in the theme on
+    /// screen: a connection's own, grey for tabs without one, and no hue
+    /// for a report's.
+    pub(super) fn recolor_groups(&mut self, cx: &mut Context<Self>) {
+        let mut shades: Vec<(TabGroupId, u32)> = self
+            .connections
+            .iter()
+            .map(|connection| (connection.group, connection_color(connection.color)))
+            .collect();
+        shades.extend(
+            self.orphan_groups
+                .iter()
+                .map(|(_, group)| (*group, colors().faint)),
+        );
+        shades.extend(
+            self.report_tabs
+                .values()
+                .map(|report| (report.group, colors().neutral)),
+        );
+        self.tabs.update(cx, |tabs, cx| {
+            for (group, shade) in shades {
+                // A group whose last tab closed is gone; it gets its shade
+                // when it is made again.
+                let _ = tabs.set_group_color(group, rgb(shade).into(), cx);
+            }
+        });
+    }
+
+    /// Saves the theme the user chose in Preferences; the last choice of
+    /// a burst wins.
+    pub(super) fn persist_theme(
+        &mut self,
+        choice: jykre::theme::ThemeChoice,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = connection_store::data_dir();
+        let ticket = connection_store::THEME_WRITES.ask();
+        cx.spawn(async move |weak, cx| {
+            let result = backend::run(async move {
+                connection_store::THEME_WRITES
+                    .run(ticket, async {
+                        let repository = ConfigRepository::open(&dir).await?;
+                        let result = repository
+                            .set_setting(jykre::theme::SETTINGS_KEY, &choice.to_value())
+                            .await;
+                        repository.close().await;
+                        result
+                    })
+                    .await
+                    .unwrap_or(Ok(()))
+            })
+            .await;
+            if let Err(error) = result {
+                let _ = weak.update(cx, |this, cx| {
+                    this.app_notice = Some(Feedback::new(
+                        Tone::Error,
+                        tr!("Could not save the preference: {0}", error),
+                    ));
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
@@ -1093,7 +1191,8 @@ impl AppView {
             });
         profile.name = name;
         profile.config = input.config.clone();
-        profile.remember_password = self.driver != 2 && self.remember_password;
+        profile.remember_password =
+            connection_store::signs_in_with_password(input.config.driver) && self.remember_password;
         let scope = self.connection_scope.read(cx).selection();
         let previous_scope = editing
             .map(|index| self.connections[index].scope.clone())
@@ -1208,12 +1307,12 @@ impl AppView {
                                 tabs.rename_group(connection.group, connection.name.clone(), cx)?;
                                 tabs.set_group_color(
                                     connection.group,
-                                    rgb(connection.color).into(),
+                                    rgb(connection_color(connection.color)).into(),
                                     cx,
                                 )
                             });
                             let (color, environment) =
-                                (connection.color, connection.appearance.environment);
+                                (Some(connection.color), connection.appearance.environment);
                             for panel in this.panels.values() {
                                 panel.update(cx, |panel, cx| {
                                     if panel.connection_name() == old_name {
@@ -1555,7 +1654,7 @@ impl AppView {
     }
 
     /// The focus handle of an explorer node, created the first time it shows.
-    fn node_handle(&self, index: usize, path: &ObjectPath, cx: &App) -> FocusHandle {
+    pub(super) fn node_handle(&self, index: usize, path: &ObjectPath, cx: &App) -> FocusHandle {
         self.node_focus
             .borrow_mut()
             .entry((index, path.clone()))
@@ -1564,7 +1663,7 @@ impl AppView {
     }
 
     /// Selects an explorer node and gives it the keyboard.
-    fn select_node(
+    pub(super) fn select_node(
         &mut self,
         index: usize,
         path: &ObjectPath,
@@ -1593,12 +1692,15 @@ impl AppView {
         use jykre::explorer::TreeMove;
         let searching = !self.search.read(cx).value().is_empty();
         let connection = &self.connections[index];
-        let rows = if searching {
-            connection.search_rows.as_slice()
-        } else {
-            connection.tree.rows()
-        };
-        let nodes: Vec<_> = rows.iter().filter_map(TreeRow::object).collect();
+        // The nodes on the list, so a quick search's filter is followed.
+        let nodes: Vec<_> = self
+            .explorer_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ExplorerEntry::Row(at, row) if *at == index => row.object(),
+                _ => None,
+            })
+            .collect();
         let Some(current) = nodes.iter().position(|node| node.path == *path) else {
             return;
         };
@@ -1616,7 +1718,7 @@ impl AppView {
 
     /// Expands or collapses a node, reading its first page of children from
     /// the cache when they were not read yet.
-    fn toggle_node(&mut self, index: usize, path: &ObjectPath, cx: &mut Context<Self>) {
+    pub(super) fn toggle_node(&mut self, index: usize, path: &ObjectPath, cx: &mut Context<Self>) {
         if self.connections[index].tree.toggle(path) {
             self.load_children(index, path.clone(), None, cx);
         }
@@ -1979,7 +2081,7 @@ impl AppView {
                                         .w(px(96.))
                                         .flex_none()
                                         .text_size(px(12.))
-                                        .text_color(rgb(FAINT))
+                                        .text_color(rgb(colors().faint))
                                         .child(jykre::explorer::inspected_kind_name(item.kind)),
                                 )
                                 .child(
@@ -1996,7 +2098,7 @@ impl AppView {
                                         .min_w_0()
                                         .truncate()
                                         .text_size(px(12.))
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(colors().muted))
                                         .child(item.detail.clone()),
                                 )
                                 // The whole text, built only when shown.
@@ -2020,9 +2122,9 @@ impl AppView {
                     .w(px(640.))
                     .mt(px(100.))
                     .rounded(px(10.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(colors().panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -2031,7 +2133,7 @@ impl AppView {
                             .p_4()
                             .justify_between()
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(colors().border))
                             .child(
                                 div()
                                     .text_size(px(14.))
@@ -2466,7 +2568,7 @@ impl AppView {
             // A neutral line between connections, so where one's tree ends
             // and the next begins is plain.
             .when(index > 0, |s| {
-                s.child(div().mx_2().h(px(1.)).flex_none().bg(rgb(BORDER)))
+                s.child(div().mx_2().h(px(1.)).flex_none().bg(rgb(colors().border)))
             })
             .child(
                 row()
@@ -2477,7 +2579,7 @@ impl AppView {
                     .h(px(38.))
                     // The colour its tab group shows.
                     .border_l_3()
-                    .border_color(rgb(connection.color))
+                    .border_color(rgb(connection_color(connection.color)))
                     // As every node: the chevron expands or collapses, and
                     // so do a double click, Enter and the arrows; a single
                     // click only takes the focus.
@@ -2665,7 +2767,7 @@ impl AppView {
                             s.child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(AMBER))
+                                    .text_color(rgb(colors().amber))
                                     .child(notice),
                             )
                         })
@@ -2679,7 +2781,7 @@ impl AppView {
                                     div()
                                         .text_size(px(12.))
                                         .text_color(rgb(if connection.status.tone == Tone::Info {
-                                            MUTED
+                                            colors().muted
                                         } else {
                                             connection.status.tone.color()
                                         }))
@@ -2733,10 +2835,23 @@ impl AppView {
                 )
             })
             .collect();
-        if signature == self.explorer_signature {
+        // A quick search that filters changes the entries; one that marks
+        // changes only how many match.
+        let quick = self
+            .explorer_quick
+            .as_ref()
+            .map(|quick| (quick.text.clone(), self.explorer_quick_mode));
+        if signature == self.explorer_signature && quick == self.explorer_quick_key {
             return;
         }
         self.explorer_signature = signature;
+        let filter = quick
+            .as_ref()
+            .filter(|(text, mode)| *mode == QuickMode::Filter && !text.is_empty())
+            .map(|(text, _)| text.clone());
+        let text = quick.as_ref().map(|(text, _)| text.clone());
+        self.explorer_quick_key = quick;
+        let mut matches = 0;
         let mut entries = Vec::with_capacity(self.explorer_entries.len());
         for (index, connection) in self.connections.iter().enumerate() {
             entries.push(ExplorerEntry::Connection(index));
@@ -2748,11 +2863,28 @@ impl AppView {
             } else {
                 connection.tree.rows()
             };
-            entries.extend(
-                rows.iter()
-                    .cloned()
-                    .map(|row| ExplorerEntry::Row(index, row)),
-            );
+            if let Some(text) = text.as_deref().filter(|text| !text.is_empty()) {
+                matches += rows
+                    .iter()
+                    .filter_map(TreeRow::object)
+                    .filter(|object| jykre::explorer::quick_matches(&object.name, text))
+                    .count();
+            }
+            match filter.as_deref() {
+                Some(filter) => entries.extend(
+                    jykre::explorer::filter_rows(rows, filter)
+                        .into_iter()
+                        .map(|row| ExplorerEntry::Row(index, row)),
+                ),
+                None => entries.extend(
+                    rows.iter()
+                        .cloned()
+                        .map(|row| ExplorerEntry::Row(index, row)),
+                ),
+            }
+        }
+        if let Some(quick) = self.explorer_quick.as_mut() {
+            quick.matches = matches;
         }
         let old: Vec<_> = self
             .explorer_entries
@@ -2792,15 +2924,19 @@ impl AppView {
         }
     }
 
-    /// Scrolls the explorer so the node is on screen.
-    fn reveal_explorer_node(&self, index: usize, path: &ObjectPath) {
-        let found = self.explorer_entries.iter().position(|entry| match entry {
+    /// Where the node is in the explorer list, if it shows.
+    pub(super) fn explorer_position(&self, index: usize, path: &ObjectPath) -> Option<usize> {
+        self.explorer_entries.iter().position(|entry| match entry {
             &ExplorerEntry::Row(at, ref row) => {
                 at == index && row.object().is_some_and(|object| object.path == *path)
             }
             ExplorerEntry::Connection(_) => false,
-        });
-        if let Some(found) = found {
+        })
+    }
+
+    /// Scrolls the explorer so the node is on screen.
+    fn reveal_explorer_node(&self, index: usize, path: &ObjectPath) {
+        if let Some(found) = self.explorer_position(index, path) {
             self.explorer_list.scroll_to_reveal_item(found);
         }
     }
@@ -2878,8 +3014,26 @@ impl AppView {
             .as_ref()
             .is_some_and(|(at, chosen)| *at == index && *chosen == path);
         let focus = self.node_handle(index, &path, cx);
+        // What the quick search, or else the explorer search, typed is
+        // marked in the name; only rows on screen do this.
+        let marks = match self.explorer_quick.as_ref() {
+            Some(quick) => jykre::palette::highlights(&object.name, &[&quick.text]),
+            None => jykre::palette::highlights(&object.name, &[&self.search.read(cx).value()]),
+        };
         row()
             .id(("node-row", id))
+            .relative()
+            // Where the selected node is, for the menu Shift F10 opens.
+            .when(selected, |s| {
+                let cell = self.selected_bounds.clone();
+                s.child(
+                    canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
+            })
             .pl(px(tree_indent(path.0.len())))
             .pr_1()
             .h(px(32.))
@@ -2934,15 +3088,15 @@ impl AppView {
                     .aria_selected(selected)
                     .track_focus(&focus)
                     .tab_index(0)
-                    .when(selected, |s| s.bg(rgb(SURFACE)))
-                    .focus_visible(|s| s.bg(rgb(HOVER)))
+                    .when(selected, |s| s.bg(rgb(colors().surface)))
+                    .focus_visible(|s| s.bg(rgb(colors().hover)))
                     .flex()
                     .items_center()
                     .gap_2()
                     .flex_1()
                     .min_w_0()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(HOVER)))
+                    .hover(|s| s.bg(rgb(colors().hover)))
                     .child(icon(
                         match object.kind {
                             ObjectKind::View => I::Eye,
@@ -2956,16 +3110,16 @@ impl AppView {
                             _ => I::Database,
                         },
                         if object.primary_key.is_some() {
-                            AMBER
+                            colors().amber
                         } else {
-                            MUTED
+                            colors().muted
                         },
                     ))
                     .child(
                         div()
                             .truncate()
                             .text_size(px(14.))
-                            .child(object.name.clone()),
+                            .child(marked(object.name.clone(), marks)),
                     )
                     .when_some(detail, |s, detail| {
                         s.child(
@@ -2974,7 +3128,7 @@ impl AppView {
                                 .max_w(px(140.))
                                 .truncate()
                                 .text_size(px(12.))
-                                .text_color(rgb(FAINT))
+                                .text_color(rgb(colors().faint))
                                 .child(detail),
                         )
                     })
@@ -3031,7 +3185,7 @@ impl AppView {
                         .flex_none()
                         .px_1()
                         .text_size(px(12.))
-                        .text_color(rgb(FAINT))
+                        .text_color(rgb(colors().faint))
                         .child(age),
                 )
             })
@@ -3042,7 +3196,7 @@ impl AppView {
                         .flex_none()
                         .px_1()
                         .text_size(px(12.))
-                        .text_color(rgb(AMBER))
+                        .text_color(rgb(colors().amber))
                         .child(tr!("no access")),
                 )
             })
@@ -3182,11 +3336,11 @@ impl AppView {
         let section = self.connection_section;
         let scope = self.connection_scope.read(cx).selection();
         let scope_badge = if scope.all {
-            badge(tr!("All"), MINT)
+            badge(tr!("All"), colors().mint)
         } else if scope.is_pending() {
-            badge(tr!("None"), AMBER)
+            badge(tr!("None"), colors().amber)
         } else {
-            badge(scope.include.len().to_string(), MINT)
+            badge(scope.include.len().to_string(), colors().mint)
         };
         let body = match section {
             ConnectionSection::Connection => self.connection_fields(cx),
@@ -3234,8 +3388,8 @@ impl AppView {
                     .mt(px(40.))
                     .rounded(px(12.))
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(PANEL))
+                    .border_color(rgb(colors().border))
+                    .bg(rgb(colors().panel))
                     .shadow_lg()
                     .overflow_hidden()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -3265,26 +3419,19 @@ impl AppView {
                                             })),
                                     ),
                             )
-                            .child(
-                                row().children(
-                                    ["PostgreSQL", "MySQL", "Databricks"]
-                                        .into_iter()
-                                        .enumerate()
-                                        .map(|(index, name)| {
-                                            button(("select-driver", index), I::Database, name)
-                                                .flex_1()
-                                                .aria_selected(self.driver == index)
-                                                .when(self.driver == index, |s| {
-                                                    s.bg(rgb(HOVER)).text_color(rgb(MINT))
-                                                })
-                                                .on_click(cx.listener(
-                                                    move |this, _, window, cx| {
-                                                        this.select_driver(index, window, cx)
-                                                    },
-                                                ))
-                                        }),
-                                ),
-                            )
+                            .child(row().children(FORM_DRIVERS.into_iter().enumerate().map(
+                                |(index, (_, name))| {
+                                    button(("select-driver", index), I::Database, name)
+                                        .flex_1()
+                                        .aria_selected(self.driver == index)
+                                        .when(self.driver == index, |s| {
+                                            s.bg(rgb(colors().hover)).text_color(rgb(colors().mint))
+                                        })
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.select_driver(index, window, cx)
+                                        }))
+                                },
+                            )))
                             .child(
                                 row()
                                     .id("connection-sections")
@@ -3292,7 +3439,7 @@ impl AppView {
                                     .aria_label(tr!("Connection settings"))
                                     .gap_0()
                                     .border_b_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(colors().border))
                                     .child(self.section_tab(
                                         "section-connection",
                                         tr!("Connection"),
@@ -3335,7 +3482,7 @@ impl AppView {
                             .py_4()
                             .gap_3()
                             .border_t_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(colors().border))
                             .when_some(self.connection_status.as_ref(), |s, status| {
                                 s.child(
                                     feedback_line(status)
@@ -3437,14 +3584,18 @@ impl AppView {
             .cursor_pointer()
             .border_b_2()
             .border_color(if selected {
-                rgb(MINT)
+                rgb(colors().mint)
             } else {
                 transparent_black().into()
             })
-            .focus_visible(|s| s.bg(rgb(HOVER)))
-            .hover(|s| s.text_color(rgb(TEXT)))
+            .focus_visible(|s| s.bg(rgb(colors().hover)))
+            .hover(|s| s.text_color(rgb(colors().text)))
             .text_size(px(14.))
-            .text_color(rgb(if selected { TEXT } else { MUTED }))
+            .text_color(rgb(if selected {
+                colors().text
+            } else {
+                colors().muted
+            }))
             .child(title)
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.connection_section = target;
@@ -3469,13 +3620,13 @@ impl AppView {
                 .px_3()
                 .rounded(px(5.))
                 .border_1()
-                .border_color(rgb(if on { color } else { BORDER }))
-                .focus_visible(|s| s.border_color(rgb(MINT)))
+                .border_color(rgb(if on { color } else { colors().border }))
+                .focus_visible(|s| s.border_color(rgb(colors().mint)))
                 .when(on, |s| s.bg(Hsla::from(rgb(color)).opacity(0.12)))
                 .cursor_pointer()
                 .text_size(px(12.))
-                .text_color(rgb(if on { TEXT } else { MUTED }))
-                .hover(|s| s.bg(rgb(HOVER)))
+                .text_color(rgb(if on { colors().text } else { colors().muted }))
+                .hover(|s| s.bg(rgb(colors().hover)))
                 .child(text)
         };
         column()
@@ -3485,7 +3636,7 @@ impl AppView {
                 row()
                     .gap_2()
                     .child(
-                        chip(("connection-color-auto", 0), tr!("Driver's"), chosen.color.is_none(), MINT)
+                        chip(("connection-color-auto", 0), tr!("Driver's"), chosen.color.is_none(), colors().mint)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.connection_appearance.color = None;
                                 cx.notify();
@@ -3506,8 +3657,8 @@ impl AppView {
                             .rounded_full()
                             .bg(rgb(shade))
                             .border_2()
-                            .border_color(rgb(if on { TEXT } else { PANEL }))
-                            .focus_visible(|s| s.border_color(rgb(MINT)))
+                            .border_color(rgb(if on { colors().text } else { colors().panel }))
+                            .focus_visible(|s| s.border_color(rgb(colors().mint)))
                             .cursor_pointer()
                             .tooltip(move |window, cx| {
                                 Tooltip::new(connection_color_name(color)).build(window, cx)
@@ -3527,7 +3678,7 @@ impl AppView {
                 row()
                     .gap_2()
                     .child(
-                        chip(("environment", 0), tr!("Not set"), chosen.environment.is_none(), MINT)
+                        chip(("environment", 0), tr!("Not set"), chosen.environment.is_none(), colors().mint)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.connection_appearance.environment = None;
                                 cx.notify();
@@ -3535,9 +3686,9 @@ impl AppView {
                     )
                     .children(Environment::ALL.into_iter().enumerate().map(|(index, environment)| {
                         let color = match environment {
-                            Environment::Development => MINT,
-                            Environment::Staging => AMBER,
-                            Environment::Production => RED,
+                            Environment::Development => colors().mint,
+                            Environment::Staging => colors().amber,
+                            Environment::Production => colors().red,
                         };
                         chip(
                             ("environment", index + 1),
@@ -3582,7 +3733,7 @@ impl AppView {
         column()
             .gap_3()
             .child(field(tr!("Connection name"), &self.connection_name))
-            .when(self.driver != 2, |s| {
+            .when(self.driver < 2, |s| {
                 s.child(
                     row()
                         .gap_3()
@@ -3621,7 +3772,7 @@ impl AppView {
                     } else {
                         Toggled::False
                     })
-                    .when(self.remember_password, |s| s.text_color(rgb(MINT)))
+                    .when(self.remember_password, |s| s.text_color(rgb(colors().mint)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if !this.connection_saving {
                             this.remember_password = !this.remember_password;
@@ -3666,7 +3817,7 @@ impl AppView {
                     } else {
                         Toggled::False
                     })
-                    .when(self.all_databases, |s| s.text_color(rgb(MINT)))
+                    .when(self.all_databases, |s| s.text_color(rgb(colors().mint)))
                     .on_click(cx.listener(|this, _, _, cx| {
                         if !this.connection_saving {
                             this.all_databases = !this.all_databases;
@@ -3679,6 +3830,120 @@ impl AppView {
             .when(self.driver == 2, |s| {
                 s.child(self.connection_databricks.clone())
             })
+            .when(self.driver == 3, |s| s.child(self.sqlite_fields(cx)))
+    }
+
+    /// SQLite: the database file and whether it opens read-only.
+    fn sqlite_fields(&self, cx: &mut Context<Self>) -> Div {
+        column()
+            .gap_3()
+            .child(
+                column()
+                    .gap_1()
+                    .child(label(tr!("Database file")))
+                    .child(
+                        row()
+                            .gap_2()
+                            .child(
+                                Input::new(&self.connection_file)
+                                    .flex_1()
+                                    .disabled(self.connection_saving)
+                                    .aria_label(tr!("Database file")),
+                            )
+                            .child(
+                                button("browse-database-file", I::FolderOpen, tr!("Browse…"))
+                                    .flex_none()
+                                    .when(self.connection_saving, |s| {
+                                        s.opacity(0.6).cursor_default()
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.browse_database_file(window, cx)
+                                    })),
+                            ),
+                    )
+                    .child(label(tr!(
+                        "An existing SQLite file. A missing file is never created, so a mistyped path cannot open an empty database."
+                    ))),
+            )
+            .child(
+                column()
+                    .gap_1()
+                    .child(
+                        button(
+                            "sqlite-read-only",
+                            if self.sqlite_read_only {
+                                I::SquareCheck
+                            } else {
+                                I::Square
+                            },
+                            tr!("Open read-only"),
+                        )
+                        .role(Role::CheckBox)
+                        .aria_toggled(if self.sqlite_read_only {
+                            Toggled::True
+                        } else {
+                            Toggled::False
+                        })
+                        .when(self.sqlite_read_only, |s| s.text_color(rgb(colors().mint)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.connection_saving {
+                                this.sqlite_read_only = !this.sqlite_read_only;
+                                this.invalidate_connection_test();
+                                cx.notify();
+                            }
+                        })),
+                    )
+                    .child(label(tr!(
+                        "Statements that write fail, whatever the file's permissions. The file needs no password."
+                    ))),
+            )
+    }
+
+    /// **Browse…** for the SQLite file: the system's open dialog fills the
+    /// path field. Closing the dialog leaves the field as it was.
+    fn browse_database_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connection_saving {
+            return;
+        }
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(tr!("Choose").into()),
+        });
+        cx.spawn_in(window, async move |weak, cx| {
+            let chosen = chosen.await;
+            let _ = weak.update_in(cx, |this, window, cx| {
+                if !this.connection_open || this.connection_saving {
+                    return;
+                }
+                match chosen {
+                    Ok(Ok(Some(paths))) => {
+                        let Some(path) = paths.into_iter().next() else {
+                            return;
+                        };
+                        let path = path.to_string_lossy().into_owned();
+                        this.connection_file
+                            .update(cx, |input, cx| input.set_value(path, window, cx));
+                        this.invalidate_connection_test();
+                        cx.notify();
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "open dialog failed");
+                        this.connection_status = Some(Feedback::new(
+                            Tone::Error,
+                            tr!(
+                                "The open dialog could not open. Type the file's full path instead."
+                            ),
+                        ));
+                        cx.notify();
+                    }
+                    // Closed without a file.
+                    _ => {}
+                }
+            });
+        })
+        .detach();
     }
 
     /// Switches the form to another driver. Re-selecting the current one
@@ -3693,11 +3958,9 @@ impl AppView {
             .update(cx, |form, _| form.cancel_discovery());
         // Another driver has other namespaces; the edited connection's own
         // choice comes back with its driver.
-        let kind = [
-            DriverKind::Postgres,
-            DriverKind::MySql,
-            DriverKind::Databricks,
-        ][index];
+        let kind = FORM_DRIVERS
+            .get(index)
+            .map_or(DriverKind::Postgres, |(kind, _)| *kind);
         let selection = self
             .editing_connection
             .filter(|editing| {
@@ -3813,7 +4076,7 @@ fn queued_label() -> Div {
         .flex_none()
         .px_1()
         .text_size(px(12.))
-        .text_color(rgb(FAINT))
+        .text_color(rgb(colors().faint))
         .child(tr!("queued"))
 }
 
@@ -3972,7 +4235,7 @@ fn progress_bar(index: usize, progress: &RefreshProgress) -> impl IntoElement {
                         .min_w_0()
                         .truncate()
                         .text_size(px(12.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(colors().muted))
                         .child(text),
                 )
                 .when(progress.phase == RefreshPhase::Reading, |s| {
@@ -3980,7 +4243,7 @@ fn progress_bar(index: usize, progress: &RefreshProgress) -> impl IntoElement {
                         div()
                             .flex_none()
                             .text_size(px(12.))
-                            .text_color(rgb(FAINT))
+                            .text_color(rgb(colors().faint))
                             .child(format!("{percent}%")),
                     )
                 }),
@@ -3990,25 +4253,40 @@ fn progress_bar(index: usize, progress: &RefreshProgress) -> impl IntoElement {
                 .h(px(4.))
                 .w_full()
                 .rounded_full()
-                .bg(rgb(SURFACE))
+                .bg(rgb(colors().surface))
                 .child(
                     div()
                         .h_full()
                         .rounded_full()
-                        .bg(rgb(MINT))
+                        .bg(rgb(colors().mint))
                         .w(relative(progress.fraction())),
                 ),
         )
         .when(!eta.is_empty(), |s| {
-            s.child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(eta))
+            s.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(colors().faint))
+                    .child(eta),
+            )
         })
 }
+
+/// The drivers the connection dialog offers, in the order of its buttons;
+/// `AppView::driver` is an index into it.
+const FORM_DRIVERS: [(DriverKind, &str); 4] = [
+    (DriverKind::Postgres, "PostgreSQL"),
+    (DriverKind::MySql, "MySQL"),
+    (DriverKind::Databricks, "Databricks"),
+    (DriverKind::Sqlite, "SQLite"),
+];
 
 // Resource labels are presentation only. The driver executes using the ID.
 fn connection_detail(config: &ConnectionConfig) -> String {
     let base = config.options["host"]
         .as_str()
         .or(config.options["profile"].as_str())
+        .or(config.options["path"].as_str())
         .unwrap_or("");
     let id = config.options["clusterId"]
         .as_str()
@@ -4026,16 +4304,16 @@ fn connection_detail(config: &ConnectionConfig) -> String {
 }
 
 /// The colour of a connection: the one the user chose, or its driver's.
+/// It names a hue, drawn in the theme on screen.
 fn connection_shade(
     driver: DriverKind,
     appearance: jykre::connection_appearance::Appearance,
-) -> u32 {
-    appearance
-        .color
-        .map(connection_color)
-        .unwrap_or(match driver {
-            DriverKind::MySql => BLUE,
-            DriverKind::Databricks => PURPLE,
-            _ => MINT,
-        })
+) -> jykre::connection_appearance::ConnectionColor {
+    use jykre::connection_appearance::ConnectionColor as C;
+    appearance.color.unwrap_or(match driver {
+        DriverKind::MySql => C::Blue,
+        DriverKind::Databricks => C::Purple,
+        DriverKind::Sqlite => C::Teal,
+        _ => C::Mint,
+    })
 }

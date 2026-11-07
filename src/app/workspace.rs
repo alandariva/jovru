@@ -1,4 +1,7 @@
-use super::demo::{self, OPTIMIZED_SQL, SALES_SQL, sample_result};
+use super::assistant_panel::{
+    AssistantPanel, AssistantPanelEvent, FixTarget, Mode as AssistantMode, QueryTicket,
+};
+use super::demo::{self, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
 use super::result_grid::{GridSql, ResultGrid, ResultGridEvent, Summary};
 use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
@@ -16,6 +19,12 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::tr;
 use jykre::{
+    assistant::{
+        apply,
+        facts::{ErrorFacts, RunFacts, SchemaScope},
+        prompts,
+        released::{self, QueryPreview},
+    },
     backend, cell_format, connection_store,
     drivers::*,
     error_report::ErrorReport,
@@ -43,12 +52,6 @@ pub const SQL_EDITOR_CONTEXT: &str = "SqlEditor";
 enum ResultView {
     Table,
     Messages,
-}
-
-struct Message {
-    user: bool,
-    text: String,
-    sql: Option<&'static str>,
 }
 
 pub struct Workspace {
@@ -101,11 +104,22 @@ pub struct Workspace {
     editor: Entity<EditorState>,
     assistant_split: Entity<ResizableState>,
     query_split: Entity<ResizableState>,
-    prompt: Entity<InputState>,
+    /// The assistant, its own cached entity (ADR-0028).
+    assistant_panel: Entity<AssistantPanel>,
+    /// The assistant's own session, for the queries the user lets it run:
+    /// apart from the tab's, so they never touch its transaction, temporary
+    /// tables or `USE`.
+    assistant_session: Option<Box<dyn Session>>,
+    /// Bumped when the connection changes: a session coming back from the
+    /// previous one is closed.
+    assistant_lease: u64,
+    /// The assistant's query waiting for the connection's password.
+    pending_assistant: Option<AssistantQuery>,
     connection: SharedString,
     dialect: SharedString,
     database: String,
-    connection_color: u32,
+    /// The hue of the tab's connection; `None` without one.
+    connection_color: Option<jykre::connection_appearance::ConnectionColor>,
     title: SharedString,
     /// One result tab per statement run, each read page by page.
     results: ResultTabs,
@@ -133,7 +147,8 @@ pub struct Workspace {
     selection_summary: Summary,
     result_view: ResultView,
     assistant_open: bool,
-    messages: Vec<Message>,
+    /// The connection whose metadata cache the assistant's tools read.
+    cache_id: Option<ConnectionId>,
     /// The run state and the status of each statement in the editor.
     run: QueryRun,
     editor_sql: String,
@@ -163,7 +178,6 @@ pub struct Workspace {
     notice: Option<Feedback>,
     filter_open: bool,
     filter: Entity<InputState>,
-    chat_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -200,16 +214,24 @@ impl Workspace {
                 }
             },
         );
-        let prompt =
-            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Ask about your data…")));
+        let assistant_panel = cx.new(|cx| AssistantPanel::new(demo::enabled(), window, cx));
+        if sql == SALES_SQL {
+            assistant_panel.update(cx, |panel, cx| {
+                panel.seed_demo(
+                    tr!("Which categories generated the most revenue last quarter?").into(),
+                    tr!("I prepared a query for Q3 2026, considering only completed orders.")
+                        .into(),
+                    Some(SALES_SQL),
+                    cx,
+                )
+            });
+        }
         let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter results…")));
-        let prompt_subscription = cx.subscribe_in(
-            &prompt,
+        let assistant_subscription = cx.subscribe_in(
+            &assistant_panel,
             window,
-            |this, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.submit_prompt(window, cx);
-                }
+            |this, _, event: &AssistantPanelEvent, window, cx| {
+                this.on_assistant_event(event, window, cx)
             },
         );
         let filter_subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
@@ -307,7 +329,7 @@ impl Workspace {
             editor,
             assistant_split,
             query_split,
-            prompt,
+            assistant_panel,
             filter,
             connection: connection.to_string().into(),
             // The demo guesses its database from the connection's name; a
@@ -327,13 +349,13 @@ impl Workspace {
                 "commerce".into()
             },
             connection_color: if !demo {
-                FAINT
+                None
             } else if connection.contains("Databricks") {
-                BLUE
+                Some(jykre::connection_appearance::ConnectionColor::Blue)
             } else if connection.contains("MySQL") {
-                0xd995a7
+                Some(jykre::connection_appearance::ConnectionColor::Pink)
             } else {
-                MINT
+                Some(jykre::connection_appearance::ConnectionColor::Mint)
             },
             title: title.to_string().into(),
             results,
@@ -348,26 +370,10 @@ impl Workspace {
             selection_summary: Summary::default(),
             result_view: ResultView::Table,
             assistant_open: true,
-            messages: if sql == SALES_SQL {
-                vec![
-                    Message {
-                        user: true,
-                        text: tr!("Which categories generated the most revenue last quarter?")
-                            .into(),
-                        sql: None,
-                    },
-                    Message {
-                        user: false,
-                        text: tr!(
-                            "I prepared a query for Q3 2026, considering only completed orders."
-                        )
-                        .into(),
-                        sql: Some(SALES_SQL),
-                    },
-                ]
-            } else {
-                Vec::new()
-            },
+            assistant_session: None,
+            assistant_lease: 0,
+            pending_assistant: None,
+            cache_id: None,
             run: QueryRun::new(sql),
             editor_sql: sql.to_string(),
             statement_lines: jykre::sql::statement_lines(sql, None).into(),
@@ -381,9 +387,8 @@ impl Workspace {
             opened_sql: Some(sql.to_string()),
             notice: None,
             filter_open: false,
-            chat_scroll: ScrollHandle::new(),
             _subscriptions: vec![
-                prompt_subscription,
+                assistant_subscription,
                 filter_subscription,
                 grid_subscription,
                 resize_subscription,
@@ -772,14 +777,6 @@ impl Workspace {
         cx.notify();
     }
 
-    /// The demo's "distribution": the revenue column's statistics.
-    fn show_revenue_statistics(&mut self, cx: &mut Context<Self>) {
-        self.result_view = ResultView::Table;
-        self.grid
-            .update(cx, |grid, cx| grid.show_column_statistics(2, cx));
-        cx.notify();
-    }
-
     /// The gear of the result toolbar: how the grid shows values. Its
     /// options are toggles that leave the menu's button as an icon.
     fn display_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -789,7 +786,7 @@ impl Workspace {
             .ghost()
             .small()
             .icon(I::Settings)
-            .when(numbers_pt_br, |s| s.text_color(rgb(MINT)))
+            .when(numbers_pt_br, |s| s.text_color(rgb(colors().mint)))
             .accessibility_label(tr!("Display settings"))
             .tooltip(tr!("Display settings"))
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
@@ -1034,6 +1031,7 @@ impl Workspace {
             self.sql_editor
                 .update(cx, |editor, _| editor.set_context(context.clone()));
             self.context = context;
+            self.push_assistant_context(cx);
             cx.emit(WorkspaceEvent::Changed);
         }
     }
@@ -1237,6 +1235,9 @@ impl Workspace {
         if let Some(input) = self.input.clone() {
             self.cancellation = CancellationToken::new();
             let cancel = self.cancellation.clone();
+            // Labels the run's telemetry span; unknown until the
+            // connection's names are read.
+            let connection = self.cache_id;
             self.run.queue_all(id);
             // The previous run has ended (a stopping one blocks new runs), so
             // its session is back unless it was lost.
@@ -1268,6 +1269,7 @@ impl Workspace {
                 // Rows become compact display text on the database runtime, row
                 // by row, and the driver cells are dropped there.
                 let result = backend::run(backend::query(
+                    connection,
                     input,
                     session,
                     requests,
@@ -1543,73 +1545,6 @@ impl Workspace {
         });
     }
 
-    fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.prompt.read(cx).value().to_string();
-        if text.trim().is_empty() {
-            return;
-        }
-        self.ask(text, cx);
-        self.prompt
-            .update(cx, |input, cx| input.set_value("", window, cx));
-    }
-
-    fn ask(&mut self, text: String, cx: &mut Context<Self>) {
-        let lower = text.to_lowercase();
-        let (answer, sql) = if lower.contains("optimi") || lower.contains("slow") {
-            (
-                tr!(
-                    "One alternative is to aggregate the orders before the JOINs. This can reduce intermediate rows. Validate the difference with EXPLAIN ANALYZE on your database; this mock does not measure performance."
-                ),
-                Some(OPTIMIZED_SQL),
-            )
-        } else if lower.contains("expla") {
-            (
-                tr!(
-                    "The query filters completed orders between July and September 2026, joins products and categories, and groups the values. COUNT counts orders, SUM computes revenue, and AVG returns the average ticket. The ordering shows the highest revenue first."
-                ),
-                None,
-            )
-        } else if lower.contains("chart") || lower.contains("graph") {
-            self.show_revenue_statistics(cx);
-            (
-                tr!(
-                    "I opened the statistics of the revenue column. Electronics leads with R$ 248,760.00; the sum, average and median show how revenue is spread across the categories."
-                ),
-                None,
-            )
-        } else if lower.contains("clean") {
-            (
-                tr!(
-                    "To investigate data quality, start by checking null values in product_id, orders without a category, and duplicate IDs. Also compare the orders count before and after the JOINs."
-                ),
-                None,
-            )
-        } else {
-            (
-                tr!(
-                    "In this sample, Electronics accounts for 32.4% of revenue. Together with Home and decor, the two categories make up 52.7% of the total. You can explore the chart, ask for an explanation of the query, or try an optimization suggestion."
-                ),
-                None,
-            )
-        };
-        self.messages.push(Message {
-            user: true,
-            text,
-            sql: None,
-        });
-        self.messages.push(Message {
-            user: false,
-            text: if self.sales() { answer.into() } else {
-                let (columns, rows) = self.current_page().map_or((0, 0), |page| (page.data.column_count(), page.data.row_count()));
-                tr!("The query runs in the context of {0}. The sample preview has {1} columns and {2} rows. Use the editor to adjust the filters and run it to see the sample. This demo's assistant has a complete analysis flow in the Revenue by category tab.", self.connection, columns, rows)
-            },
-            sql: if self.sales() { sql } else { None },
-        });
-        self.assistant_open = true;
-        self.chat_scroll.scroll_to_bottom();
-        cx.notify();
-    }
-
     /// The connection this tab runs on. Choosing another asks the host,
     /// which confirms with the user before moving the tab.
     fn connection_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1714,6 +1649,7 @@ impl Workspace {
                                     this.sql_editor
                                         .update(cx, |editor, _| editor.set_context(chosen.clone()));
                                     this.context = chosen.clone();
+                                    this.push_assistant_context(cx);
                                     cx.emit(WorkspaceEvent::Changed);
                                     cx.notify();
                                 });
@@ -1735,6 +1671,10 @@ impl Workspace {
     pub fn set_names(&mut self, id: ConnectionId, names: Arc<NameIndex>, cx: &mut Context<Self>) {
         self.sql_editor
             .update(cx, |editor, _| editor.set_names(id, names));
+        if self.cache_id != Some(id) {
+            self.cache_id = Some(id);
+            self.push_assistant_target(cx);
+        }
     }
 
     /// Sets the namespaces the header offers.
@@ -1791,7 +1731,7 @@ impl Workspace {
             .px_4()
             .justify_between()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .child(
                 row()
                     .gap_3()
@@ -1902,7 +1842,7 @@ impl Workspace {
                             I::PanelRight,
                             tr!("Show or hide the assistant"),
                         )
-                        .when(self.assistant_open, |s| s.bg(rgb(SURFACE)))
+                        .when(self.assistant_open, |s| s.bg(rgb(colors().surface)))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.assistant_open = !this.assistant_open;
                             cx.notify();
@@ -1980,7 +1920,11 @@ impl Workspace {
     fn session_status(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.input.is_none() {
             return row()
-                .child(dot(if self.demo { MINT } else { AMBER }))
+                .child(dot(if self.demo {
+                    colors().mint
+                } else {
+                    colors().amber
+                }))
                 .child(label(if self.demo {
                     tr!("Demo")
                 } else {
@@ -2003,21 +1947,21 @@ impl Workspace {
         match SessionIndicator::of(self.session.is_some(), self.is_busy()) {
             SessionIndicator::InUse => status(
                 "session-in-use",
-                MINT,
+                colors().mint,
                 tr!("Connected"),
                 tr!("A query is using the session. Stop it to disconnect."),
             )
             .into_any_element(),
             SessionIndicator::Disconnected => status(
                 "session-closed",
-                FAINT,
+                colors().faint,
                 tr!("Disconnected"),
                 tr!("The next run opens a session."),
             )
             .into_any_element(),
             SessionIndicator::Connected => status(
                 "disconnect-session",
-                MINT,
+                colors().mint,
                 tr!("Connected"),
                 tr!("Disconnect: close this tab's session"),
             )
@@ -2027,10 +1971,10 @@ impl Workspace {
             .tab_index(0)
             .border_1()
             .border_color(transparent_black())
-            .focus_visible(|s| s.border_color(rgb(MINT)))
+            .focus_visible(|s| s.border_color(rgb(colors().mint)))
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(HOVER)))
-            .child(icon(I::Unplug, FAINT).size(px(14.)))
+            .hover(|s| s.bg(rgb(colors().hover)))
+            .child(icon(I::Unplug, colors().faint).size(px(14.)))
             .on_click(cx.listener(|this, _, window, cx| this.disconnect(false, window, cx)))
             .into_any_element(),
         }
@@ -2091,7 +2035,7 @@ impl Workspace {
     fn editor_panel(&self, cx: &mut Context<Self>) -> Div {
         column()
             .size_full()
-            .bg(rgb(BG))
+            .bg(rgb(colors().bg))
             .child(
                 row()
                     .h(px(38.))
@@ -2101,7 +2045,11 @@ impl Workspace {
                     .child(
                         row()
                             .gap_2()
-                            .child(icon(I::Server, self.connection_color))
+                            .child(icon(
+                                I::Server,
+                                self.connection_color
+                                    .map_or(colors().faint, connection_color),
+                            ))
                             .child(label(self.connection.clone()))
                             .when_some(self.environment, |s, environment| {
                                 s.child(environment_badge(environment))
@@ -2158,13 +2106,16 @@ impl Workspace {
                                     .aria_label(tr!("SQL query editor")),
                             ),
                     )
+                    // Not deferred: a deferred gutter would paint over the
+                    // dialogs. Drawn after the editor, so it still reads the
+                    // editor's prepaint of this frame and paints on top of it.
                     .child(
                         div()
                             .absolute()
                             .left(px(8.))
                             .top_0()
                             .h_full()
-                            .child(deferred(self.query_gutter(cx))),
+                            .child(self.query_gutter(cx)),
                     ),
             )
             .child(
@@ -2200,8 +2151,8 @@ impl Workspace {
         column()
             .size_full()
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
+            .border_color(rgb(colors().border))
+            .bg(rgb(colors().panel))
             .child(
                 row()
                     .h(px(42.))
@@ -2210,7 +2161,7 @@ impl Workspace {
                     .gap_2()
                     .justify_between()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(colors().border))
                     // One tab per statement result; the close button keeps
                     // the tab strip from growing without end.
                     .child(
@@ -2240,7 +2191,7 @@ impl Workspace {
                                         .aria_label(tr!("{0}: {1}", title, status))
                                         .focusable()
                                         .tab_index(0)
-                                        .focus_visible(|s| s.bg(rgb(HOVER)))
+                                        .focus_visible(|s| s.bg(rgb(colors().hover)))
                                         .flex_none()
                                         .h(px(28.))
                                         .pl_2()
@@ -2249,9 +2200,13 @@ impl Workspace {
                                         .rounded(px(5.))
                                         .cursor_pointer()
                                         .text_size(px(12.))
-                                        .text_color(rgb(if index == active { TEXT } else { MUTED }))
-                                        .when(index == active, |s| s.bg(rgb(SURFACE)))
-                                        .hover(|s| s.bg(rgb(HOVER)))
+                                        .text_color(rgb(if index == active {
+                                            colors().text
+                                        } else {
+                                            colors().muted
+                                        }))
+                                        .when(index == active, |s| s.bg(rgb(colors().surface)))
+                                        .hover(|s| s.bg(rgb(colors().hover)))
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.results.select(index);
                                             this.show_active(cx);
@@ -2266,9 +2221,9 @@ impl Workspace {
                                         })
                                         .drag_over::<ResultTabDrag>(|style, _, _, _| {
                                             style
-                                                .bg(rgb(HOVER))
+                                                .bg(rgb(colors().hover))
                                                 .border_l_2()
-                                                .border_color(rgb(MINT))
+                                                .border_color(rgb(colors().mint))
                                         })
                                         .on_drop(cx.listener(
                                             move |this, drag: &ResultTabDrag, _, cx| {
@@ -2350,7 +2305,8 @@ impl Workspace {
                                     let mode = icon_button(("result-mode", i), symbol, title)
                                         .aria_selected(self.result_view == view)
                                         .when(self.result_view == view, |s| {
-                                            s.bg(rgb(SURFACE)).text_color(rgb(TEXT))
+                                            s.bg(rgb(colors().surface))
+                                                .text_color(rgb(colors().text))
                                         })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.result_view = view;
@@ -2367,7 +2323,10 @@ impl Workspace {
                                             tr!("Statistics"),
                                         )
                                         .aria_selected(shown)
-                                        .when(shown, |s| s.bg(rgb(SURFACE)).text_color(rgb(MINT)))
+                                        .when(shown, |s| {
+                                            s.bg(rgb(colors().surface))
+                                                .text_color(rgb(colors().mint))
+                                        })
                                         .on_click(
                                             cx.listener(move |this, _, _, cx| {
                                                 this.show_statistics(!shown, cx)
@@ -2387,7 +2346,7 @@ impl Workspace {
                                     tr!("Show the selected rows as records"),
                                 )
                                 .aria_selected(records)
-                                .when(records, |s| s.bg(rgb(HOVER)))
+                                .when(records, |s| s.bg(rgb(colors().hover)))
                                 .on_click(cx.listener(
                                     move |this, _, _, cx| {
                                         this.grid
@@ -2398,7 +2357,7 @@ impl Workspace {
                             .child(
                                 icon_button("filter-results", I::ListFilter, tr!("Filter results"))
                                     .aria_selected(self.filter_open)
-                                    .when(self.filter_open, |s| s.bg(rgb(HOVER)))
+                                    .when(self.filter_open, |s| s.bg(rgb(colors().hover)))
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.filter_open = !this.filter_open;
                                         if this.filter_open {
@@ -2435,7 +2394,7 @@ impl Workspace {
                                     tr!("Export the result to a file (Ctrl+Shift+E)"),
                                 )
                                 .aria_selected(open)
-                                .when(open, |s| s.bg(rgb(HOVER)))
+                                .when(open, |s| s.bg(rgb(colors().hover)))
                                 .on_click(cx.listener(|this, _, _, cx| this.toggle_export(cx)))
                             })
                             .child(
@@ -2491,7 +2450,7 @@ impl Workspace {
             // offers to read its rows.
             if self.data_sql.is_some() {
                 return centered()
-                    .child(icon(I::Table2, FAINT))
+                    .child(icon(I::Table2, colors().faint))
                     .child(div().text_size(px(14.)).child(tr!("Ready to explore")))
                     .child(label(tr!(
                         "Read the table's rows, a page at a time, with the query above."
@@ -2503,7 +2462,7 @@ impl Workspace {
                     .into_any_element();
             }
             return centered()
-                .child(icon(I::Terminal, FAINT))
+                .child(icon(I::Terminal, colors().faint))
                 .child(div().text_size(px(14.)).child(tr!("Ready to explore")))
                 .child(label(tr!("Run the query to see the results.")))
                 .child(
@@ -2514,7 +2473,11 @@ impl Workspace {
         };
         match &tab.state {
             ResultState::Running => centered()
-                .child(spinning_icon("running-spinner", I::LoaderCircle, MINT))
+                .child(spinning_icon(
+                    "running-spinner",
+                    I::LoaderCircle,
+                    colors().mint,
+                ))
                 .child(label(if self.input.is_some() {
                     tr!("Running on the server…")
                 } else {
@@ -2523,7 +2486,7 @@ impl Workspace {
                 .into_any_element(),
             ResultState::Failed(report) => self.result_error(tab, report, cx),
             ResultState::Cancelled => centered()
-                .child(icon(I::Ban, AMBER))
+                .child(icon(I::Ban, colors().amber))
                 .child(label(tr!("Execution cancelled")))
                 .into_any_element(),
             ResultState::Done => match self.result_view {
@@ -2541,7 +2504,7 @@ impl Workspace {
                         .into_any_element()
                 }
                 ResultView::Table => centered()
-                    .child(icon(I::CircleCheck, MINT))
+                    .child(icon(I::CircleCheck, colors().mint))
                     .child(label(match tab.rows_affected {
                         Some(affected) => tr!("{0} rows affected", affected),
                         None => tr!("Statement completed").into(),
@@ -2577,11 +2540,11 @@ impl Workspace {
             .p_4()
             .gap_2()
             .child(
-                row().gap_2().child(icon(I::CircleX, RED)).child(
+                row().gap_2().child(icon(I::CircleX, colors().red)).child(
                     div()
                         .text_size(px(14.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgb(RED))
+                        .text_color(rgb(colors().red))
                         .child(report.title.clone()),
                 ),
             )
@@ -2591,7 +2554,7 @@ impl Workspace {
                     .font_family("Cascadia Mono")
                     .text_size(px(12.))
                     .line_height(relative(1.5))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(colors().text))
                     .child(report.message.clone()),
             )
             .when_some(codes, |s, codes| {
@@ -2602,7 +2565,7 @@ impl Workspace {
                     div()
                         .pl(px(24.))
                         .text_size(px(12.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(colors().muted))
                         .child(action),
                 )
             })
@@ -2610,6 +2573,13 @@ impl Workspace {
                 row()
                     .pl(px(24.))
                     .gap_2()
+                    .when(self.assistant_ready(cx), |s| {
+                        s.child(
+                            button("fix-with-ai", I::Sparkles, tr!("Fix with AI")).on_click(
+                                cx.listener(move |this, _, _, cx| this.fix_with_ai(id, cx)),
+                            ),
+                        )
+                    })
                     .child(button("copy-error", I::Copy, tr!("Copy details")).on_click(
                         cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
@@ -2661,13 +2631,13 @@ impl Workspace {
                     timeout_label(Some(timeout))
                 )
             });
-            (I::LoaderCircle, AMBER, text, detail)
+            (I::LoaderCircle, colors().amber, text, detail)
         } else if *state == RunState::Cancelling {
             let waited = self.run.cancelling_for().unwrap_or_default();
             if waited >= CANCEL_SLOW {
                 (
                         I::LoaderCircle,
-                        AMBER,
+                        colors().amber,
                         tr!(
                             "Still cancelling… {0}",
                             cell_format::duration(waited.as_millis() as u64)
@@ -2680,29 +2650,47 @@ impl Workspace {
                         ),
                     )
             } else {
-                (I::LoaderCircle, AMBER, tr!("Cancelling…").into(), None)
+                (
+                    I::LoaderCircle,
+                    colors().amber,
+                    tr!("Cancelling…").into(),
+                    None,
+                )
             }
         } else if self.fetching {
             (
                 I::LoaderCircle,
-                AMBER,
+                colors().amber,
                 tr!("Reading the next page…").into(),
                 None,
             )
         } else if let Some(tab) = tab {
             match &tab.state {
                 ResultState::Failed(report) => match state {
-                    RunState::Failed { error } => {
-                        (I::CircleX, RED, report.title.clone(), Some(error.clone()))
-                    }
-                    _ => (I::CircleX, RED, report.title.clone(), None),
+                    RunState::Failed { error } => (
+                        I::CircleX,
+                        colors().red,
+                        report.title.clone(),
+                        Some(error.clone()),
+                    ),
+                    _ => (I::CircleX, colors().red, report.title.clone(), None),
                 },
-                ResultState::Cancelled => (I::Ban, AMBER, tr!("Execution cancelled").into(), None),
-                ResultState::Running => (I::LoaderCircle, AMBER, tr!("Running…").into(), None),
+                ResultState::Cancelled => (
+                    I::Ban,
+                    colors().amber,
+                    tr!("Execution cancelled").into(),
+                    None,
+                ),
+                ResultState::Running => (
+                    I::LoaderCircle,
+                    colors().amber,
+                    tr!("Running…").into(),
+                    None,
+                ),
                 ResultState::Done => page_summary(tab, self.filtered_rows),
             }
         } else {
-            (I::Clock, FAINT, tr!("Waiting to run").into(), None)
+            (I::Clock, colors().faint, tr!("Waiting to run").into(), None)
         };
         // The status region is announced when it changes: the clock is shown,
         // not read out every second.
@@ -2721,7 +2709,7 @@ impl Workspace {
             .flex_none()
             .px_3()
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(colors().border))
             .justify_between()
             .child(
                 row()
@@ -2769,7 +2757,7 @@ impl Workspace {
                                         .min_w_0()
                                         .truncate()
                                         .text_size(px(12.))
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(colors().muted))
                                         .tooltip(move |window, cx| {
                                             Tooltip::new(detail.clone()).build(window, cx)
                                         })
@@ -2803,7 +2791,7 @@ impl Workspace {
                     .when(self.input.is_some() || self.demo, |s| {
                         s.child(badge(
                             if self.input.is_some() { "SQL" } else { "MOCK" },
-                            FAINT,
+                            colors().faint,
                         ))
                     }),
             )
@@ -2861,11 +2849,6 @@ impl Workspace {
                 ))
             }
         }
-    }
-
-    /// The result on screen is the demo's, with an analysis.
-    fn sales(&self) -> bool {
-        self.results.active().is_some_and(|tab| tab.sales)
     }
 
     fn result_messages(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2936,7 +2919,7 @@ impl Workspace {
             .justify_center()
             .gap_3()
             .p_4()
-            .child(icon(I::Server, AMBER))
+            .child(icon(I::Server, colors().amber))
             .child(
                 div()
                     .text_size(px(14.))
@@ -2962,16 +2945,16 @@ impl Workspace {
                                     .focusable()
                                     .tab_index(0)
                                     .border_1()
-                                    .border_color(rgb(BORDER))
-                                    .focus_visible(|s| s.border_color(rgb(MINT)))
+                                    .border_color(rgb(colors().border))
+                                    .focus_visible(|s| s.border_color(rgb(colors().mint)))
                                     .h(px(32.))
                                     .px(px(9.))
                                     .rounded(px(5.))
                                     .cursor_pointer()
                                     .text_size(px(14.))
-                                    .text_color(rgb(MUTED))
-                                    .hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                                    .child(icon(I::Server, MUTED))
+                                    .text_color(rgb(colors().muted))
+                                    .hover(|s| s.bg(rgb(colors().hover)).text_color(rgb(colors().text)))
+                                    .child(icon(I::Server, colors().muted))
                                     .child(name.clone())
                                     .on_click(cx.listener(move |_, _, _, cx| {
                                         cx.emit(WorkspaceEvent::ConnectionRequested(
@@ -3013,7 +2996,7 @@ impl Workspace {
         let (symbol, color, text, detail) = match self.transaction {
             Transaction::AutoCommit => (
                 I::CheckCheck,
-                FAINT,
+                colors().faint,
                 tr!("Auto-commit"),
                 tr!("Each statement commits on its own. BEGIN opens a transaction."),
             ),
@@ -3022,7 +3005,7 @@ impl Workspace {
                 manual: true,
             } => (
                 I::LockOpen,
-                AMBER,
+                colors().amber,
                 tr!("Manual commit"),
                 tr!(
                     "Autocommit is off: statements wait for COMMIT. Closing the tab rolls them back."
@@ -3030,13 +3013,13 @@ impl Workspace {
             ),
             Transaction::Open { changes: false, .. } => (
                 I::LockOpen,
-                AMBER,
+                colors().amber,
                 tr!("Transaction open"),
                 tr!("A transaction is open in this tab's session. Closing the tab rolls it back."),
             ),
             Transaction::Open { changes: true, .. } => (
                 I::CircleDot,
-                AMBER,
+                colors().amber,
                 tr!("Uncommitted changes"),
                 tr!(
                     "Statements in the open transaction changed data that is not committed. Commit or roll back; closing the tab rolls it back."
@@ -3044,7 +3027,7 @@ impl Workspace {
             ),
             Transaction::Failed { .. } => (
                 I::CircleAlert,
-                RED,
+                colors().red,
                 tr!("Transaction failed"),
                 tr!(
                     "A statement failed inside the transaction. The server ignores the next statements until you roll back."
@@ -3098,71 +3081,247 @@ impl Workspace {
             .update(cx, |editor, cx| editor.format(window, cx));
     }
 
-    fn assistant(&self, cx: &mut Context<Self>) -> Div {
-        column().size_full().bg(rgb(0x191d23)).border_l_1().border_color(rgb(BORDER))
-            .child(row().h(px(48.)).flex_none().px_4().justify_between().border_b_1().border_color(rgb(BORDER))
-                .child(row().child(icon(I::Sparkles, MINT)).child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(tr!("Assistant")))
-                    .child(badge("IA", MINT)))
-                .child(row().gap_0()
-                    .child(icon_button("reset-chat", I::SquarePen, tr!("New conversation"))
-                        .on_click(cx.listener(|this, _, _, cx| { this.messages.clear(); cx.notify(); })))
-                    .child(icon_button("close-ai", I::PanelRightClose, tr!("Collapse assistant"))
-                        .on_click(cx.listener(|this, _, _, cx| { this.assistant_open = false; cx.notify(); })))))
-            // Said as soon as the panel opens, before anything is asked.
-            .child(div().id("assistant-pending").role(Role::Status).flex_none().mx_3().mt_3().p_2().rounded(px(6.))
-                .bg(rgb(Tone::Warning.background()))
-                .child(feedback_line(&Feedback::new(Tone::Warning, tr!(
-                    "Pending implementation: the assistant is not connected to an AI model yet, so its answers are simulated."
-                ))).text_size(px(12.))))
-            .child(row().px_4().h(px(37.)).flex_none().gap_2().border_b_1().border_color(rgb(BORDER))
-                .child(icon(I::Layers, FAINT)).child(label(tr!("Context")))
-                .child(badge(tr!("Current SQL"), MUTED)).child(badge(if self.sales() { tr!("3 tables") } else { tr!("1 query") }, MUTED)))
-            .child(column().id("ai-conversation").flex_1().overflow_y_scroll().track_scroll(&self.chat_scroll).vertical_scrollbar(&self.chat_scroll).px_4().py_4().gap_5()
-                .child(row().gap_2().child(div().h(px(1.)).flex_1().bg(rgb(BORDER)))
-                    .child(div().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Context of this query")))
-                    .child(div().h(px(1.)).flex_1().bg(rgb(BORDER))))
-                .when(self.messages.is_empty(), |s| s.child(column().py_5().gap_3()
-                    .child(icon(I::Sparkles, MINT)).child(div().text_size(px(16.)).child(tr!("One question, a new path.")))
-                    .child(label(tr!("Explore data, understand queries, and turn questions into SQL.")))))
-                .children(self.messages.iter().enumerate().map(|(index, message)| {
-                    column().gap_2()
-                        .child(row().gap_2()
-                            .child(div().size(px(20.)).rounded(px(5.)).bg(rgb(if message.user { HOVER } else { 0x263b34 }))
-                                .flex().items_center().justify_center().child(icon(if message.user { I::UserRound } else { I::Sparkles }, if message.user { MUTED } else { MINT })))
-                            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(if message.user { MUTED } else { MINT })).child(if message.user { tr!("You") } else { "Jykre Studio" })))
-                        .child(div().text_size(px(14.)).line_height(relative(1.6)).text_color(rgb(if message.user { TEXT } else { 0xaeb8c5 })).child(message.text.clone()))
-                        .when_some(message.sql, |s, suggested| s.child(column().mt_1().rounded(px(6.)).border_1().border_color(rgb(BORDER)).bg(rgb(BG)).overflow_hidden()
-                            .child(row().px_3().h(px(28.)).justify_between().border_b_1().border_color(rgb(BORDER)).child(label(tr!("SQL · suggestion")))
-                                .child(icon_button(("copy-ai", index), I::Copy, tr!("Copy suggested SQL"))
-                                    .on_click(cx.listener(move |this, _, _, cx| { cx.write_to_clipboard(ClipboardItem::new_string(suggested.into())); this.notice = Some(Feedback::new(Tone::Success, tr!("Suggested SQL copied."))); cx.notify(); }))))
-                            .child(div().px_3().py_3().font_family("Cascadia Mono").text_size(px(12.)).line_height(relative(1.6)).text_color(rgb(BLUE))
-                                .child(if suggested == OPTIMIZED_SQL { "WITH sales AS (\n  SELECT product_id,\n         SUM(total) AS revenue\n  FROM orders\n  …\n)" } else { "SELECT c.name AS category,\n       SUM(o.total) AS revenue\nFROM orders o\nJOIN products p ON …\nGROUP BY c.name;" }))
-                            .child(button(("apply-ai", index), I::CornerDownLeft, tr!("Insert at the cursor")).w_full().justify_center().border_t_1().border_color(rgb(BORDER)).text_color(rgb(MINT))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    // It goes where the cursor is, or in place of the selection;
-                                    // the rest of the SQL stays, and Ctrl+Z takes it out.
-                                    this.editor.update(cx, |editor, cx| { editor.replace(suggested, window, cx); editor.focus(window, cx); });
-                                    this.notice = Some(Feedback::new(Tone::Info, tr!("Suggestion inserted at the cursor. Review the SQL before running it."))); cx.notify();
-                                })))))
-                }))
-                .when(self.has_results() && self.sales(), |s| s.child(column().gap_2().p_3().rounded(px(7.)).border_1().border_color(rgb(0x34473f)).bg(rgb(0x1c2a26))
-                    .child(row().child(icon(I::Lightbulb, MINT)).child(div().text_size(px(14.)).text_color(rgb(MINT)).font_weight(FontWeight::MEDIUM).child(tr!("A look at the data"))))
-                    .child(div().text_size(px(14.)).line_height(relative(1.55)).text_color(rgb(0xb8c8c1)).child(tr!("Electronics and Home account for 52.7% of the quarter's revenue.")))
-                    .child(button("ai-show-chart", I::ChartColumn, tr!("View distribution")).px_0().text_color(rgb(MINT))
-                        .on_click(cx.listener(|this, _, _, cx| this.show_revenue_statistics(cx)))))))
-            .child(column().flex_none().p_3().gap_2().border_t_1().border_color(rgb(BORDER))
-                .child(row().gap_1().children([("explain-chip", tr!("Explain SQL")), ("optimize-chip", tr!("Optimize")), ("chart-chip", tr!("Create chart"))].into_iter().map(|(id, text)| {
-                    div().id(id).role(Role::Button).aria_label(text).focusable().tab_index(0).focus_visible(|s| s.border_color(rgb(MINT))).px_2().py(px(5.)).rounded(px(5.)).border_1().border_color(rgb(BORDER))
-                        .text_size(px(12.)).text_color(rgb(MUTED)).cursor_pointer().hover(|s| s.bg(rgb(HOVER)).text_color(rgb(TEXT)))
-                        .child(text).on_click(cx.listener(move |this, _, _, cx| this.ask(text.into(), cx)))
-                })))
-                .child(column().p_2().gap_2().rounded(px(7.)).border_1().border_color(rgb(0x3b4945)).bg(rgb(BG))
-                    .child(Input::new(&self.prompt).appearance(false).bordered(false).small().w_full().aria_label(tr!("Message to the AI assistant")))
-                    .child(row().justify_between().child(row().gap_1().child(icon(I::AtSign, FAINT)).child(label(tr!("Query context"))))
-                        .child(icon_button("send-ai", I::ArrowUp, tr!("Send message")).bg(rgb(0x304a40))
-                            .on_click(cx.listener(|this, _, window, cx| this.submit_prompt(window, cx))))))
-                .child(div().text_center().text_size(px(12.)).text_color(rgb(FAINT)).child(tr!("Simulated AI · Always review the suggestions."))))
+    /// What the assistant panel asks of the tab.
+    fn on_assistant_event(
+        &mut self,
+        event: &AssistantPanelEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            AssistantPanelEvent::Submit { text, mode } => {
+                // The request's first message holds only what the facts
+                // allow-list lets the tab tell (ADR-0028).
+                let prompt = match mode {
+                    AssistantMode::Ask => prompts::chat_message(
+                        text,
+                        self.results.active().and_then(RunFacts::of),
+                        &self.context,
+                    ),
+                    AssistantMode::WriteSql => {
+                        let current = self.report_sql(cx);
+                        prompts::write_message(text, current.as_deref(), &self.context)
+                    }
+                };
+                let display = text.clone();
+                self.assistant_panel
+                    .update(cx, |panel, cx| panel.start(display, prompt, None, cx));
+            }
+            AssistantPanelEvent::Insert(sql) => {
+                // It goes where the cursor is, or in place of the selection;
+                // the rest of the SQL stays, and Ctrl+Z takes it out.
+                self.editor.update(cx, |editor, cx| {
+                    editor.replace(sql.as_str(), window, cx);
+                    editor.focus(window, cx);
+                });
+                self.notice = Some(Feedback::new(
+                    Tone::Info,
+                    tr!("Suggestion inserted at the cursor. Review the SQL before running it."),
+                ));
+            }
+            AssistantPanelEvent::Replace {
+                statement,
+                origin,
+                sql,
+            } => match apply::locate_statement(&self.editor_sql, statement, *origin) {
+                Some(range) => {
+                    let text = apply::fit_replacement(statement, sql);
+                    // Selecting the statement and replacing it is one undo step.
+                    self.editor.update(cx, |editor, cx| {
+                        editor.set_selected_range(range, cx);
+                        editor.replace(text.as_str(), window, cx);
+                        editor.focus(window, cx);
+                    });
+                    self.notice = Some(Feedback::new(
+                        Tone::Info,
+                        tr!("Statement replaced. Review it before running; Ctrl+Z undoes it."),
+                    ));
+                }
+                None => {
+                    self.notice = Some(Feedback::new(
+                        Tone::Warning,
+                        tr!(
+                            "The failed statement changed in the editor; use Insert at the cursor instead."
+                        ),
+                    ));
+                }
+            },
+            AssistantPanelEvent::Notice(notice) => self.notice = Some(notice.clone()),
+            AssistantPanelEvent::OpenPreferences => cx.emit(WorkspaceEvent::OpenPreferences),
+            AssistantPanelEvent::Close => self.assistant_open = false,
+            AssistantPanelEvent::RunQuery {
+                sql,
+                ticket,
+                cancel,
+            } => self.run_assistant_query(
+                AssistantQuery {
+                    sql: sql.clone(),
+                    ticket: *ticket,
+                    cancel: cancel.clone(),
+                },
+                cx,
+            ),
+        }
+        cx.notify();
     }
+
+    /// Runs a statement the user approved for the assistant, in the
+    /// assistant's own session, and hands the panel its result cut to what
+    /// may be sent ([`QueryPreview`]); the panel then asks the user whether
+    /// to send it. It is not a result tab and not in the history.
+    fn run_assistant_query(&mut self, query: AssistantQuery, cx: &mut Context<Self>) {
+        let Some(input) = self.input.clone() else {
+            let error = DriverError::new(
+                ErrorCode::Connection,
+                tr!("Choose a connection for this tab."),
+            );
+            let preview = QueryPreview::from_error(&error, &query.sql);
+            self.assistant_panel.update(cx, |panel, cx| {
+                panel.query_done(query.ticket, Some(preview), cx)
+            });
+            return;
+        };
+        if connection_store::needs_password(&input) {
+            // The host asks for the password, then resumes this query.
+            self.pending_assistant = Some(query);
+            cx.emit(WorkspaceEvent::PasswordRequired);
+            return;
+        }
+        let AssistantQuery {
+            sql,
+            ticket,
+            cancel,
+        } = query;
+        let session = self.assistant_session.take();
+        let lease = self.assistant_lease;
+        let connection = self.cache_id;
+        let context = self.context.clone();
+        let request = QueryRequest::new(
+            sql.clone(),
+            ExecutionOptions {
+                max_rows: released::READ_ROWS,
+                ..self.options()
+            },
+        );
+        cx.spawn(async move |weak, cx| {
+            // The result becomes a preview on the runtime; its rows are
+            // dropped there.
+            let outcome = backend::run(async move {
+                let stopped = cancel.clone();
+                let run = backend::query_in_context(
+                    connection,
+                    input,
+                    context,
+                    session,
+                    vec![request],
+                    ASSISTANT_MEMORY_CEILING,
+                    cancel,
+                )
+                .await;
+                let (preview, session) = match run {
+                    Ok(run) => {
+                        let preview = match &run.batch {
+                            Ok(batch) => QueryPreview::from_batch(batch, &sql),
+                            Err(error) => QueryPreview::from_error(error, &sql),
+                        };
+                        (preview, run.session)
+                    }
+                    Err(error) => (QueryPreview::from_error(&error, &sql), None),
+                };
+                Ok(((!stopped.is_cancelled()).then_some(preview), session))
+            })
+            .await;
+            let (preview, session) = outcome.unwrap_or((None, None));
+            let mut session = session;
+            let _ = weak.update(cx, |this, cx| {
+                if this.assistant_lease == lease && this.assistant_session.is_none() {
+                    this.assistant_session = session.take();
+                }
+                this.assistant_panel
+                    .update(cx, |panel, cx| panel.query_done(ticket, preview, cx));
+            });
+            if let Some(session) = session {
+                backend::close_in_background(session);
+            }
+        })
+        .detach();
+    }
+
+    /// Closes the assistant's session: the connection changed or went away.
+    fn drop_assistant_session(&mut self) {
+        self.assistant_lease += 1;
+        if let Some(session) = self.assistant_session.take() {
+            backend::close_in_background(session);
+        }
+    }
+
+    /// Tells the panel which connection's cache its tools read, and where
+    /// names resolve.
+    fn push_assistant_target(&mut self, cx: &mut Context<Self>) {
+        let target = match (&self.input, self.cache_id) {
+            (Some(input), Some(connection)) => Some(SchemaScope {
+                dir: connection_store::data_dir(),
+                connection,
+                config: input.config.clone(),
+                engine: self.dialect.to_string(),
+                dialect: self.run.dialect(),
+                context: self.context.clone(),
+            }),
+            _ => None,
+        };
+        let label = self.connection.clone();
+        self.assistant_panel
+            .update(cx, |panel, cx| panel.set_target(target, label, cx));
+    }
+
+    fn push_assistant_context(&mut self, cx: &mut Context<Self>) {
+        let context = self.context.clone();
+        self.assistant_panel
+            .update(cx, |panel, _| panel.set_context(context));
+    }
+
+    /// Whether **Fix with AI** is offered: a real tab with the assistant set
+    /// up.
+    fn assistant_ready(&self, cx: &App) -> bool {
+        !self.demo
+            && self.input.is_some()
+            && super::assistant_settings::preferences(cx)
+                .config()
+                .is_some()
+    }
+
+    /// Asks the assistant to fix the failed statement of result `id`: the
+    /// statement and the server's error, nothing from any result.
+    fn fix_with_ai(&mut self, id: ResultId, cx: &mut Context<Self>) {
+        let Some(tab) = self.results.get(id) else {
+            return;
+        };
+        let ResultState::Failed(report) = &tab.state else {
+            return;
+        };
+        let facts = ErrorFacts::new(report, &tab.sql);
+        let prompt = prompts::fix_message(&tab.sql, &facts, &self.context);
+        let fix = FixTarget {
+            statement: tab.sql.clone(),
+            origin: tab.origin,
+        };
+        self.assistant_open = true;
+        self.assistant_panel.update(cx, |panel, cx| {
+            panel.start(tr!("Fix this statement").to_owned(), prompt, Some(fix), cx)
+        });
+        cx.notify();
+    }
+}
+
+/// The memory one query of the assistant may read: far more than the
+/// [`released::MAX_ROWS`] rows it may send, far less than a tab's result.
+const ASSISTANT_MEMORY_CEILING: usize = 4 << 20;
+
+/// A statement the user approved for the assistant, on its way.
+struct AssistantQuery {
+    sql: String,
+    ticket: QueryTicket,
+    cancel: CancellationToken,
 }
 
 /// What the editor header says about the tab's session.
@@ -3189,6 +3348,8 @@ impl SessionIndicator {
 }
 
 pub enum WorkspaceEvent {
+    /// The assistant needs setting up: show Preferences.
+    OpenPreferences,
     /// State worth saving changed (SQL, timeout, result tabs).
     Changed,
     /// A run needs the connection's password, which was not remembered.
@@ -3264,6 +3425,7 @@ impl Workspace {
             self.set_connection(input, row_limit, cx);
         } else {
             self.abandon_run();
+            self.drop_assistant_session();
             self.input = None;
             self.sql_editor
                 .update(cx, |editor, _| editor.set_connection(None));
@@ -3327,6 +3489,7 @@ impl Workspace {
         let context = self.context.clone();
         self.sql_editor
             .update(cx, |editor, _| editor.set_context(context));
+        self.push_assistant_context(cx);
     }
 
     /// What the query tab shows before its title: the run in progress, or
@@ -3356,6 +3519,8 @@ impl Workspace {
         self.connection = name.into();
         // The new limit applies from the next run.
         self.row_limit = row_limit;
+        // The assistant's next query opens a session with the new settings.
+        self.drop_assistant_session();
         let same_server = self
             .input
             .as_ref()
@@ -3397,6 +3562,9 @@ impl Workspace {
         if let Some((scope, placement)) = self.pending_run.take() {
             self.execute_queries(scope, placement, cx);
         }
+        if let Some(query) = self.pending_assistant.take() {
+            self.run_assistant_query(query, cx);
+        }
     }
 
     /// Runs what waited for the user to confirm its risky statements.
@@ -3412,12 +3580,15 @@ impl Workspace {
     /// explorer shows them.
     pub fn set_appearance(
         &mut self,
-        color: u32,
+        color: Option<jykre::connection_appearance::ConnectionColor>,
         environment: Option<jykre::connection_appearance::Environment>,
         cx: &mut Context<Self>,
     ) {
         self.connection_color = color;
         self.environment = environment;
+        let production = environment == Some(jykre::connection_appearance::Environment::Production);
+        self.assistant_panel
+            .update(cx, |panel, cx| panel.set_production(production, cx));
         cx.notify();
     }
 
@@ -3427,6 +3598,7 @@ impl Workspace {
     /// runs until another connection is chosen.
     pub fn connection_deleted(&mut self, cx: &mut Context<Self>) {
         self.abandon_run();
+        self.drop_assistant_session();
         self.input = None;
         self.transactions = false;
         self.pending_run = None;
@@ -3441,9 +3613,14 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Forgets the run that waited for a password the user did not give.
-    pub fn cancel_pending(&mut self) {
+    /// Forgets the run that waited for a password the user did not give;
+    /// the assistant's query waiting for it does not run.
+    pub fn cancel_pending(&mut self, cx: &mut Context<Self>) {
         self.pending_run = None;
+        if let Some(query) = self.pending_assistant.take() {
+            self.assistant_panel
+                .update(cx, |panel, cx| panel.query_done(query.ticket, None, cx));
+        }
     }
 
     /// Opens the tab without its connection, which no longer exists, and
@@ -3518,7 +3695,6 @@ impl Workspace {
         self.assistant_open = false;
         self.results.clear();
         self.show_active(cx);
-        self.messages.clear();
     }
 
     /// Shows what the connection is (its dialect, database and whether it
@@ -3556,13 +3732,32 @@ impl Workspace {
     /// Another server: its namespaces and the names read from its cache are
     /// not this one's.
     fn forget_server(&mut self, cx: &mut Context<Self>) {
+        self.drop_assistant_session();
         self.context = SessionContext::default();
         self.context_choices.clear();
         self.sql_editor
             .update(cx, |editor, _| editor.forget_server());
+        self.cache_id = None;
+        self.push_assistant_target(cx);
     }
 
     /// Puts the keyboard in the SQL editor.
+    /// Shows the connections to choose from in the results area, for a tab
+    /// opened without one.
+    pub fn ask_for_connection(&mut self, cx: &mut Context<Self>) {
+        if self.input.is_none() && !self.demo {
+            self.choosing_connection = true;
+            self.result_view = ResultView::Table;
+            cx.notify();
+        }
+    }
+
+    /// The tab has a connection to run on (the demo's simulated one too),
+    /// so it may hold a session and results.
+    pub fn has_connection(&self) -> bool {
+        self.input.is_some() || self.demo
+    }
+
     pub fn focus_editor(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.editor
             .update(cx, |editor, cx| editor.focus(window, cx));
@@ -3669,7 +3864,7 @@ fn pin_button(index: usize, pinned: bool) -> Stateful<Div> {
         .tab_index(0)
         .border_1()
         .border_color(transparent_black())
-        .focus_visible(|s| s.border_color(rgb(MINT)))
+        .focus_visible(|s| s.border_color(rgb(colors().mint)))
         .size(px(20.))
         .flex()
         .items_center()
@@ -3677,8 +3872,15 @@ fn pin_button(index: usize, pinned: bool) -> Stateful<Div> {
         .rounded(px(5.))
         .cursor_pointer()
         .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
-        .hover(|s| s.bg(rgb(HOVER)))
-        .child(icon(I::Pin, if pinned { MINT } else { FAINT }))
+        .hover(|s| s.bg(rgb(colors().hover)))
+        .child(icon(
+            I::Pin,
+            if pinned {
+                colors().mint
+            } else {
+                colors().faint
+            },
+        ))
 }
 
 /// How a statement that failed or was cancelled reads in Messages.
@@ -3700,19 +3902,25 @@ fn log_entry(index: usize, entry: &LogEntry, now: SystemTime) -> Stateful<Div> {
     let (symbol, color, outcome) = match &entry.outcome {
         LogOutcome::Rows { rows, more } => (
             I::CircleCheck,
-            MINT,
+            colors().mint,
             match (*rows, *more) {
                 (rows, true) => tr!("{0} rows on the first page", cell_format::count(rows)),
                 (1, false) => tr!("1 row").to_string(),
                 (rows, false) => tr!("{0} rows", cell_format::count(rows)),
             },
         ),
-        LogOutcome::Affected(affected) => {
-            (I::CircleCheck, MINT, tr!("{0} rows affected", affected))
-        }
-        LogOutcome::Completed => (I::CircleCheck, MINT, tr!("Statement completed").into()),
-        LogOutcome::Failed(error) => (I::CircleX, RED, error.clone()),
-        LogOutcome::Cancelled => (I::Ban, AMBER, tr!("Execution cancelled").into()),
+        LogOutcome::Affected(affected) => (
+            I::CircleCheck,
+            colors().mint,
+            tr!("{0} rows affected", affected),
+        ),
+        LogOutcome::Completed => (
+            I::CircleCheck,
+            colors().mint,
+            tr!("Statement completed").into(),
+        ),
+        LogOutcome::Failed(error) => (I::CircleX, colors().red, error.clone()),
+        LogOutcome::Cancelled => (I::Ban, colors().amber, tr!("Execution cancelled").into()),
     };
     let age = jykre::explorer::format_age(now.duration_since(entry.at).unwrap_or_default());
     let timing = match entry.elapsed_ms {
@@ -3748,7 +3956,7 @@ fn log_entry(index: usize, entry: &LogEntry, now: SystemTime) -> Stateful<Div> {
             div()
                 .pl(px(24.))
                 .text_size(px(12.))
-                .text_color(rgb(FAINT))
+                .text_color(rgb(colors().faint))
                 .font_family("Cascadia Code")
                 .truncate()
                 .child(entry.sql.clone()),
@@ -3763,20 +3971,20 @@ fn stopping_notice() -> String {
 /// The icon, colour and words for how a result tab ended.
 fn result_status(tab: &ResultTab) -> (I, u32, String) {
     match &tab.state {
-        ResultState::Running => (I::LoaderCircle, AMBER, tr!("Running…").into()),
+        ResultState::Running => (I::LoaderCircle, colors().amber, tr!("Running…").into()),
         ResultState::Failed(report) => (
             I::CircleX,
-            RED,
+            colors().red,
             format!(
                 "{}: {}",
                 report.title,
                 report.message.lines().next().unwrap_or_default()
             ),
         ),
-        ResultState::Cancelled => (I::Ban, AMBER, tr!("Execution cancelled").into()),
+        ResultState::Cancelled => (I::Ban, colors().amber, tr!("Execution cancelled").into()),
         ResultState::Done => {
             let (_, _, text, _) = page_summary(tab, None);
-            (I::CircleCheck, MINT, text)
+            (I::CircleCheck, colors().mint, text)
         }
     }
 }
@@ -3789,7 +3997,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
     let Some(page) = tab.current() else {
         return (
             I::CircleCheck,
-            MINT,
+            colors().mint,
             match tab.rows_affected {
                 Some(affected) => tr!("{0} rows affected", affected),
                 None => tr!("Statement completed").into(),
@@ -3803,7 +4011,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
     match tab.limit {
         Some(ResultLimit::Memory(bytes)) => (
             I::TriangleAlert,
-            AMBER,
+            colors().amber,
             tr!("{0} · memory limit reached", rows),
             Some(tr!(
                 "The page reached the memory limit of {0} MB before the row limit, so the rest of the result was not read. Refine the SQL to get other rows.",
@@ -3812,7 +4020,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
         ),
         _ if tab.rest_closed() => (
             I::TriangleAlert,
-            AMBER,
+            colors().amber,
             tr!("{0} · more rows were not read", rows),
             Some(
                 tr!(
@@ -3826,7 +4034,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
                 Some(affected) => tr!("{0} · {1} rows affected", rows, affected),
                 None => rows,
             };
-            (I::CircleCheck, MINT, text, None)
+            (I::CircleCheck, colors().mint, text, None)
         }
     }
 }
@@ -3863,16 +4071,16 @@ fn run_button(
     workspace: WeakEntity<Workspace>,
 ) -> AnyElement {
     let (symbol, color, title) = match status {
-        StatementStatus::Ready => (I::Play, MINT, tr!("Run this query")),
+        StatementStatus::Ready => (I::Play, colors().mint, tr!("Run this query")),
         StatementStatus::Pending => (
             I::Clock,
-            FAINT,
+            colors().faint,
             tr!("Waiting for the statements before it · stop the run"),
         ),
-        StatementStatus::Running => (I::Square, 0xe7bd7b, tr!("Stop execution")),
-        StatementStatus::Success => (I::CircleCheck, MINT, tr!("Success · run again")),
-        StatementStatus::Error => (I::CircleX, 0xef8b91, tr!("Error · run again")),
-        StatementStatus::Cancelled => (I::Play, FAINT, tr!("Cancelled · run again")),
+        StatementStatus::Running => (I::Square, colors().amber, tr!("Stop execution")),
+        StatementStatus::Success => (I::CircleCheck, colors().mint, tr!("Success · run again")),
+        StatementStatus::Error => (I::CircleX, colors().red, tr!("Error · run again")),
+        StatementStatus::Cancelled => (I::Play, colors().faint, tr!("Cancelled · run again")),
     };
     div()
         .id(("query-run", index))
@@ -3884,7 +4092,7 @@ fn run_button(
         .items_center()
         .justify_center()
         .rounded(px(4.))
-        .hover(|s| s.bg(rgb(HOVER)))
+        .hover(|s| s.bg(rgb(colors().hover)))
         .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
         .child(icon(symbol, color))
         .on_click(move |_, _, cx| {
@@ -3926,7 +4134,12 @@ impl Render for Workspace {
                         .size(px(ASSISTANT_WIDTH))
                         .size_range(px(280.)..px(560.))
                         .fixed()
-                        .child(self.assistant(cx)),
+                        // A streamed answer redraws the panel alone.
+                        .child(
+                            self.assistant_panel
+                                .clone()
+                                .cached(StyleRefinement::default().size_full()),
+                        ),
                 )
                 .into_any_element()
         } else {
@@ -3935,7 +4148,7 @@ impl Render for Workspace {
         column()
             .id("query-workspace")
             .size_full()
-            .bg(rgb(BG))
+            .bg(rgb(colors().bg))
             .child(content)
     }
 }
@@ -3945,6 +4158,9 @@ impl Drop for Workspace {
         self.cancellation.cancel();
         self.export.cancel();
         if let Some(session) = self.session.take() {
+            backend::close_in_background(session);
+        }
+        if let Some(session) = self.assistant_session.take() {
             backend::close_in_background(session);
         }
     }
@@ -3967,11 +4183,11 @@ impl Render for ResultTabPreview {
             .h(px(28.))
             .px_3()
             .rounded(px(5.))
-            .bg(rgb(SURFACE))
+            .bg(rgb(colors().surface))
             .border_1()
-            .border_color(rgb(MINT))
+            .border_color(rgb(colors().mint))
             .text_size(px(12.))
-            .text_color(rgb(TEXT))
+            .text_color(rgb(colors().text))
             .child(self.title.clone())
     }
 }

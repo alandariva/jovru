@@ -631,6 +631,114 @@ pub fn step(
     }
 }
 
+/// How the explorer's quick search shows what it found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum QuickMode {
+    /// Every node stays; the matches are marked.
+    #[default]
+    Highlight,
+    /// Only the matches show, with their ancestors (and what is expanded
+    /// under them), so the hierarchy stays.
+    Filter,
+}
+
+impl QuickMode {
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Highlight => Self::Filter,
+            Self::Filter => Self::Highlight,
+        }
+    }
+}
+
+/// Whether `name` holds `text`, ignoring case as every search does. Empty
+/// text matches nothing.
+pub fn quick_matches(name: &str, text: &str) -> bool {
+    !crate::palette::highlights(name, &[text]).is_empty()
+}
+
+/// The node a quick search selects after its text changed, among `names` in
+/// the order shown: the current one while it still matches, otherwise the
+/// next match after it, wrapping. `None` when nothing matches.
+pub fn quick_target(names: &[&str], current: Option<usize>, text: &str) -> Option<usize> {
+    if let Some(current) = current
+        && names
+            .get(current)
+            .is_some_and(|name| quick_matches(name, text))
+    {
+        return Some(current);
+    }
+    let start = current.map_or(0, |current| current + 1);
+    (0..names.len())
+        .map(|offset| (start + offset) % names.len())
+        .find(|&at| quick_matches(names[at], text))
+}
+
+/// `↑` or `↓` while the quick search is open: the previous or next match,
+/// wrapping at both ends. With no text typed, the previous or next node, as
+/// without a search.
+pub fn quick_step(
+    names: &[&str],
+    current: Option<usize>,
+    text: &str,
+    forward: bool,
+) -> Option<usize> {
+    let len = names.len();
+    if len == 0 {
+        return None;
+    }
+    if text.is_empty() {
+        return Some(match (current, forward) {
+            (None, _) => 0,
+            (Some(at), true) => (at + 1).min(len - 1),
+            (Some(at), false) => at.saturating_sub(1),
+        });
+    }
+    let current = current.filter(|&at| at < len);
+    (1..=len)
+        .map(|offset| match (current, forward) {
+            (Some(at), true) => (at + offset) % len,
+            (Some(at), false) => (at + len - offset % len) % len,
+            (None, true) => offset - 1,
+            (None, false) => len - offset,
+        })
+        .find(|&at| quick_matches(names[at], text))
+}
+
+/// The rows a filtering quick search leaves of `rows` (one connection's, in
+/// order): each node whose name holds `text`, its ancestors and what shows
+/// under it because it is expanded. "Load more" rows go. Empty text keeps
+/// everything.
+pub fn filter_rows(rows: &[TreeRow], text: &str) -> Vec<TreeRow> {
+    if text.is_empty() {
+        return rows.to_vec();
+    }
+    let matched: Vec<&ObjectPath> = rows
+        .iter()
+        .filter_map(TreeRow::object)
+        .filter(|object| quick_matches(&object.name, text))
+        .map(|object| &object.path)
+        .collect();
+    if matched.is_empty() {
+        return Vec::new();
+    }
+    let mut ancestors = HashSet::new();
+    for path in &matched {
+        for length in 1..path.0.len() {
+            ancestors.insert(ObjectPath(path.0[..length].to_vec()));
+        }
+    }
+    rows.iter()
+        .filter(|row| {
+            row.object().is_some_and(|object| {
+                ancestors.contains(&object.path)
+                    || matched.iter().any(|path| object.path.is_within(path))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1055,5 +1163,82 @@ mod tests {
         );
         assert_eq!(TreeKey::from_key("down"), Some(TreeKey::Down));
         assert_eq!(TreeKey::from_key("enter"), None);
+    }
+
+    #[test]
+    fn a_quick_search_keeps_a_matching_selection_or_jumps_to_the_next_match() {
+        let names = ["app", "Tables", "customers", "customer_orders", "products"];
+        // Ignoring case; empty text matches nothing.
+        assert!(quick_matches("Customers", "CUST"));
+        assert!(!quick_matches("customers", ""));
+        assert_eq!(quick_target(&names, None, "cust"), Some(2));
+        // From the selection, forward, wrapping.
+        assert_eq!(quick_target(&names, Some(4), "cust"), Some(2));
+        assert_eq!(quick_target(&names, Some(2), "cust"), Some(2));
+        assert_eq!(quick_target(&names, Some(2), "customer_"), Some(3));
+        assert_eq!(quick_target(&names, Some(1), "zzz"), None);
+        assert_eq!(quick_target(&[], None, "a"), None);
+    }
+
+    #[test]
+    fn arrows_in_a_quick_search_cycle_through_the_matches() {
+        let names = [
+            "app",
+            "customers",
+            "products",
+            "customer_orders",
+            "invoices",
+        ];
+        assert_eq!(quick_step(&names, Some(1), "cust", true), Some(3));
+        // The last match wraps to the first, and back.
+        assert_eq!(quick_step(&names, Some(3), "cust", true), Some(1));
+        assert_eq!(quick_step(&names, Some(1), "cust", false), Some(3));
+        assert_eq!(quick_step(&names, Some(3), "cust", false), Some(1));
+        // From a node that does not match, the nearest match that way.
+        assert_eq!(quick_step(&names, Some(2), "cust", true), Some(3));
+        assert_eq!(quick_step(&names, Some(2), "cust", false), Some(1));
+        assert_eq!(quick_step(&names, None, "cust", false), Some(3));
+        // One match stays; none moves nowhere.
+        assert_eq!(quick_step(&names, Some(4), "invo", true), Some(4));
+        assert_eq!(quick_step(&names, Some(0), "zzz", true), None);
+        // No text: every node, without wrapping.
+        assert_eq!(quick_step(&names, Some(0), "", true), Some(1));
+        assert_eq!(quick_step(&names, Some(4), "", true), Some(4));
+        assert_eq!(quick_step(&names, Some(0), "", false), Some(0));
+        assert_eq!(quick_step(&[], None, "", true), None);
+        assert_eq!(QuickMode::Highlight.toggled(), QuickMode::Filter);
+    }
+
+    #[test]
+    fn filtering_keeps_matches_with_their_ancestors_and_what_is_open_under_them() {
+        let source = tree();
+        let mut tree = read(&source);
+        tree.toggle(&source[0].path);
+        tree.toggle(&source[1].path);
+        let rows = tree.rows();
+        assert_eq!(
+            names(&filter_rows(rows, "TOT")),
+            ["sales", "orders", "total"]
+        );
+        // An expanded match keeps what shows under it.
+        assert_eq!(
+            names(&filter_rows(rows, "orders")),
+            ["sales", "orders", "id", "total"]
+        );
+        assert_eq!(
+            names(&filter_rows(rows, "a")),
+            ["sales", "orders", "id", "total", "summary", "catalog"]
+        );
+        assert!(filter_rows(rows, "zzz").is_empty());
+        assert_eq!(filter_rows(rows, ""), rows);
+        // "Load more" never stays in a filter.
+        let more = vec![
+            rows[0].clone(),
+            TreeRow::More {
+                parent: source[0].path.clone(),
+                id: 7,
+            },
+        ];
+        assert_eq!(filter_rows(&more, "sal"), &more[..1]);
     }
 }

@@ -124,7 +124,14 @@ pub async fn export_with(
     cancel: CancellationToken,
     progress: Option<watch::Sender<ExportProgress>>,
 ) -> ExportRun {
-    let span = tracing::info_span!("export", format = ?request.options.format);
+    let span = crate::client_span!(
+        "export",
+        format = ?request.options.format,
+        jykre.export.format = format!("{:?}", request.options.format).to_lowercase(),
+        jykre.export.rows = tracing::field::Empty,
+        jykre.export.truncated = tracing::field::Empty,
+        jykre.bytes = tracing::field::Empty
+    );
     let started = Instant::now();
     let mut run = ExportRun {
         outcome: Err(DriverError::cancelled()),
@@ -144,6 +151,20 @@ pub async fn export_with(
     )
     .instrument(span.clone())
     .await;
+    match &outcome {
+        Ok(exported) => {
+            span.record(
+                "jykre.export.rows",
+                crate::telemetry::attributes::count(exported.rows),
+            );
+            span.record(
+                "jykre.bytes",
+                crate::telemetry::attributes::count(exported.bytes),
+            );
+            span.record("jykre.export.truncated", exported.truncated);
+        }
+        Err(error) => crate::telemetry::attributes::record_error(&span, error),
+    }
     let _entered = span.enter();
     let elapsed_ms = started.elapsed().as_millis();
     match &outcome {

@@ -243,7 +243,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .text_size(px(12.))
-                                    .text_color(rgb(SQL_PARAMETER))
+                                    .text_color(rgb(colors().sql_parameter))
                                     .child(format!(":{}", field.name)),
                             )
                             .child(
@@ -297,7 +297,7 @@ impl Workspace {
                                 } else {
                                     Toggled::False
                                 })
-                                .when(field.null, |s| s.text_color(rgb(MINT)))
+                                .when(field.null, |s| s.text_color(rgb(colors().mint)))
                                 .on_click(move |_, _, cx| {
                                     null_view.update(cx, |this, cx| {
                                         this.toggle_parameter_null(&null_name, cx)
@@ -310,7 +310,11 @@ impl Workspace {
                             .w(px(200.))
                             .rounded(px(5.))
                             .border_1()
-                            .border_color(rgb(if problem.is_some() { RED } else { BORDER }))
+                            .border_color(rgb(if problem.is_some() {
+                                colors().red
+                            } else {
+                                colors().border
+                            }))
                             .child(
                                 Input::new(&input.input)
                                     .small()
@@ -324,7 +328,7 @@ impl Workspace {
                                 .id(("parameter-problem", index))
                                 .role(Role::Alert)
                                 .text_size(px(12.))
-                                .text_color(rgb(RED))
+                                .text_color(rgb(colors().red))
                                 .child(match problem {
                                     ParameterProblem::Missing => {
                                         tr!("Type a value, or choose NULL")
@@ -346,7 +350,7 @@ impl Workspace {
                 .px_3()
                 .py_2()
                 .border_b_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(colors().border))
                 .child(
                     div()
                         .id("query-parameters")

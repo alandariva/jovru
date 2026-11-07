@@ -21,7 +21,9 @@ formatting, Clippy with warnings treated as errors and
 `cargo test --workspace --locked`, then Clippy and the tests of
 `jykre-sql-language` without its default features (the built-in formatter
 instead of sqruff). It includes binary, library, contract,
-local Databricks HTTP and gate tests, plus the `compile_fail` credential
+local Databricks HTTP, SQLite file (synthetic databases created in the system's
+temporary folder, `crates/driver-sqlite/tests/file.rs`) and gate tests, plus
+the `compile_fail` credential
 doctests. Clippy also checks the examples. `live` tests are compiled but
 ignored in basic mode; Cargo prints their names and counts. No database,
 Docker or Databricks profile is needed in this mode.
@@ -53,6 +55,11 @@ no fallback that skips checks.
   `jykre-sql-language` only on core and `jykre-sql`; neither on GPUI or
   `lsp-types`. No library file outside `src/app/` and `src/main.rs` uses
   `jykre_sql_language` (a source check).
+- `jykre-assistant` depends on core and external libraries only; core never
+  depends on `genai`. The assistant's code names no result data, bound
+  parameters, sessions, credentials or server reads (`assistant_privacy`,
+  a source check; `tests.rs` files may build fixtures with them, and
+  `src/assistant/released.rs` alone may name a query's result).
 - The check covers direct Cargo edges, including dev and build dependencies.
   Where logic lives and transitive dependencies still need review.
 
@@ -222,6 +229,36 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   reopen, explicit discovery/cancellation, SQL, context reuse and cancellation.
   Local HTTP fixtures cover these protocols, expiration/concurrent token refresh,
   exact classic JSON cells and failed recovery without real credentials.
+- The AI assistant is tested against a local fake of an OpenAI-compatible
+  server (port 0, synthetic text, a synthetic key): streaming, tool calls,
+  token counts, statuses classified without their bodies, cancellation
+  closing the connection and the silence and round limits
+  (`crates/assistant`). `src/assistant/tests.rs` runs **Fix**, **Write** and
+  **Ask** through the agentic loop against the fake and a temporary
+  metadata cache, and proves that a result value and a bound `:name` value
+  never reach a request, that every reviewed text is in what the provider
+  received, and that rounds are never logged with their text or the key.
+  The same file runs `run_query` on a synthetic SQLite file of 60 rows,
+  answered as the user would (send with a column hidden, withhold,
+  decline): a hidden column's value, a withheld result and a declined
+  query never reach a request, a declined query never runs, at most 50
+  rows are sent, and a call with two statements is refused before the user
+  is asked. The loop's tests (`src/assistant/run.rs`) prove that nothing is
+  left out of a request on its own, that each request knows what the last
+  sent one carried, that pruning keeps the calls and stops a sent value
+  from being sent again, and that a summary replaces the conversation only
+  when the model answered with one.
+  Real providers are checked by hand: record the provider, model and
+  outcome, never the key.
+- Telemetry ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)) is
+  tested with the SDK's in-memory exporters behind the same bridges and
+  filters as the application (`jykre::telemetry::testing::capture`): a run
+  with a synthetic password, SQL text, values and host exports none of them,
+  only allowlisted attributes, and its logs carry the run's trace. The OTLP
+  transport is tested against a fake collector on port 0 (protobuf, the
+  configured headers, a 401 as an authentication failure) and a closed gRPC
+  port. A real collector is checked by hand, with an isolated
+  `JYKRE_CONFIG_DIR`.
 - UI changes require opening the app and checking the affected flow, tabs,
   content preservation, shortcuts, focus and dividers where relevant. Record
   that check separately. Use `JYKRE_CONFIG_DIR` with an isolated folder and

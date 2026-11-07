@@ -11,8 +11,11 @@ use jykre::reports::chart::{ChartData, ChartPoint, Indicator, Visual};
 use jykre::tr;
 use std::rc::Rc;
 
-/// The colours of the series, in order.
-pub const CHART_SERIES: [u32; 6] = [MINT, BLUE, PURPLE, AMBER, PINK, TEAL];
+/// The colours of the series, in order, in the theme on screen.
+pub fn chart_series() -> [u32; 6] {
+    let c = colors();
+    [c.mint, c.blue, c.purple, c.amber, c.pink, c.teal]
+}
 
 /// A point's label, unique by its position, so two rows with the same label
 /// stay two bars.
@@ -90,8 +93,8 @@ impl ReportChart {
     /// One value, large, as the database wrote it; NULL in the NULL style.
     fn indicator(number: &Indicator) -> Stateful<Div> {
         let (text, color) = match &number.text {
-            Some(text) => (text.clone(), TEXT),
-            None => ("NULL".to_owned(), VALUE_NULL),
+            Some(text) => (text.clone(), colors().text),
+            None => ("NULL".to_owned(), colors().value_null),
         };
         column()
             .id("report-number")
@@ -140,7 +143,7 @@ impl Render for ReportChart {
                 .size_full()
                 .gap_3()
                 .children(data.series.iter().enumerate().map(|(serie, name)| {
-                    let color = CHART_SERIES[serie % CHART_SERIES.len()];
+                    let color = chart_series()[serie % chart_series().len()];
                     column()
                         .flex_1()
                         .h_full()
@@ -171,7 +174,7 @@ impl Render for ReportChart {
                     .tooltip_title(|datum: &Datum| datum.band().1)
                     .tooltip_value(|datum: &Datum, serie, _| datum.text(serie));
                 for serie in 0..data.series.len() {
-                    let color = Hsla::from(rgb(CHART_SERIES[serie % CHART_SERIES.len()]));
+                    let color = Hsla::from(rgb(chart_series()[serie % chart_series().len()]));
                     chart = chart
                         .y(move |datum: &Datum| datum.value(serie))
                         .stroke(color)
@@ -184,7 +187,7 @@ impl Render for ReportChart {
                         |(serie, name)| {
                             row()
                                 .gap_1()
-                                .child(dot(CHART_SERIES[serie % CHART_SERIES.len()]))
+                                .child(dot(chart_series()[serie % chart_series().len()]))
                                 .child(label(name.clone()))
                         },
                     )))
@@ -196,7 +199,10 @@ impl Render for ReportChart {
                 .appear(false)
                 .outer_radius(110.)
                 .value(|datum: &Datum| datum.value(0).max(0.0) as f32)
-                .color(|datum: &Datum| rgb(CHART_SERIES[datum.index % CHART_SERIES.len()]))
+                .color({
+                    let series = chart_series();
+                    move |datum: &Datum| rgb(series[datum.index % series.len()])
+                })
                 .label(|datum: &Datum| datum.band().1)
                 .tooltip_name(|datum: &Datum| datum.band().1)
                 .tooltip_value(|datum: &Datum, _, _| datum.text(0))

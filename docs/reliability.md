@@ -41,7 +41,8 @@
 - **Retries** only for idempotent reads (introspection, Databricks polling,
   token resolution), with exponential backoff and jitter, at most three
   attempts. A user's statement is **never** retried automatically: it may be
-  an `UPDATE`.
+  an `UPDATE`. A round of the AI assistant is not retried either: it
+  costs tokens, and the user retries it with **Try again**.
 - **Clean shutdown.** On exit, running operations are cancelled and sessions
   are closed within a short deadline.
 
@@ -52,6 +53,9 @@
 | PostgreSQL/MySQL: connect, test, open a session | 15 s per step |
 | Statement execution (all drivers), and each further page | `ExecutionOptions.timeout`, chosen per tab: default 300 s; `None` disables it |
 | PostgreSQL/MySQL introspection | 300 s |
+| SQLite: open the file and read its header, test, open a session | 15 s per step |
+| SQLite: wait for a lock another connection holds (busy timeout) | 4 s, below the 5 s recovery, since the busy wait does not see an interrupt |
+| SQLite introspection | 300 s; namespace discovery 60 s |
 | Server-side cancel attempt after cancellation or timeout | 5 s |
 | Bringing a session back to a known state after a failure, or pinging a kept session | 5 s |
 | Databricks: test, warehouse open or initial classic authentication/compute check | 90 s |
@@ -59,7 +63,8 @@
 | Inspection or definition of an object (all drivers) | 60 s |
 | Reading, writing or removing a password in the OS vault | 10 s; past it the vault counts as unavailable, so the password is used for the session only and the connection dialog never stays stuck saving |
 | Databricks HTTP request | 30 s |
-| Databricks: first wait for a statement, inside its submit request | 5 s, then status polls from 200 ms up to every 2 s |
+| Databricks: first wait for a statement, inside its submit request | 5 s, then status polls |
+| Databricks: status polls of a warehouse statement or classic command | Every 2 s for the first 10 s since submission (a classic command's first poll comes 2 s after it), then a quarter of the time elapsed, at most 10 s |
 | Databricks compute discovery | 90 s, cancellable without starting compute |
 | Databricks CLI profile discovery | 60 s, cancellable; skips per-profile validation, output bounded to 1 MiB |
 | Databricks classic context creation/readiness | 90 s for readiness/setup, after the bounded submission obtains its ID; destroyed on failure/cancellation |
@@ -68,6 +73,19 @@
 | Databricks CLI (token resolution) | 60 s |
 | Export: each part read from the session | `ExecutionOptions.timeout` of the tab, as any page |
 | Export: creating, writing one part (about 16 MB) or finishing the file | 60 s (`backend::FILE_TIMEOUT`), so a network share that stops answering fails the export |
+| AI assistant: connecting to the provider | 15 s |
+| AI assistant: first byte of an answer | 120 s |
+| AI assistant: silence between pieces of a streamed answer | 60 s |
+| AI assistant: a whole round | 300 s; cancellable at any time (**Stop**), which closes the connection |
+| AI assistant: **Test** in Preferences | 30 s, cancellable |
+| AI assistant: one tool reading the metadata cache | 10 s; past it the model is told so and the round goes on |
+| AI assistant: a query the user approved (`run_query`) | The tab's statement time limit; **Stop** cancels it and ends the turn. It runs in the assistant's own session, kept between queries and closed when the tab's connection changes or the tab closes; it reads at most 4 MB |
+| AI assistant: reading, saving or removing the API key in the OS vault | 10 s, as passwords |
+| Telemetry: one export of a batch of spans or log records to the collector | 10 s, then the batch is retried at most three times with backoff, as OpenTelemetry recommends; past the queue (2,048), new items are dropped |
+| Telemetry: what is queued when the application exits | 3 s |
+| Final writes of the open tabs and the reports when the application exits | 200 ms, GPUI's shutdown limit (`SHUTDOWN_TIMEOUT`); past it the write is abandoned and the last debounced save remains |
+| Telemetry: **Test** in Preferences | 10 s, cancellable |
+| Telemetry: reading, saving or removing the collector's headers in the OS vault | 10 s, as passwords |
 
 A new network operation gets an explicit timeout and a row in this table.
 
@@ -115,6 +133,12 @@ up by `jykre::logging::init` when the application starts:
 - SQLx statement logging is off in the drivers and in local storage, and
   `reqwest` never logs headers. A unit test runs a batch with a password and
   SQL text and checks neither appears in the logs above `trace`.
+- When the user turns it on, the same events (except `trace`, the frame
+  probe, UI-thread timings below a warning and events with a free-text
+  field) and the spans of external calls are also sent to an OpenTelemetry
+  collector ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md),
+  [Security](security.md#telemetry)). UI-thread timings use the target
+  `jykre::ui_thread`.
 
 ### Levels
 
@@ -132,6 +156,15 @@ Use them whenever they exist in context: `connection_id`, `driver`,
 `execution_id`, `operation`, `elapsed_ms`, `rows`, `error_code`. Spans
 (`#[instrument(skip_all, fields(...))]`) propagate them; `skip_all` prevents
 logging arguments by accident.
+
+A span around an external call (a database, a server, a program, the vault,
+a file) is a `client` span, `jykre::client_span!` in the library, with
+OpenTelemetry semantic-convention names for what telemetry may export
+(`db.system.name`, `db.namespace`, `db.operation.name`,
+`db.response.returned_rows`, `error.type`, `http.request.method`,
+`url.template`, `process.exit.code`, `gen_ai.*`) and `jykre.*` for the rest.
+It records how it ended with `telemetry::attributes::record_outcome`.
+`backend::run` carries the caller's span into the runtime.
 
 ### Never logged
 

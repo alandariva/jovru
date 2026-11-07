@@ -157,7 +157,43 @@ impl Client {
         }
         self.auth.token(rejected).await
     }
+    /// One REST call, inside an HTTP client span that records the method,
+    /// the path as a template ([`url_template`]), the status and a repeat
+    /// after a 401; never the host, the query, the body or the token.
     async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(String, String)],
+        body: Option<Value>,
+    ) -> DriverResult<Value> {
+        use tracing::Instrument as _;
+        let template = url_template(path);
+        let span = tracing::info_span!(
+            "http_request",
+            otel.name = format!("{method} {template}"),
+            otel.kind = "client",
+            http.request.method = %method,
+            url.template = template,
+            http.response.status_code = tracing::field::Empty,
+            http.request.resend_count = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            otel.status_code = tracing::field::Empty,
+        );
+        let result = self
+            .request_in(method, path, query, body)
+            .instrument(span.clone())
+            .await;
+        if let Err(failure) = &result {
+            span.record("error.type", error_type(failure.code));
+            if failure.code != ErrorCode::Cancelled {
+                span.record("otel.status_code", "error");
+            }
+        }
+        result
+    }
+
+    async fn request_in(
         &self,
         method: Method,
         path: &str,
@@ -175,6 +211,7 @@ impl Client {
         // A 401 means the request was not processed, so repeating it is safe.
         let (mut response, mut generation) = self.send(&method, &url, query, &body, None).await?;
         if response.status().as_u16() == 401 {
+            tracing::Span::current().record("http.request.resend_count", 1);
             (response, generation) = self
                 .send(&method, &url, query, &body, Some(generation))
                 .await?;
@@ -182,6 +219,10 @@ impl Client {
                 self.auth.invalidate(generation).await;
             }
         }
+        tracing::Span::current().record(
+            "http.response.status_code",
+            i64::from(response.status().as_u16()),
+        );
         if !response.status().is_success() {
             let status = response.status().as_u16();
             // Only the start of the body: an error is a short JSON object,
@@ -953,8 +994,34 @@ struct Pending {
 const SERVER_PAGES: u32 = 5;
 /// How long the first request waits for the statement before polling.
 const FIRST_WAIT: &str = "5s";
-/// Status polls start fast for short statements and slow down to this.
+/// Classic context readiness polls start fast and slow down to this.
 const POLL_MAX: Duration = Duration::from_secs(2);
+
+/// How long to wait before the next status poll of a statement or command
+/// that has been running for `elapsed` since its submission. Databricks
+/// queries seldom finish in under two seconds, so the polls are two seconds
+/// apart for the first ten; past that the gap is a quarter of the time
+/// already spent, at most ten seconds, so a long query costs few requests
+/// and its result is never late by more than a quarter of its run.
+fn poll_wait(elapsed: Duration) -> Duration {
+    const STEADY: Duration = Duration::from_secs(2);
+    if elapsed < Duration::from_secs(10) {
+        STEADY
+    } else {
+        (elapsed / 4).clamp(STEADY, Duration::from_secs(10))
+    }
+}
+
+/// Sleeps [`poll_wait`] before the next status poll.
+async fn poll_pause(elapsed: Duration) {
+    let wait = poll_wait(elapsed);
+    // Unit tests answer from a local fixture server: they keep the order of
+    // the schedule (the first poll still comes after a pause) without
+    // waiting its real seconds.
+    #[cfg(test)]
+    let wait = wait / 20;
+    tokio::time::sleep(wait).await;
+}
 
 impl DatabricksSession {
     fn new(client: Client) -> Self {
@@ -1267,13 +1334,11 @@ impl Session for DatabricksSession {
             if cancelled {
                 return Err(DriverError::cancelled());
             }
-            let mut wait = Duration::from_millis(200);
             loop {
                 match response["status"]["state"].as_str() {
                     Some("SUCCEEDED") => break,
                     Some("PENDING" | "RUNNING") => {
-                        tokio::time::sleep(wait).await;
-                        wait = (wait * 2).min(POLL_MAX);
+                        poll_pause(started.elapsed()).await;
                         response = self.client.request(Method::GET, &path, &[], None).await?;
                     }
                     Some("CANCELED") => return Err(DriverError::cancelled()),
@@ -1388,6 +1453,40 @@ impl Session for DatabricksSession {
     }
 }
 
+/// The path of a REST call with every segment that is not a fixed word of
+/// the API (an identifier, a number, an object's name) replaced by `{id}`,
+/// so a span never names a statement, a table or a workspace object.
+pub(crate) fn url_template(path: &str) -> String {
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    path.split('/')
+        .map(|segment| {
+            let word = !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'-' || byte == b'_')
+                && segment.as_bytes()[0].is_ascii_lowercase();
+            let version = segment.split('.').count() == 2
+                && segment
+                    .split('.')
+                    .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+            if segment.is_empty() || word || version {
+                segment
+            } else {
+                "{id}"
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `error.type` of a failed call: the error code's own name.
+pub(crate) fn error_type(code: ErrorCode) -> String {
+    serde_json::to_value(code)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "other".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,6 +1497,29 @@ mod tests {
 
     // Native CLI coverage is separate from the credential-free portable gate.
     // This test lists synthetic profiles only; it never authenticates or queries.
+    #[test]
+    fn url_templates_keep_only_the_words_of_the_api() {
+        for (path, template) in [
+            ("/api/2.0/sql/statements", "/api/2.0/sql/statements"),
+            (
+                "/api/2.0/sql/statements/01ef-abc-123/result/chunks/3",
+                "/api/2.0/sql/statements/{id}/result/chunks/{id}",
+            ),
+            (
+                "/api/2.0/sql/statements/abcdef/cancel?x=1",
+                "/api/2.0/sql/statements/abcdef/cancel",
+            ),
+            (
+                "/api/2.1/unity-catalog/tables/main.sales.Orders_2024",
+                "/api/2.1/unity-catalog/tables/{id}",
+            ),
+            ("/api/1.2/commands/status", "/api/1.2/commands/status"),
+        ] {
+            assert_eq!(url_template(path), template, "{path}");
+        }
+        assert_eq!(error_type(ErrorCode::PermissionDenied), "permission_denied");
+    }
+
     #[tokio::test]
     #[ignore = "requires native Databricks CLI; cargo test -p jykre-driver-databricks native_cli_profile_syntax -- --ignored"]
     async fn native_cli_profile_syntax_resolves_bom_and_section_comments() {
@@ -1663,6 +1785,27 @@ mod tests {
             task,
         )
     }
+    #[test]
+    fn status_polls_are_two_seconds_apart_then_a_quarter_of_the_run_up_to_ten() {
+        let s = Duration::from_secs;
+        for elapsed in [s(0), s(1), s(2), s(9), Duration::from_millis(9_999)] {
+            assert_eq!(poll_wait(elapsed), s(2), "{elapsed:?}");
+        }
+        assert_eq!(poll_wait(s(10)), Duration::from_millis(2_500));
+        assert_eq!(poll_wait(s(20)), s(5));
+        assert_eq!(poll_wait(s(40)), s(10));
+        assert_eq!(poll_wait(s(300)), s(10));
+        assert_eq!(poll_wait(s(86_400)), s(10));
+        // A five-minute command: about forty polls, against about 150 for
+        // the former 200 ms to 2 s schedule.
+        let (mut at, mut polls) = (Duration::ZERO, 0);
+        while at < s(300) {
+            at += poll_wait(at);
+            polls += 1;
+        }
+        assert!((35..=42).contains(&polls), "{polls} polls");
+    }
+
     #[tokio::test]
     async fn sql_timeout_requests_remote_cancellation() {
         let (client, task) = fixture(vec![

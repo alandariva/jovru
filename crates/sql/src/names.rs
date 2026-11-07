@@ -31,6 +31,10 @@ pub fn parts(sql: &str, dialect: Option<SqlDialect>) -> Vec<Part> {
             let text = &sql[range];
             match kind {
                 TokenKind::Word => Part::Word(text.to_ascii_uppercase(), text.to_owned()),
+                // SQLite's `[name]` holds no escapes.
+                TokenKind::QuotedIdentifier if text.starts_with('[') => {
+                    Part::Quoted(text[1..].strip_suffix(']').unwrap_or(&text[1..]).to_owned())
+                }
                 TokenKind::QuotedIdentifier => {
                     let quote = &text[..1];
                     let inner = text
@@ -72,14 +76,14 @@ pub fn name_at(parts: &[Part], mut at: usize) -> Option<(Vec<Name>, usize)> {
 }
 
 /// How the server stores a name: quoted as written; unquoted folded the way
-/// the dialect folds it (PostgreSQL and Unity Catalog to lower case, MySQL as
-/// written).
+/// the dialect folds it (PostgreSQL and Unity Catalog to lower case, MySQL
+/// and SQLite as written).
 pub fn stored(name: &Name, dialect: SqlDialect) -> String {
     if name.quoted {
         return name.text.clone();
     }
     match dialect {
-        SqlDialect::MySql => name.text.clone(),
+        SqlDialect::MySql | SqlDialect::Sqlite => name.text.clone(),
         _ => name.text.to_lowercase(),
     }
 }

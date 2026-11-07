@@ -36,8 +36,10 @@ flowchart TB
         PG[jykre-driver-postgres]
         MY[jykre-driver-mysql]
         DBX[jykre-driver-databricks]
+        LITE[jykre-driver-sqlite]
         SqlCrate[jykre-sql: tokens, splitting]
         Language[jykre-sql-language: completion, format]
+        Assistant[jykre-assistant: AI providers]
     end
 
     Bin --> Lib
@@ -53,11 +55,15 @@ flowchart TB
     Drivers --> PG
     Drivers --> MY
     Drivers --> DBX
+    Drivers --> LITE
     Storage --> Core
     Secrets --> Core
     PG --> Core
     MY --> Core
     DBX --> Core
+    LITE --> Core
+    Lib --> Assistant
+    Assistant --> Core
 ```
 
 ## Layers and responsibilities
@@ -66,11 +72,12 @@ flowchart TB
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`) | Depend on a specific view; use the editor's language features |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
 | **Drivers** | `crates/driver-*` | Validate configuration, connect, execute, cancel, introspect and classify errors for one database | Persist; talk to the UI; know another driver |
+| **AI providers** | `crates/assistant` (`jykre-assistant`) | The canonical request of a round, one streamed round against Anthropic, OpenAI, OpenAI-compatible servers or Ollama (through `genai`, private to its transport), error classification, prices and the SQL blocks of an answer ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)) | Know the cache, the vault, sessions or the UI; decide what a request contains |
 | **SQL text** | `crates/sql` (`jykre-sql`) | Tokens by dialect, statement splitting, `EXPLAIN`, position mapping and qualified names: what execution and the editor share | I/O; depend on an editor engine |
 | **Language features** | `crates/sql-language` (`jykre-sql-language`) | What the editor suggests and explains (`completion`, which reads each statement's queries and the relations they bind from its tokens), Format (`format`, sqruff-lib behind the `sqruff` feature) and the line comments **Ctrl+/** toggles (`comment`) | I/O, GPUI, `lsp-types` or translations; be used by the library |
 | **Tooling** | `xtask` | Local gate, architecture check, translation catalogs | Ship in the application |
@@ -80,10 +87,10 @@ flowchart TB
 `cargo xtask check` reads `cargo metadata` and fails on a forbidden direct
 edge, including dev and build dependencies:
 
-1. `jykre-core` depends on no internal crate and on neither `sqlx` nor
-   `reqwest`.
-2. Drivers, `jykre-storage` and `jykre-secrets` depend on no internal crate
-   other than `jykre-core`. **A driver never depends on another driver.**
+1. `jykre-core` depends on no internal crate and on none of `sqlx`,
+   `reqwest` and `genai`.
+2. Drivers, `jykre-storage`, `jykre-secrets` and `jykre-assistant` depend on
+   no internal crate other than `jykre-core`. **A driver never depends on another driver.**
 3. No crate under `crates/` depends on GPUI (`gpui*`) or Tauri.
 4. Only the `jykre` crate composes the drivers, in
    `drivers::builtin_registry()`. Adding a database means a new crate plus one
@@ -96,6 +103,13 @@ edge, including dev and build dependencies:
    `src/main.rs`) uses `jykre_sql_language`, so the editor's features can be
    removed without touching what runs queries. `jykre-sql-language` is also
    linted and tested without its default features.
+7. The assistant's code (`src/assistant/`, `src/app/assistant_panel.rs`,
+   `src/app/assistant_settings.rs`; tests aside) names no result data,
+   bound parameters, sessions, credentials or server reads: what a request
+   may tell comes from `assistant::facts` and the metadata cache, and a
+   query's result only through `src/assistant/released.rs`, the one file
+   allowed to name a result
+   ([ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)).
 
 Transitive dependencies and where logic lives inside the `jykre` crate are
 checked in review.
@@ -117,8 +131,10 @@ checked in review.
 │   ├── driver-postgres/    # jykre-driver-postgres
 │   ├── driver-mysql/       # jykre-driver-mysql
 │   ├── driver-databricks/  # jykre-driver-databricks
+│   ├── driver-sqlite/      # jykre-driver-sqlite
 │   ├── storage/            # jykre-storage
 │   ├── secrets/            # jykre-secrets
+│   ├── assistant/          # jykre-assistant
 │   ├── sql/                # jykre-sql
 │   └── sql-language/       # jykre-sql-language
 ├── catalog/                # SQL dialect catalogs read at run time (ADR-0021)
@@ -148,7 +164,7 @@ The full types live in `jykre-core`.
 | Type | Description |
 | --- | --- |
 | `ConnectionId` | Newtype over a UUID. Do not pass raw strings or UUIDs between layers. |
-| `DriverKind` | `Postgres`, `MySql`, `Databricks`; `#[non_exhaustive]`. |
+| `DriverKind` | `Postgres`, `MySql`, `Databricks`, `Sqlite`; `#[non_exhaustive]`. |
 | `ConnectionConfig` | Driver identity plus non-sensitive JSON options owned by the driver. Serializable. |
 | `Credentials`, `ResolvedConnection` | Configuration plus resolved secrets. In memory only; not serializable (checked by `compile_fail` doctests). |
 | `DriverDescriptor`, `DriverStatus` | What a driver is and supports. Consumers check status and capabilities, not the kind. |
@@ -192,9 +208,10 @@ sequenceDiagram
 - Splitting and highlighting share one tokenizer whose rules follow the
   connection's `SqlDialect` (`jykre::sql`): MySQL backslash escapes, `#`
   comments, `DELIMITER` and routine bodies; PostgreSQL `E''` strings, dollar
-  quotes and `BEGIN ATOMIC`; Databricks compound statements. It also tells
+  quotes and `BEGIN ATOMIC`; Databricks compound statements; SQLite `[x]`
+  names, strings without backslash escapes and trigger bodies. It also tells
   quoted names (`"x"`, `` `x` ``) from strings and finds parameters (`$1`,
-  `?`, `:name`, `@var`) by dialect. A tab without a connection uses generic
+  `?`, `:name`, `@var`, `$name`) by dialect. A tab without a connection uses generic
   rules.
 - The tokenizer only knows words; whether a word is a keyword, a function or
   a type comes from the dialect's catalog
@@ -375,6 +392,26 @@ time as if it came from outside ([ADR-0021](adr/0021-sql-catalogs-read-at-run-ti
    Settings shows which catalogs were read.
 3. A dialect whose files are missing or invalid keeps the built-in words
    (and is logged); no catalog never stops the application.
+
+### Telemetry
+
+Logs and spans go through `tracing`. When the user turns them on in
+Preferences, `jykre::telemetry` also sends them to an OpenTelemetry
+collector ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md)):
+
+1. `logging::init` adds two bridges behind per-layer filters: spans of
+   Jykre's crates become traces, log events become OTLP logs. Until the
+   preferences are read, what they capture is held in memory, bounded.
+2. `AppView::new` reads the preferences (and the headers from the vault)
+   and calls `telemetry::apply`, which builds a batch processor per signal
+   and sends or drops what was held. **Save** in Preferences applies again.
+3. Every external call runs inside a `client` span (`jykre::client_span!`
+   in the library, `tracing::info_span!` with the same fields in a backend
+   crate). The processor removes every attribute outside
+   `telemetry::attributes::ALLOWED` before export.
+4. The batch processors run on threads of their own; each export is polled
+   inside the Tokio runtime of `backend::run`. Dropping the `LogGuard` at
+   exit sends what is queued, within 3 s.
 
 ## Concurrency
 

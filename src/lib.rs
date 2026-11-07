@@ -3,6 +3,7 @@
 //! components.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod assistant;
 pub mod backend;
 pub mod cell_format;
 pub mod connection_appearance;
@@ -31,6 +32,8 @@ pub mod result;
 pub mod result_tabs;
 pub mod run_log;
 pub mod stats;
+pub mod telemetry;
+pub mod theme;
 pub mod transaction;
 pub mod workspace_state;
 
