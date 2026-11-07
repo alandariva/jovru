@@ -1,5 +1,5 @@
 //! A report's print document: one self-contained HTML file with its title,
-//! description and parameters, then each panel with its chart or indicator
+//! description and parameters, then each panel with its chart or numbers
 //! and table, laid out in two columns like the report, which the browser
 //! prints or saves as PDF (ADR-0024, ADR-0025).
 //!
@@ -8,7 +8,7 @@
 //! loads nothing (a content security policy forbids it) and every text from
 //! the database is escaped.
 use super::chart::{ChartData, Indicator, Visual};
-use super::{ChartKind, Width};
+use super::{ChartKind, Signal, Width};
 use crate::result::ResultData;
 use std::path::{Path, PathBuf};
 
@@ -70,8 +70,10 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:2px 12px;margin:0 0 16
 .panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:24px 20px}.full{grid-column:1/-1}\
 section{min-width:0}\
 figure{margin:0 0 12px;break-inside:avoid}figcaption{color:#5d6670;font-size:12px}svg text{font-size:11px;fill:#3a414a}\
-.number{break-inside:avoid;margin:4px 0 12px}.number .value{font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}\
+.numbers{display:flex;flex-wrap:wrap;gap:8px 28px;break-inside:avoid;margin:4px 0 12px}.number{min-width:0}\
+.number .value{font-size:32px;font-weight:600;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}\
 .number .value.null{color:#8a939c;font-style:italic}.number .label{display:block;color:#5d6670}\
+.number.green .value{color:#1f7a4d}.number.red .value{color:#c0392b}.number .mark{margin-right:4px}\
 table{border-collapse:collapse;width:100%;font-size:12px}thead{display:table-header-group}\
 th,td{border:1px solid #d5dae0;padding:3px 6px;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{background:#f1f3f5}\
 tr{break-inside:avoid}td.null{color:#8a939c;font-style:italic}td.number{text-align:right;font-variant-numeric:tabular-nums}\
@@ -169,7 +171,7 @@ fn section(page: &mut String, panel: &PanelDocument, shared: &[(String, Option<S
     parameter_list(page, &own);
     match panel.visual {
         Some(Visual::Chart(chart)) => figure(page, chart),
-        Some(Visual::Number(number)) => indicator(page, number),
+        Some(Visual::Number(numbers)) => indicators(page, numbers),
         None => {}
     }
     if let Some(note) = &panel.note {
@@ -214,15 +216,26 @@ fn figure(page: &mut String, chart: &ChartData) {
     page.push_str("</figure>");
 }
 
-fn indicator(page: &mut String, number: &Indicator) {
-    let value = match &number.text {
-        Some(text) => format!("<span class=\"value\">{}</span>", escape(text)),
-        None => "<span class=\"value null\">NULL</span>".to_owned(),
-    };
-    page.push_str(&format!(
-        "<div class=\"number\">{value}<span class=\"label\">{}</span></div>",
-        escape(&number.column)
-    ));
+/// The numbers side by side. A coloured one also carries a mark, so it
+/// reads the same printed in black and white.
+fn indicators(page: &mut String, numbers: &[Indicator]) {
+    page.push_str("<div class=\"numbers\">");
+    for number in numbers {
+        let value = match &number.text {
+            Some(text) => format!("<span class=\"value\">{}</span>", escape(text)),
+            None => "<span class=\"value null\">NULL</span>".to_owned(),
+        };
+        let (class, mark) = match number.signal {
+            Some(Signal::Green) => (" green", "<span class=\"mark\">\u{2713}</span>"),
+            Some(Signal::Red) => (" red", "<span class=\"mark\">\u{2715}</span>"),
+            None => ("", ""),
+        };
+        page.push_str(&format!(
+            "<div class=\"number{class}\">{value}<span class=\"label\">{mark}{}</span></div>",
+            escape(&number.column)
+        ));
+    }
+    page.push_str("</div>");
 }
 
 fn table(page: &mut String, result: &ResultData) {
@@ -629,16 +642,28 @@ mod tests {
     #[test]
     fn every_panel_is_a_section_laid_out_by_its_width() {
         let result = sample();
-        let number = Visual::Number(Indicator {
-            column: "total <eur>".into(),
-            text: Some("1234567890.123456789".into()),
-            rows: 1,
-        });
-        let empty = Visual::Number(Indicator {
+        let number = Visual::Number(vec![
+            Indicator {
+                column: "total <eur>".into(),
+                text: Some("1234567890.123456789".into()),
+                signal: Some(Signal::Green),
+            },
+            Indicator {
+                column: "late".into(),
+                text: Some("3".into()),
+                signal: Some(Signal::Red),
+            },
+            Indicator {
+                column: "open".into(),
+                text: Some("7".into()),
+                signal: None,
+            },
+        ]);
+        let empty = Visual::Number(vec![Indicator {
             column: "n".into(),
             text: None,
-            rows: 1,
-        });
+            signal: None,
+        }]);
         let mut half = panel(Some(&result), Some(&number));
         half.width = Width::Half;
         half.table = false;
@@ -657,8 +682,18 @@ mod tests {
         assert_eq!(page.matches("<section").count(), 4);
         assert_eq!(page.matches("<section class=\"half\">").count(), 1);
         assert!(page.contains(".full{grid-column:1/-1}"));
-        assert!(page.contains("<span class=\"value\">1234567890.123456789</span>"));
-        assert!(page.contains("<span class=\"label\">total &lt;eur&gt;</span>"));
+        assert!(page.contains(
+            "<div class=\"number green\"><span class=\"value\">1234567890.123456789</span>\
+             <span class=\"label\"><span class=\"mark\">\u{2713}</span>total &lt;eur&gt;</span></div>"
+        ));
+        assert!(page.contains(
+            "<div class=\"number red\"><span class=\"value\">3</span>\
+             <span class=\"label\"><span class=\"mark\">\u{2715}</span>late</span></div>"
+        ));
+        assert!(page.contains(
+            "<div class=\"number\"><span class=\"value\">7</span><span class=\"label\">open</span></div>"
+        ));
+        assert_eq!(page.matches("<div class=\"numbers\">").count(), 2);
         assert!(page.contains("<span class=\"value null\">NULL</span>"));
         assert!(page.contains("relation &quot;x&quot; does not exist"));
         assert!(page.contains("<dd>2025-01-01</dd>"));

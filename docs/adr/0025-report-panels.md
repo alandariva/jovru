@@ -2,7 +2,9 @@
 
 - **Status:** Proposed
 - **Date:** 2026-11-05 (revised the same day, before acceptance: panels may
-  run on different connections, and a report tab has a group of its own)
+  run on different connections, and a report tab has a group of its own;
+  revised on 2026-11-07, at the maintainer's request: a number panel shows
+  several numbers, each optionally green or red by a condition)
 - **Authors:** AI agent, at the maintainer's request (plans approved on
   2026-11-05)
 - **Amends:** [ADR-0024](0024-reports.md) (a report is a set of panels, not
@@ -47,9 +49,16 @@ What constrains the change:
   identity within its report, a title, its **connection**, its SQL, its
   **context** (the database, schema or catalog of that connection it runs in;
   empty is the session default), how it shows its result (a table, bars,
-  lines, a pie or a **number**, the first row's value of one column shown
-  large), whether the table shows under its chart, and its width (half or the
-  whole row). Panels of one report may run on different connections.
+  lines, a pie or **numbers**, the first row's value of up to eight columns
+  shown large, side by side), whether the table shows under its chart, and
+  its width (half or the whole row). Panels of one report may run on
+  different connections.
+- Each number may turn **green** or **red** when it meets a condition the
+  user sets: a comparison (`>`, `>=`, `<`, `<=`, `=`, `<>`) with a target
+  number, one condition per colour, both optional. The comparison is exact
+  (golden rule 9); NULL, text or a target that is not a number never
+  colour; when both hold, red wins so an alert is never hidden. A coloured
+  number also shows a mark, so colour is not its only sign.
 - While the report is edited, a panel's header has a menu of the connections,
   each with a submenu of its databases, to choose where it runs, and a grip
   that drags the panel onto another to take its place (or after the last
@@ -121,7 +130,10 @@ What constrains the change:
 - The `reports` setting goes to `"version": 3`. Each report holds
   `parameters` (with `choices`) and `panels` (`id`, `title`, `connection` as
   `{"id", "name"}`, `sql`, `context` as `{"catalog", "schema"}`, `chart`,
-  `table`, `width`).
+  `table`, `width`). A number panel's `chart` may hold `colors`, by column:
+  `{"<column>": {"green": {"op": ">=", "value": "100"}, "red": {…}}}`,
+  written only when some number has a condition; a version that does not
+  know it reads the panel without colours.
 - A version 1 report (one top-level `sql` and `chart`) is read as one panel,
   and the report-level `connection` of versions 1 and 2 is given to each of
   its panels; they are written back as version 3. Neither was released. Keys
@@ -132,7 +144,7 @@ What constrains the change:
 
 - **Print HTML** names the connections and shows every panel in a two-column
   grid like the report, each with its connection and database, its chart or
-  number and, when asked, its table. The values the panels ran with appear
+  numbers (in their colours, with their marks) and, when asked, its table. The values the panels ran with appear
   once at the top; a panel run again with other values lists its own.
 - **Copy** is per panel (CSV or for a spreadsheet).
 - A query tab's SQL becomes a report with **Save as a new report**, or a new
@@ -183,7 +195,7 @@ What constrains the change:
 - Library tests: the version 1 and 2 reading (the connection given to each
   panel), round trips with unknown keys at every level and repaired panel
   identities; the connections of a report; parameters across panels in their
-  dialects, list choices and per-panel checking; the indicator's exact text;
+  dialects, list choices and per-panel checking; the numbers' exact text and their colours, compared exactly, red winning;
   where a dropped panel lands; the scheduler's grouping by connection and
   context, limit of four, joining a running group, stopping a panel or a
   connection, removing and stale outcomes; the sessions' leases, least

@@ -1,13 +1,15 @@
-//! A report panel's chart or indicator, its own entity embedded with
+//! A report panel's chart or numbers, its own entity embedded with
 //! `.cached`, so the panel around it redraws without laying the chart out
 //! again ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
 //! It draws what [`jykre::reports::chart::visual`] computed when the result
 //! or the chart changed, never while rendering.
 use super::ui::*;
+use gpui_kit::assets::IconName as I;
 use gpui_kit::component::chart::{AreaChart, BarChart, PieChart};
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::reports::ChartKind;
 use jykre::reports::chart::{ChartData, ChartPoint, Indicator, Visual};
+use jykre::reports::{ChartKind, Signal};
 use jykre::tr;
 use std::rc::Rc;
 
@@ -69,50 +71,116 @@ impl Datum {
 
 pub struct ReportChart {
     data: Option<Rc<ChartData>>,
-    number: Option<Indicator>,
+    numbers: Vec<Indicator>,
+    /// The most numbers on one line; the panel's width decides it.
+    per_row: usize,
 }
 
 impl ReportChart {
     pub fn new() -> Self {
         Self {
             data: None,
-            number: None,
+            numbers: Vec::new(),
+            per_row: 1,
         }
     }
 
     /// Draws `visual` from now on; `None` draws nothing.
     pub fn set_visual(&mut self, visual: Option<Visual>, cx: &mut Context<Self>) {
-        (self.data, self.number) = match visual {
-            Some(Visual::Chart(data)) => (Some(Rc::new(data)), None),
-            Some(Visual::Number(number)) => (None, Some(number)),
-            None => (None, None),
+        (self.data, self.numbers) = match visual {
+            Some(Visual::Chart(data)) => (Some(Rc::new(data)), Vec::new()),
+            Some(Visual::Number(numbers)) => (None, numbers),
+            None => (None, Vec::new()),
         };
         cx.notify();
     }
 
-    /// One value, large, as the database wrote it; NULL in the NULL style.
-    fn indicator(number: &Indicator) -> Stateful<Div> {
-        let (text, color) = match &number.text {
-            Some(text) => (text.clone(), colors().text),
-            None => ("NULL".to_owned(), colors().value_null),
+    /// Lays numbers out `per_row` to a line from now on.
+    pub fn set_per_row(&mut self, per_row: usize, cx: &mut Context<Self>) {
+        let per_row = per_row.max(1);
+        if self.per_row != per_row {
+            self.per_row = per_row;
+            cx.notify();
+        }
+    }
+
+    /// One value, large, as the database wrote it: NULL in the NULL style,
+    /// green or red (with a mark, so colour is not the only sign) when one
+    /// of its conditions holds.
+    fn indicator(index: usize, number: &Indicator, size: f32) -> Stateful<Div> {
+        let text = number.text.clone().unwrap_or_else(|| "NULL".to_owned());
+        let (color, mark, spoken) = match (&number.text, number.signal) {
+            (None, _) => (
+                colors().value_null,
+                None,
+                tr!("{0}: {1}", number.column, text),
+            ),
+            (Some(_), Some(Signal::Green)) => (
+                colors().mint,
+                Some(I::CircleCheck),
+                tr!("{0}: {1}, green", number.column, text),
+            ),
+            (Some(_), Some(Signal::Red)) => (
+                colors().red,
+                Some(I::CircleX),
+                tr!("{0}: {1}, red", number.column, text),
+            ),
+            (Some(_), None) => (colors().text, None, tr!("{0}: {1}", number.column, text)),
         };
+        let whole = tr!("{0}: {1}", number.column, text);
         column()
-            .id("report-number")
+            .id(("report-number", index))
             .role(Role::Status)
-            .aria_label(tr!("{0}: {1}", number.column, text))
-            .size_full()
+            .aria_label(spoken)
+            .flex_1()
+            .min_w_0()
+            .h_full()
             .justify_center()
             .px_2()
             .gap_1()
+            .tooltip(move |window, cx| Tooltip::new(whole.clone()).build(window, cx))
             .child(
                 div()
-                    .text_size(px(34.))
+                    .flex_none()
+                    .text_size(px(size))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgb(color))
                     .truncate()
                     .child(text),
             )
-            .child(label(number.column.clone()))
+            .child(
+                row()
+                    .gap_1()
+                    .min_w_0()
+                    .when_some(mark, |s, mark| s.child(icon(mark, color)))
+                    .child(label(number.column.clone()).truncate()),
+            )
+    }
+
+    /// The numbers, `per_row` to a line, each line as tall as the others.
+    fn indicators(&self) -> Div {
+        let size = if self.numbers.len() == 1 { 34. } else { 26. };
+        column().flex_1().w_full().gap_2().children(
+            self.numbers
+                .chunks(self.per_row)
+                .enumerate()
+                .map(|(line, numbers)| {
+                    row()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .items_stretch()
+                        .gap_3()
+                        .children(numbers.iter().enumerate().map(|(index, number)| {
+                            Self::indicator(line * self.per_row + index, number, size)
+                        }))
+                        // A short last line keeps the columns of the others.
+                        .children(
+                            (numbers.len()..self.per_row.min(self.numbers.len()))
+                                .map(|_| div().flex_1()),
+                        )
+                }),
+        )
     }
 
     fn data(&self, data: &Rc<ChartData>) -> Vec<Datum> {
@@ -128,11 +196,13 @@ impl ReportChart {
 
 impl Render for ReportChart {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        if let Some(number) = &self.number {
+        if !self.numbers.is_empty() {
             return div()
                 .id("report-chart")
                 .size_full()
-                .child(Self::indicator(number));
+                .flex()
+                .flex_col()
+                .child(self.indicators());
         }
         let Some(data) = self.data.clone() else {
             return div().id("report-chart");

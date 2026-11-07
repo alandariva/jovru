@@ -1120,11 +1120,7 @@ mod tests {
         assert_eq!(outcome.data.as_ref().map(|data| data.row_count()), Some(1));
         // A panel with a chart of its own shows it, even a broken one.
         let info = JobInfo {
-            chart: Some(ChartSpec {
-                kind: ChartKind::Number,
-                label: String::new(),
-                values: vec!["gone".into()],
-            }),
+            chart: Some(ChartSpec::new(ChartKind::Number, "", vec!["gone".into()])),
             ..JobInfo::default()
         };
         let last = QueryResult {

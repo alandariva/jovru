@@ -129,7 +129,8 @@ cannot be read starts an empty workspace. Results are never stored.
 numeric `id`, its title, description, parameters (name, label, kind,
 default, required, choices), panels (`id`, title, connection as
 `{"id": …, "name": …}`, SQL, context as `{"catalog": …, "schema": …}`,
-optional chart, `table`, `width`) and when it was created and last changed.
+optional chart, with the green and red conditions of a number panel's
+numbers as `colors`, `table`, `width`) and when it was created and last changed.
 A version 1 report (one top-level SQL and chart) is read as one panel, and
 the report-level connection of versions 1 and 2 is given to each of its
 panels; both are written back as version 3. Keys this version does not know

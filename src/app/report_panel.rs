@@ -1,6 +1,6 @@
 //! A panel of a report ([ADR-0025](../../docs/adr/0025-report-panels.md)):
 //! its SQL, the connection and database it runs in, and the chart,
-//! indicator or table it shows. It is its own entity, embedded with
+//! numbers or table it shows. It is its own entity, embedded with
 //! `.cached`, so hovering one panel's grid does not lay the others out.
 //!
 //! The panel holds its definition and what its last run showed; the report
@@ -22,10 +22,13 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::drivers::*;
-use jykre::reports::chart::{self, Visual};
+use jykre::reports::chart::{self, ChartProblem, Visual};
 use jykre::reports::export::PanelDocument;
 use jykre::reports::run::{PanelOutcome, PanelPhase};
-use jykre::reports::{ChartKind, ChartSpec, ConnectionRef, Direction, Panel, PanelId, Width};
+use jykre::reports::{
+    ChartKind, ChartSpec, Comparison, Condition, ConnectionRef, Direction, Panel, PanelId, Signal,
+    Width,
+};
 use jykre::result::ResultData;
 use jykre::{backend, tr};
 use std::rc::Rc;
@@ -39,7 +42,11 @@ const EDITOR_HEIGHT: f32 = 180.;
 /// The title, database, editor and visual rows while editing.
 const DEFINITION_HEIGHT: f32 = EDITOR_HEIGHT + 136.;
 const CHART_HEIGHT: f32 = 240.;
+/// One line of numbers.
 const NUMBER_HEIGHT: f32 = 110.;
+/// The colours' explanation, then one line per number while editing.
+const COLORS_HINT_HEIGHT: f32 = 24.;
+const COLOR_ROW_HEIGHT: f32 = 34.;
 const TABLE_HEIGHT: f32 = 240.;
 const TABLE_ALONE_HEIGHT: f32 = 300.;
 const NOTICE_HEIGHT: f32 = 28.;
@@ -212,6 +219,13 @@ struct PanelEditor {
     _subscriptions: Vec<Subscription>,
 }
 
+/// The target of one colour of one number, typed while editing.
+struct TargetField {
+    column: String,
+    signal: Signal,
+    input: Entity<InputState>,
+}
+
 /// What the last run left to show.
 struct Shown {
     data: Arc<ResultData>,
@@ -251,6 +265,9 @@ pub struct ReportPanel {
     grid: Entity<ResultGrid>,
     chart: Entity<ReportChart>,
     notice: Option<Feedback>,
+    /// One per number and colour of a number panel, while it is edited.
+    targets: Vec<TargetField>,
+    target_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -298,6 +315,8 @@ impl ReportPanel {
             grid: cx.new(|cx| ResultGrid::new(Arc::default(), false, cx)),
             chart: cx.new(|_| ReportChart::new()),
             notice: None,
+            targets: Vec::new(),
+            target_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -328,6 +347,14 @@ impl ReportPanel {
         let mut height = HEADER_HEIGHT + FOOTER_HEIGHT + 12.;
         if self.editing {
             height += DEFINITION_HEIGHT;
+            if let Some(spec) = self
+                .panel
+                .chart
+                .as_ref()
+                .filter(|spec| spec.kind == ChartKind::Number && !spec.values.is_empty())
+            {
+                height += COLORS_HINT_HEIGHT + COLOR_ROW_HEIGHT * spec.values.len() as f32;
+            }
         }
         if self.notice.is_some() {
             height += NOTICE_HEIGHT;
@@ -339,7 +366,7 @@ impl ReportPanel {
             None => TABLE_ALONE_HEIGHT,
             Some(spec) => {
                 let shown = if spec.kind == ChartKind::Number {
-                    NUMBER_HEIGHT
+                    self.number_height()
                 } else {
                     CHART_HEIGHT
                 };
@@ -347,6 +374,32 @@ impl ReportPanel {
             }
         };
         height
+    }
+
+    /// The most numbers on one line: two in half a row, four in a whole one.
+    fn numbers_per_row(&self) -> usize {
+        match self.width() {
+            Width::Half => 2,
+            Width::Full => 4,
+        }
+    }
+
+    /// The height of a number panel's numbers, a line per
+    /// [`Self::numbers_per_row`].
+    fn number_height(&self) -> f32 {
+        let count = self
+            .panel
+            .chart
+            .as_ref()
+            .map_or(1, |spec| spec.values.len().max(1));
+        NUMBER_HEIGHT * count.div_ceil(self.numbers_per_row()) as f32
+    }
+
+    /// Hands the chart the numbers' layout of the panel's width.
+    fn sync_number_layout(&mut self, cx: &mut Context<Self>) {
+        let per_row = self.numbers_per_row();
+        self.chart
+            .update(cx, |chart, cx| chart.set_per_row(per_row, cx));
     }
 
     /// Its place among the report's panels, for its default title and for
@@ -375,8 +428,10 @@ impl ReportPanel {
         self.editing = editing;
         if editing {
             self.ensure_editor(window, cx);
+            self.sync_targets(window, cx);
             self.focus(window, cx);
         }
+        self.sync_number_layout(cx);
         cx.notify();
     }
 
@@ -632,6 +687,7 @@ impl ReportPanel {
         };
         self.chart_problem = problem;
         self.visual = visual.clone();
+        self.sync_number_layout(cx);
         self.chart
             .update(cx, |chart, cx| chart.set_visual(visual, cx));
     }
@@ -660,15 +716,151 @@ impl ReportPanel {
         .detach();
     }
 
-    fn set_chart(&mut self, chart: Option<ChartSpec>, cx: &mut Context<Self>) {
+    fn set_chart(&mut self, chart: Option<ChartSpec>, window: &mut Window, cx: &mut Context<Self>) {
         self.fresh = false;
         self.panel.chart = chart;
         if self.panel.chart.is_none() {
             self.panel.table = true;
         }
+        self.sync_targets(window, cx);
         self.derive_visual(cx);
         cx.emit(PanelEvent::Changed);
         cx.notify();
+    }
+
+    /// Shows column `name` of the chart, or stops showing it; a number
+    /// panel that already shows all it can says so.
+    fn toggle_value(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut spec) = self.panel.chart.clone() else {
+            return;
+        };
+        if spec.toggle_value(name) {
+            self.set_chart(Some(spec), window, cx);
+        } else {
+            self.notice = Some(Feedback::new(
+                Tone::Warning,
+                ChartProblem::TooManyNumbers.message(),
+            ));
+            cx.emit(PanelEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    /// Sets when number `column` shows in `signal`'s colour, keeping the
+    /// target already typed for it.
+    fn set_comparison(
+        &mut self,
+        column: &str,
+        signal: Signal,
+        comparison: Option<Comparison>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(mut spec) = self.panel.chart.clone() else {
+            return;
+        };
+        let target = self
+            .target_field(column, signal)
+            .map(|field| field.input.read(cx).value().trim().to_owned())
+            .unwrap_or_default();
+        spec.set_condition(
+            column,
+            signal,
+            comparison.map(|comparison| Condition::new(comparison, target)),
+        );
+        self.set_chart(Some(spec), window, cx);
+    }
+
+    /// The target typed for number `column` changed.
+    fn set_target(&mut self, column: &str, signal: Signal, cx: &mut Context<Self>) {
+        let Some(target) = self
+            .target_field(column, signal)
+            .map(|field| field.input.read(cx).value().to_string())
+        else {
+            return;
+        };
+        if self
+            .panel
+            .chart
+            .as_mut()
+            .is_some_and(|spec| spec.set_target(column, signal, &target))
+        {
+            self.derive_visual(cx);
+            cx.emit(PanelEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    fn target_field(&self, column: &str, signal: Signal) -> Option<&TargetField> {
+        self.targets
+            .iter()
+            .find(|field| field.column == column && field.signal == signal)
+    }
+
+    /// One target field per number and colour of a number panel being
+    /// edited; a field kept keeps what it holds.
+    fn sync_targets(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wanted: Vec<(String, Signal)> = self
+            .panel
+            .chart
+            .as_ref()
+            .filter(|spec| spec.kind == ChartKind::Number && self.editing)
+            .map(|spec| {
+                spec.values
+                    .iter()
+                    .flat_map(|column| Signal::ALL.map(|signal| (column.clone(), signal)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let current: Vec<(String, Signal)> = self
+            .targets
+            .iter()
+            .map(|field| (field.column.clone(), field.signal))
+            .collect();
+        if wanted == current {
+            return;
+        }
+        let mut old = std::mem::take(&mut self.targets);
+        self.targets = wanted
+            .into_iter()
+            .map(|(column, signal)| {
+                if let Some(index) = old
+                    .iter()
+                    .position(|field| field.column == column && field.signal == signal)
+                {
+                    return old.swap_remove(index);
+                }
+                let target = self
+                    .panel
+                    .chart
+                    .as_ref()
+                    .and_then(|spec| spec.colors_of(&column).get(signal).cloned())
+                    .map(|condition| condition.target)
+                    .unwrap_or_default();
+                TargetField {
+                    column,
+                    signal,
+                    input: cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .placeholder(tr!("e.g. 1250.50"))
+                            .default_value(target)
+                    }),
+                }
+            })
+            .collect();
+        self.target_subscriptions = self
+            .targets
+            .iter()
+            .map(|field| {
+                let column = field.column.clone();
+                let signal = field.signal;
+                cx.subscribe(&field.input, move |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.set_target(&column, signal, cx);
+                    }
+                })
+            })
+            .collect();
     }
 
     /// The panel as the print document shows it.
@@ -898,6 +1090,7 @@ impl ReportPanel {
                                     Width::Half => Width::Full,
                                     Width::Full => Width::Half,
                                 };
+                                this.sync_number_layout(cx);
                                 cx.emit(PanelEvent::Changed);
                                 cx.notify();
                             })
@@ -951,6 +1144,157 @@ impl ReportPanel {
                     .child(Editor::new(&editor.editor).h_full()),
             )
             .child(self.visual_controls(cx))
+            .when_some(
+                self.panel
+                    .chart
+                    .clone()
+                    .filter(|spec| spec.kind == ChartKind::Number && !spec.values.is_empty()),
+                |s, spec| s.child(self.color_rows(&spec, cx)),
+            )
+    }
+
+    /// When each number turns green or red: a comparison and a target per
+    /// colour, both optional.
+    fn color_rows(&self, spec: &ChartSpec, cx: &mut Context<Self>) -> Div {
+        column()
+            .gap_1()
+            .child(div().h(px(COLORS_HINT_HEIGHT - 4.)).child(label(tr!(
+                "Colour a number green or red when it meets a condition; when both hold, red wins."
+            ))))
+            .children(spec.values.iter().enumerate().map(|(index, column)| {
+                let conditions = spec.colors_of(column);
+                row()
+                    .h(px(COLOR_ROW_HEIGHT - 4.))
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .flex_none()
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors().text))
+                            .child(column.clone()),
+                    )
+                    .children(Signal::ALL.into_iter().map(|signal| {
+                        self.condition_controls(
+                            index,
+                            column,
+                            signal,
+                            conditions.get(signal).cloned(),
+                            cx,
+                        )
+                    }))
+            }))
+    }
+
+    /// "Green when ≥ [target]": the comparison's menu and, once one is
+    /// chosen, the target's field, outlined when it is not a number.
+    fn condition_controls(
+        &self,
+        index: usize,
+        column: &str,
+        signal: Signal,
+        condition: Option<Condition>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let view = cx.entity().downgrade();
+        let (color, caption, menu_label) = match signal {
+            Signal::Green => (
+                colors().mint,
+                tr!("Green when"),
+                tr!("When {0} turns green", column),
+            ),
+            Signal::Red => (
+                colors().red,
+                tr!("Red when"),
+                tr!("When {0} turns red", column),
+            ),
+        };
+        let id = index * 2 + usize::from(signal == Signal::Red);
+        let current = condition.as_ref().map(|condition| condition.comparison);
+        let menu_column = column.to_owned();
+        let invalid = condition
+            .as_ref()
+            .is_some_and(|condition| !condition.target.is_empty() && !condition.target_is_valid());
+        row()
+            .gap_1()
+            .child(dot(color))
+            .child(label(caption))
+            .child(
+                Button::new(("number-comparison", id))
+                    .ghost()
+                    .small()
+                    .label(current.map_or(tr!("Never"), comparison_symbol))
+                    .dropdown_caret(true)
+                    .accessibility_label(menu_label)
+                    .dropdown_menu(move |menu, _, _| {
+                        let never_view = view.clone();
+                        let never_column = menu_column.clone();
+                        let mut menu = menu.item(
+                            PopupMenuItem::new(tr!("Never"))
+                                .checked(current.is_none())
+                                .on_click(move |_, window, cx| {
+                                    let _ = never_view.update(cx, |this, cx| {
+                                        this.set_comparison(&never_column, signal, None, window, cx)
+                                    });
+                                }),
+                        );
+                        for comparison in Comparison::ALL {
+                            let view = view.clone();
+                            let column = menu_column.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(comparison_name(comparison))
+                                    .checked(current == Some(comparison))
+                                    .on_click(move |_, window, cx| {
+                                        let _ = view.update(cx, |this, cx| {
+                                            this.set_comparison(
+                                                &column,
+                                                signal,
+                                                Some(comparison),
+                                                window,
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            );
+                        }
+                        menu
+                    }),
+            )
+            .when_some(
+                self.target_field(column, signal)
+                    .filter(|_| condition.is_some()),
+                |s, field| {
+                    s.child(
+                        div()
+                            .w(px(110.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(rgb(if invalid {
+                                colors().red
+                            } else {
+                                colors().panel
+                            }))
+                            .child(
+                                Input::new(&field.input)
+                                    .small()
+                                    .aria_label(tr!("Target of {0}", column)),
+                            ),
+                    )
+                    .when(invalid, |s| {
+                        s.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(rgb(colors().red))
+                                .child(tr!("A number, with a dot for decimals")),
+                        )
+                    })
+                },
+            )
+            // The red condition starts at the same place on every line.
+            .when(signal == Signal::Green, |s| {
+                s.flex_none().min_w(px(280.)).mr_3()
+            })
     }
 
     /// Where the panel runs: its connection and the database its
@@ -1055,23 +1399,27 @@ impl ReportPanel {
                         let mut menu = menu.item(
                             PopupMenuItem::new(tr!("Table"))
                                 .checked(kind_spec.is_none())
-                                .on_click(move |_, _, cx| {
-                                    let _ =
-                                        table_view.update(cx, |this, cx| this.set_chart(None, cx));
+                                .on_click(move |_, window, cx| {
+                                    let _ = table_view
+                                        .update(cx, |this, cx| this.set_chart(None, window, cx));
                                 }),
                         );
                         for kind in ChartKind::ALL {
                             let view = kind_view.clone();
-                            let spec =
-                                switch_kind(kind_spec.clone(), kind, &kind_columns, &kind_numeric);
+                            let spec = ChartSpec::switched(
+                                kind_spec.clone(),
+                                kind,
+                                &kind_columns,
+                                &kind_numeric,
+                            );
                             menu = menu.item(
                                 PopupMenuItem::new(chart_name(kind))
                                     .checked(
                                         kind_spec.as_ref().is_some_and(|spec| spec.kind == kind),
                                     )
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |_, window, cx| {
                                         let _ = view.update(cx, |this, cx| {
-                                            this.set_chart(Some(spec.clone()), cx)
+                                            this.set_chart(Some(spec.clone()), window, cx)
                                         });
                                     }),
                             );
@@ -1108,9 +1456,9 @@ impl ReportPanel {
                                     menu = menu.item(
                                         PopupMenuItem::new(name.clone())
                                             .checked(label_current.label == *name)
-                                            .on_click(move |_, _, cx| {
+                                            .on_click(move |_, window, cx| {
                                                 let _ = view.update(cx, |this, cx| {
-                                                    this.set_chart(Some(spec.clone()), cx)
+                                                    this.set_chart(Some(spec.clone()), window, cx)
                                                 });
                                             }),
                                     );
@@ -1146,7 +1494,6 @@ impl ReportPanel {
                         .map(|(index, name)| {
                             let on = current.values.contains(&name);
                             let shown = name.clone();
-                            let current = current.clone();
                             div()
                                 .id(("panel-value", index))
                                 .role(Role::CheckBox)
@@ -1166,16 +1513,8 @@ impl ReportPanel {
                                 .text_size(px(12.))
                                 .text_color(rgb(if on { colors().mint } else { colors().muted }))
                                 .child(shown)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    let mut spec = current.clone();
-                                    if spec.values.contains(&name) {
-                                        spec.values.retain(|value| *value != name);
-                                    } else if spec.kind.single_value() {
-                                        spec.values = vec![name.clone()];
-                                    } else {
-                                        spec.values.push(name.clone());
-                                    }
-                                    this.set_chart(Some(spec), cx);
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.toggle_value(&name, window, cx);
                                 }))
                         }),
                 )
@@ -1208,7 +1547,7 @@ impl ReportPanel {
     fn body(&self) -> AnyElement {
         let chart_height = match self.panel.chart.as_ref().map(|chart| chart.kind) {
             None => None,
-            Some(ChartKind::Number) => Some(NUMBER_HEIGHT),
+            Some(ChartKind::Number) => Some(self.number_height()),
             Some(_) => Some(CHART_HEIGHT),
         };
         if !self.has_result() {
@@ -1379,47 +1718,35 @@ impl Render for ReportPanel {
     }
 }
 
-/// The chart a change to `kind` gives: the current columns where they fit,
-/// otherwise the first ones the result offers.
-fn switch_kind(
-    current: Option<ChartSpec>,
-    kind: ChartKind,
-    columns: &[String],
-    numeric: &[String],
-) -> ChartSpec {
-    let mut spec = current.unwrap_or(ChartSpec {
-        kind,
-        label: String::new(),
-        values: Vec::new(),
-    });
-    spec.kind = kind;
-    if kind.labelled() && spec.label.is_empty() {
-        spec.label = columns
-            .iter()
-            .find(|name| !numeric.contains(name))
-            .or_else(|| columns.first())
-            .cloned()
-            .unwrap_or_default();
-    }
-    if spec.values.is_empty() {
-        spec.values = numeric
-            .iter()
-            .filter(|name| **name != spec.label)
-            .take(if kind.single_value() { 1 } else { 3 })
-            .cloned()
-            .collect();
-    }
-    if kind.single_value() {
-        spec.values.truncate(1);
-    }
-    spec
-}
-
 pub fn chart_name(kind: ChartKind) -> &'static str {
     match kind {
         ChartKind::Bar => tr!("Bars"),
         ChartKind::Line => tr!("Lines"),
         ChartKind::Pie => tr!("Pie"),
         ChartKind::Number => tr!("Number"),
+    }
+}
+
+/// A comparison as its button shows it.
+fn comparison_symbol(comparison: Comparison) -> &'static str {
+    match comparison {
+        Comparison::Greater => ">",
+        Comparison::GreaterOrEqual => "≥",
+        Comparison::Less => "<",
+        Comparison::LessOrEqual => "≤",
+        Comparison::Equal => "=",
+        Comparison::NotEqual => "≠",
+    }
+}
+
+/// A comparison as its menu names it.
+fn comparison_name(comparison: Comparison) -> &'static str {
+    match comparison {
+        Comparison::Greater => tr!("Greater than (>)"),
+        Comparison::GreaterOrEqual => tr!("At least (≥)"),
+        Comparison::Less => tr!("Less than (<)"),
+        Comparison::LessOrEqual => tr!("At most (≤)"),
+        Comparison::Equal => tr!("Equal to (=)"),
+        Comparison::NotEqual => tr!("Not equal to (≠)"),
     }
 }
