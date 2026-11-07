@@ -1100,6 +1100,13 @@ pub struct SessionRun {
     pub reopened: bool,
     /// The session was lost during this run; the next run opens a new one.
     pub ended: bool,
+    /// The kept session held an open transaction and no longer answered, so
+    /// nothing ran: the server rolled that transaction back, and statements
+    /// meant for it would have committed one by one in a new session.
+    pub transaction_lost: bool,
+    /// A report's session came back with a transaction open, so it was
+    /// closed, which rolled the transaction back ([`query_in_context`]).
+    pub transaction_closed: bool,
     /// Where unqualified names resolve after the run, as the session reports
     /// it ([`Session::context`]). `None` when it could not be asked: the
     /// last result is still open for paging, or the session ended.
@@ -1111,13 +1118,22 @@ pub struct SessionRun {
     pub transaction: Option<TransactionStatus>,
 }
 
-/// Runs `requests` in order on the tab's `session`, opening one when there is
+/// A tab's kept session, and whether the tab knows it holds an open
+/// transaction.
+pub struct TabSession {
+    pub session: Option<Box<dyn Session>>,
+    pub holds_transaction: bool,
+}
+
+/// Runs `requests` in order on the tab's session, opening one when there is
 /// none, and hands the session back so state set by one run (`USE`, `SET`,
 /// temporary tables, a transaction) applies to the next. A failed statement
 /// keeps the session; only a session the driver could not bring back to a
 /// known state is closed. A kept session is checked with [`Session::ping`]
-/// before it is reused, and replaced when it no longer answers. A statement
-/// is never retried.
+/// before it is reused, and replaced when it no longer answers, unless it
+/// held an open transaction: then nothing runs
+/// ([`SessionRun::transaction_lost`]), since the statements would commit one
+/// by one in a new session. A statement is never retried.
 ///
 /// Each result is converted to [`ResultData`] row by row as the driver reads
 /// it, so driver cells are dropped here, on the runtime, and reading stops at
@@ -1133,12 +1149,16 @@ pub struct SessionRun {
 pub async fn query(
     connection: Option<ConnectionId>,
     input: ResolvedConnection,
-    session: Option<Box<dyn Session>>,
+    tab: TabSession,
     requests: Vec<QueryRequest>,
     memory_ceiling: usize,
     cancel: CancellationToken,
     progress: Option<Progress>,
 ) -> DriverResult<SessionRun> {
+    let TabSession {
+        session,
+        holds_transaction,
+    } = tab;
     let driver = match builtin_registry().and_then(|registry| registry.get(input.config.driver)) {
         Ok(driver) => driver,
         Err(error) => {
@@ -1156,6 +1176,7 @@ pub async fn query(
             memory_ceiling,
             progress,
             settle: false,
+            holds_transaction,
         },
         cancel,
     )
@@ -1185,6 +1206,7 @@ pub async fn query_with(
             memory_ceiling,
             progress,
             settle: false,
+            holds_transaction: false,
         },
         cancel,
     )
@@ -1218,7 +1240,8 @@ async fn run_query(
 /// it. The session is always settled after the run, even when the last
 /// result has more rows (a report does not page): asking the session where
 /// names resolve discards that result, and a `USE` the panel ran is undone
-/// for the next panel of the same session.
+/// for the next panel of the same session. A session left in a transaction
+/// is closed, which rolls it back ([`SessionRun::transaction_closed`]).
 pub async fn query_in_context(
     connection: Option<ConnectionId>,
     input: ResolvedConnection,
@@ -1246,6 +1269,7 @@ pub async fn query_in_context(
             memory_ceiling,
             progress: None,
             settle: true,
+            holds_transaction: false,
         },
         cancel,
     )
@@ -1274,6 +1298,7 @@ pub async fn query_in_context_with(
             memory_ceiling,
             progress: None,
             settle: true,
+            holds_transaction: false,
         },
         cancel,
     )
@@ -1299,7 +1324,16 @@ async fn in_context(
     for request in &mut statements.requests {
         request.options.context = context.clone();
     }
-    Ok(run_query(driver, connection, input, session, statements, cancel).await)
+    let mut run = run_query(driver, connection, input, session, statements, cancel).await;
+    // A report keeps no transaction: one its panel left open (or failed, or
+    // MySQL's autocommit off) would hold locks and a snapshot between runs
+    // and reach the next panel. Closing the session rolls it back, and the
+    // panel says so.
+    if !matches!(run.transaction, None | Some(TransactionStatus::Idle)) {
+        close_session(run.session.take()).await;
+        run.transaction_closed = true;
+    }
+    Ok(run)
 }
 
 /// The span of a run: the local log's fields (`driver`, `statements`) and,
@@ -1386,6 +1420,9 @@ struct Statements {
     /// Ask the session's context and transaction even when the last result
     /// is still open, discarding it (a report never pages).
     settle: bool,
+    /// The kept session holds an open transaction: if it was lost, the run
+    /// stops instead of running the statements on a new session.
+    holds_transaction: bool,
 }
 
 async fn run_statements(
@@ -1400,12 +1437,15 @@ async fn run_statements(
         memory_ceiling,
         progress,
         settle,
+        holds_transaction,
     } = statements;
     let mut run = SessionRun {
         batch: Err(DriverError::cancelled()),
         session: None,
         reopened: false,
         ended: false,
+        transaction_lost: false,
+        transaction_closed: false,
         context: None,
         transaction: None,
     };
@@ -1414,8 +1454,14 @@ async fn run_statements(
         run.session = session;
         return run;
     }
-    let (session, reopened) = session_for_run(&*driver, &input, session, &cancel).await;
-    run.reopened = reopened;
+    let (session, lost) =
+        session_for_run(&*driver, &input, session, &cancel, !holds_transaction).await;
+    if lost && holds_transaction {
+        run.ended = true;
+        run.transaction_lost = true;
+    } else {
+        run.reopened = lost;
+    }
     let mut session = match session {
         Ok(session) => session,
         Err(error) => {
@@ -1514,14 +1560,26 @@ async fn run_statements(
     run
 }
 
+/// Why a run on a tab whose session held an open transaction did not start:
+/// that session no longer answers, so the server rolled the transaction
+/// back, and a new session would commit each statement on its own.
+fn transaction_lost() -> DriverError {
+    DriverError::new(
+        ErrorCode::Connection,
+        "The session that held the open transaction no longer answers, so the server rolled the transaction back. Nothing ran.",
+    )
+}
+
 /// The tab's kept session when it still answers its ping, otherwise a new
-/// one; `true` when a kept session had to be replaced, so the caller tells
-/// the user that session state started over.
+/// one; `true` when a kept session was lost, so the caller tells the user
+/// that session state started over. A lost session is not replaced unless
+/// `replace`: the run then fails with [`transaction_lost`].
 async fn session_for_run(
     driver: &dyn Driver,
     input: &ResolvedConnection,
     session: Option<Box<dyn Session>>,
     cancel: &CancellationToken,
+    replace: bool,
 ) -> (DriverResult<Box<dyn Session>>, bool) {
     let mut reopened = false;
     let system = db_system(input.config.driver);
@@ -1534,8 +1592,12 @@ async fn session_for_run(
                 if let Err(error) = &pinged {
                     record_error(&span, error);
                 }
-                tracing::debug!("kept session no longer answers; opening another");
                 close_session(Some(session)).await;
+                if !replace {
+                    tracing::debug!("kept session holding a transaction no longer answers");
+                    return (Err(transaction_lost()), true);
+                }
+                tracing::debug!("kept session no longer answers; opening another");
                 reopened = true;
             }
         }
@@ -2121,6 +2183,7 @@ mod tests {
                 memory_ceiling: crate::result::DEFAULT_MEMORY_CEILING,
                 progress: None,
                 settle: false,
+                holds_transaction: false,
             },
             CancellationToken::new(),
         )
@@ -2589,6 +2652,103 @@ mod tests {
         assert!(run.batch.is_err() && cells.is_empty());
         let (_, cells) = run_on(&driver, run.session, &["SELECT"]).await;
         assert_eq!(cells, ["2:"]);
+    }
+
+    #[tokio::test]
+    async fn a_lost_session_holding_a_transaction_is_not_replaced() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let driver = Arc::new(StateDriver::default());
+        driver.dead.store(true, SeqCst);
+        let (run, _) = run_on(&driver, None, &["BEGIN"]).await;
+        assert_eq!(
+            run.transaction,
+            Some(TransactionStatus::Open { changes: None })
+        );
+        driver.dead.store(false, SeqCst);
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({}),
+            },
+            credentials: Credentials::default(),
+        };
+        // The statements were meant for the transaction: in a new session
+        // they would commit one by one, so nothing runs.
+        let run = run_query(
+            driver.clone(),
+            None,
+            input,
+            run.session,
+            Statements {
+                requests: vec![QueryRequest {
+                    parameters: Vec::new(),
+                    sql: "SET schema=sales".into(),
+                    options: ExecutionOptions::default(),
+                }],
+                memory_ceiling: crate::result::DEFAULT_MEMORY_CEILING,
+                progress: None,
+                settle: false,
+                holds_transaction: true,
+            },
+            CancellationToken::new(),
+        )
+        .await;
+        assert!(run.transaction_lost && run.ended && !run.reopened);
+        assert!(run.session.is_none());
+        assert_eq!(
+            run.batch.as_ref().err().map(|error| error.code),
+            Some(ErrorCode::Connection)
+        );
+        assert_eq!(driver.opened.load(SeqCst), 1, "no session was opened");
+        // The next run, with nothing to keep, opens a new session.
+        let (run, cells) = run_on(&driver, None, &["SELECT"]).await;
+        assert_eq!(cells, ["2:"]);
+        assert!(!run.transaction_lost);
+    }
+
+    #[tokio::test]
+    async fn a_report_session_left_in_a_transaction_is_closed() {
+        let driver = Arc::new(StateDriver::default());
+        let input = ResolvedConnection {
+            config: ConnectionConfig {
+                driver: DriverKind::Postgres,
+                options: serde_json::json!({}),
+            },
+            credentials: Credentials::default(),
+        };
+        let panel = |sql: &str| {
+            vec![QueryRequest {
+                parameters: Vec::new(),
+                sql: sql.into(),
+                options: ExecutionOptions::default(),
+            }]
+        };
+        let run = query_in_context_with(
+            driver.clone(),
+            input.clone(),
+            SessionContext::default(),
+            None,
+            panel("BEGIN"),
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(run.transaction_closed && run.session.is_none());
+        // A panel that leaves none keeps its session for the next run.
+        let run = query_in_context_with(
+            driver.clone(),
+            input,
+            SessionContext::default(),
+            None,
+            panel("SELECT"),
+            crate::result::DEFAULT_MEMORY_CEILING,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert!(!run.transaction_closed && run.session.is_some());
+        assert_eq!(driver.opened.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

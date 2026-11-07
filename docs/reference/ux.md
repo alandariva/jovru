@@ -242,7 +242,20 @@ Rules:
 - No action leaves the UI without an answer: a click gives immediate visual
   feedback even when the result takes longer.
 - Dangerous actions ask for confirmation: deleting a connection, closing a tab
-  with a running query or an open transaction, copying more than 50 MiB.
+  with a running query or an open transaction, closing the application with
+  open transactions, copying more than 50 MiB.
+- Work is never committed or rolled back without the user being told:
+  - A run whose tab holds an open transaction does not start when the
+    session no longer answers: the server already rolled the transaction
+    back, and a new session would commit each statement on its own. The
+    notice bar says so and that nothing ran; the next run opens a new
+    session.
+  - When a run, a page read or an export loses the session while a
+    transaction was open, the notice bar says the server rolled it back.
+  - A report panel whose SQL leaves a transaction open (or failed, or
+    MySQL's autocommit off) has its session closed right after it, which
+    rolls the transaction back, and the panel says so: reports keep no
+    transactions between runs or panels.
 - A run shortcut never cancels by itself. Pressing `Ctrl Enter`,
   `Ctrl Shift Enter` or `Ctrl Alt Enter` while a run is active asks "Cancel
   the running query?" (for `Ctrl Alt Enter`, "Stop the whole run?") with
@@ -271,6 +284,9 @@ Rules:
 - Closing a tab with a running query asks first: closing cancels the query.
   Closing one with an open transaction asks too: closing rolls it back.
   Closing one whose SQL is not in the saved queries asks too: closing loses it.
+- Closing the application (the title bar's X, `Alt F4`, the window manager)
+  while query tabs hold open transactions asks first, naming how many:
+  closing rolls them back (**Close and roll back** or **Keep open**).
 - Moving a tab to another connection (dragging it to another group, or
   choosing a connection in the editor toolbar) asks first: its results and
   session belong to the previous connection, and an open transaction is

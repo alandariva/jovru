@@ -513,8 +513,10 @@ impl Workspace {
                 match lease {
                     Some(lease) => {
                         let current = self.session_lease == Some(lease);
+                        // A session lost on the way took the tab's
+                        // transaction with it; the notice names it.
+                        let open = self.transaction.is_open();
                         if current {
-                            self.session_notice(run.reopened, run.ended);
                             if run.reopened {
                                 self.transaction = Transaction::AutoCommit;
                             }
@@ -522,8 +524,17 @@ impl Workspace {
                         }
                         self.session_context(lease, run.context, cx);
                         self.return_session(lease, run.session);
-                        if current && self.session.is_none() {
-                            self.transaction = Transaction::AutoCommit;
+                        if current {
+                            let ended = self.session.is_none();
+                            let lost = SessionLoss {
+                                reopened: run.reopened,
+                                ended: run.ended || ended,
+                                transaction: false,
+                            };
+                            self.session_notice(lost, open && (run.reopened || ended));
+                            if ended {
+                                self.transaction = Transaction::AutoCommit;
+                            }
                         }
                     }
                     None => {

@@ -108,7 +108,11 @@ Started without the entry, the window keeps the desktop's generic icon.
   report it, including one opened in a procedure or rolled back by the
   server; whether a MySQL or SQLite transaction changed data is inferred
   from the statements the tab ran, and Databricks shows no transaction
-  state. Limits: a row limit per
+  state. Nothing is committed or rolled back without saying so: a tab whose
+  session was lost while holding a transaction runs nothing until you run
+  again, closing a tab or the application with open transactions asks
+  first, and a report panel that leaves a transaction open has it rolled
+  back and says so. Limits: a row limit per
   statement set in each connection (1,000 by default, up to 100,000), 256 MB
   per result and a 300 s timeout. The run button can cancel.
 - Tabs keep their SQL. Moving a tab to another group changes its connection and

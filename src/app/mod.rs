@@ -431,6 +431,9 @@ struct AppView {
     /// Focus of each explorer node shown so far, so the arrow keys can move
     /// it. Rendering takes `&self`, hence the cell.
     node_focus: std::cell::RefCell<HashMap<(usize, ObjectPath), FocusHandle>>,
+    /// The user confirmed closing the window although transactions were
+    /// open; it closes without asking again.
+    closing: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -685,6 +688,7 @@ impl AppView {
             selected_bounds: Default::default(),
             selection_before_search: None,
             node_focus: std::cell::RefCell::new(HashMap::new()),
+            closing: false,
             _subscriptions: vec![
                 // The last edits are written before the application exits.
                 // Closing the window releases this view before GPUI runs the
@@ -705,6 +709,13 @@ impl AppView {
                 assistant_resize,
             ],
         };
+        // The system's close (the title bar's X on Windows, Alt F4, the
+        // window manager) asks first when transactions are open.
+        let view = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            view.update(cx, |this, cx| this.may_close(window, cx))
+                .unwrap_or(true)
+        });
         for field in [
             &app.connection_name,
             &app.connection_host,
@@ -1421,6 +1432,51 @@ impl AppView {
             self.push_context_choices(index, cx);
         }
         self.sync_reports(cx);
+    }
+
+    /// Whether the window may close now. While query tabs hold open
+    /// transactions it asks first, since closing rolls them back, and closes
+    /// the window once the user confirms. Reports keep no transactions.
+    fn may_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.closing {
+            return true;
+        }
+        let open = self
+            .panels
+            .values()
+            .filter(|panel| panel.read(cx).has_open_transaction())
+            .count();
+        if open == 0 {
+            return true;
+        }
+        let (title, description) = if open == 1 {
+            (
+                tr!("A transaction is open in a tab.").to_string(),
+                tr!("Closing Jykre Studio rolls it back.").to_string(),
+            )
+        } else {
+            (
+                tr!("Transactions are open in {0} tabs.", open),
+                tr!("Closing Jykre Studio rolls them back.").to_string(),
+            )
+        };
+        let view = cx.entity().downgrade();
+        confirm(
+            window,
+            cx,
+            Confirmation {
+                title,
+                description,
+                ok: tr!("Close and roll back"),
+                cancel: tr!("Keep open"),
+                focus: ConfirmFocus::Dialog,
+            },
+            move |window, cx| {
+                let _ = view.update(cx, |this, _| this.closing = true);
+                window.remove_window();
+            },
+        );
+        false
     }
 
     /// Closes a tab, asking first when a query is running in it (closing
@@ -3022,6 +3078,19 @@ impl Render for AppView {
             }))
             .child(
                 TitleBar::new()
+                    // On Linux the title bar draws its own X, which would
+                    // remove the window without asking.
+                    .on_close_window({
+                        let view = cx.entity().downgrade();
+                        move |_, window, cx| {
+                            let close = view
+                                .update(cx, |this, cx| this.may_close(window, cx))
+                                .unwrap_or(true);
+                            if close {
+                                window.remove_window();
+                            }
+                        }
+                    })
                     .h(px(46.))
                     .bg(rgb(colors().chrome))
                     .border_b_1()

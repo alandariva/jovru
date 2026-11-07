@@ -262,7 +262,11 @@ sequenceDiagram
   sessions by authentication identity ([ADR-0005](../adr/0005-databricks-through-cli-and-rest.md)).
   The workspace hands it to the run and takes it back with the result; a
   session that comes back from a superseded run, or after the connection
-  changed, is closed.
+  changed, is closed. A kept session that no longer answers its ping is
+  replaced, unless the tab holds an open transaction in it
+  (`backend::TabSession`): then nothing runs (`SessionRun::transaction_lost`),
+  since the statements meant for that transaction would commit one by one in
+  a new session.
 - Statements run in order and stop at the first failure. Whether earlier
   statements are committed depends on the session's transaction, which the
   driver reports after the run (`Session::transaction`) and the workspace
@@ -346,7 +350,9 @@ its panels and closes its sessions.
    `backend::query_in_context` opens or reopens the session with the
    connection the driver gives for the context
    (`Driver::session_connection`: another database's for PostgreSQL), runs
-   the requests and always asks the session its context afterwards. Each
+   the requests and always asks the session its context and transaction
+   afterwards. A session left in a transaction is closed, which rolls it
+   back, and the panel says so (`SessionRun::transaction_closed`). Each
    driver binds the values (PostgreSQL with `set_config`, MySQL with a
    prepared `SET`, Databricks warehouses with the Statement API's
    `parameters`) and replaces each marker with a fixed reference to its value

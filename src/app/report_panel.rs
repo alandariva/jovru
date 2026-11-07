@@ -574,12 +574,21 @@ impl ReportPanel {
             PanelPhase::Cancelled => tr!("The panel was stopped.").to_owned(),
             _ => tr!("The panel failed: {0}", error),
         });
-        self.notice = outcome.reopened.then(|| {
-            Feedback::new(
+        self.notice = if outcome.transaction_closed {
+            Some(Feedback::new(
                 Tone::Warning,
-                tr!("The connection was lost and opened again; session settings started over."),
-            )
-        });
+                tr!(
+                    "This panel's SQL left a transaction open. Reports keep no transactions, so its session was closed and the transaction rolled back."
+                ),
+            ))
+        } else {
+            outcome.reopened.then(|| {
+                Feedback::new(
+                    Tone::Warning,
+                    tr!("The connection was lost and opened again; session settings started over."),
+                )
+            })
+        };
         if outcome.info.adopt
             && self.fresh
             && self.panel.chart.is_none()

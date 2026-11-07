@@ -264,7 +264,10 @@ async fn write(
                     return Err(error);
                 }
             };
-            let (session, reopened) = session_for_run(&*driver, &input, session, cancel).await;
+            // Only a read runs again, so a lost session is replaced; the tab
+            // says whether a transaction went with it.
+            let (session, reopened) =
+                session_for_run(&*driver, &input, session, cancel, true).await;
             run.reopened = reopened;
             let session = run.session.insert(session?);
             let read = parts

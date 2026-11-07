@@ -285,6 +285,9 @@ pub struct PanelOutcome {
     pub error: Option<DriverError>,
     /// The session had been lost and was opened again.
     pub reopened: bool,
+    /// The panel's SQL left a transaction open; its session was closed,
+    /// which rolled the transaction back.
+    pub transaction_closed: bool,
     /// The result's columns that hold numbers, for the chart's values.
     pub numeric: Vec<String>,
     /// The chart the result suggests.
@@ -308,6 +311,7 @@ pub fn settle(
     let (session, batch) = match run {
         Ok(run) => {
             outcome.reopened = run.reopened;
+            outcome.transaction_closed = run.transaction_closed;
             (run.session, run.batch)
         }
         Err(error) => (None, Err(error)),
@@ -1066,6 +1070,21 @@ mod tests {
         assert_eq!(closing.len(), 3, "idle sessions no panel uses close");
     }
 
+    #[test]
+    fn a_panel_that_left_a_transaction_says_its_session_was_closed() {
+        let info = JobInfo::default();
+        let (_, outcome) = settle(finished(vec![QueryResult::default()], None), info.clone());
+        assert!(!outcome.transaction_closed);
+        let closed = finished(vec![QueryResult::default()], None).map(|run| SessionRun {
+            session: None,
+            transaction_closed: true,
+            ..run
+        });
+        let (session, outcome) = settle(closed, info);
+        assert!(session.is_none() && outcome.transaction_closed);
+        assert_eq!(outcome.phase, PanelPhase::Succeeded);
+    }
+
     fn data(columns: &[(&str, &str)], rows: &[Vec<Option<&str>>]) -> ResultData {
         ResultData::from_rows(
             columns
@@ -1085,6 +1104,8 @@ mod tests {
             session: session(),
             reopened: false,
             ended: false,
+            transaction_lost: false,
+            transaction_closed: false,
             context: None,
             transaction: None,
         })

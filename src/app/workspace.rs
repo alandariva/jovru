@@ -1056,7 +1056,11 @@ impl Workspace {
                         }
                         this.return_session(lease, run.session);
                         if this.session.is_none() && this.session_lease == Some(lease) {
-                            this.session_notice(false, true);
+                            let ended = SessionLoss {
+                                ended: true,
+                                ..SessionLoss::default()
+                            };
+                            this.session_notice(ended, this.transaction.is_open());
                             this.transaction = Transaction::AutoCommit;
                         }
                         run.page
@@ -1214,6 +1218,12 @@ impl Workspace {
             // The previous run has ended (a stopping one blocks new runs), so
             // its session is back unless it was lost.
             let (session, lease) = self.lease_session(true);
+            // A kept session that holds the tab's transaction is not
+            // silently replaced if it was lost.
+            let tab_session = backend::TabSession {
+                session,
+                holds_transaction: self.transaction.is_open(),
+            };
             let before = options.context.clone();
             // COMMIT and ROLLBACK from the toolbar are logged in Messages,
             // not in the history of what the user ran.
@@ -1243,7 +1253,7 @@ impl Workspace {
                 let result = backend::run(backend::query(
                     connection,
                     input,
-                    session,
+                    tab_session,
                     requests,
                     DEFAULT_MEMORY_CEILING,
                     cancel,
@@ -1261,14 +1271,19 @@ impl Workspace {
                     let current = this.session_lease == Some(lease);
                     let dialect = this.run.dialect();
                     let mut reported = None;
+                    // How the session fared, told once the transaction is
+                    // known.
+                    let mut lost = SessionLoss::default();
                     let result = match result {
                         Ok(run) => {
                             reported = run.transaction;
-                            if current {
-                                this.session_notice(run.reopened, run.ended);
-                                if run.reopened {
-                                    this.transaction = Transaction::AutoCommit;
-                                }
+                            lost = SessionLoss {
+                                reopened: run.reopened,
+                                ended: run.ended,
+                                transaction: run.transaction_lost,
+                            };
+                            if current && run.reopened {
+                                this.transaction = Transaction::AutoCommit;
                             }
                             this.session_context(lease, run.context, cx);
                             this.return_session(lease, run.session);
@@ -1341,7 +1356,12 @@ impl Workspace {
                             }
                         }
                         Err(error) => {
-                            if current && let Some((_, sql)) = queries.get(this.started_position) {
+                            // When the session holding the transaction was
+                            // lost, no statement was sent.
+                            if current
+                                && !lost.transaction
+                                && let Some((_, sql)) = queries.get(this.started_position)
+                            {
                                 this.transaction = this.transaction.after(sql, false, dialect);
                                 this.ran(sql, logged_failure(&error), None, history, cx);
                             }
@@ -1354,9 +1374,11 @@ impl Workspace {
                     // What the server reports wins over what the statements
                     // suggest; a session that did not come back takes its
                     // transaction with it.
+                    let mut rolled_back = false;
                     if current {
                         this.transaction = this.transaction.reported(reported);
                         if this.session.is_none() {
+                            rolled_back = this.transaction.is_open();
                             this.transaction = Transaction::AutoCommit;
                         }
                     }
@@ -1365,6 +1387,11 @@ impl Workspace {
                         && let Some(report) = failed
                     {
                         this.notice = Some(Feedback::new(Tone::Error, report.summary()));
+                    }
+                    // A lost session, and the transaction it took with it,
+                    // matters more than which statement failed.
+                    if current {
+                        this.session_notice(lost, rolled_back);
                     }
                     this.clear_stopping_notice();
                     this.show_active(cx);
@@ -3298,6 +3325,18 @@ struct AssistantQuery {
     cancel: CancellationToken,
 }
 
+/// How the tab's session fared in a run, a page read or an export.
+#[derive(Clone, Copy, Debug, Default)]
+struct SessionLoss {
+    /// The kept session no longer answered and a new one was used.
+    reopened: bool,
+    /// The session was lost; the next run opens a new one.
+    ended: bool,
+    /// The kept session held an open transaction and no longer answered, so
+    /// nothing ran.
+    transaction: bool,
+}
+
 /// What the editor header says about the tab's session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionIndicator {
@@ -3633,9 +3672,36 @@ impl Workspace {
     }
 
     /// Tells the user when the session state they may rely on (current
-    /// schema, temporary tables, an open transaction) started over.
-    fn session_notice(&mut self, reopened: bool, ended: bool) {
-        if ended {
+    /// schema, temporary tables, an open transaction) started over, naming
+    /// the transaction the server rolled back with it (`rolled_back`).
+    fn session_notice(&mut self, lost: SessionLoss, rolled_back: bool) {
+        let SessionLoss {
+            reopened,
+            ended,
+            transaction,
+        } = lost;
+        if transaction {
+            self.notice = Some(Feedback::new(
+                Tone::Warning,
+                tr!(
+                    "The session that held the open transaction no longer answers, so the server rolled the transaction back and its uncommitted changes are lost. Nothing ran: run again to continue in a new session."
+                ),
+            ));
+        } else if ended && rolled_back {
+            self.notice = Some(Feedback::new(
+                Tone::Warning,
+                tr!(
+                    "The session was closed, so the server rolled back its open transaction and any uncommitted changes. The next run opens a new session, and session settings such as the current schema start over."
+                ),
+            ));
+        } else if reopened && rolled_back {
+            self.notice = Some(Feedback::new(
+                Tone::Warning,
+                tr!(
+                    "The previous session no longer answered, so the server rolled back its open transaction and any uncommitted changes. A new session was used, and session settings such as the current schema started over."
+                ),
+            ));
+        } else if ended {
             self.notice = Some(Feedback::new(
                 Tone::Warning,
                 tr!(
