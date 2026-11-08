@@ -9,8 +9,8 @@ A native desktop workspace written in Rust and [GPUI](https://www.gpui.rs/) to
 register PostgreSQL, MySQL, Databricks and SQLite connections, explore metadata
 and run real SQL.
 
-> **Status:** early prototype; `0.2.0` (in preparation) makes daily use
-> reliable and adds saved queries as `.sql` files, reopening closed tabs and
+> **Status:** early prototype; `0.2.0` makes daily use reliable, updates
+> itself from signed releases, and adds saved queries as `.sql` files, reopening closed tabs and
 > explorer favorites. Windows is the primary platform; Linux is validated
 > since 0.2.0 (Ubuntu 24.04 on X11). The AI assistant talks to Anthropic, OpenAI, an
 > OpenAI-compatible server or Ollama, once set up in Preferences; it sees
