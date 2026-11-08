@@ -6,7 +6,7 @@
 Q-01…Q-14 ([section 12](#12-decisions-required-from-the-maintainer)),
 ADR-0033 and ADR-0034 accepted. Phase 3 still waits for the supervision
 dependency (Q-11) and phase 5 for its revision of this document
-**Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is partial)
+**Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
 
@@ -778,7 +778,7 @@ and the measured budgets.
 | Q-08 | Typed remote-completion metadata in `DriverOutcome`, or conservative uncertainty? | Conservative in phase 1; the PoC measures the need | Phase 1 (optional) | **Conservative**; no contract change |
 | Q-09 | Keep `native_flow`, or replace it with linear chaining? | Replace; if revived, compile it to the same plan | Roadmap | **Replace** |
 | Q-10 | Treat external code as explicitly trusted, with the UI explaining that grants protect Studio APIs, not the machine? | Yes; warn on import and first run | Phase 3 | **Yes** |
-| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | **Evaluate formally**; the proposal is still to be written and approved |
+| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | **Evaluate formally**; [proposal](process-supervision-dependency.md) written 2026-11-08, awaiting approval |
 | Q-12 | Accept per-run IPC tokens in the environment, visible to same-user processes during the run? | Accept, with `hello` consumption and documented risk | Phase 4 | **Token through stdin**, not the environment (section 9.2) |
 | Q-13 | Keep the SDK out of the repository until `jjp/1` stabilizes? | Yes (D24) | Phase 4 | **Yes** |
 | Q-14 | Durable scheduling consent and execution while the application is closed? | Design with scheduling | Phase 7 | **Only while the application is open**; execution while it is closed is excluded |

@@ -2,7 +2,7 @@
 
 **Date:** November 7, 2026
 **Approval:** Proposed
-**Implementation:** Partial — code and basic-gate experiments complete; PostgreSQL and MySQL live experiments written, not yet run ([Findings](#8-findings))
+**Implementation:** Complete on 2026-11-08 ([Findings](#8-findings)); Databricks not run, as planned
 **Specification:** [Automation engine specification](automation-engine-specification.md), version 1.1
 
 ## 1. Purpose
@@ -123,7 +123,7 @@ closes; it is not worked around in phase 1.
 | Check | Result |
 | --- | --- |
 | `cargo xtask check` | Passed (Linux) |
-| `cargo xtask check --full` | **Not run**: no Docker on the machine used, and `cargo-deny` is not installed. The four live tests are compiled and ignored |
+| `cargo xtask check --full` | Passed on 2026-11-08 (Linux, Docker 29.1, Compose 2.40): the four automation live tests passed on PostgreSQL 14 and 18 and MySQL 8.4 and 9.7, with every existing live test, the benchmarks in quick mode and `cargo deny` |
 | Databricks | Not run, as planned (no profile in the gate) |
 | E7 repeated | The 200-iteration race passed in three further runs |
 
@@ -132,27 +132,33 @@ closes; it is not worked around in phase 1.
 | Hypothesis | Result | Evidence |
 | --- | --- | --- |
 | H1 | **Confirmed** (SQLite; PostgreSQL dialect checked offline) | `reports::params::requests` binds `ParameterSpec` values; markers in strings, comments, quoted names and dollar quotes and the `::` cast are left alone, and the SQL is sent as written. Two statements, or none, are refused before a session opens (the scripted driver opened none). A hostile value reached SQLite as a value |
-| H2 | **Confirmed on SQLite**; PostgreSQL and MySQL pending `--full` | `UPDATE … RETURNING` over 10,000 rows with a 1,000-row limit: `Succeeded`, `truncated`, 1,000 rows kept, 9,000 read and discarded, every row updated once. The same write past a 300 ms deadline: `Failed`/`Timeout`, `effect_unknown`, rows changed together or not at all. A `SELECT` above the limit: truncated, nothing drained, `effect_unknown` clear. No `DriverOutcome` change was needed |
-| H3 | **Confirmed on SQLite**, with a limitation; PostgreSQL and MySQL pending `--full` | The job's session does not see the tab's uncommitted row, and the tab's transaction is still open with its row afterwards. SQLite has one writer, so a job that writes while a tab holds a write transaction waits for the lock (4 s) and fails with `Database` and its effect known; it never commits or rolls back the tab's work |
+| H2 | **Confirmed** on SQLite, PostgreSQL 14/18 and MySQL 8.4/9.7 | `UPDATE … RETURNING` (a `CALL` that writes and then returns rows on MySQL) over 10,000 rows with a 1,000-row limit: `Succeeded`, `truncated`, 1,000 rows kept, 9,000 read and discarded, every row updated once. The same write past a 300 ms deadline: `Failed`/`Timeout`, `effect_unknown`, rows changed together or not at all. A `SELECT` above the limit: truncated, nothing drained, `effect_unknown` clear. No `DriverOutcome` change was needed |
+| H3 | **Confirmed** on every driver, with a SQLite limitation | On PostgreSQL and MySQL the job's write commits on its own while the tab's transaction keeps its row, and the tab's rollback leaves the job's row. On SQLite, the job's session does not see the tab's uncommitted row, and the tab's transaction is still open with its row afterwards. SQLite has one writer, so a job that writes while a tab holds a write transaction waits for the lock (4 s) and fails with `Database` and its effect known; it never commits or rolls back the tab's work |
 | H4 | **Confirmed** | Third run refused at once with the global limit, second run on a connection refused with the connection; Stop ends a run within a second and closes its session; 200 runs with Stop and the deadline fired together each produced exactly one outcome, the same in the history, with every session closed; dropping every handle leaves the run to finish; `shutdown` stops every run, waits, and refuses new ones |
-| H5 | **Confirmed** on SQLite and through a scripted exact decimal; PostgreSQL and MySQL `DECIMAL(38, 18)` pending `--full` | `ResultData` already keeps ordered columns with duplicate names, rows by position, the database's text and NULL apart from the text `NULL`. Phase 1 needs no new output type |
+| H5 | **Confirmed** on SQLite, PostgreSQL and MySQL, including `DECIMAL(38, 18)` kept as its exact text | `ResultData` already keeps ordered columns with duplicate names, rows by position, the database's text and NULL apart from the text `NULL`. Phase 1 needs no new output type |
 
 ### 8.4 Measurements (section 5)
 
-SQLite only, release build, `examples/automation_drain.rs`, each row an
-`INTEGER` and 200 bytes of text:
+Release build of `examples/automation_drain.rs`, each row an `INTEGER` and
+200 bytes of text, the databases in Docker on the same Linux machine (8
+cores), 1,000 rows kept:
 
-| Rows returned | First page to confirmed end | Rows/s drained | Result held | Process peak |
+| Database | Rows returned | First page to confirmed end | Rows/s drained | Process peak |
 | --- | --- | --- | --- | --- |
-| 10,000 | 35 ms | 257,000 | 211 KB | 10.8 MB |
-| 100,000 | 389 ms | 254,000 | 211 KB | 13.7 MB |
-| 1,000,000 | 3,941 ms | 253,000 | 211 KB | 17.9 MB |
+| SQLite | 10,000 / 100,000 / 1,000,000 | 35 ms / 389 ms / 3,941 ms | 253,000–257,000 | 10.8–17.9 MB |
+| PostgreSQL 14 | 10,000 / 100,000 / 1,000,000 | 10 ms / 107 ms / 1,033 ms | 882,000–967,000 | 7.4–7.6 MB |
+| PostgreSQL 18 | 10,000 / 100,000 / 1,000,000 | 10 ms / 143 ms / 1,112 ms | 691,000–898,000 | 7.3–7.7 MB |
+| MySQL 8.4 | 10,000 / 100,000 / 1,000,000 | 13 ms / 169 ms / 1,899 ms | 526,000–652,000 | 7.8–8.5 MB |
+| MySQL 9.7 | 10,000 / 100,000 / 1,000,000 | 20 ms / 186 ms / 1,676 ms | 435,000–596,000 | 7.8–8.6 MB |
+
+A result held at the row limit takes 211 KB whatever the size: the drain
+keeps nothing, and peak memory stays flat on PostgreSQL and MySQL.
 
 The result held stays at the row limit whatever the size: the drain keeps
-nothing. SQLite applies every change of an `UPDATE … RETURNING` in its first
-step and buffers what it returns, so on SQLite the drain only reads. The
-PostgreSQL and MySQL numbers come from running the same example against the
-gate's fixtures, which is still to do.
+SQLite applies every change of an `UPDATE … RETURNING` in its first step
+and buffers what it returns, so on SQLite the drain only reads. A million
+returned rows were confirmed in under 2 s on PostgreSQL and MySQL and under
+4 s on SQLite, inside the drivers' 5 s recovery window.
 
 ### 8.5 What phase 1 inherits
 
@@ -200,6 +206,14 @@ gate's fixtures, which is still to do.
   on a SQLite file that a tab is writing waits up to 4 s and fails. Document
   it beside the per-connection limit (section 5.3).
 - `Interrupted` is not implemented: it needs durable history and recovery.
+- **MySQL `CALL` results lose their columns.** The MySQL driver prepares a
+  `CALL`, gets no column metadata, and then sends the rows without columns:
+  the result has rows but no columns or values, and `rows_affected` reads
+  `Some(0)`. Confirmed with a direct session on MySQL 8.4; it affects SQL
+  tabs and reports today, not only jobs. The completion rule is unaffected
+  (the rows are read to the end and counted), but a SQL → script chain fed by
+  a procedure would get nothing. It needs a driver fix of its own before
+  phase 5.
 
 ### 8.7 Recommendations
 
@@ -207,14 +221,13 @@ gate's fixtures, which is still to do.
   300 s timeout. The limits behaved as specified; a run costs one connection,
   opened and closed with it.
 - **Q-08:** keep the conservative rule in phase 1, with no change to
-  `DriverOutcome`. On SQLite the drain confirmed a million returned rows in
-  under 4 s. Revisit only if the PostgreSQL or MySQL measurements show a
-  realistic result that cannot be confirmed within the 5 s recovery window.
+  `DriverOutcome`. The drain confirmed a million returned rows in at most
+  1.9 s on PostgreSQL and MySQL and 3.9 s on SQLite. Revisit only for
+  Databricks, if its terminal state ever stops arriving with the rows.
 
-### 8.8 Left to finish the proof of concept
+### 8.8 Exit
 
-1. Run `cargo xtask check --full` on a machine with Docker and `cargo-deny`,
-   and record the four live tests' results.
-2. Run `examples/automation_drain.rs` against PostgreSQL 14/18 and MySQL
-   8.4/9.7 and add the numbers to 8.4. On MySQL, E2 and E3 also show whether
-   a `CALL` that writes and then returns rows reaches the sink as expected.
+Every hypothesis is confirmed, none refuted (section 7). The proof of
+concept is the base of phase 1, with the changes of 8.6 already folded into
+the specification, version 1.2. Left outside it: Databricks (no profile in
+the gate) and the MySQL `CALL` columns, a driver fix of its own.
