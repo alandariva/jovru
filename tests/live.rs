@@ -311,7 +311,11 @@ async fn a_cancelled_export_leaves_the_file_as_it_was_and_the_session_answers() 
 
 mod automation {
     use super::{Fixture, fixture, options};
-    use jykre::automation::{Cause, Engine, RunOutcome, RunRequest, RunState, SqlJob};
+    use jykre::automation::definition::{JobBody, JobDefinition};
+    use jykre::automation::{
+        Availability, Cause, ConnectionInput, Engine, JobRequest, RunOutcome, RunState, RunStatus,
+        SqlOutcome,
+    };
     use jykre::drivers::*;
     use jykre::result::{DEFAULT_MEMORY_CEILING, ResultBuilder, ResultData};
     use std::collections::HashMap;
@@ -376,22 +380,57 @@ mod automation {
         ]
     }
 
-    async fn run(engine: &Engine, fixture: &Fixture, job: SqlJob) -> Arc<RunOutcome> {
+    /// An engine on a data folder of its own.
+    async fn engine() -> Engine {
+        let dir =
+            std::env::temp_dir().join(format!("jykre-live-automation-{}", ConnectionId::new()));
+        let engine = Engine::start(tokio::runtime::Handle::current(), dir);
+        assert_eq!(engine.started().await, Availability::Ready);
+        engine
+    }
+
+    /// A draft run of `sql`, with its deadline.
+    async fn run(
+        engine: &Engine,
+        fixture: &Fixture,
+        sql: impl Into<String>,
+        timeout: Option<Duration>,
+    ) -> Arc<RunOutcome> {
+        let connection = ConnectionId::new();
+        let mut job = JobDefinition::new_sql("live", Some(connection));
+        if let JobBody::Sql(body) = &mut job.body {
+            body.sql = sql.into();
+            if let Some(timeout) = timeout {
+                body.timeout_ms = timeout.as_millis() as u64;
+            }
+        }
         let mut handle = engine
-            .submit(RunRequest {
-                job,
-                driver: fixture.driver.clone(),
-                connection: fixture.input.clone(),
+            .submit(JobRequest {
+                definition: job,
+                stored: None,
                 values: HashMap::new(),
+                connection: Some(ConnectionInput {
+                    id: connection,
+                    driver: fixture.driver.clone(),
+                    resolved: fixture.input.clone(),
+                    revision: 1,
+                }),
             })
             .unwrap();
-        handle.finished().await.unwrap()
+        match handle.finished().await {
+            RunStatus::Finished(outcome) => outcome,
+            other => unreachable!("the run did not finish: {other:?}"),
+        }
+    }
+
+    fn result(outcome: &RunOutcome) -> &SqlOutcome {
+        outcome.sql.as_ref().unwrap()
     }
 
     async fn scalar(engine: &Engine, fixture: &Fixture, sql: String) -> Option<String> {
-        let outcome = run(engine, fixture, SqlJob::new(ConnectionId::new(), sql)).await;
+        let outcome = run(engine, fixture, sql, None).await;
         assert_eq!(outcome.state, RunState::Succeeded, "{:?}", outcome.error);
-        outcome.data.value(0, 0).map(str::to_owned)
+        self::result(&outcome).data.value(0, 0).map(str::to_owned)
     }
 
     /// The distinct values of `v`, comma-separated.
@@ -410,7 +449,7 @@ mod automation {
     #[ignore = "live: needs JYKRE_TEST_DRIVER and JYKRE_TEST_PORT from cargo xtask check --full"]
     async fn a_job_write_beyond_the_limit_completes() {
         let fixture = fixture();
-        let engine = Engine::new(tokio::runtime::Handle::current());
+        let engine = engine().await;
         let table = name("job_e2");
         let procedure = name("job_e2_p");
         let mut statements = numbers(&fixture, &table);
@@ -424,13 +463,13 @@ mod automation {
             format!("UPDATE {table} SET v = v + 1 RETURNING id")
         };
         setup(&fixture, &statements).await;
-        let outcome = run(&engine, &fixture, SqlJob::new(ConnectionId::new(), sql)).await;
+        let outcome = run(&engine, &fixture, sql, None).await;
         assert_eq!(outcome.state, RunState::Succeeded, "{:?}", outcome.error);
         assert!(!outcome.effect_unknown);
-        assert!(outcome.truncated);
-        assert_eq!(outcome.data.row_count(), 1_000);
-        assert_eq!(outcome.rows_discarded, 9_000);
-        assert!(outcome.completion.is_some());
+        assert!(result(&outcome).truncated);
+        assert_eq!(result(&outcome).data.row_count(), 1_000);
+        assert_eq!(result(&outcome).rows_discarded, 9_000);
+        assert!(result(&outcome).completion.is_some());
         assert_eq!(
             scalar(&engine, &fixture, distinct_v(&fixture, &table))
                 .await
@@ -452,7 +491,7 @@ mod automation {
     #[ignore = "live: needs JYKRE_TEST_DRIVER and JYKRE_TEST_PORT from cargo xtask check --full"]
     async fn a_job_write_past_its_deadline_is_never_run_again() {
         let fixture = fixture();
-        let engine = Engine::new(tokio::runtime::Handle::current());
+        let engine = engine().await;
         let table = name("job_e3");
         let procedure = name("job_e3_p");
         let mut statements = numbers(&fixture, &table);
@@ -466,9 +505,7 @@ mod automation {
             format!("UPDATE {table} SET v = v + 1 RETURNING id, pg_sleep(0.001)")
         };
         setup(&fixture, &statements).await;
-        let mut job = SqlJob::new(ConnectionId::new(), sql);
-        job.timeout = Duration::from_millis(500);
-        let outcome = run(&engine, &fixture, job).await;
+        let outcome = run(&engine, &fixture, sql, Some(Duration::from_millis(500))).await;
         assert_eq!(outcome.state, RunState::Failed);
         assert_eq!(outcome.cause, Some(Cause::Timeout));
         assert!(outcome.effect_unknown);
@@ -487,7 +524,7 @@ mod automation {
     #[ignore = "live: needs JYKRE_TEST_DRIVER and JYKRE_TEST_PORT from cargo xtask check --full"]
     async fn a_job_leaves_a_tab_transaction_alone() {
         let fixture = fixture();
-        let engine = Engine::new(tokio::runtime::Handle::current());
+        let engine = engine().await;
         let (a, b) = (name("job_e5_a"), name("job_e5_b"));
         setup(
             &fixture,
@@ -507,7 +544,8 @@ mod automation {
         let write = run(
             &engine,
             &fixture,
-            SqlJob::new(ConnectionId::new(), format!("INSERT INTO {b} VALUES (1)")),
+            format!("INSERT INTO {b} VALUES (1)"),
+            None,
         )
         .await;
         assert_eq!(write.state, RunState::Succeeded, "{:?}", write.error);
@@ -547,13 +585,13 @@ mod automation {
     #[ignore = "live: needs JYKRE_TEST_DRIVER and JYKRE_TEST_PORT from cargo xtask check --full"]
     async fn a_job_result_keeps_names_decimals_and_null() {
         let fixture = fixture();
-        let engine = Engine::new(tokio::runtime::Handle::current());
+        let engine = engine().await;
         let sql = "SELECT x.n AS id, y.n AS id, \
                    CAST('12345678901234567890.123456789012345678' AS DECIMAL(38, 18)) AS d, \
                    NULL AS nul, 'NULL' AS txt FROM (SELECT 1 AS n) AS x, (SELECT 2 AS n) AS y";
-        let outcome = run(&engine, &fixture, SqlJob::new(ConnectionId::new(), sql)).await;
+        let outcome = run(&engine, &fixture, sql, None).await;
         assert_eq!(outcome.state, RunState::Succeeded, "{:?}", outcome.error);
-        let data = &outcome.data;
+        let data = &result(&outcome).data;
         let names: Vec<&str> = data.columns().iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["id", "id", "d", "nul", "txt"]);
         assert_eq!((data.value(0, 0), data.value(0, 1)), (Some("1"), Some("2")));

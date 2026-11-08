@@ -1,7 +1,7 @@
 //! A SQL Job's statement on a session of its own: one statement, bound
 //! values, and success only once the statement is confirmed complete
 //! (specification, sections 4.2–4.6).
-use super::{Phase, RunStatus, SqlJob};
+use super::{Phase, Progress, RunStatus, SqlJob};
 use crate::backend;
 use crate::parameters::ParameterError;
 use crate::reports::params;
@@ -38,7 +38,6 @@ pub struct Prepared {
     pub(super) request: QueryRequest,
     /// Read by the dialect's tokens: the completion rule's first case.
     pub(super) reads_only: bool,
-    pub(super) timeout: Duration,
 }
 
 impl Prepared {
@@ -88,7 +87,6 @@ pub fn prepare(
     Ok(Prepared {
         reads_only: sql::reads_only(&request.sql, Some(dialect)),
         request,
-        timeout: job.timeout,
     })
 }
 
@@ -278,7 +276,10 @@ fn remaining(deadline: Instant) -> Duration {
 }
 
 fn publish(status: &watch::Sender<RunStatus>, phase: Phase, rows: u64) {
-    status.send_replace(RunStatus::Active { phase, rows });
+    status.send_replace(RunStatus::Active(Progress {
+        rows,
+        ..Progress::new(phase)
+    }));
 }
 
 /// Keeps the rows a result may hold. For a write (`drains`), it never asks
@@ -304,7 +305,7 @@ impl JobSink {
     }
 
     /// Rows read so far, kept or not.
-    fn rows(&self) -> u64 {
+    pub(super) fn rows(&self) -> u64 {
         self.kept + self.discarded
     }
 

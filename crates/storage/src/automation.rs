@@ -8,7 +8,7 @@
 //! specification forbids: no input value, cell, scalar or server message. The
 //! one exception is the declared, opt-in, small and short-lived outputs of
 //! ADR-0035, stored in `run_outputs`.
-use crate::{error, open_pool, sql_error};
+use crate::{error, open_pool_with, sql_error};
 use jykre_core::{
     ConnectionId, DriverError, DriverResult, ErrorCode, ParameterKind,
     automation::{
@@ -912,7 +912,7 @@ impl AutomationRepository {
             .map_err(|_| error("Could not create the data folder."))?;
         let path = dir.join(AUTOMATION_FILE);
         let mut recreated = false;
-        let pool = match open_pool(&path, true).await {
+        let pool = match open_pool_with(&path, true, true).await {
             Ok(pool) => pool,
             Err(_) => {
                 if !confirmed_corrupt(&path).await {
@@ -934,7 +934,7 @@ impl AutomationRepository {
                     }
                 }
                 recreated = true;
-                open_pool(&path, true).await?
+                open_pool_with(&path, true, true).await?
             }
         };
         if migrate(&pool, LATEST_VERSION).await? == Migrated::Newer {

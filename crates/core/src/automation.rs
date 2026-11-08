@@ -200,6 +200,8 @@ codes!(
         PlanChanged => "plan_changed",
         /// A chain step waited in the queue longer than allowed.
         QueueTimeout => "queue_timeout",
+        /// A chain step found the queue full.
+        QueueFull => "queue_full",
     }
 );
 

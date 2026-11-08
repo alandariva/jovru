@@ -254,7 +254,7 @@ async fn each_migration_keeps_every_row() {
         let dir = dir();
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(AUTOMATION_FILE);
-        let pool = open_pool(&path, true).await.unwrap();
+        let pool = open_pool_with(&path, true, true).await.unwrap();
         assert_eq!(migrate(&pool, stopped_at).await.unwrap(), Migrated::Current);
         assert_eq!(
             sqlx::query_scalar::<_, i64>("PRAGMA user_version")
@@ -371,7 +371,7 @@ async fn a_newer_file_is_refused_untouched() {
         Opened::Newer
     ));
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    let pool = open_pool(&path, true).await.unwrap();
+    let pool = open_pool_with(&path, true, true).await.unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>("PRAGMA user_version")
             .fetch_one(&pool)
@@ -1527,4 +1527,16 @@ async fn programs_remember_their_versions_and_logs_are_forgotten() {
         (None, None, None)
     );
     assert_eq!(run.state, RunState::Succeeded);
+}
+
+#[tokio::test]
+async fn deleted_values_are_overwritten_in_the_file() {
+    // ADR-0035: an expired value must not linger in free pages.
+    let dir = dir();
+    let repo = ready(&dir).await;
+    let on: i64 = sqlx::query_scalar("PRAGMA secure_delete")
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+    assert_eq!(on, 1);
 }

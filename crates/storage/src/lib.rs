@@ -33,10 +33,22 @@ pub(crate) fn json_error(_: serde_json::Error) -> DriverError {
 }
 
 pub(crate) async fn open_pool(path: &Path, durable: bool) -> DriverResult<SqlitePool> {
+    open_pool_with(path, durable, false).await
+}
+
+/// [`open_pool`], and with `secure_delete` SQLite overwrites deleted content
+/// with zeros, so a value removed on time (ADR-0035) does not stay in the
+/// file's free pages.
+pub(crate) async fn open_pool_with(
+    path: &Path,
+    durable: bool,
+    secure_delete: bool,
+) -> DriverResult<SqlitePool> {
     let pool = SqlitePoolOptions::new()
         .max_connections(4)
         .connect_with(
             SqliteConnectOptions::new()
+                .pragma("secure_delete", if secure_delete { "ON" } else { "OFF" })
                 .filename(path)
                 .create_if_missing(true)
                 .journal_mode(SqliteJournalMode::Wal)

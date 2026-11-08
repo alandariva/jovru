@@ -1053,6 +1053,12 @@ fn runtime() -> DriverResult<&'static tokio::runtime::Runtime> {
         .map_err(|_| DriverError::new(ErrorCode::Internal, tr!("Cannot start database runtime")))
 }
 
+/// A handle to the only runtime, for a service that spawns tasks of its own
+/// there (the automation engine, ADR-0034); never a second runtime.
+pub fn runtime_handle() -> DriverResult<tokio::runtime::Handle> {
+    runtime().map(|runtime| runtime.handle().clone())
+}
+
 /// Drive network futures on Tokio while allowing the GUI to await their result.
 pub async fn run<T: Send + 'static>(
     work: impl Future<Output = DriverResult<T>> + Send + 'static,
