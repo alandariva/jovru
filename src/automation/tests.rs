@@ -1454,3 +1454,80 @@ async fn history_lists_runs_and_chain_runs_without_their_steps() {
     assert!(matches!(history[1], HistoryEntry::Chain(_)));
     let _ = ExecutionOptions::default();
 }
+
+// ---------------------------------------------------------------------------
+// History that cannot be written (section 6.3, ADR-0034 decision 3).
+
+/// A session that holds `automation.db`'s write lock, as a failing disk
+/// would refuse every write, until it is closed.
+async fn hold_history(engine: &Engine) -> Box<dyn Session> {
+    let input = ResolvedConnection {
+        config: ConnectionConfig {
+            driver: DriverKind::Sqlite,
+            options: serde_json::json!({
+                "path": engine.data_dir().join("automation.db").to_string_lossy()
+            }),
+        },
+        credentials: Credentials::default(),
+    };
+    let mut session = SqliteDriver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    exec(&mut *session, "BEGIN EXCLUSIVE").await;
+    session
+}
+
+#[tokio::test]
+async fn a_run_whose_history_cannot_be_written_is_refused_before_anything_is_sent() {
+    let driver = Scripted::new(Script::Blocks);
+    let engine = engine().await;
+    let mut held = hold_history(&engine).await;
+    let mut handle = engine
+        .submit(scripted_run(
+            &driver,
+            sql_job(ConnectionId::new(), "UPDATE t SET v = 1"),
+        ))
+        .unwrap();
+    assert!(matches!(
+        handle.finished().await,
+        RunStatus::Refused(Refusal::History)
+    ));
+    assert_eq!(driver.opened.load(Ordering::SeqCst), 0, "nothing was sent");
+    exec(&mut *held, "ROLLBACK").await;
+    held.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_terminal_state_that_cannot_be_written_is_never_replayed() {
+    let release = Arc::new(Notify::new());
+    let driver = Scripted::new(Script::WaitsFor(release.clone()));
+    let dir = data_dir();
+    let engine = engine_in(dir.clone(), Limits::default()).await;
+    let mut handle = engine
+        .submit(scripted_run(
+            &driver,
+            sql_job(ConnectionId::new(), "UPDATE t SET v = 1"),
+        ))
+        .unwrap();
+    eventually(Duration::from_secs(5), || executing(&handle)).await;
+    let mut held = hold_history(&engine).await;
+    release.notify_one();
+    let outcome = finished(&mut handle).await;
+    assert_eq!(outcome.state, RunState::Succeeded);
+    assert!(outcome.history_failed, "the user is told");
+    exec(&mut *held, "ROLLBACK").await;
+    held.close().await.unwrap();
+    assert_eq!(record(&engine, handle.id).await.state, RunState::Running);
+    engine.shutdown().await;
+    drop(engine);
+
+    // The next start marks it interrupted and never sends it again.
+    let engine = engine_in(dir, Limits::default()).await;
+    let recovered = record(&engine, handle.id).await;
+    assert_eq!(
+        (recovered.state, recovered.effect_unknown),
+        (RunState::Interrupted, true)
+    );
+    assert_eq!(driver.opened.load(Ordering::SeqCst), 1);
+}
