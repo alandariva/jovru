@@ -42,7 +42,10 @@ jobs:
           if-no-files-found: error
 
   linux:
-    runs-on: ubuntu-latest
+    # The binary needs the glibc it was linked against or newer: build on
+    # the oldest Ubuntu this release supports (24.04, validated in 0.2.0),
+    # never on ubuntu-latest, whose glibc 2.43 the validated system lacks.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
