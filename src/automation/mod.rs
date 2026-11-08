@@ -221,15 +221,17 @@ pub struct ProgramOutcome {
     pub exit_signal: Option<i64>,
     /// A `jjp/1` program's `fail` code.
     pub failure_code: Option<String>,
-    /// After Stop or the deadline: whether the tree ended on its own within
-    /// 5 s (`Some(false)`) or was killed (`Some(true)`).
-    pub killed: Option<bool>,
+    /// After Stop, the deadline or a protocol failure: whether the tree
+    /// ended on its own within 5 s or was killed.
+    pub stop: Option<process::StopResult>,
     /// What the run asked to start, resolved.
     pub program: Option<PathBuf>,
     pub program_fingerprint: Option<String>,
-    pub log_bytes: process::LogSizes,
-    /// Why a `jjp/1` program broke the protocol, in words without values.
-    pub protocol: Option<String>,
+    pub log_bytes: process::LogBytes,
+    /// How a `jjp/1` program broke the protocol.
+    pub protocol: Option<jjp::ProtocolProblem>,
+    /// Why the program could not start.
+    pub start_error: Option<process::StartError>,
 }
 
 /// How a run ended. Held in memory only: closing every handle to the run
