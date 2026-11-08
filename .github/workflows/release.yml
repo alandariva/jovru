@@ -1,7 +1,7 @@
 name: Release
 
-# Push a tag such as v0.1.0 to build the Windows and Linux binaries and draft a
-# GitHub Release. Review the draft before publishing it.
+# Push a tag such as v0.1.0 to build the Windows and Linux binaries, sign them
+# and draft a GitHub Release. Review the draft before publishing it.
 on:
   push:
     tags: ["v*"]
@@ -81,9 +81,93 @@ jobs:
           path: dist/*.tar.gz*
           if-no-files-found: error
 
-  # Drafted only after every platform builds, so a release never ships partial.
-  draft:
+  # Signs each archive with the release key (ADR-0033): the application
+  # installs an update only when it verifies against
+  # assets/update/release-key.pub. The signature's context is the archive's
+  # file name, so an archive cannot be renamed to pass for another version.
+  sign:
     needs: [windows, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The environment holds the ZIPSIGN_PRIVATE_KEY secret.
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - name: Install zipsign
+        run: cargo install --locked zipsign --version 0.2.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Sign
+        env:
+          ZIPSIGN_PRIVATE_KEY: ${{ secrets.ZIPSIGN_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ZIPSIGN_PRIVATE_KEY" ]; then
+            echo "::error::The ZIPSIGN_PRIVATE_KEY secret is not set"
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/release.key"
+          trap 'rm -f "$key"' EXIT
+          printf '%s' "$ZIPSIGN_PRIVATE_KEY" | base64 --decode > "$key"
+          cd dist
+          # The checksums are of the signed files.
+          rm -f ./*.sha256
+          for f in *.zip; do zipsign sign zip --context "$f" "$f" "$key"; done
+          for f in *.tar.gz; do zipsign sign tar --context "$f" "$f" "$key"; done
+          for f in *.zip *.tar.gz; do sha256sum "$f" > "$f.sha256"; done
+      - name: Verify with the committed public key
+        run: |
+          set -euo pipefail
+          cd dist
+          key=../assets/update/release-key.pub
+          for f in *.zip; do zipsign verify zip --context "$f" "$f" "$key"; done
+          for f in *.tar.gz; do
+            zipsign verify tar --context "$f" "$f" "$key"
+            tar -tzf "$f" > /dev/null
+          done
+          sha256sum --check ./*.sha256
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: dist/*
+          if-no-files-found: error
+
+  # A signed zip still opens as users open it, with Windows' own extractor.
+  verify-windows:
+    needs: sign
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: dist
+      - name: Expand the signed archives
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($zip in Get-ChildItem dist/*.zip) {
+            $out = Join-Path $env:RUNNER_TEMP $zip.BaseName
+            Expand-Archive -Path $zip.FullName -DestinationPath $out
+            foreach ($entry in 'jykre.exe', 'catalog') {
+              if (-not (Test-Path (Join-Path $out (Join-Path $zip.BaseName $entry)))) {
+                throw "$entry is missing from $($zip.Name)"
+              }
+            }
+          }
+
+  # Drafted only after every platform builds and its signed archive verifies,
+  # so a release never ships partial or unsigned.
+  draft:
+    needs: [sign, verify-windows]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -91,8 +175,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          name: signed
           path: dist
-          merge-multiple: true
       - name: Draft release
         env:
           GH_TOKEN: ${{ github.token }}

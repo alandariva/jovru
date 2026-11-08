@@ -36,6 +36,12 @@ private = { ignore = true }
 
 [bans]
 multiple-versions = "warn"
+# TLS stays on ring (ADR-0028, ADR-0033): reqwest 0.13's `rustls` feature,
+# which `self_update`'s own `rustls` feature turns on, would compile these.
+deny = [
+    { name = "aws-lc-rs" },
+    { name = "aws-lc-sys" },
+]
 
 [sources]
 unknown-registry = "deny"

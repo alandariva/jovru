@@ -16,6 +16,8 @@
 | OS vault unavailable | The password is used for this session only; the UI says why | Falling back to a file |
 | A saved connection, the font size or the last session's tabs cannot be read at start | That item is left out or takes its default, and the explorer says which | Hiding the other connections or the restored tabs |
 | An export fails or is cancelled (disk full, no permission, the server, the user) | The export bar says why; the temporary file is removed and the chosen file keeps what it had; the session comes back to the tab unless it was lost | A half-written file, a replaced file, or a session left out |
+| An update check fails (no network, GitHub limiting requests, an unreadable answer) | Nothing is shown outside **Preferences › About**, which says why; the next automatic check waits at least an hour, or what GitHub asks, at most a day | A dialog or a notice for a background check; checking again at once |
+| An update fails or is cancelled (download, signature, unpacking, the swap) | About says why and offers the release page; the folder keeps the running version, the downloaded files are removed, and a failed swap is undone step by step | A half-replaced folder; installing an archive that did not verify |
 
 ## Mechanisms
 
@@ -87,6 +89,9 @@
 | Final writes of the open tabs and the reports when the application exits | 200 ms, GPUI's shutdown limit (`SHUTDOWN_TIMEOUT`); past it the write is abandoned and the last debounced save remains |
 | Telemetry: **Test** in Preferences | 10 s, cancellable |
 | Telemetry: reading, saving or removing the collector's headers in the OS vault | 10 s, as passwords |
+| Update check: connecting to GitHub, then the whole release list | 15 s each; cancellable |
+| Update download | 15 s to connect, 30 s of silence while the body arrives, 10 min in all; cancellable |
+| Update: verifying the signature and unpacking the archive | 120 s; cancellable. The swap that follows is renames only and is neither cancelled nor timed: a rename refused on Windows (an antivirus holding the file) is tried 5 times, 200 ms apart, then undone |
 
 A new network operation gets an explicit timeout and a row in this table.
 

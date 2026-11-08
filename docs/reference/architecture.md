@@ -72,7 +72,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine's SQL Job proof of concept, not wired into the application (`automation`, [plan](../plans/automation-sql-job-poc.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)) | Depend on a specific view; use the editor's language features |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine's SQL Job proof of concept, not wired into the application (`automation`, [plan](../plans/automation-sql-job-poc.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
@@ -126,6 +126,7 @@ checked in review.
 ├── build.rs                # embeds the icon and version details in the Windows executable
 ├── assets/icon/            # the official icon: jykre.svg (title bar), jykre.ico (executable)
 ├── assets/linux/           # desktop entry and its install.sh, shipped in the Linux release
+├── assets/update/          # release-key.pub: the public key updates must be signed with (ADR-0033)
 ├── src/
 │   ├── main.rs             # binary entry point
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
@@ -439,6 +440,37 @@ collector ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)):
 4. The batch processors run on threads of their own; each export is polled
    inside the Tokio runtime of `backend::run`. Dropping the `LogGuard` at
    exit sends what is queued, within 3 s.
+
+### Update
+
+GitHub's releases are checked and installed by `jykre::update`, driven by
+`src/app/updates.rs` ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)):
+
+1. At start, `updates::Updater` reads `update.preferences` and
+   `update.state` and removes what an earlier update left next to the
+   executable (`swap::cleanup_leftovers`). `update::next_check_in` plans the
+   next automatic check: at least 30 s away, a day after the last one,
+   none when turned off or in a development build.
+2. `update::check` reads the release list through `self_update`'s
+   `ReleaseList` with our own `reqwest` client (no redirect, 15 s) and
+   `release::select_update` picks the highest version above the running one,
+   pre-releases included, and this platform's archive by its exact name. On
+   the blocking pool, `layout::detect` decides whether this copy can replace
+   itself.
+3. **Download and install** runs `update::install` on the runtime: the
+   archive is downloaded into `.jykre-update/staging-<id>/` under the name
+   the application computes (`download`), its signature verified against
+   `keys::RELEASE_KEYS`, then it is unpacked and checked (`swap::validate_staged`)
+   on the blocking pool. Progress and the phase come back through `watch`
+   channels; the view redraws on each change, never on a timer.
+4. `swap::apply` renames each entry of the release into the folder, the
+   executable last, moving what it replaces into `trash-<id>/`, and undoes
+   every step if one fails. Up to here the work can be cancelled; the swap
+   cannot.
+5. **Restart now** closes the window through `AppView::close_window`, so
+   its questions come first; when the window goes, its release handler
+   queues the exit writes and calls `App::set_restart_path` and
+   `App::restart`, which start the new executable once this process exits.
 
 ## Concurrency
 

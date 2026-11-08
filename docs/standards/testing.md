@@ -223,6 +223,13 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   repositories in a temporary folder with a unique name, and bind servers to
   port 0. Flakiness requires a record, an owner and a fix;
   retrying until it passes does not replace investigation.
+- Updates are tested without reaching GitHub (`jykre::update::tests`): a
+  server on `127.0.0.1` serves the release list, the redirect and the
+  archive, and archives are signed in the test with a key made from a fixed
+  seed. The committed release key never signs anything in a test. The whole
+  flow against real signed pre-releases is a manual check on Windows and
+  Linux, recorded with the release
+  ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)).
 - Ignored tests need a reason and a way to run them. Relational `live` tests
   always run in full mode; authenticated Databricks tests are separate.
 - The native vault test runs manually:

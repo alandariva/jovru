@@ -24,7 +24,7 @@ is visible, and the keyboard reaches everything.
 │  │              │ Footer: 1,000 rows · row limit reached · 18 ms       │
 │  │              │ Notice bar (user actions: copied, saved, formatted)  │
 ├──┴──────────────┴──────────────────────────────────────────────────────┤
-│ Status bar: connections · version                                      │
+│ Status bar: connections · update · version                             │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -40,8 +40,25 @@ with its categories listed on the left: **Appearance** (the theme and
 **Reset widths**), **SQL editor** (the SQL font size from 12 to 24 px, with
 a preview in the editor's colours, and the SQL catalogs read), **Assistant**,
 **Diagnostics** (the log folder and telemetry), **Shortcuts** and **About**
-(the version and the data folder). `Esc` or its close button closes it and
+(the version, the data folder and **Updates**). `Esc` or its close button closes it and
 gives the keyboard back to the tab; Tab stays inside while it is open.
+
+**Updates** ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)):
+**Check for updates automatically** (on until turned off) asks GitHub once a
+day, never in the first 30 s after the window opens; **Check now** asks at
+once. The section says how the last check ended, in one line. A newer
+version (pre-releases included) shows as a badge in the status bar, before
+the version: **Version 0.2.1 available**, then **Downloading update · 42 %**,
+**Installing update…** and **Restart to update**; clicking it opens About,
+and nothing else announces an update (a failed check stays in About). In
+About, **Download and install** downloads, checks the signature and
+installs, with progress and **Cancel** until the swap starts; then **Restart
+now** closes the window with the same questions as closing it (files not
+saved, open transactions) and starts the new version, while **Release
+notes** opens the release's page. Where the copy cannot replace itself (a
+development build, another system, a folder it cannot write to), About
+says why and offers **Download manually**, which opens the release's page.
+A failure says what failed and that nothing was installed.
 
 The **theme** is **System** until the user chooses: it follows the
 operating system's light or dark appearance, also when it changes while the
