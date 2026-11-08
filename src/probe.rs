@@ -1,4 +1,4 @@
-//! Measurements for the UI budgets in [Performance](../docs/performance.md#how-to-measure)
+//! Measurements for the UI budgets in [Performance](../docs/standards/performance.md#how-to-measure)
 //! (ADR-0010), turned on with `JYKRE_PROBE=1`.
 //!
 //! The application records the time of each frame (from the root view's

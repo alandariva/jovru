@@ -278,7 +278,7 @@ fn metadata_paging(c: &mut Criterion) {
 }
 
 /// Encoding a page for an export, as each part is before it reaches the
-/// file ([Results](../docs/results.md#export)).
+/// file ([Results](../docs/reference/results.md#export)).
 fn export_encoding(c: &mut Criterion) {
     use jykre::export::{Encoder, ExportFormat, ExportOptions, SqlTarget};
     let result = event_log(100_000);
@@ -312,6 +312,94 @@ fn export_encoding(c: &mut Criterion) {
     group.finish();
 }
 
+fn clipboard_encoding(c: &mut Criterion) {
+    use jykre::copy_as::{self, Block, CopyFormat, CopyOptions, CopyRequest, CopySource, SqlStyle};
+    use jykre::grid::CellSelection;
+    use std::sync::Arc;
+    let result = Arc::new(event_log(100_000));
+    let view = Arc::new(GridView::new(&result, GridKey::default()));
+    let selection = CellSelection::all(&view.rows, result.column_count());
+    let quote = |name: &str| name.to_owned();
+    let style = SqlStyle {
+        dialect: None,
+        table: "table_name",
+        quote_name: &quote,
+    };
+    let mut group = c.benchmark_group("clipboard, 500,000 cells");
+    group.sample_size(10);
+    for format in [CopyFormat::Text, CopyFormat::Csv] {
+        let options = CopyOptions {
+            format,
+            ..Default::default()
+        };
+        let request = CopyRequest {
+            result: result.clone(),
+            options,
+            source: CopySource::Selection {
+                view: view.clone(),
+                selection: selection.expect("selection"),
+            },
+            dialect: None,
+            table: "table_name".to_owned(),
+            quoted_columns: result
+                .columns()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+        };
+        group.bench_function(format!("{format:?} legacy"), |b| {
+            b.iter(|| {
+                let block =
+                    Block::new(&result, &view.rows, selection, &view.families).expect("block");
+                copy_as::copy_as(&options, &block, &style)
+            })
+        });
+        group.bench_function(format!("{format:?} worker"), |b| {
+            b.iter(|| {
+                copy_as::generate(black_box(&request), &CancellationToken::new(), |_| {})
+                    .expect("encoded")
+            })
+        });
+        group.bench_function(format!("{format:?} estimate"), |b| {
+            b.iter(|| {
+                request
+                    .estimate(&CancellationToken::new())
+                    .expect("estimate")
+            })
+        });
+    }
+    group.finish();
+    let value = "x".repeat(600);
+    let result = Arc::new(ResultData::from_rows(
+        vec![ResultColumn::new("payload", "text")],
+        (0..100_000).map(|_| [Some(value.as_str())]),
+    ));
+    let request = CopyRequest {
+        result: result.clone(),
+        source: CopySource::Page,
+        options: CopyOptions {
+            format: CopyFormat::Csv,
+            header: true,
+            ..Default::default()
+        },
+        dialect: None,
+        table: String::new(),
+        quoted_columns: vec!["payload".to_owned()],
+    };
+    let mut group = c.benchmark_group("clipboard, page above 50 MiB");
+    group.sample_size(10);
+    group.bench_function("CSV legacy", |b| {
+        b.iter(|| jykre::cell_format::result_csv(black_box(&result)))
+    });
+    group.bench_function("CSV worker", |b| {
+        b.iter(|| {
+            copy_as::generate(black_box(&request), &CancellationToken::new(), |_| {})
+                .expect("encoded")
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     grid_view,
@@ -319,6 +407,7 @@ criterion_group!(
     statement_splitting,
     sql_tokens,
     metadata_paging,
-    export_encoding
+    export_encoding,
+    clipboard_encoding
 );
 criterion_main!(benches);

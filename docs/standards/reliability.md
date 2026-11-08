@@ -19,11 +19,11 @@
 
 ## Mechanisms
 
-- **A session per tab** ([ADR-0014](adr/0014-a-session-per-tab.md)). A tab
+- **A session per tab** ([ADR-0014](../adr/0014-a-session-per-tab.md)). A tab
   opens a session on its first run and keeps it until the tab closes, its
   connection changes or the session is lost, so state such as the current
   schema and temporary tables carries over between runs (only autocommit is
-  supported; see [Architecture](architecture.md#known-deviations)). While a
+  supported; see [Architecture](../reference/architecture.md#known-deviations)). While a
   result has more pages, the session keeps it open until the tab runs
   anything else.
   A failed statement keeps the session. After a cancellation, a timeout or an
@@ -73,6 +73,7 @@
 | Databricks CLI (token resolution) | 60 s |
 | Export: each part read from the session | `ExecutionOptions.timeout` of the tab, as any page |
 | Export: creating, writing one part (about 16 MB) or finishing the file | 60 s (`backend::FILE_TIMEOUT`), so a network share that stops answering fails the export |
+| Clipboard: estimating or encoding a grid selection/query page | 60 s per phase, checked between rows/cells on the blocking pool; cancellable, with no partial clipboard update |
 | AI assistant: connecting to the provider | 15 s |
 | AI assistant: first byte of an answer | 120 s |
 | AI assistant: silence between pieces of a streamed answer | 60 s |
@@ -113,7 +114,7 @@ A test of the error mapping is required in each driver ([Testing](testing.md)).
 
 ## Logs
 
-Logs follow [ADR-0009](adr/0009-structured-logging-and-timings.md) and are set
+Logs follow [ADR-0009](../adr/0009-structured-logging-and-timings.md) and are set
 up by `jykre::logging::init` when the application starts:
 
 - `tracing` with `tracing-subscriber`; `tracing-appender` writes in the
@@ -136,7 +137,7 @@ up by `jykre::logging::init` when the application starts:
 - When the user turns it on, the same events (except `trace`, the frame
   probe, UI-thread timings below a warning and events with a free-text
   field) and the spans of external calls are also sent to an OpenTelemetry
-  collector ([ADR-0029](adr/0029-otlp-export-of-logs-and-traces.md),
+  collector ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md),
   [Security](security.md#telemetry)). UI-thread timings use the target
   `jykre::ui_thread`.
 

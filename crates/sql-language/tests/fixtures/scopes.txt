@@ -15,7 +15,7 @@
 # (the statement, a subquery, a CTE body or a UNION branch). The test's index
 # holds every relation the cases read, so one read in the wrong query shows.
 #
-# History: docs/investigacao-editor-sql.md, section G.4.
+# History: docs/research/sql-editor-investigation.md, section G.4.
 
 # Written for the tree-sitter proof of concept (64 cases).
 

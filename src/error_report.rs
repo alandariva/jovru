@@ -1,6 +1,6 @@
 //! How a failure reads in the UI: a short title chosen from the error's code,
 //! the database's own message, a suggested action and the details a report
-//! needs ([UX](../docs/ux.md#error-messages)).
+//! needs ([UX](../docs/reference/ux.md#error-messages)).
 use crate::drivers::{DriverError, ErrorCode};
 use crate::tr;
 use std::time::{SystemTime, UNIX_EPOCH};

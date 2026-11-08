@@ -29,9 +29,9 @@ impl IntrospectionSink for Metadata {
 }
 fn input() -> ResolvedConnection {
     // The fixture port is chosen by Docker for each run: `cargo xtask check
-    // --full` sets it, and docs/testing.md shows how to run these by hand.
+    // --full` sets it, and docs/standards/testing.md shows how to run these by hand.
     let port: u16 = std::env::var("JYKRE_TEST_PORT")
-        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/testing.md)")
+        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/standards/testing.md)")
         .parse()
         .expect("JYKRE_TEST_PORT must be a valid port");
     ResolvedConnection {
@@ -94,6 +94,11 @@ async fn live_connection_queries_metadata_and_timeout() {
             .is_some()
     );
     let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
+    // The fixture's profile requires TLS: the server names its version.
+    assert!(matches!(
+        session.encryption(cancel.clone()).await.unwrap(),
+        Encryption::Tls { version: Some(version) } if version.starts_with("TLS")
+    ));
     keep_state(&mut session).await;
     let mut sink = Sink::default();
     session.execute(&QueryRequest{parameters:Vec::new(),sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
@@ -704,9 +709,14 @@ async fn live_levels_inspection_definitions_and_permissions() {
     .expect("live metadata extensions took too long");
 }
 
+/// The transaction state the session reports.
+async fn state(session: &mut Box<dyn Session>) -> Option<TransactionStatus> {
+    session.transaction(CancellationToken::new()).await.unwrap()
+}
+
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
-async fn live_autocommit_off_is_reported() {
+async fn live_the_transaction_state_is_read_from_the_status_flags() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = MySqlDriver;
         let mut session = driver
@@ -714,24 +724,117 @@ async fn live_autocommit_off_is_reported() {
             .await
             .unwrap();
         let none = SessionContext::default();
-        // A BEGIN is not visible without privileges; it is left to inference.
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        let open = Some(TransactionStatus::Open { changes: None });
         text_in(&mut session, "BEGIN", &none).await;
-        assert_eq!(
-            session.transaction(CancellationToken::new()).await.unwrap(),
-            None
-        );
+        assert_eq!(state(&mut session).await, open);
+        // A failed statement keeps the transaction.
+        let mut sink = Sink::default();
+        let failed = session
+            .execute(
+                &QueryRequest::new("SELECT * FROM gate_missing", ExecutionOptions::default()),
+                &mut sink,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(failed.is_err());
+        assert_eq!(state(&mut session).await, open);
         text_in(&mut session, "ROLLBACK", &none).await;
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        // A transaction begun inside a procedure.
+        text_in(&mut session, "DROP PROCEDURE IF EXISTS gate_begin", &none).await;
+        text_in(
+            &mut session,
+            "CREATE PROCEDURE gate_begin() START TRANSACTION",
+            &none,
+        )
+        .await;
+        text_in(&mut session, "CALL gate_begin()", &none).await;
+        assert_eq!(state(&mut session).await, open);
+        text_in(&mut session, "ROLLBACK", &none).await;
+        text_in(&mut session, "DROP PROCEDURE gate_begin", &none).await;
+        // With autocommit off every statement waits for a COMMIT.
         text_in(&mut session, "SET autocommit = 0", &none).await;
-        assert_eq!(
-            session.transaction(CancellationToken::new()).await.unwrap(),
-            Some(TransactionStatus::Manual)
-        );
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Manual));
         text_in(&mut session, "SET autocommit = 1", &none).await;
-        assert_eq!(
-            session.transaction(CancellationToken::new()).await.unwrap(),
-            None
-        );
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
         session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_a_deadlock_victim_reports_its_transaction_rolled_back() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = MySqlDriver;
+        let none = SessionContext::default();
+        let mut setup = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        text_in(&mut setup, "DROP TABLE IF EXISTS gate_deadlock", &none).await;
+        text_in(
+            &mut setup,
+            "CREATE TABLE gate_deadlock (id INT PRIMARY KEY, v INT) ENGINE = InnoDB",
+            &none,
+        )
+        .await;
+        text_in(
+            &mut setup,
+            "INSERT INTO gate_deadlock VALUES (1, 0), (2, 0)",
+            &none,
+        )
+        .await;
+        let mut a = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let mut b = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        text_in(&mut a, "BEGIN", &none).await;
+        text_in(&mut b, "BEGIN", &none).await;
+        text_in(&mut a, "UPDATE gate_deadlock SET v = 1 WHERE id = 1", &none).await;
+        text_in(&mut b, "UPDATE gate_deadlock SET v = 1 WHERE id = 2", &none).await;
+        // Each waits for the other's row; InnoDB rolls one back, and the
+        // error it answers with carries no status flags.
+        let update = |sql: &str| QueryRequest::new(sql, ExecutionOptions::default());
+        let (first_update, second_update) = (
+            update("UPDATE gate_deadlock SET v = 2 WHERE id = 2"),
+            update("UPDATE gate_deadlock SET v = 2 WHERE id = 1"),
+        );
+        let (mut first_sink, mut second_sink) = (Sink::default(), Sink::default());
+        let (first, second) = tokio::join!(
+            a.execute(&first_update, &mut first_sink, CancellationToken::new()),
+            async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                b.execute(&second_update, &mut second_sink, CancellationToken::new())
+                    .await
+            }
+        );
+        assert_ne!(
+            first.is_err(),
+            second.is_err(),
+            "expected one deadlock victim: {first:?}, {second:?}"
+        );
+        let (victim, survivor) = if first.is_err() {
+            (&mut a, &mut b)
+        } else {
+            (&mut b, &mut a)
+        };
+        assert_eq!(state(victim).await, Some(TransactionStatus::Idle));
+        assert_eq!(
+            state(survivor).await,
+            Some(TransactionStatus::Open { changes: None })
+        );
+        text_in(survivor, "ROLLBACK", &none).await;
+        text_in(&mut setup, "DROP TABLE gate_deadlock", &none).await;
+        for session in [a, b, setup] {
+            session.close().await.unwrap();
+        }
     })
     .await
     .unwrap();

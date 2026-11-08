@@ -1,6 +1,6 @@
 # ADR-0028: An agentic AI assistant over the metadata cache, with every request reviewable
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-06
 - **Authors:** Alan de Oliveira (decisions; plan approved 2026-11-06), drafted with an AI agent
 

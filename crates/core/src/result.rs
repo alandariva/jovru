@@ -31,6 +31,25 @@ pub enum TransactionStatus {
     Manual,
 }
 
+/// Whether what a session sends and receives travels encrypted, as the
+/// connection found it when the session opened
+/// ([`crate::Session::encryption`]).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Encryption {
+    /// The driver cannot tell.
+    #[default]
+    Unknown,
+    /// Over TLS, with the protocol version when the server names it
+    /// (`TLSv1.3`).
+    Tls { version: Option<String> },
+    /// In plain text: anyone on the network path can read the SQL, the
+    /// results and the password.
+    Plaintext,
+    /// No network at all: a database file on this computer.
+    Local,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
     pub max_rows: u32,

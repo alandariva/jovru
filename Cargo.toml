@@ -77,6 +77,9 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # SQL formatting by dialect (N010), behind jykre-sql-language's `sqruff`
 # feature; it has no default features to turn off.
 sqruff-lib = "0.44.0"
+# The Windows executable's icon and version details, from build.rs
+# (approved 2026-11-07). Without `toml`, it reads nothing from Cargo.toml.
+winresource = { version = "0.1.34", default-features = false }
 
 [dependencies]
 gpui-kit = "0.9.0"
@@ -117,6 +120,9 @@ secrecy.workspace = true
 # to a temporary file as it is added, so an export never holds the sheet.
 rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["constant_memory"] }
 
+[build-dependencies]
+winresource.workspace = true
+
 [lints]
 workspace = true
 
@@ -129,3 +135,17 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 [[bench]]
 name = "hot_paths"
 harness = false
+
+# SQLx 0.9.0 plus public readers of the transaction state the server reports
+# (ADR-0030, TD-001), from a fork pinned to one revision of its branch
+# `jykre/transaction-status` until a SQLx release has them. Every SQLx crate
+# is patched, so the tree keeps one `sqlx-core`; the revision is allowed in
+# `deny.toml`.
+[patch.crates-io]
+sqlx = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-core = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-macros = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-macros-core = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-mysql = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-postgres = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx-sqlite = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }

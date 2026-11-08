@@ -15,7 +15,7 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
-use jykre::copy_as::{self, Block, CopyFormat, CopyOptions, SqlStyle};
+use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
 use jykre::grid::{
     self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, selection_block,
 };
@@ -231,9 +231,25 @@ pub struct ResultGrid {
     records_scroll: UniformListScrollHandle,
     records_pan: ScrollHandle,
     sql: GridSql,
+    copy_job: Option<super::copying::CopyJob>,
 }
 
 impl EventEmitter<ResultGridEvent> for ResultGrid {}
+
+impl super::copying::CopyHost for ResultGrid {
+    fn copy_job(&mut self) -> &mut Option<super::copying::CopyJob> {
+        &mut self.copy_job
+    }
+
+    /// Bumped whenever another page is shown.
+    fn copy_epoch(&self) -> u64 {
+        self.version
+    }
+
+    fn copy_notice(&mut self, feedback: Feedback, cx: &mut Context<Self>) {
+        cx.emit(ResultGridEvent::Notice(feedback));
+    }
+}
 
 impl ResultGrid {
     pub(super) fn benchmark_begin(&mut self, bottom: bool, cx: &mut Context<Self>) {
@@ -303,6 +319,7 @@ impl ResultGrid {
             records_scroll: UniformListScrollHandle::new(),
             records_pan: ScrollHandle::new(),
             sql: GridSql::default(),
+            copy_job: None,
         }
     }
 
@@ -352,6 +369,7 @@ impl ResultGrid {
             self.sort = None;
             self.widths.clear();
         }
+        self.copy_job = None;
         self.result = result;
         self.sales = sales;
         self.first_row = first_row;
@@ -419,7 +437,7 @@ impl ResultGrid {
     }
 
     /// The grid for the current result, filter, sort and number format.
-    fn view(&self) -> Rc<GridView> {
+    fn view(&self) -> Arc<GridView> {
         let key = GridKey {
             result: self.version,
             filter: self.filter.clone(),
@@ -926,118 +944,94 @@ impl ResultGrid {
     /// Copies the selected block in the format of the copy menu
     /// (`Ctrl C`), with the column names first when `headers`
     /// (`Ctrl Shift C`) or when the menu says so. A copy estimated above
-    /// 50 MiB asks first, unless `confirmed`.
+    /// 50 MiB asks first, before the worker generates the text.
     pub(super) fn copy_selection(
         &mut self,
         headers: bool,
-        confirmed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let options = super::copying::options(cx);
-        self.copy(options.with(options.format, headers), confirmed, window, cx);
+        self.copy(options.with(options.format, headers), window, cx);
     }
 
     /// Copies the selected block in `format` (**Copy as**), with the other
     /// choices of the copy menu.
-    fn copy_as(
-        &mut self,
-        format: CopyFormat,
-        confirmed: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn copy_as(&mut self, format: CopyFormat, window: &mut Window, cx: &mut Context<Self>) {
         let options = super::copying::options(cx);
-        self.copy(options.with(format, false), confirmed, window, cx);
+        self.copy(options.with(format, false), window, cx);
     }
 
-    fn copy(
-        &mut self,
-        options: CopyOptions,
-        confirmed: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let view = self.view();
-        let bytes = grid::selection_bytes(&self.result, &view.rows, self.selection, true);
-        if !confirmed && bytes > grid::COPY_CONFIRM_BYTES {
-            self.confirm_copy(bytes, window, cx, move |this, window, cx| {
-                this.copy(options, true, window, cx)
-            });
-            return;
-        }
-        let _timer = jykre::logging::UiTimer::start("copy selection");
-        let notice = match Block::new(&self.result, &view.rows, self.selection, &view.families) {
-            None => Feedback::new(Tone::Info, tr!("Select cells to copy.")),
-            Some(block) => {
-                let count = block.cells();
-                let table = self
-                    .sql
-                    .table
-                    .clone()
-                    .unwrap_or_else(|| "table_name".to_owned());
-                let style = SqlStyle {
-                    dialect: self.sql.dialect,
-                    quote_name: &*self.sql.quote_name,
-                    table: &table,
-                };
-                let text = copy_as::copy_as(&options, &block, &style);
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                let message = match (options.format, count) {
-                    (CopyFormat::Text, 1) => tr!("Cell copied.").to_string(),
-                    (CopyFormat::Text, count) => tr!("{0} cells copied.", count),
-                    (format, 1) => tr!("Cell copied as {0}.", format_name(format)),
-                    (format, count) => tr!("{0} cells copied as {1}.", count, format_name(format)),
-                };
-                Feedback::new(Tone::Success, message)
-            }
-        };
-        cx.emit(ResultGridEvent::Notice(notice));
-    }
-
-    fn confirm_copy(
-        &self,
-        bytes: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        copy: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) {
-        let grid = cx.entity().downgrade();
-        super::confirm(
-            window,
-            cx,
-            super::Confirmation {
-                title: tr!("Copy about {0} MB?", bytes / (1024 * 1024)),
-                description: tr!(
-                    "The selection is large: copying it can take a moment and holds all of it in the clipboard."
-                )
-                .to_string(),
-                ok: tr!("Copy"),
-                cancel: tr!("Cancel"),
-                focus: super::ConfirmFocus::Dialog,
-            },
-            move |window, cx| {
-                let _ = grid.update(cx, |this, cx| copy(this, window, cx));
-            },
-        );
-    }
-
-    /// Copies the whole value the viewer shows.
-    fn copy_value(&mut self, cx: &mut Context<Self>) {
-        let value = self
-            .inspected
-            .and_then(|(row, column)| self.result.value(row, column));
-        let notice = match value {
-            Some(value) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(value.to_owned()));
-                Feedback::new(Tone::Success, tr!("Value copied."))
-            }
-            None => Feedback::new(
+    fn copy(&mut self, options: CopyOptions, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(selection) = self.selection else {
+            cx.emit(ResultGridEvent::Notice(Feedback::new(
                 Tone::Info,
-                tr!("The value is NULL: there is nothing to copy."),
-            ),
+                tr!("Select cells to copy."),
+            )));
+            return;
         };
-        cx.emit(ResultGridEvent::Notice(notice));
+        let request = self.copy_request(
+            CopySource::Selection {
+                view: self.view(),
+                selection,
+            },
+            options,
+        );
+        self.start_copy(request, super::copying::CopyWhat::Selection, window, cx);
+    }
+
+    fn copy_request(&self, source: CopySource, options: CopyOptions) -> CopyRequest {
+        CopyRequest {
+            result: self.result.clone(),
+            source,
+            options,
+            dialect: self.sql.dialect,
+            table: self
+                .sql
+                .table
+                .clone()
+                .unwrap_or_else(|| "table_name".to_owned()),
+            quoted_columns: self
+                .result
+                .columns()
+                .iter()
+                .map(|column| (self.sql.quote_name)(&column.name))
+                .collect(),
+        }
+    }
+
+    pub(super) fn copy_page_csv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let options = CopyOptions {
+            format: CopyFormat::Csv,
+            header: true,
+            ..CopyOptions::default()
+        };
+        let request = self.copy_request(CopySource::Page, options);
+        self.start_copy(request, super::copying::CopyWhat::Page, window, cx);
+    }
+
+    fn start_copy(
+        &mut self,
+        request: CopyRequest,
+        what: super::copying::CopyWhat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        super::copying::start(self, request, what, window, cx);
+    }
+
+    fn cancel_copy(&mut self, cx: &mut Context<Self>) {
+        super::copying::cancel(self, cx);
+    }
+
+    /// Copies the whole value the viewer shows, never only the part it
+    /// shows, off the UI thread like any other copy.
+    fn copy_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, column)) = self.inspected else {
+            return;
+        };
+        let request = self.copy_request(CopySource::Value { row, column }, CopyOptions::default());
+        self.start_copy(request, super::copying::CopyWhat::Value, window, cx);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1046,7 +1040,7 @@ impl ResultGrid {
         let handled = if keystroke.modifiers.control || keystroke.modifiers.platform {
             match keystroke.key.as_str() {
                 "c" => {
-                    self.copy_selection(shift, false, window, cx);
+                    self.copy_selection(shift, window, cx);
                     true
                 }
                 "a" => {
@@ -1080,6 +1074,7 @@ impl ResultGrid {
                     self.jump_selection(Jump::Rows(rows), shift, cx)
                 }
                 "enter" if self.inspected.is_some() => self.open_inspector(Inspector::Value, cx),
+                "escape" if self.copy_job.is_some() => self.cancel_copy(cx),
                 // Esc closes what is on top first: the panel, the records
                 // view, then the selection.
                 "escape" if self.inspector.is_some() => self.set_inspector(None, cx),
@@ -1512,7 +1507,7 @@ impl ResultGrid {
                             .when(self.sales && !self.widths.contains_key(&col), |s| {
                                 s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col])
                             })
-                            .font_family("Cascadia Mono")
+                            .font_family(fonts().mono.clone())
                             .text_size(px(13.))
                             .when(is_null, |s| s.italic())
                             .when(family == ValueFamily::Boolean, |s| s.justify_center())
@@ -1725,7 +1720,7 @@ impl ResultGrid {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(colors().grid_hover)))
                             .when(inspected, |s| s.bg(rgb(colors().grid_selected)))
-                            .font_family("Cascadia Mono")
+                            .font_family(fonts().mono.clone())
                             .text_size(px(13.))
                             .when(raw.is_none(), |s| s.italic())
                             .when(family == ValueFamily::Number, |s| s.justify_end())
@@ -2141,7 +2136,7 @@ impl ResultGrid {
                             .h_full()
                             .readonly(true)
                             .aria_label(tr!("Full value"))
-                            .font_family("Cascadia Mono")
+                            .font_family(fonts().mono.clone())
                             .text_size(px(13.)),
                     )
                     .into_any_element(),
@@ -2150,21 +2145,29 @@ impl ResultGrid {
             .child(
                 row()
                     .flex_none()
+                    .gap_2()
                     .justify_between()
-                    .child(label(match value {
-                        Some(value) if value.len() > VIEWER_BYTES => tr!(
-                            "{0} characters · shows the first 1 MB; Copy copies all of it",
-                            cell_format::count(value.chars().count())
-                        ),
-                        Some(value) => {
-                            tr!("{0} characters", cell_format::count(value.chars().count()))
-                        }
-                        None => String::new(),
-                    }))
+                    // The text wraps, so a long note (or a longer language)
+                    // never pushes Copy out of the panel.
                     .child(
-                        button("copy-value", I::Copy, tr!("Copy"))
-                            .on_click(cx.listener(|this, _, _, cx| this.copy_value(cx))),
-                    ),
+                        label(match value {
+                            Some(value) if value.len() > VIEWER_BYTES => tr!(
+                                "{0} characters · shows the first 1 MB; Copy copies all of it",
+                                cell_format::count(value.chars().count())
+                            ),
+                            Some(value) => {
+                                tr!("{0} characters", cell_format::count(value.chars().count()))
+                            }
+                            None => String::new(),
+                        })
+                        .flex_1()
+                        .min_w_0(),
+                    )
+                    .child(div().flex_none().child(
+                        button("copy-value", I::Copy, tr!("Copy")).on_click(
+                            cx.listener(|this, _, window, cx| this.copy_value(window, cx)),
+                        ),
+                    )),
             )
     }
 
@@ -2374,7 +2377,7 @@ impl ResultGrid {
                                     div()
                                         .min_w_0()
                                         .truncate()
-                                        .font_family("Cascadia Mono")
+                                        .font_family(fonts().mono.clone())
                                         .text_size(px(13.))
                                         .text_color(rgb(value_color(Some(text), family)))
                                         .child(value(text).replace(['\n', '\r'], "↵")),
@@ -2426,14 +2429,14 @@ impl ResultGrid {
             PopupMenuItem::new(tr!("Copy as {0} (Ctrl+C)", format_name(format)))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, window, cx| {
-                    this.copy_selection(false, false, window, cx)
+                    this.copy_selection(false, window, cx)
                 })),
         )
         .item(
             PopupMenuItem::new(tr!("Copy with headers (Ctrl+Shift+C)"))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, window, cx| {
-                    this.copy_selection(true, false, window, cx)
+                    this.copy_selection(true, window, cx)
                 })),
         )
         .submenu(tr!("Copy as"), window, cx, move |menu, _, _| {
@@ -2443,8 +2446,7 @@ impl ResultGrid {
                     PopupMenuItem::new(format_name(format))
                         .disabled(!has_selection)
                         .on_click(move |_, window, cx| {
-                            let _ =
-                                weak.update(cx, |this, cx| this.copy_as(format, false, window, cx));
+                            let _ = weak.update(cx, |this, cx| this.copy_as(format, window, cx));
                         }),
                 )
             })
@@ -2512,7 +2514,7 @@ impl ResultGrid {
     }
 }
 
-/// The text colour of a value, by its family ([Results](../../docs/results.md#value-presentation)).
+/// The text colour of a value, by its family ([Results](../../docs/reference/results.md#value-presentation)).
 fn value_color(raw: Option<&str>, family: ValueFamily) -> u32 {
     if raw.is_none() {
         colors().value_null
@@ -2552,7 +2554,7 @@ fn stat_line(name: &'static str, value: String) -> Div {
         div()
             .min_w_0()
             .truncate()
-            .font_family("Cascadia Mono")
+            .font_family(fonts().mono.clone())
             .text_size(px(13.))
             .text_color(rgb(colors().text))
             .child(value),
@@ -2581,7 +2583,7 @@ fn swatch_line(name: &'static str, value: String, color: u32) -> Div {
             div()
                 .min_w_0()
                 .truncate()
-                .font_family("Cascadia Mono")
+                .font_family(fonts().mono.clone())
                 .text_size(px(13.))
                 .text_color(rgb(colors().text))
                 .child(value),
@@ -2698,6 +2700,34 @@ impl Render for ResultGrid {
                     .min_w_0()
                     .h_full()
                     .child(main)
+                    .when_some(
+                        self.copy_job.as_ref().and_then(super::copying::status),
+                        |s, status| {
+                            s.child(
+                                row()
+                                    .id("copy-progress")
+                                    .role(Role::Status)
+                                    .absolute()
+                                    .top_2()
+                                    .right_2()
+                                    .p_2()
+                                    .gap_3()
+                                    .bg(rgb(colors().panel))
+                                    .border_1()
+                                    .border_color(rgb(colors().border))
+                                    .rounded_md()
+                                    .child(label(status))
+                                    .child(
+                                        button("cancel-copy", I::X, tr!("Cancel copy")).on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.cancel_copy(cx);
+                                                window.focus(&this.focus, cx);
+                                            }),
+                                        ),
+                                    ),
+                            )
+                        },
+                    )
                     .context_menu(move |menu, window, cx| {
                         Self::menu(menu_weak.clone(), menu, window, cx)
                     })

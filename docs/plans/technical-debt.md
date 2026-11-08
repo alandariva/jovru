@@ -18,7 +18,7 @@ own, across areas.
 
 | ID | Severity | Area | Debt | Status |
 | --- | --- | --- | --- | --- |
-| TD-001 | Critical | Transactions, drivers | The transaction state is not read from the database protocol, and the probes that replace it can change what the session's statements see | Mitigated; fix open |
+| TD-001 | Critical | Transactions, drivers | The transaction state is not read from the database protocol, and the probes that replace it can change what the session's statements see | Fix in place through a pinned SQLx fork (ADR-0030); open until upstream |
 | TD-002 | Low | Reports, query tabs, PostgreSQL driver | Binding `:name` parameters runs a `SELECT set_config(...)` before the statement, which can take the snapshot of a transaction the report panel's or the query tab's SQL opened | Open |
 
 ## TD-001 — Transaction state is not read from the protocol
@@ -27,7 +27,11 @@ own, across areas.
 - **Area:** Transactions; `jykre-core` (`Session`), `jykre-driver-postgres`,
   `jykre-driver-mysql`, `jykre-driver-sqlite`, `jykre::transaction`
 - **Registered:** 2026-11-04
-- **Status:** Mitigated (see *Way out*, step 1); the fix is open
+- **Status:** Fix in place through a pinned SQLx fork (see *Way out*,
+  step 2, and [ADR-0030](../adr/0030-transaction-state-through-a-pinned-sqlx-fork.md));
+  open until a SQLx release has the readers
+  ([transact-rs/sqlx#4512](https://github.com/transact-rs/sqlx/pull/4512)).
+  The *Problem* below describes the state before that fix.
 
 ### Problem
 
@@ -46,7 +50,7 @@ MySQL in the status flags of each OK packet (`SERVER_STATUS_IN_TRANS`,
 transactions opened through SQLx's own API, so it is wrong for a `BEGIN` the
 user typed. The drivers therefore cannot read the state that the protocol
 already carries. SQLite keeps it in `sqlite3_get_autocommit`, which SQLx
-reaches only through `unsafe` FFI ([ADR-0027](adr/0027-sqlite-driver.md)), so
+reaches only through `unsafe` FFI ([ADR-0027](../adr/0027-sqlite-driver.md)), so
 the SQLite driver reports nothing and only the inference applies.
 
 What the application does instead, and why each falls short:
@@ -91,11 +95,33 @@ What the application does instead, and why each falls short:
    run. What remains: one extra round trip per run in PostgreSQL, the
    snapshot rule depends on reading the statement's first word, and MySQL
    still infers a `BEGIN`.
-2. **Fix.** Read the protocol state: get SQLx to expose it (an upstream pull
-   request, or a `[patch]` until a release has it). Then the drivers return
-   it from `Session::transaction` with no query at all, the probes go away
-   and the contract does not change. Adding or patching a dependency needs
-   the maintainer's approval ([Stack and dependencies](stack-and-dependencies.md)).
+2. **Fix (in place, 2026-11-07).** Read the protocol state: get SQLx to
+   expose it (an upstream pull request, or a `[patch]` until a release has
+   it). Then the drivers return it from `Session::transaction`, the probes
+   go away and the contract does not change. Adding or patching a
+   dependency needs the maintainer's approval
+   ([Stack and dependencies](../standards/stack-and-dependencies.md)).
+
+   The maintainer chose the patch: every SQLx crate points to a fork pinned
+   to one revision ([ADR-0030](../adr/0030-transaction-state-through-a-pinned-sqlx-fork.md)).
+   PostgreSQL reads `ReadyForQuery`, MySQL the status flags and SQLite
+   `sqlite3_get_autocommit`; the timestamp probe and the `@@autocommit`
+   query are gone. The snapshot rule also learned `… AND CHAIN`, which made
+   both PostgreSQL probes take the chained transaction's snapshot. Live
+   tests cover a transaction begun in a MySQL procedure, a deadlock's
+   rollback, `COMMIT AND CHAIN` and, in SQLite, an interrupted write and
+   `OR ROLLBACK`; the `BEGIN` and `SET TRANSACTION` test still passes
+   unchanged. What remains:
+   - PostgreSQL still asks `pg_current_xact_id_if_assigned()` whether an
+     open transaction with a snapshot wrote, one round trip per run inside
+     a transaction, and the snapshot rule still reads the statement's first
+     words.
+   - Whether a MySQL or SQLite transaction wrote is inferred from the
+     statements.
+   - The fork goes away only once a SQLx release has the readers; the
+     upstream pull request,
+     [transact-rs/sqlx#4512](https://github.com/transact-rs/sqlx/pull/4512),
+     was opened on 2026-11-07.
 
 ### Done when
 
@@ -118,15 +144,15 @@ What the application does instead, and why each falls short:
 A report or query tab statement with parameters is preceded, in the same
 session, by
 `SELECT set_config(name, value, false) FROM unnest($1, $2)`, which binds the
-values ([ADR-0023](adr/0023-named-parameters-bound-by-drivers.md),
-[ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)). In a
+values ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md),
+[ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)). In a
 transaction that the tab's SQL opened (`BEGIN` before the statement) and
 that has no snapshot yet, that query takes the snapshot just before the
 statement would. It runs only for statements that carry parameters, which
 are queries that take a snapshot anyway, so what they read does not change;
 but a parameterized statement that must come first in a transaction cannot
 have parameters. The values also stay in the report's sessions (one per
-database its panels use, [ADR-0025](adr/0025-report-panels.md)) until their
+database its panels use, [ADR-0025](../adr/0025-report-panels.md)) until their
 next run, and in a query tab's session until its next run. Query tabs make
 this more likely than reports, since users open transactions there.
 

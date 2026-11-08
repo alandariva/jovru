@@ -22,7 +22,7 @@ production timings.
   operations slower than expected are `warn`.
 - SQLx statement logging is turned off; `reqwest` header logging is never
   enabled. What may not be logged is listed in
-  [Reliability](../reliability.md#never-logged).
+  [Reliability](../standards/reliability.md#never-logged).
 
 ## Alternatives considered
 

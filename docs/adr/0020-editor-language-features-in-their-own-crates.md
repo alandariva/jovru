@@ -1,6 +1,6 @@
 # ADR-0020: Editor language features in their own crates, apart from query execution
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-04
 - **Authors:** AI agent, at the maintainer's request (plan approved 2026-11-04)
 
@@ -16,7 +16,7 @@ Format grew inside code that query execution also depends on:
 - The `Workspace` view held the completion caches, the provider methods, the
   highlighter set-up and the whole Format flow.
 
-The [editor investigation](../investigacao-editor-sql.md) plans more of
+The [editor investigation](../research/sql-editor-investigation.md) plans more of
 these features: dialect catalogs, a model of each statement's queries for
 completion and semantic highlighting. Several may be replaced (a formatter,
 that model) or dropped; tree-sitter was evaluated for the model and not

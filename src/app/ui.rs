@@ -2,9 +2,12 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::{Icon, tooltip::Tooltip};
 use gpui_kit::*;
 
+/// The families of the interface and of code, as `colors()` gives colours.
+pub use super::fonts::fonts;
+
 /// The colour tokens of one theme. Views name a token
 /// (`rgb(colors().text)`), never a raw value, so both themes follow
-/// ([UI guidelines](../../docs/ui-guidelines.md#colours-and-theme)).
+/// ([UI guidelines](../../docs/standards/ui-guidelines.md#colours-and-theme)).
 #[derive(Debug)]
 pub struct Palette {
     pub bg: u32,
@@ -74,7 +77,7 @@ pub struct Palette {
     pub grid_focus: u32,
     pub grid_header_text: u32,
     pub grid_type_text: u32,
-    // Values by type family ([Results](../../docs/results.md#value-presentation)).
+    // Values by type family ([Results](../../docs/reference/results.md#value-presentation)).
     pub value_text: u32,
     pub value_number: u32,
     pub value_temporal: u32,
@@ -297,6 +300,48 @@ pub fn icon(name: IconName, color: u32) -> Icon {
     Icon::new(name).size(px(16.)).text_color(rgb(color))
 }
 
+/// The product icon, `assets/icon/jykre.svg`.
+const APP_MARK: &[u8] = include_bytes!("../../assets/icon/jykre.svg");
+
+/// The product icon, `edge` wide. It is rasterized once for each size in
+/// device pixels: a GPUI `img` of the SVG would make a 2048-pixel texture
+/// (its 1024 pixels, twice over) and shrink it on screen, blurred.
+pub fn app_mark(edge: Pixels) -> Img {
+    img(ImageSource::Custom(std::sync::Arc::new(
+        move |window: &mut Window, cx: &mut App| {
+            let device = (f32::from(edge) * window.scale_factor()).round().max(1.) as i32;
+            window.use_asset::<AppMark>(&device, cx)
+        },
+    )))
+    .size(edge)
+    .flex_none()
+}
+
+/// [`APP_MARK`] rasterized at an edge in device pixels.
+struct AppMark;
+
+impl Asset for AppMark {
+    type Source = i32;
+    type Output = Result<std::sync::Arc<RenderImage>, ImageCacheError>;
+
+    fn load(edge: i32, cx: &mut App) -> impl Future<Output = Self::Output> + Send + 'static {
+        let renderer = cx.svg_renderer();
+        async move { render_app_mark(&renderer, edge) }
+    }
+}
+
+fn render_app_mark(
+    renderer: &SvgRenderer,
+    edge: i32,
+) -> Result<std::sync::Arc<RenderImage>, ImageCacheError> {
+    let usvg = |error| ImageCacheError::Usvg(std::sync::Arc::new(error));
+    let svg = renderer.parse_svg(APP_MARK).map_err(usvg)?;
+    let edge = DevicePixels(edge);
+    renderer
+        .render_parsed(&svg, SvgSize::ExactSize(size(edge, edge)))
+        .map_err(usvg)
+}
+
 /// An icon that rotates continuously, for work in progress.
 pub fn spinning_icon(
     id: impl Into<ElementId>,
@@ -359,17 +404,18 @@ pub fn shortcut(value: &'static str) -> Div {
 
 /// A focusable control with `on_click`: GPUI turns Enter and Space on the
 /// focused element into the same click, so a mouse-only handler is never
-/// needed ([UI guidelines](../../docs/ui-guidelines.md#accessibility-and-keyboard)).
+/// needed ([UI guidelines](../../docs/standards/ui-guidelines.md#accessibility-and-keyboard)).
 fn base_button(
     id: impl Into<ElementId>,
     name: IconName,
-    title: &'static str,
+    title: impl Into<SharedString>,
     color: u32,
 ) -> Stateful<Div> {
+    let title = title.into();
     row()
         .id(id)
         .role(Role::Button)
-        .aria_label(title)
+        .aria_label(title.clone())
         .focusable()
         .tab_index(0)
         .border_1()
@@ -385,7 +431,11 @@ fn base_button(
         .child(title)
 }
 
-pub fn button(id: impl Into<ElementId>, name: IconName, title: &'static str) -> Stateful<Div> {
+pub fn button(
+    id: impl Into<ElementId>,
+    name: IconName,
+    title: impl Into<SharedString>,
+) -> Stateful<Div> {
     base_button(id, name, title, colors().muted)
         .hover(|s| s.bg(rgb(colors().hover)).text_color(rgb(colors().text)))
 }
@@ -509,5 +559,26 @@ pub fn environment_name(environment: jykre::connection_appearance::Environment) 
         E::Development => jykre::tr!("Development"),
         E::Staging => jykre::tr!("Staging"),
         E::Production => jykre::tr!("Production"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: GPUI's `test` attribute would replace the standard one.
+    use super::render_app_mark;
+    use gpui_kit::{DevicePixels, SvgRenderer};
+
+    #[test]
+    fn the_app_mark_renders_at_the_sizes_the_title_bar_uses() {
+        let renderer = SvgRenderer::new(std::sync::Arc::new(()));
+        // 21 px at 100 %, 125 %, 150 % and 200 %.
+        for edge in [21, 26, 32, 42] {
+            let image = render_app_mark(&renderer, edge).expect("the embedded SVG renders");
+            let size = image.size(0);
+            assert_eq!(
+                (size.width, size.height),
+                (DevicePixels(edge), DevicePixels(edge))
+            );
+        }
     }
 }

@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// The longest a tool may take ([reliability](../../docs/reliability.md)).
+/// The longest a tool may take ([reliability](../../docs/standards/reliability.md)).
 pub const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
 const SEARCH_PAGE: u32 = 100;
 const MAX_COLUMNS: usize = 300;

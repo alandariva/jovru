@@ -1,6 +1,6 @@
 # Persistent databases with synthetic data for manual testing. Separate from
 # docker-compose.test.yml, whose fixtures the full gate creates and removes.
-# Usage is described in docs/testing.md ("Local databases for manual testing").
+# Usage is described in docs/standards/testing.md ("Local databases for manual testing").
 name: jykre-dev
 
 services:

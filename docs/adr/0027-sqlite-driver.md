@@ -1,6 +1,6 @@
 # ADR-0027: SQLite database files through SQLx's bundled SQLite
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-06
 - **Authors:** Alan de Oliveira (decisions), drafted with an AI agent
 
@@ -73,7 +73,12 @@ Decisions made by the maintainer on 2026-11-06:
 - Negative or costs:
   - `Session::transaction` reports nothing (SQLx keeps
     `sqlite3_get_autocommit` private); the application infers the state from
-    the statements, as for MySQL's `BEGIN` ([TD-001](../technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)).
+    the statements, as for MySQL's `BEGIN` ([TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)).
+    *Amended by [ADR-0030](0030-transaction-state-through-a-pinned-sqlx-fork.md)
+    on 2026-11-07:* the driver now reads `sqlite3_get_autocommit` through
+    `LockedSqliteHandle::is_autocommit()`, a safe reader the pinned SQLx fork
+    adds, so a transaction SQLite ends on its own shows as ended; only
+    whether it wrote is inferred.
   - Errors carry no position (SQLx does not expose `sqlite3_error_offset`).
   - Interrupting a write inside an explicit transaction makes SQLite roll
     the whole transaction back.

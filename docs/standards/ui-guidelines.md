@@ -12,7 +12,7 @@ CLI, a test) would have to repeat.
 | Format values for display through `cell_format` (alignment, NULL style, `↵`) | Convert database values to floats or dates |
 | Start operations through `backend` and show their progress and outcome | Do network, disk or vault I/O directly |
 | Validate a form for immediate feedback | Be the only validation: drivers always validate again |
-| Adapt the layout to a driver's descriptor and capabilities | Branch on `DriverKind` (see [golden rule 3](README.md#golden-rules)) |
+| Adapt the layout to a driver's descriptor and capabilities | Branch on `DriverKind` (see [golden rule 3](../README.md#golden-rules)) |
 
 ## How GPUI renders, and what follows from it
 
@@ -66,7 +66,7 @@ See [Performance](performance.md) for budgets and how to measure.
 - Guard against stale results with a generation counter, as `Workspace` does
   with `execution_id`.
 - Show progress for anything that may exceed 300 ms and offer cancellation for
-  anything that may exceed 2 s ([User experience](ux.md#always-visible-states)).
+  anything that may exceed 2 s ([User experience](../reference/ux.md#always-visible-states)).
 - Never hold a `RefCell` borrow of shared UI data across `.await`.
 - Work that must finish before the application exits is not registered with
   a view's `cx.on_app_quit`: closing the last window releases the window's
@@ -81,7 +81,7 @@ See [Performance](performance.md) for budgets and how to measure.
   keymap at startup with `cx.bind_keys` and handled with `.on_action`.
   Component-scoped shortcuts use a `key_context`, so the same keys can mean
   different things in the editor, the grid and the explorer.
-- Bindings are listed in [User experience](ux.md#keyboard-shortcuts). A new
+- Bindings are listed in [User experience](../reference/ux.md#keyboard-shortcuts). A new
   shortcut updates that table with the change.
 - Raw `on_key_down` handlers are only for text-like navigation inside a single
   focused component when an action would not fit.
@@ -93,7 +93,15 @@ See [Performance](performance.md) for budgets and how to measure.
   translators need whole sentences.
 - After adding or changing strings, run `cargo xtask i18n pt-BR` and fill in
   the new entries (empty entries fall back to English).
-- Terminology is fixed; see [User experience](ux.md#text-and-terminology).
+- Terminology is fixed; see [User experience](../reference/ux.md#text-and-terminology).
+- Fonts come from roles, `ui::fonts()`: `ui` for the interface, `code` for
+  SQL (ligatures allowed), `mono` for values and messages, shown as typed.
+  Views never name a family. `fonts::resolve` picks each role once at
+  startup, the first of its platform's candidates that is installed (Segoe
+  UI and Cascadia on Windows; the desktop's sans family and Cascadia, Noto
+  Sans Mono, DejaVu Sans Mono, Liberation Mono or Ubuntu Mono on Linux),
+  else GPUI's `.SystemUIFont`. A family that is not installed would let GPUI
+  draw code in a proportional font.
 
 ## Colours and theme
 
@@ -113,7 +121,7 @@ See [Performance](performance.md) for budgets and how to measure.
 - `theme::apply` (`src/app/theme.rs`) sets the palette and the component
   kit's theme together; GPUI's refresh redraws cached views as well.
 - Value colours by type family are defined once in
-  [Results](results.md#value-presentation).
+  [Results](../reference/results.md#value-presentation).
 
 ## Accessibility and keyboard
 
@@ -144,6 +152,6 @@ See [Performance](performance.md) for budgets and how to measure.
 
 | Standard | Current code |
 | --- | --- |
-| Shortcuts are actions in one keymap | Only the run shortcuts, closing a tab, a new tab, moving between tabs, Preferences, the export bar and commenting lines are actions (`ExecuteCurrentQuery`, `ExecuteCurrentQueryInNewResult`, `ExecuteAllQueries`, `CloseActiveTab`, `NewTab`, `NextTab`, `PreviousTab`, `ShowPreferences`, `ExportResult`, `ToggleComment`, and in the explorer `ExplorerContextMenu` and `ToggleExplorerFilter`). Typing in the explorer's quick search is text-like navigation, read by a `capture_key_down` on the tree (`src/app/quick_search.rs`). The others are matched by hand in `on_key_down`/`capture_key_down` handlers in `src/app/mod.rs`, `workspace.rs`, `connections.rs`, `result_grid.rs` (the grid's navigation keys) and `grouped_tabs` |
-| Frequently changing regions are their own cached entities | The result grid is its own cached entity (`src/app/result_grid.rs`, [ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)); so is the assistant panel (`src/app/assistant_panel.rs`, [ADR-0028](adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)). The editor still renders inside `Workspace` |
-| Long collections are virtualized | The result grid, the explorer tree, Messages and the saved queries and history are. The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`) |
+| Shortcuts are actions in one keymap | Only the run shortcuts, stopping a run, reopening a closed tab, opening and saving files, closing a tab, a new tab, moving between tabs, Preferences, the export bar and commenting lines are actions (`ExecuteCurrentQuery`, `ExecuteCurrentQueryInNewResult`, `ExecuteAllQueries`, `CancelRun`, `ReopenClosedTab`, `OpenFile`, `SaveFile`, `SaveFileAs`, `CloseActiveTab`, `NewTab`, `NextTab`, `PreviousTab`, `ShowPreferences`, `ExportResult`, `ToggleComment`, and in the explorer `ExplorerContextMenu` and `ToggleExplorerFilter`). Typing in the explorer's quick search is text-like navigation, read by a `capture_key_down` on the tree (`src/app/quick_search.rs`). The others are matched by hand in `on_key_down`/`capture_key_down` handlers in `src/app/mod.rs`, `workspace.rs`, `connections.rs`, `result_grid.rs` (the grid's navigation keys) and `grouped_tabs` |
+| Frequently changing regions are their own cached entities | The result grid is its own cached entity (`src/app/result_grid.rs`, [ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md)); so is the assistant panel (`src/app/assistant_panel.rs`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)). The editor still renders inside `Workspace` |
+| Long collections are virtualized | The result grid, the explorer tree and its favorites, Messages and the saved queries and history are. The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`) |

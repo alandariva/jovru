@@ -4,7 +4,7 @@ The four adapters have `Ready` status and provide connection testing, SQL
 sessions and metadata. PostgreSQL and MySQL use SQLx 0.9 with rustls TLS;
 Databricks uses the authenticated CLI and HTTPS with redirects disabled; SQLite
 opens a database file through SQLx's bundled SQLite
-([ADR-0027](adr/0027-sqlite-driver.md)). The UI
+([ADR-0027](../adr/0027-sqlite-driver.md)). The UI
 uses this backend and persists non-sensitive configuration and caches in
 SQLite. Passwords stay in the session or, if the user chooses, in the system
 vault.
@@ -29,7 +29,7 @@ demo stays separate and is enabled with `JYKRE_DEMO=1`.
 
 `Driver::discover_namespaces` lists the namespaces directly below a parent
 without reading relations or columns, so the user can choose what to
-introspect ([ADR-0015](adr/0015-introspect-only-what-the-user-chooses.md)).
+introspect ([ADR-0015](../adr/0015-introspect-only-what-the-user-chooses.md)).
 PostgreSQL lists the configured database at the root and its schemas below
 it (without `pg_catalog`, `information_schema`, TOAST and temporary schemas);
 MySQL lists the visible databases, without the system ones; Databricks lists
@@ -47,7 +47,7 @@ read only the requested subset. PostgreSQL reads `pg_catalog` and MySQL
 individual Unity Catalog endpoints when an object is selected. SQLite reads
 the pragma table functions with bound arguments.
 
-What each driver reads ([ADR-0016](adr/0016-keys-defaults-and-relation-kinds.md)):
+What each driver reads ([ADR-0016](../adr/0016-keys-defaults-and-relation-kinds.md)):
 
 | | PostgreSQL | MySQL | Databricks | SQLite |
 | --- | --- | --- | --- | --- |
@@ -230,7 +230,7 @@ readiness and destroys it on close. Context defaults are applied using quoted
 the command API cannot bind values: text as `decode(X'<hex>', 'UTF-8')`,
 numbers as `CAST('…' AS DECIMAL(p,s))` (or `DOUBLE` with an exponent),
 `TRUE`/`FALSE`, `DATE'…'`, `TIMESTAMP'…'` and a typed `CAST(NULL AS …)`
-([ADR-0026](adr/0026-named-parameters-in-sql-tabs.md)). Warehouses send the
+([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)). Warehouses send the
 statement unchanged with the Statement API's typed `parameters`. Metadata uses Unity
 Catalog REST without opening a SQL session or starting compute. Jobs clusters,
 non-warehouse serverless compute and OAuth implemented inside the app remain
@@ -282,7 +282,7 @@ fresh token.
   no statement that changes where unqualified names resolve (`temp`, `main`,
   then the attached databases): it accepts `main` and refuses another schema
   with `Validation`, asking to qualify the names instead.
-- `Driver::session_connection` ([ADR-0025](adr/0025-report-panels.md))
+- `Driver::session_connection` ([ADR-0025](../adr/0025-report-panels.md))
   gives the connection a session opens with so that names resolve in a
   context from its first statement; report panels open their sessions with
   it, one per context. The default returns the connection unchanged, since
@@ -298,29 +298,47 @@ fresh token.
   Asking discards a result still open for paging, so the application asks
   after a run whose last result is complete, or after its last page. The
   default implementation reports an empty context. In PostgreSQL, right
-  after `BEGIN` or `START TRANSACTION` (and until a statement other than
-  `SET`, `SHOW`, `SAVEPOINT` or `RELEASE` runs) it answers from what the
-  session knows instead of querying, so it takes no snapshot.
+  after a transaction opens without a snapshot (`BEGIN`, `START
+  TRANSACTION`, or ending one `AND CHAIN`), and until a statement other than
+  `SET`, `SHOW`, `SAVEPOINT`, `RELEASE` or `ROLLBACK TO` runs, it answers
+  from what the session knows instead of querying, so it takes no snapshot.
 - `Session::transaction` reports the transaction state as the server sees
   it (`TransactionStatus`: idle, open with or without changes, failed, or
   MySQL's manual commit), or `None` when the driver cannot tell; the
   application then infers it. It is asked when the context is. Asking must
-  not change what the session's statements see:
-  - PostgreSQL probes with the simple query protocol
-    (`transaction_timestamp() <> statement_timestamp()`,
-    `pg_current_xact_id_if_assigned()`); a failed transaction answers with
-    SQLSTATE 25P02. Right after `BEGIN` it answers "open, nothing written"
-    without querying, under the same rule as the context, so `SET
-    TRANSACTION` and the isolation level's snapshot keep working.
-  - MySQL reports only `autocommit = 0` (`@@autocommit`): whether a `BEGIN`
-    is open needs privileges a user may not have.
+  not change what the session's statements see. The PostgreSQL, MySQL and
+  SQLite drivers read the state the database keeps, through public readers
+  that a pinned SQLx fork adds
+  ([ADR-0030](../adr/0030-transaction-state-through-a-pinned-sqlx-fork.md)):
+  - PostgreSQL reads the status of the last `ReadyForQuery` (idle, open,
+    failed) with no query. Whether an open transaction wrote is read with
+    `pg_current_xact_id_if_assigned()` over the simple query protocol, only
+    once the transaction has a snapshot; before that, under the same rule as
+    the context, it answers "nothing written", so `SET TRANSACTION` and the
+    isolation level's snapshot keep working.
+  - MySQL reads the status flags of the last OK or EOF packet with no query:
+    autocommit off is `Manual`, otherwise an open transaction (including one
+    begun in a procedure) is open with unknown changes. An error packet
+    carries no flags, but every failed or cut statement ends with a ping,
+    which reads them again, so a deadlock's rollback shows.
+  - SQLite reads `sqlite3_get_autocommit` from the connection, so a
+    transaction SQLite ended on its own (an interrupted write,
+    `OR ROLLBACK`) shows as idle; changes are unknown.
   - Databricks reports nothing.
-  - SQLite reports nothing: `sqlite3_get_autocommit` is private to SQLx
-    ([ADR-0027](adr/0027-sqlite-driver.md)), so the application infers the
-    state, including `BEGIN IMMEDIATE`/`EXCLUSIVE` and `END`.
 
-  The protocol carries the exact state, but SQLx keeps it private; see
-  [technical debt TD-001](technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
+  Whether a MySQL or SQLite transaction wrote is still inferred from the
+  statements; see
+  [technical debt TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
+- `Session::encryption` reports whether the session's traffic is encrypted
+  (`Encryption`: TLS with its version, plain text, local, or unknown), as
+  the connection negotiated it, not as the profile asked
+  ([ADR-0032](../adr/0032-session-encryption-reported-by-drivers.md)). The
+  application asks once, right after a run opened the session and before
+  its first statement. PostgreSQL reads `pg_stat_ssl` for its backend (and
+  answers unknown, without querying, inside a transaction that has no
+  snapshot yet); MySQL reads the `Ssl_version` session status, empty for
+  plain text; Databricks answers TLS, since profiles need an `https` URL;
+  SQLite answers local. The default answers unknown.
 - `Session::close` consumes the session and can report close failures.
   Relational sessions keep physical state (`USE`, `SET`, temporary tables,
   transactions). Databricks warehouses keep a logical catalog/schema context sent with
@@ -328,7 +346,7 @@ fresh token.
   `USE [SCHEMA | DATABASE]` statements, without promising transactions or
   other SQL state between statements. Classic clusters keep their actual SQL
   execution context, including successful context changes, between runs.
-- [ADR-0017](adr/0017-driver-metadata-contract-batch.md) adds, all with
+- [ADR-0017](../adr/0017-driver-metadata-contract-batch.md) adds, all with
   defaults that keep the previous behaviour:
   - `cache_identity`: the options that decide which catalog a cache
     describes. PostgreSQL: host, port, database and user; MySQL: host,
@@ -531,7 +549,7 @@ the system's temporary folder and run in the basic gate.
 
 The gate starts PostgreSQL 14/18 and MySQL 8.4/9.7 and removes the services at
 the end. They use only localhost and database/user `jykre`, with the public
-fixture password `jykre-test`. Ports and policy: [testing](testing.md). The
+fixture password `jykre-test`. Ports and policy: [testing](../standards/testing.md). The
 Databricks HTTP tests use a local mock server; the real CLI and workspace must
 be validated in an authenticated environment.
 
@@ -549,5 +567,3 @@ References: [SQLx RawSql](https://docs.rs/sqlx/latest/sqlx/struct.RawSql.html) a
 [Databricks Statement Execution](https://docs.databricks.com/api/statement-execution/v1/statement-execution).
 Classic execution: [Command Execution](https://docs.databricks.com/api/command-execution/v2/create).
 Profile discovery: [Databricks CLI auth profiles implementation](https://github.com/databricks/cli/blob/main/cmd/auth/profiles.go).
-See the [2026-11-03 validation report](databricks-validation-2026-11-03.md) for
-completed checks, measurements and remaining visual/authenticated checks.

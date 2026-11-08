@@ -4,7 +4,7 @@
 //! NULLs are bits in a bitmap, so a result costs a handful of allocations
 //! instead of one per cell, and its size in memory is known exactly. Values
 //! keep the database's text: exact numbers, temporal values and the text
-//! `NULL` are never reinterpreted ([Results](../docs/results.md)).
+//! `NULL` are never reinterpreted ([Results](../docs/reference/results.md)).
 use crate::drivers::{Cell, ColumnInfo, Row, RowSink, SinkControl};
 use std::fmt::Write as _;
 

@@ -181,6 +181,9 @@ enum Command {
     Ping {
         reply: oneshot::Sender<DriverResult<()>>,
     },
+    Transaction {
+        reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
@@ -254,6 +257,11 @@ impl DatabaseSession {
 
 #[async_trait]
 impl Session for DatabaseSession {
+    /// A database file on this computer: nothing travels on a network.
+    async fn encryption(&mut self, _: CancellationToken) -> DriverResult<Encryption> {
+        Ok(Encryption::Local)
+    }
+
     async fn execute(
         &mut self,
         request: &QueryRequest,
@@ -312,9 +320,23 @@ impl Session for DatabaseSession {
         })
     }
 
-    // The transaction state (`sqlite3_get_autocommit`) is not exposed by
-    // SQLx without unsafe code, so the default `None` leaves it to the
-    // caller, which infers it from the statements it ran.
+    /// Read from the connection (`sqlite3_get_autocommit`), so it runs
+    /// nothing and sees a transaction SQLite ended on its own (an
+    /// interrupted write, `OR ROLLBACK`). Whether it wrote is not known.
+    async fn transaction(
+        &mut self,
+        cancel: CancellationToken,
+    ) -> DriverResult<Option<TransactionStatus>> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Transaction { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
 
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
@@ -421,6 +443,27 @@ impl Server {
                                 Ok(Err(error)) => map_error(error),
                                 _ => timed_out(),
                             }));
+                            Flow::Broken
+                        }
+                    }
+                }
+                Command::Transaction { reply } => {
+                    match tokio::time::timeout(RECOVERY, connection.lock_handle()).await {
+                        Ok(Ok(mut handle)) => {
+                            let status = if handle.is_autocommit() {
+                                TransactionStatus::Idle
+                            } else {
+                                TransactionStatus::Open { changes: None }
+                            };
+                            let _ = reply.send(Ok(Some(status)));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(timed_out()));
                             Flow::Broken
                         }
                     }

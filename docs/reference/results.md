@@ -7,7 +7,7 @@ How query results are read, kept, shown and copied.
 A result is **bounded** while it is read, **converted off the UI thread**, and
 **rendered only where it is visible**. The UI thread receives display-ready
 data and builds the rows on screen, so a frame costs the same for ten rows or
-the largest result the limits allow ([Performance](performance.md)).
+the largest result the limits allow ([Performance](../standards/performance.md)).
 
 ## Value types
 
@@ -62,14 +62,14 @@ alignment only; the value itself is never converted.
 
 - `jykre::result::ResultData` holds the columns (name and database type) once,
   all cell text in one UTF-8 buffer, the end offset of each cell and a NULL
-  bitmap ([ADR-0008](adr/0008-compact-result-storage.md)). Cells are read
+  bitmap ([ADR-0008](../adr/0008-compact-result-storage.md)). Cells are read
   through `value(row, column)`, which returns `None` for NULL. Its size in
   memory is exact (`memory_bytes`).
 - `ResultBuilder` is the `RowSink` that `backend::query` hands the driver: it
   converts each row as it arrives, on the Tokio runtime, and drops the driver
   cells there. It stops reading at the memory ceiling and records which limit
   applied.
-- A tab shares its result as `Rc<ResultData>`. A new run releases the previous
+- A tab shares its result as `Arc<ResultData>`. A new run releases the previous
   result before the next one arrives; a result that is no longer held is freed
   on the runtime's blocking pool (`backend::release`), never on the UI thread.
   Closing a tab releases everything.
@@ -79,7 +79,7 @@ alignment only; the value itself is never converted.
   when its key changes: the result version, the filter text, the sort or the
   number format. Hover, scroll and selection never rebuild it.
 - The grid on screen is `ResultGrid`, its own entity embedded in the workspace
-  with `.cached(...)` ([ADR-0012](adr/0012-result-grid-as-a-cached-entity.md)).
+  with `.cached(...)` ([ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md)).
   It shares the tab's `Rc<ResultData>`, owns the selection, focus and scroll,
   and reports the selected count and copy notices to the workspace through
   `ResultGridEvent`. Selection and copy rules live in `jykre::grid`.
@@ -181,7 +181,7 @@ alignment only; the value itself is never converted.
   Up to 20,000 cells are summarized at once; a larger selection shows
   "Calculating…" while it is summarized off the UI thread, which reads the
   shared page in place
-  ([ADR-0022](adr/0022-result-pages-shared-across-threads.md)). A drag is
+  ([ADR-0022](../adr/0022-result-pages-shared-across-threads.md)). A drag is
   summarized when it ends.
 - A header's right edge resizes its column (48 to 1,600 px); a double click on
   it, or **Fit the column to its values** in the menu, fits the column to its
@@ -191,7 +191,8 @@ alignment only; the value itself is never converted.
 - A double click on a cell, or `Enter`, opens the side panel on the cell's
   **full value**: read-only text that can be selected, JSON laid out with
   indentation without changing any token, up to the first 1 MB (**Copy**
-  copies all of it), NULL shown as NULL. The panel follows the focused cell.
+  copies all of it, exactly as stored, like the other copies below), NULL
+  shown as NULL. The panel follows the focused cell.
   Its other tab, **Statistics**, summarizes one of three things, chosen at
   its top:
   - **Selection**: the selected cells (two or more): how many rows and
@@ -239,7 +240,8 @@ alignment only; the value itself is never converted.
 - Right-clicking outside the selection selects the cell under the pointer
   first, so the context menu acts on what is under it.
 - The filter bar matches text in any column, ignoring case, and stops hiding
-  rows when it is closed. It matches values, not how they are drawn: a NULL
+  rows when it is closed. It applies once typing pauses for 150 ms, so a
+  burst of keystrokes rebuilds the grid's view once. It matches values, not how they are drawn: a NULL
   never matches, even a filter for "null", while the text 'NULL' does.
 - The filter searches only the rows held for the page on screen. Below the
   field it says so ("Filters this page only (1,000 rows)…") whenever the
@@ -294,9 +296,24 @@ alignment only; the value itself is never converted.
 - **Copy this page as CSV** copies the page on screen with headers, `;` as the
   separator and every value quoted, using the original values regardless of
   presentation; NULL becomes an empty field. The copy settings do not apply.
-- Copies estimated above 50 MiB (from the length of the cells, before they
-  are built) ask for confirmation, and copying runs off the UI thread
-  when it would exceed a frame.
+- Every copy of a result runs the same way (`copy_as::CopyRequest`, run by
+  `src/app/copying.rs`): grid selections (every menu format), **Copy this
+  page as CSV**, the inspector's **Copy** (the whole value, never the part
+  the inspector shows) and a report panel's **Copy as CSV** and **Copy for a
+  spreadsheet**. Each estimates its size and generates its text on the
+  runtime's blocking pool, sharing the immutable page and display order
+  rather than cloning the cells. Copies estimated above 50 MiB ask for
+  confirmation before generating the text. The confirmation keeps the
+  selection, page or value that was requested.
+- Past the 100 ms copy budget, the grid shows progress and **Cancel copy**
+  (a report panel, in its notice line); `Esc` cancels too. Encoding reports
+  rows at most every 100 ms. Estimation and encoding each have a 60 s
+  deadline, checked between rows/cells. Cancellation, closing the grid or
+  panel, changing its page or result, or requesting a newer copy anywhere in
+  the window prevents the old text from reaching the clipboard. Partial text
+  is never published; large discarded text and snapshots are freed off the UI
+  thread. Only handing the completed text to the OS clipboard stays on the UI
+  thread.
 
 ## Export
 
@@ -320,7 +337,7 @@ system's save dialog (`jykre::export`, `backend::export`).
   `""`, numbers are written as the database wrote them (a JSON number only
   when valid), strings are escaped by the dialect, nothing is converted
   between time zones or changed to defend spreadsheets from formulas
-  ([Security](security.md#exported-files)).
+  ([Security](../standards/security.md#exported-files)).
 - **XLSX** writes one sheet, `Result`, in constant memory (each row goes to a
   temporary file as soon as the next starts). A number column's value is a
   number cell only when it has at most 15 significant digits, which Excel
@@ -357,12 +374,12 @@ system's save dialog (`jykre::export`, `backend::export`).
   folder**.
 - Each part is converted and written on the runtime's blocking pool, never
   the UI thread; the held pages are shared with the export, not copied
-  ([ADR-0022](adr/0022-result-pages-shared-across-threads.md)).
+  ([ADR-0022](../adr/0022-result-pages-shared-across-threads.md)).
 
 ## Reports
 
-A report ([ADR-0024](adr/0024-reports.md),
-[ADR-0025](adr/0025-report-panels.md)) shows, in each panel, the last result
+A report ([ADR-0024](../adr/0024-reports.md),
+[ADR-0025](../adr/0025-report-panels.md)) shows, in each panel, the last result
 of the panel's SQL up to its connection's row limit, without paging, in the
 same grid. A panel's result may also take the memory ceiling divided by the
 report's number of panels (`jykre::reports::run::memory_ceiling`), so a
@@ -378,7 +395,9 @@ report holds no more than one query tab.
 - What a panel draws is computed off the UI thread, with its result, and
   again when its chart changes.
 - **Copy as CSV** and **Copy for a spreadsheet**, in a panel's menu, copy its
-  result with the rules above, asking first above 50 MiB.
+  whole result with the column names, as **Copy this page as CSV** and as
+  tab-separated text, whatever the copy menu says. They run off the UI thread
+  like every copy ([Copying](#copying)), asking first above 50 MiB.
 - **Export for printing or PDF…** (`jykre::reports::export`) writes one HTML
   file where the user chooses: the title, description, the connections, the
   values the panels ran with, and each panel with its connection and
@@ -412,6 +431,5 @@ format ([User experience](ux.md#feedback)).
 
 ## Known deviations
 
-| Standard | Current code |
-| --- | --- |
-| Copy off the UI thread when large | Copies above 50 MiB ask first, but the text is still built on the UI thread (about 85 ms for 500,000 cells). Pages are now shared as `Arc<ResultData>` ([ADR-0022](adr/0022-result-pages-shared-across-threads.md), Proposed), which lets the copy move off the UI thread; that change is not made yet |
+None at the moment. Copies off the UI thread when large, the last one
+listed here, were completed in 0.2.0 M2.

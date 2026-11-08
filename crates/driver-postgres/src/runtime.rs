@@ -204,6 +204,9 @@ enum Command {
     Transaction {
         reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
     },
+    Encryption {
+        reply: oneshot::Sender<DriverResult<Encryption>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
@@ -343,6 +346,19 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
+    /// Read from `pg_stat_ssl` for this backend, so a profile that only
+    /// prefers TLS tells whether it fell back to plain text.
+    async fn encryption(&mut self, cancel: CancellationToken) -> DriverResult<Encryption> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Encryption { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -404,15 +420,17 @@ const BIND_SETTINGS: &str =
 /// none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SnapshotEffect {
-    /// `BEGIN` or `START TRANSACTION`: a transaction opens without a snapshot.
+    /// `BEGIN`, `START TRANSACTION`, or ending one `AND CHAIN`: a transaction
+    /// opens without a snapshot.
     Opens,
-    /// `SET`, `SHOW`, `SAVEPOINT`, `RELEASE`: no snapshot is taken.
+    /// `SET`, `SHOW`, `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`: no snapshot is
+    /// taken.
     Keeps,
     /// Anything else may take one.
     Takes,
 }
 
-/// The [`SnapshotEffect`] of `sql`, from its first word after whitespace and
+/// The [`SnapshotEffect`] of `sql`, from its first words after whitespace and
 /// comments.
 fn snapshot_effect(sql: &str) -> SnapshotEffect {
     let mut rest = sql;
@@ -448,49 +466,45 @@ fn snapshot_effect(sql: &str) -> SnapshotEffect {
             break;
         }
     }
-    let word: String = rest
+    let first: String = rest
         .chars()
         .take_while(char::is_ascii_alphabetic)
         .collect::<String>()
         .to_ascii_uppercase();
-    match word.as_str() {
+    match first.as_str() {
         "BEGIN" | "START" => SnapshotEffect::Opens,
         "SET" | "SHOW" | "SAVEPOINT" | "RELEASE" => SnapshotEffect::Keeps,
+        "COMMIT" | "END" | "ROLLBACK" | "ABORT" => {
+            // `[WORK | TRANSACTION] [AND [NO] CHAIN]`, or `ROLLBACK [WORK |
+            // TRANSACTION] TO [SAVEPOINT] name`.
+            let next: Vec<String> = rest[first.len()..]
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .filter(|word| !word.is_empty())
+                .map(str::to_ascii_uppercase)
+                .skip_while(|word| word == "WORK" || word == "TRANSACTION")
+                .take(2)
+                .collect();
+            match next.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                ["AND", "CHAIN"] => SnapshotEffect::Opens,
+                ["TO", ..] if first == "ROLLBACK" => SnapshotEffect::Keeps,
+                _ => SnapshotEffect::Takes,
+            }
+        }
         _ => SnapshotEffect::Takes,
     }
 }
 
-/// The transaction state, read with one simple-protocol query. In the
-/// simple protocol the transaction and the statement start at the same
-/// `Query` message, so their timestamps differ only inside a transaction
-/// opened earlier; the extended protocol stamps each message apart and
-/// cannot be used. Inside a failed transaction the query itself fails with
-/// SQLSTATE 25P02, which is the answer.
-async fn transaction_status(connection: &mut PgConnection) -> DriverResult<TransactionStatus> {
-    let probe = sqlx::raw_sql(sqlx::AssertSqlSafe(
-        "SELECT (transaction_timestamp() <> statement_timestamp())::text, \
-         (pg_current_xact_id_if_assigned() IS NOT NULL)::text",
+/// Whether the open transaction wrote something, read with one
+/// simple-protocol query. Asked only once the transaction has a snapshot
+/// ([`SnapshotEffect`]), so the query takes none.
+async fn transaction_wrote(connection: &mut PgConnection) -> DriverResult<bool> {
+    let row = sqlx::raw_sql(sqlx::AssertSqlSafe(
+        "SELECT (pg_current_xact_id_if_assigned() IS NOT NULL)::text",
     ))
     .fetch_one(&mut *connection)
-    .await;
-    match probe {
-        Ok(row) => {
-            let flag = |index: usize| -> DriverResult<bool> {
-                Ok(row.try_get::<String, _>(index).map_err(map_error)? == "true")
-            };
-            Ok(if flag(0)? {
-                TransactionStatus::Open {
-                    changes: Some(flag(1)?),
-                }
-            } else {
-                TransactionStatus::Idle
-            })
-        }
-        Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("25P02") => {
-            Ok(TransactionStatus::Failed)
-        }
-        Err(error) => Err(map_error(error)),
-    }
+    .await
+    .map_err(map_error)?;
+    Ok(row.try_get::<String, _>(0).map_err(map_error)? == "true")
 }
 
 /// What the connection's task does after a statement.
@@ -583,15 +597,8 @@ impl Server {
                     }));
                     Flow::Ready
                 }
-                Command::Transaction { reply } if self.unread => {
-                    let _ = reply.send(Ok(Some(TransactionStatus::Open {
-                        changes: Some(false),
-                    })));
-                    Flow::Ready
-                }
                 Command::Transaction { reply } => {
-                    match tokio::time::timeout(RECOVERY, transaction_status(&mut connection)).await
-                    {
+                    match tokio::time::timeout(RECOVERY, self.transaction(&mut connection)).await {
                         Ok(status) => {
                             let _ = reply.send(status.map(Some));
                             Flow::Ready
@@ -636,6 +643,44 @@ impl Server {
                         }
                     }
                 }
+                Command::Encryption { reply } if self.unread => {
+                    // Querying would take the new transaction's snapshot.
+                    let _ = reply.send(Ok(Encryption::Unknown));
+                    Flow::Ready
+                }
+                Command::Encryption { reply } => {
+                    let found = tokio::time::timeout(
+                        RECOVERY,
+                        sqlx::query_as::<_, (bool, Option<String>)>(
+                            "SELECT ssl, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+                        )
+                        .fetch_optional(&mut connection),
+                    )
+                    .await;
+                    match found {
+                        Ok(Ok(found)) => {
+                            let _ = reply.send(Ok(match found {
+                                Some((true, version)) => Encryption::Tls { version },
+                                Some((false, _)) => Encryption::Plaintext,
+                                // A server without the view's row (a
+                                // compatible database) does not tell.
+                                None => Encryption::Unknown,
+                            }));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
+                            Flow::Broken
+                        }
+                    }
+                }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
                     let _ = reply.send(connection.close().await.map_err(map_error));
@@ -655,6 +700,33 @@ impl Server {
         }
         self.open.store(false, Ordering::SeqCst);
         let _ = tokio::time::timeout(RECOVERY, connection.close()).await;
+    }
+
+    /// The transaction state the server reported in its last `ReadyForQuery`
+    /// message, which takes no query. Whether an open transaction wrote is
+    /// known to be nothing while it has no snapshot, and is otherwise asked
+    /// with [`transaction_wrote`].
+    async fn transaction(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> DriverResult<TransactionStatus> {
+        use sqlx::postgres::PgTransactionStatus;
+        let status = connection.transaction_status().await.map_err(map_error)?;
+        if status != PgTransactionStatus::Transaction {
+            // Whatever the statements suggested, no transaction waits for
+            // its snapshot.
+            self.unread = false;
+        }
+        Ok(match status {
+            PgTransactionStatus::Idle => TransactionStatus::Idle,
+            PgTransactionStatus::Error => TransactionStatus::Failed,
+            PgTransactionStatus::Transaction if self.unread => TransactionStatus::Open {
+                changes: Some(false),
+            },
+            PgTransactionStatus::Transaction => TransactionStatus::Open {
+                changes: Some(transaction_wrote(connection).await?),
+            },
+        })
     }
 
     /// Runs one statement and serves its pages until the result ends or
@@ -1514,6 +1586,11 @@ mod tests {
             "BEGIN",
             "begin;",
             "START TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            // Ending a transaction AND CHAIN opens the next one at once.
+            "COMMIT AND CHAIN",
+            "end work and chain;",
+            "ROLLBACK TRANSACTION AND CHAIN",
+            "abort and chain",
         ] {
             assert_eq!(snapshot_effect(sql), SnapshotEffect::Opens, "{sql}");
         }
@@ -1523,6 +1600,9 @@ mod tests {
             "/* a /* nested */ b */ SHOW search_path",
             "SAVEPOINT a",
             "RELEASE SAVEPOINT a",
+            "ROLLBACK TO SAVEPOINT a",
+            // A savepoint named like the keyword is still a name.
+            "rollback work to chain",
         ] {
             assert_eq!(snapshot_effect(sql), SnapshotEffect::Keeps, "{sql}");
         }
@@ -1532,6 +1612,9 @@ mod tests {
             "",
             "-- only",
             "/* open",
+            "COMMIT",
+            "COMMIT AND NO CHAIN",
+            "ROLLBACK",
         ] {
             assert_eq!(snapshot_effect(sql), SnapshotEffect::Takes, "{sql}");
         }

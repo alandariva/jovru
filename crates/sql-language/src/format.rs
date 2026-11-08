@@ -17,6 +17,8 @@ pub enum FormatError {
     /// The formatter failed on this input, or its result would change more
     /// than layout and keyword case; the SQL is left as it was.
     Failed,
+    /// The caller asked [`format_until`] to stop; nothing was formatted.
+    Cancelled,
 }
 
 /// The SQL as [`format`] laid it out.
@@ -121,10 +123,25 @@ fn format_statement(statement: &str, dialect: Option<SqlDialect>) -> Option<(Str
 /// It is CPU work that grows with the SQL, and the first call per dialect
 /// builds its grammar: callers run it off the UI thread.
 pub fn format(sql: &str, dialect: Option<SqlDialect>) -> Result<Formatted, FormatError> {
+    format_until(sql, dialect, &|| false)
+}
+
+/// [`format`], asking `stop` before each statement: once it answers `true`
+/// the work ends with [`FormatError::Cancelled`] and nothing is returned. A
+/// statement already being formatted (or the dialect's grammar being built)
+/// finishes first, so stopping waits for at most one statement.
+pub fn format_until(
+    sql: &str,
+    dialect: Option<SqlDialect>,
+    stop: &dyn Fn() -> bool,
+) -> Result<Formatted, FormatError> {
     let mut formatted = String::with_capacity(sql.len() + sql.len() / 8);
     let mut partial = false;
     let mut end = 0;
     for range in statements(sql, dialect) {
+        if stop() {
+            return Err(FormatError::Cancelled);
+        }
         formatted.push_str(&sql[end..range.start]);
         match format_statement(&sql[range.clone()], dialect) {
             Some((statement, unparsed)) => {
@@ -157,11 +174,21 @@ pub fn format_range(
     range: Range<usize>,
     dialect: Option<SqlDialect>,
 ) -> Result<(Formatted, Range<usize>), FormatError> {
+    format_range_until(sql, range, dialect, &|| false)
+}
+
+/// [`format_range`], stopping as [`format_until`] does.
+pub fn format_range_until(
+    sql: &str,
+    range: Range<usize>,
+    dialect: Option<SqlDialect>,
+    stop: &dyn Fn() -> bool,
+) -> Result<(Formatted, Range<usize>), FormatError> {
     let part = sql.get(range.clone()).ok_or(FormatError::Failed)?;
     let Formatted {
         sql: formatted,
         partial,
-    } = format(part, dialect)?;
+    } = format_until(part, dialect, stop)?;
     let whole = format!("{}{formatted}{}", &sql[..range.start], &sql[range.end..]);
     let end = range.start + formatted.len();
     Ok((
@@ -252,6 +279,44 @@ fn builtin(sql: &str, dialect: Option<SqlDialect>) -> String {
         previous = if function { "FUNCTION" } else { original };
     }
     output.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::{FormatError, format, format_range_until, format_until};
+    use std::cell::Cell;
+
+    const SCRIPT: &str = "select 1;
+
+select a from t where b = 2;
+-- kept
+select 3;";
+
+    #[test]
+    fn stopping_ends_before_the_next_statement_and_returns_nothing() {
+        // Asked before every statement: stopping at once formats none.
+        assert_eq!(
+            format_until(SCRIPT, None, &|| true),
+            Err(FormatError::Cancelled)
+        );
+        // Stopping after the first statement still returns nothing partial.
+        let asked = Cell::new(0);
+        let stop = || {
+            asked.set(asked.get() + 1);
+            asked.get() > 1
+        };
+        assert_eq!(
+            format_until(SCRIPT, None, &stop),
+            Err(FormatError::Cancelled)
+        );
+        assert_eq!(asked.get(), 2);
+        // Never stopping is Format itself.
+        assert_eq!(format_until(SCRIPT, None, &|| false), format(SCRIPT, None));
+        assert_eq!(
+            format_range_until(SCRIPT, 0..9, None, &|| true),
+            Err(FormatError::Cancelled)
+        );
+    }
 }
 
 #[cfg(all(test, feature = "sqruff"))]

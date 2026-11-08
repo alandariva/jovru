@@ -9,6 +9,7 @@
 //! time the panel is edited, with its connection's names for completion.
 //! While the report is edited, the panel's header chooses where it runs and
 //! its grip drags it to another place.
+use super::copying::{self, CopyJob, CopyWhat};
 use super::report_chart::ReportChart;
 use super::result_grid::ResultGrid;
 use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
@@ -21,6 +22,7 @@ use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputSt
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
+use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
 use jykre::drivers::*;
 use jykre::reports::chart::{self, ChartProblem, Visual};
 use jykre::reports::export::PanelDocument;
@@ -208,6 +210,35 @@ pub enum PanelEvent {
 
 impl EventEmitter<PanelEvent> for ReportPanel {}
 
+impl copying::CopyHost for ReportPanel {
+    fn copy_job(&mut self) -> &mut Option<CopyJob> {
+        &mut self.copy_job
+    }
+
+    fn copy_epoch(&self) -> u64 {
+        self.copy_epoch
+    }
+
+    fn copy_notice(&mut self, feedback: Feedback, cx: &mut Context<Self>) {
+        self.notice = Some(feedback);
+        cx.emit(PanelEvent::Changed);
+        cx.notify();
+    }
+
+    /// The status takes the notice line, so the report lays the panel out
+    /// again.
+    fn copy_status_changed(&mut self, cx: &mut Context<Self>) {
+        cx.emit(PanelEvent::Changed);
+        cx.notify();
+    }
+
+    /// The panel's menu leaves the keyboard nowhere; the panel takes it so
+    /// `Esc` cancels.
+    fn copy_focus(&self) -> Option<FocusHandle> {
+        Some(self.focus.clone())
+    }
+}
+
 /// The SQL editor, made the first time the panel is edited.
 struct PanelEditor {
     editor: Entity<EditorState>,
@@ -268,6 +299,13 @@ pub struct ReportPanel {
     /// One per number and colour of a number panel, while it is edited.
     targets: Vec<TargetField>,
     target_subscriptions: Vec<Subscription>,
+    /// The copy of the result running off the UI thread, if any.
+    copy_job: Option<CopyJob>,
+    /// Bumped whenever the result on screen is replaced, so a copy confirmed
+    /// afterwards is dropped.
+    copy_epoch: u64,
+    /// Taken while a copy runs, so `Esc` reaches the panel.
+    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -317,6 +355,9 @@ impl ReportPanel {
             notice: None,
             targets: Vec::new(),
             target_subscriptions: Vec::new(),
+            copy_job: None,
+            copy_epoch: 0,
+            focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         }
     }
@@ -356,7 +397,7 @@ impl ReportPanel {
                 height += COLORS_HINT_HEIGHT + COLOR_ROW_HEIGHT * spec.values.len() as f32;
             }
         }
-        if self.notice.is_some() {
+        if self.notice.is_some() || self.copy_status().is_some() {
             height += NOTICE_HEIGHT;
         }
         if self.show_ran && !self.statements.is_empty() {
@@ -459,6 +500,7 @@ impl ReportPanel {
                         cx.notify();
                     }
                     SqlEditorEvent::Reveal(path) => cx.emit(PanelEvent::Reveal(path.clone())),
+                    SqlEditorEvent::Formatting => cx.notify(),
                 },
             ),
             cx.observe(&editor, |this, editor, cx| {
@@ -629,12 +671,21 @@ impl ReportPanel {
             PanelPhase::Cancelled => tr!("The panel was stopped.").to_owned(),
             _ => tr!("The panel failed: {0}", error),
         });
-        self.notice = outcome.reopened.then(|| {
-            Feedback::new(
+        self.notice = if outcome.transaction_closed {
+            Some(Feedback::new(
                 Tone::Warning,
-                tr!("The connection was lost and opened again; session settings started over."),
-            )
-        });
+                tr!(
+                    "This panel's SQL left a transaction open. Reports keep no transactions, so its session was closed and the transaction rolled back."
+                ),
+            ))
+        } else {
+            outcome.reopened.then(|| {
+                Feedback::new(
+                    Tone::Warning,
+                    tr!("The connection was lost and opened again; session settings started over."),
+                )
+            })
+        };
         if outcome.info.adopt
             && self.fresh
             && self.panel.chart.is_none()
@@ -646,6 +697,10 @@ impl ReportPanel {
             cx.emit(PanelEvent::Changed);
         }
         if let Some(data) = outcome.data {
+            // A copy of the result being replaced never reaches the
+            // clipboard.
+            self.copy_job = None;
+            self.copy_epoch += 1;
             self.grid.update(cx, |grid, cx| {
                 grid.set_page(data.clone(), false, 0, None, cx)
             });
@@ -884,7 +939,10 @@ impl ReportPanel {
             .is_some_and(|shown| shown.data.column_count() > 0)
     }
 
-    fn copy(&mut self, tabs: bool, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Copies the whole result as CSV, or as tab-separated text for a
+    /// spreadsheet (`sheet`), with the column names, off the UI thread and
+    /// asking first above 50 MiB. The copy menu's choices do not apply.
+    fn copy(&mut self, sheet: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(result) = self
             .shown
             .as_ref()
@@ -899,48 +957,49 @@ impl ReportPanel {
             cx.notify();
             return;
         };
-        let bytes = jykre::grid::csv_bytes(&result);
-        if !confirmed && bytes > jykre::grid::COPY_CONFIRM_BYTES {
-            let view = cx.entity().downgrade();
-            super::confirm(
-                window,
-                cx,
-                super::Confirmation {
-                    title: tr!("Copy about {0} MB?", bytes / (1024 * 1024)),
-                    description: tr!(
-                        "The result is large: copying it can take a moment and holds all of it in the clipboard."
-                    )
-                    .to_string(),
-                    ok: tr!("Copy"),
-                    cancel: tr!("Cancel"),
-                    focus: super::ConfirmFocus::Dialog,
-                },
-                move |window, cx| {
-                    let _ = view.update(cx, |this, cx| this.copy(tabs, true, window, cx));
-                },
-            );
-            return;
-        }
-        let text = if tabs {
-            let headers: Vec<&str> = result.columns().iter().map(|c| c.name.as_str()).collect();
-            let rows: Vec<Vec<Option<&str>>> = (0..result.row_count())
-                .map(|row| result.row(row).collect())
-                .collect();
-            jykre::cell_format::copy_cells(Some(&headers), &rows)
+        let (format, what) = if sheet {
+            (CopyFormat::Text, CopyWhat::ResultSheet)
         } else {
-            jykre::cell_format::result_csv(&result)
+            (CopyFormat::Csv, CopyWhat::ResultCsv)
         };
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.notice = Some(Feedback::new(
-            Tone::Success,
-            if tabs {
-                tr!("Copied {0} rows for a spreadsheet.", result.row_count())
-            } else {
-                tr!("Copied {0} rows as CSV.", result.row_count())
+        let request = CopyRequest {
+            result,
+            source: CopySource::Page,
+            options: CopyOptions {
+                format,
+                header: true,
+                ..CopyOptions::default()
             },
-        ));
-        cx.emit(PanelEvent::Changed);
-        cx.notify();
+            dialect: None,
+            table: String::new(),
+            quoted_columns: Vec::new(),
+        };
+        // Its status, then its outcome, take the notice line.
+        copying::start(self, request, what, window, cx);
+    }
+
+    /// What a copy running past the copy budget shows in the notice line.
+    fn copy_status(&self) -> Option<String> {
+        self.copy_job.as_ref().and_then(copying::status)
+    }
+
+    fn copy_status_line(&self, status: String, cx: &mut Context<Self>) -> Stateful<Div> {
+        row()
+            .id("panel-copy")
+            .role(Role::Status)
+            .h(px(NOTICE_HEIGHT))
+            .flex_none()
+            .px_2()
+            .pt_1()
+            .gap_2()
+            .child(div().flex_1().min_w_0().truncate().child(label(status)))
+            .child(
+                Button::new("panel-cancel-copy")
+                    .ghost()
+                    .xsmall()
+                    .label(tr!("Cancel copy"))
+                    .on_click(cx.listener(|this, _, _, cx| copying::cancel(this, cx))),
+            )
     }
 
     fn header(&self, cx: &mut Context<Self>) -> Div {
@@ -1066,10 +1125,10 @@ impl ReportPanel {
                 };
                 let mut menu = menu
                     .item(item(tr!("Copy as CSV"), |this, window, cx| {
-                        this.copy(false, false, window, cx)
+                        this.copy(false, window, cx)
                     }))
                     .item(item(tr!("Copy for a spreadsheet"), |this, window, cx| {
-                        this.copy(true, false, window, cx)
+                        this.copy(true, window, cx)
                     }));
                 if arranging {
                     menu = menu.separator();
@@ -1666,6 +1725,7 @@ impl ReportPanel {
 impl Render for ReportPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let shown_title = self.panel.shown_title(self.index);
+        let copy_status = self.copy_status();
         column()
             .id(("report-panel", self.panel.id.0))
             .role(Role::Group)
@@ -1676,9 +1736,22 @@ impl Render for ReportPanel {
             .border_color(rgb(if self.editing { colors().mint } else { colors().border }))
             .bg(rgb(colors().panel))
             .overflow_hidden()
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                // Esc cancels a copy of the result, when nothing inside the
+                // panel took it first.
+                if event.keystroke.key == "escape" && this.copy_job.is_some() {
+                    copying::cancel(this, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .child(self.header(cx))
             .when(self.editing, |s| s.child(self.definition_rows(cx)))
-            .when_some(self.notice.clone(), |s, notice| {
+            .when_some(copy_status.clone(), |s, status| {
+                s.child(self.copy_status_line(status, cx))
+            })
+            // A copy running past the copy budget takes the notice line.
+            .when_some(self.notice.clone().filter(|_| copy_status.is_none()), |s, notice| {
                 // One line: a long error is cut here, and the whole text
                 // shows on hover.
                 let text = notice.text.clone();
@@ -1704,7 +1777,7 @@ impl Render for ReportPanel {
                         .overflow_y_scroll()
                         .px_2()
                         .py_1()
-                        .font_family("Cascadia Code")
+                        .font_family(fonts().code.clone())
                         .text_size(px(12.))
                         .text_color(rgb(colors().muted))
                         .child(self.statements.join("\n"))

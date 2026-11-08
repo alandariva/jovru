@@ -6,7 +6,7 @@
 ## Context
 
 The rules against panics on production paths, stray output and locks held
-across `.await` ([Rust guidelines](../rust-guidelines.md)) are checked only in
+across `.await` ([Rust guidelines](../standards/rust-guidelines.md)) are checked only in
 review. Review misses things, and agents tend to add a "temporary" `unwrap`.
 
 ## Decision

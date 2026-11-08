@@ -17,7 +17,7 @@ never lose the previous read.
 - Access goes through repositories in `jykre-storage`, on SQLx's SQLite
   driver, with WAL, foreign keys, a busy timeout and a `quick_check` on open.
 - Metadata refreshes stage objects and publish a scope in one transaction.
-- Details: [Persistence](../persistence.md).
+- Details: [Persistence](../reference/persistence.md).
 
 ## Alternatives considered
 
@@ -31,5 +31,5 @@ never lose the previous read.
 
 - Positive: transactions, paged and indexed reads, offline browsing, a
   corrupted cache can be set aside without touching profiles.
-- Negative: schema changes need migrations ([Persistence](../persistence.md#migrations)).
+- Negative: schema changes need migrations ([Persistence](../reference/persistence.md#migrations)).
 - Required: no secrets and no query results in these files.

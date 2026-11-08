@@ -23,11 +23,17 @@ const APP_DIR: &str = if cfg!(any(windows, target_os = "macos")) {
     "jykre-studio"
 };
 
+/// The variable that sets the data folder (tests and manual checks).
+pub const CONFIG_DIR_VARIABLE: &str = "JYKRE_CONFIG_DIR";
+
 /// `JYKRE_CONFIG_DIR`, else the per-user local data directory:
 /// `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS and
 /// `$XDG_DATA_HOME` (default `~/.local/share`) on Linux.
 pub fn data_dir() -> PathBuf {
-    resolve_data_dir(std::env::var_os("JYKRE_CONFIG_DIR"), dirs::data_local_dir())
+    resolve_data_dir(
+        std::env::var_os(CONFIG_DIR_VARIABLE),
+        dirs::data_local_dir(),
+    )
 }
 
 fn resolve_data_dir(configured: Option<OsString>, platform: Option<PathBuf>) -> PathBuf {
@@ -656,7 +662,7 @@ pub async fn save_font_size(dir: &Path, size: f32, ticket: u64) -> DriverResult<
 }
 
 /// How long a read, write or removal in the operating system vault may take
-/// ([Reliability](../docs/reliability.md#timeouts)). A vault that does not
+/// ([Reliability](../docs/standards/reliability.md#timeouts)). A vault that does not
 /// answer (a locked keyring waiting for an unlock nobody sees) is reported
 /// as unavailable, so the connection dialog is never stuck saving.
 pub const VAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);

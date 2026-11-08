@@ -88,6 +88,9 @@ pub struct Workspace {
     /// tables and transactions carry over. Out with the run while one is
     /// running; `None` until the first run or after it was lost.
     session: Option<Box<dyn Session>>,
+    /// Whether the session the tab holds is encrypted, as the server told
+    /// when it opened; shown beside **Connected**.
+    encryption: Option<Encryption>,
     /// The lease of the run or page read that has the session out. A session
     /// that comes back under any other lease (a superseded run, or one begun
     /// on another connection) is closed.
@@ -95,7 +98,7 @@ pub struct Workspace {
     next_lease: u64,
     /// The next page of a result is being read; runs wait for it.
     fetching: bool,
-    /// The export bar and the export it runs ([Results](../../docs/results.md#export)).
+    /// The export bar and the export it runs ([Results](../../docs/reference/results.md#export)).
     export: ExportBar,
     /// The fields of the SQL's `:name` parameters, above the editor.
     parameters: ParameterForm,
@@ -158,6 +161,11 @@ pub struct Workspace {
     line_count: usize,
     /// SQL as last saved to the library, if this tab is saved.
     saved_sql: Option<String>,
+    /// The `.sql` file the tab edits; `saved_sql` is then the text it was
+    /// loaded or last saved with (ADR-0031).
+    file: Option<jykre::workspace_state::TabFile>,
+    /// The tab's recovery file, while its text is kept apart.
+    recovery: Option<String>,
     /// The saved query this tab edits, by its identity in the library.
     saved_id: Option<u64>,
     /// The table or view the tab was opened for: opening it again shows
@@ -178,6 +186,9 @@ pub struct Workspace {
     notice: Option<Feedback>,
     filter_open: bool,
     filter: Entity<InputState>,
+    /// Tells the filter text typed last from earlier keystrokes still
+    /// waiting to apply.
+    filter_revision: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -212,6 +223,7 @@ impl Workspace {
                     this.notice = Some(notice.clone());
                     cx.notify();
                 }
+                SqlEditorEvent::Formatting => cx.notify(),
             },
         );
         let assistant_panel = cx.new(|cx| AssistantPanel::new(demo::enabled(), window, cx));
@@ -236,9 +248,7 @@ impl Workspace {
         );
         let filter_subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) && this.filter_open {
-                let filter = this.filter.read(cx).value().to_string();
-                this.grid
-                    .update(cx, |grid, cx| grid.set_filter(&filter, cx));
+                this.filter_soon(cx);
             }
         });
         let sales = demo::is_sales(sql);
@@ -319,6 +329,7 @@ impl Workspace {
             risk_confirmed: false,
             environment: None,
             session: None,
+            encryption: None,
             session_lease: None,
             next_lease: 0,
             fetching: false,
@@ -379,6 +390,8 @@ impl Workspace {
             statement_lines: jykre::sql::statement_lines(sql, None).into(),
             line_count: sql.split('\n').count(),
             saved_sql: None,
+            file: None,
+            recovery: None,
             saved_id: None,
             object: None,
             data_sql: None,
@@ -387,6 +400,7 @@ impl Workspace {
             opened_sql: Some(sql.to_string()),
             notice: None,
             filter_open: false,
+            filter_revision: 0,
             _subscriptions: vec![
                 assistant_subscription,
                 filter_subscription,
@@ -648,22 +662,15 @@ impl Workspace {
     /// The save button: saves the SQL in the library, or updates the saved
     /// query this tab edits. It never removes anything; removing is done in
     /// the library's list.
-    fn save_query(&mut self, cx: &mut Context<Self>) {
-        let sql = self.editor.read(cx).text().to_string();
-        if self.saved_id.is_some() && self.saved_sql.as_deref() == Some(sql.as_str()) {
-            self.notice = Some(Feedback::new(
-                Tone::Info,
-                tr!("This query is already saved."),
-            ));
-            cx.notify();
-            return;
-        }
-        cx.emit(WorkspaceEvent::Saved {
-            id: self.saved_id,
-            title: self.title.to_string(),
-            connection: self.connection.to_string(),
-            sql,
-        });
+    /// **Save** (`Ctrl S`): the host writes the tab's file, or asks where
+    /// to save one first.
+    pub fn save_query(&mut self, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::Save { save_as: false });
+    }
+
+    /// **Save as…** (`Ctrl Shift S`): always asks where.
+    pub fn save_query_as(&mut self, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceEvent::Save { save_as: true });
     }
 
     /// The SQL a report takes from this tab: the selection, else the
@@ -716,21 +723,103 @@ impl Workspace {
         }
     }
 
-    /// The library saved this tab's SQL as the query `id`.
-    pub fn saved(&mut self, id: u64, sql: String, cx: &mut Context<Self>) {
-        let updated = self.saved_id == Some(id);
+    /// The file the tab edits, if any.
+    pub fn file(&self) -> Option<&jykre::workspace_state::TabFile> {
+        self.file.as_ref()
+    }
+
+    /// The tab's SQL as the editor holds it.
+    pub fn sql(&self) -> &str {
+        &self.editor_sql
+    }
+
+    pub fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+
+    /// The tab's recovery file, and gives it one when it has none.
+    pub fn recovery_name(&mut self) -> String {
+        self.recovery
+            .get_or_insert_with(jykre::query_files::recovery::new_name)
+            .clone()
+    }
+
+    /// Forgets the tab's recovery file (the host removes it), returning its
+    /// name.
+    pub fn take_recovery(&mut self) -> Option<String> {
+        self.recovery.take()
+    }
+
+    /// The tab now edits `file`, library entry `id`, holding `text` as the
+    /// file does: after a save, a *Save as*, or opening it. Its title is the
+    /// file's name.
+    pub fn link_file(
+        &mut self,
+        id: u64,
+        file: jykre::workspace_state::TabFile,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.title = jykre::query_files::names::title_of(&file.path).into();
         self.saved_id = Some(id);
-        self.saved_sql = Some(sql);
-        self.notice = Some(Feedback::new(
-            Tone::Success,
-            if updated {
-                tr!("Saved query updated.")
-            } else {
-                tr!("Query saved in the library.")
-            },
-        ));
+        self.saved_sql = Some(text);
+        self.file = Some(file);
         cx.emit(WorkspaceEvent::Changed);
         cx.notify();
+    }
+
+    /// The tab's file moved (a rename in the library, or **Locate…**): the
+    /// tab follows it and takes its name.
+    pub fn file_moved(
+        &mut self,
+        path: std::path::PathBuf,
+        base: Option<jykre::query_files::Fingerprint>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(file) = self.file.as_mut() {
+            file.path = path;
+            if let Some(base) = base {
+                file.base = base;
+            }
+            self.title = jykre::query_files::names::title_of(&file.path).into();
+            cx.emit(WorkspaceEvent::Changed);
+            cx.notify();
+        }
+    }
+
+    /// Replaces the tab's text with its file's (**Reload from disk**), as
+    /// one undo step.
+    pub fn reload_file(
+        &mut self,
+        file: jykre::workspace_state::TabFile,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            editor.set_value(text.clone(), window, cx);
+        });
+        self.editor_sql = text.clone();
+        self.saved_sql = Some(text);
+        self.file = Some(file);
+        self.notice = Some(Feedback::new(Tone::Info, tr!("Reloaded from the file.")));
+        cx.emit(WorkspaceEvent::Changed);
+        cx.notify();
+    }
+
+    /// Says something about the tab's file in its notice bar.
+    pub fn file_notice(&mut self, notice: Feedback, cx: &mut Context<Self>) {
+        self.notice = Some(notice);
+        cx.notify();
+    }
+
+    /// Closing or quitting would lose edits: SQL not in the tab's file, or a
+    /// draft's SQL the user wrote.
+    pub fn has_unsaved_changes(&self) -> bool {
+        match &self.file {
+            Some(_) => self.saved_sql.as_deref() != Some(self.editor_sql.as_str()),
+            None => self.has_unsaved_sql(),
+        }
     }
 
     /// Opens the tab as the saved query `id`, whose SQL it holds.
@@ -809,47 +898,19 @@ impl Workspace {
     }
 
     /// **Copy this page as CSV**. A copy estimated above 50 MiB asks first
-    /// (unless `confirmed`), since building and holding it takes time and
-    /// memory ([Results](../../docs/results.md#copying)).
-    fn copy_page_csv(&mut self, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = self.current_page().filter(|_| self.has_results()) else {
+    /// before generation, since building and holding it takes time and
+    /// memory ([Results](../../docs/reference/results.md#copying)).
+    fn copy_page_csv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.current_page().filter(|_| self.has_results()).is_none() {
             self.notice = Some(Feedback::new(
                 Tone::Info,
                 tr!("Run a query before copying the results."),
             ));
             cx.notify();
             return;
-        };
-        let bytes = jykre::grid::csv_bytes(&page.data);
-        if !confirmed && bytes > jykre::grid::COPY_CONFIRM_BYTES {
-            let workspace = cx.entity().downgrade();
-            super::confirm(
-                window,
-                cx,
-                super::Confirmation {
-                    title: tr!("Copy about {0} MB?", bytes / (1024 * 1024)),
-                    description: tr!(
-                        "The page is large: copying it can take a moment and holds all of it in the clipboard."
-                    )
-                    .to_string(),
-                    ok: tr!("Copy"),
-                    cancel: tr!("Cancel"),
-                    focus: super::ConfirmFocus::Dialog,
-                },
-                move |window, cx| {
-                    let _ = workspace.update(cx, |this, cx| this.copy_page_csv(true, window, cx));
-                },
-            );
-            return;
         }
-        let _timer = jykre::logging::UiTimer::start("copy CSV");
-        let csv = cell_format::result_csv(&page.data);
-        cx.write_to_clipboard(ClipboardItem::new_string(csv));
-        self.notice = Some(Feedback::new(
-            Tone::Success,
-            tr!("CSV copied. Paste it into a spreadsheet or file."),
-        ));
-        cx.notify();
+        self.grid
+            .update(cx, |grid, cx| grid.copy_page_csv(window, cx));
     }
 
     /// The table or view this tab was opened for.
@@ -1084,7 +1145,11 @@ impl Workspace {
                         }
                         this.return_session(lease, run.session);
                         if this.session.is_none() && this.session_lease == Some(lease) {
-                            this.session_notice(false, true);
+                            let ended = SessionLoss {
+                                ended: true,
+                                ..SessionLoss::default()
+                            };
+                            this.session_notice(ended, this.transaction.is_open());
                             this.transaction = Transaction::AutoCommit;
                         }
                         run.page
@@ -1242,6 +1307,12 @@ impl Workspace {
             // The previous run has ended (a stopping one blocks new runs), so
             // its session is back unless it was lost.
             let (session, lease) = self.lease_session(true);
+            // A kept session that holds the tab's transaction is not
+            // silently replaced if it was lost.
+            let tab_session = backend::TabSession {
+                session,
+                holds_transaction: self.transaction.is_open(),
+            };
             let before = options.context.clone();
             // COMMIT and ROLLBACK from the toolbar are logged in Messages,
             // not in the history of what the user ran.
@@ -1271,7 +1342,7 @@ impl Workspace {
                 let result = backend::run(backend::query(
                     connection,
                     input,
-                    session,
+                    tab_session,
                     requests,
                     DEFAULT_MEMORY_CEILING,
                     cancel,
@@ -1289,14 +1360,22 @@ impl Workspace {
                     let current = this.session_lease == Some(lease);
                     let dialect = this.run.dialect();
                     let mut reported = None;
+                    // How the session fared, told once the transaction is
+                    // known.
+                    let mut lost = SessionLoss::default();
                     let result = match result {
                         Ok(run) => {
                             reported = run.transaction;
-                            if current {
-                                this.session_notice(run.reopened, run.ended);
-                                if run.reopened {
-                                    this.transaction = Transaction::AutoCommit;
-                                }
+                            lost = SessionLoss {
+                                reopened: run.reopened,
+                                ended: run.ended,
+                                transaction: run.transaction_lost,
+                            };
+                            if current && run.reopened {
+                                this.transaction = Transaction::AutoCommit;
+                            }
+                            if current && let Some(encryption) = run.encryption {
+                                this.encryption = Some(encryption);
                             }
                             this.session_context(lease, run.context, cx);
                             this.return_session(lease, run.session);
@@ -1369,7 +1448,12 @@ impl Workspace {
                             }
                         }
                         Err(error) => {
-                            if current && let Some((_, sql)) = queries.get(this.started_position) {
+                            // When the session holding the transaction was
+                            // lost, no statement was sent.
+                            if current
+                                && !lost.transaction
+                                && let Some((_, sql)) = queries.get(this.started_position)
+                            {
                                 this.transaction = this.transaction.after(sql, false, dialect);
                                 this.ran(sql, logged_failure(&error), None, history, cx);
                             }
@@ -1382,9 +1466,11 @@ impl Workspace {
                     // What the server reports wins over what the statements
                     // suggest; a session that did not come back takes its
                     // transaction with it.
+                    let mut rolled_back = false;
                     if current {
                         this.transaction = this.transaction.reported(reported);
                         if this.session.is_none() {
+                            rolled_back = this.transaction.is_open();
                             this.transaction = Transaction::AutoCommit;
                         }
                     }
@@ -1393,6 +1479,11 @@ impl Workspace {
                         && let Some(report) = failed
                     {
                         this.notice = Some(Feedback::new(Tone::Error, report.summary()));
+                    }
+                    // A lost session, and the transaction it took with it,
+                    // matters more than which statement failed.
+                    if current {
+                        this.session_notice(lost, rolled_back);
                     }
                     this.clear_stopping_notice();
                     this.show_active(cx);
@@ -1510,7 +1601,7 @@ impl Workspace {
     }
 
     /// Puts the cursor where the server stopped, when the editor still holds
-    /// the statement ([UX](../../docs/ux.md#error-messages)). Nothing is
+    /// the statement ([UX](../../docs/reference/ux.md#error-messages)). Nothing is
     /// selected, so the next key never replaces text.
     fn mark_error(&mut self, id: ResultId, cx: &mut Context<Self>) {
         if let Some(at) = self.error_offset(id) {
@@ -1753,11 +1844,18 @@ impl Workspace {
                         .when(self.run.state() == &RunState::Cancelling, |s| {
                             s.opacity(0.6).cursor_default()
                         })
-                        .tooltip(|window, cx| {
-                            Tooltip::new(tr!(
-                                "Run the statement at the cursor or the selection, in place of the result on screen · Ctrl+Enter\nIn a new result · Ctrl+Shift+Enter\nRun all statements · Ctrl+Alt+Enter"
-                            ))
-                            .build(window, cx)
+                        .tooltip({
+                            let running = matches!(self.run.state(), RunState::Running { .. });
+                            move |window, cx| {
+                                Tooltip::new(if running {
+                                    tr!("Stop the run · Ctrl+F2")
+                                } else {
+                                    tr!(
+                                        "Run the statement at the cursor or the selection, in place of the result on screen · Ctrl+Enter\nIn a new result · Ctrl+Shift+Enter\nRun all statements · Ctrl+Alt+Enter\nStop a run · Ctrl+F2"
+                                    )
+                                })
+                                .build(window, cx)
+                            }
                         })
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_current(cx))),
                     )
@@ -1773,13 +1871,7 @@ impl Workspace {
                             .on_click(cx.listener(|this, _, _, cx| this.explain(cx))),
                     )
                     .child(
-                        button("format", I::TextAlignStart, tr!("Format"))
-                            .tooltip(|window, cx| {
-                                Tooltip::new(tr!(
-                                    "Format the selection, or the whole script when nothing is selected"
-                                ))
-                                .build(window, cx)
-                            })
+                        self.format_button(cx)
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.format_sql(window, cx)),
                             ),
@@ -1794,20 +1886,21 @@ impl Workspace {
                     .child(
                         icon_button(
                             "save-query",
-                            if self.saved_sql.as_deref() == Some(self.editor_sql.as_str()) {
-                                I::BookmarkCheck
-                            } else {
-                                I::Bookmark
+                            match (&self.file, self.has_unsaved_changes()) {
+                                (Some(_), false) => I::SaveCheck,
+                                _ => I::Save,
                             },
-                            match &self.saved_sql {
-                                Some(saved) if *saved == self.editor_sql => {
-                                    tr!("Saved in the library")
-                                }
-                                Some(_) => tr!("Update saved query"),
-                                None => tr!("Save query"),
+                            match (&self.file, self.has_unsaved_changes()) {
+                                (Some(_), false) => tr!("Saved in its file · Ctrl+S"),
+                                (Some(_), true) => tr!("Save the changes to its file · Ctrl+S"),
+                                (None, _) => tr!("Save to a file · Ctrl+S"),
                             },
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.save_query(cx))),
+                    )
+                    .child(
+                        icon_button("save-query-as", I::SavePen, tr!("Save as… · Ctrl+Shift+S"))
+                            .on_click(cx.listener(|this, _, _, cx| this.save_query_as(cx))),
                     )
                     .child({
                         let workspace = cx.entity().downgrade();
@@ -1916,8 +2009,21 @@ impl Workspace {
     }
 
     /// Whether the tab holds a session on its connection, after the
-    /// context in the editor header. A click on **Connected** disconnects.
+    /// context in the editor header, and whether that session is encrypted.
+    /// A click on **Connected** disconnects.
     fn session_status(&self, cx: &mut Context<Self>) -> AnyElement {
+        let status = self.connection_status(cx);
+        match self.encryption.as_ref().filter(|_| self.session.is_some()) {
+            Some(encryption) => row()
+                .gap_1()
+                .child(status)
+                .children(encryption_badge(encryption))
+                .into_any_element(),
+            None => status,
+        }
+    }
+
+    fn connection_status(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.input.is_none() {
             return row()
                 .child(dot(if self.demo {
@@ -2099,7 +2205,7 @@ impl Workspace {
                                 Editor::new(&self.editor)
                                     .appearance(false)
                                     .bordered(false)
-                                    .font_family("Cascadia Code")
+                                    .font_family(fonts().code.clone())
                                     .text_size(cx.theme().mono_font_size)
                                     .w_full()
                                     .h_full()
@@ -2364,7 +2470,9 @@ impl Workspace {
                                             this.filter
                                                 .update(cx, |input, cx| input.focus(window, cx));
                                         }
-                                        // A closed filter bar must not keep hiding rows.
+                                        // A closed filter bar must not keep hiding rows,
+                                        // nor apply text still waiting.
+                                        this.filter_revision += 1;
                                         let filter = if this.filter_open {
                                             this.filter.read(cx).value().to_string()
                                         } else {
@@ -2382,9 +2490,11 @@ impl Workspace {
                                     I::Sheet,
                                     tr!("Copy this page as CSV"),
                                 )
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| this.copy_page_csv(false, window, cx),
-                                )),
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| {
+                                        this.copy_page_csv(window, cx)
+                                    }),
+                                ),
                             )
                             .child({
                                 let open = !matches!(self.export.state, ExportState::Closed);
@@ -2551,7 +2661,7 @@ impl Workspace {
             .child(
                 div()
                     .pl(px(24.))
-                    .font_family("Cascadia Mono")
+                    .font_family(fonts().mono.clone())
                     .text_size(px(12.))
                     .line_height(relative(1.5))
                     .text_color(rgb(colors().text))
@@ -2612,7 +2722,7 @@ impl Workspace {
         let state = self.run.state();
         // After two seconds a run shows how long it has taken, and a
         // cancellation that takes long says the server has not stopped yet
-        // ([UX](../../docs/ux.md#always-visible-states)).
+        // ([UX](../../docs/reference/ux.md#always-visible-states)).
         let elapsed = |duration: Duration| {
             (duration >= Duration::from_secs(2))
                 .then(|| cell_format::duration(duration.as_millis() as u64))
@@ -3076,6 +3186,51 @@ impl Workspace {
 
     /// Formats the selection, or the whole script without one, by the tab's
     /// dialect ([`SqlEditor::format`]); the outcome comes back as a notice.
+    /// Applies the filter typed once typing pauses for [`FILTER_DELAY`], so a
+    /// burst of keystrokes rebuilds the grid view once, not once per key.
+    fn filter_soon(&mut self, cx: &mut Context<Self>) {
+        self.filter_revision += 1;
+        let revision = self.filter_revision;
+        cx.spawn(async move |weak, cx| {
+            cx.background_executor().timer(FILTER_DELAY).await;
+            let _ = weak.update(cx, |this, cx| {
+                if this.filter_revision == revision && this.filter_open {
+                    let filter = this.filter.read(cx).value().to_string();
+                    this.grid
+                        .update(cx, |grid, cx| grid.set_filter(&filter, cx));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Format, or while a Format runs, the button that cancels it, with
+    /// the time it has run after 2 s.
+    fn format_button(&self, cx: &App) -> Stateful<Div> {
+        match self.sql_editor.read(cx).formatting_for() {
+            None => button("format", I::TextAlignStart, tr!("Format")).tooltip(|window, cx| {
+                Tooltip::new(tr!(
+                    "Format the selection, or the whole script when nothing is selected"
+                ))
+                .build(window, cx)
+            }),
+            Some(elapsed) => {
+                let label = if elapsed >= Duration::from_secs(2) {
+                    tr!(
+                        "Cancel format · {0}",
+                        cell_format::duration(elapsed.as_millis() as u64)
+                    )
+                } else {
+                    tr!("Cancel format").to_string()
+                };
+                button("format", I::LoaderCircle, label).tooltip(|window, cx| {
+                    Tooltip::new(tr!("Stop formatting; the SQL is left as it was"))
+                        .build(window, cx)
+                })
+            }
+        }
+    }
+
     fn format_sql(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.sql_editor
             .update(cx, |editor, cx| editor.format(window, cx));
@@ -3324,6 +3479,18 @@ struct AssistantQuery {
     cancel: CancellationToken,
 }
 
+/// How the tab's session fared in a run, a page read or an export.
+#[derive(Clone, Copy, Debug, Default)]
+struct SessionLoss {
+    /// The kept session no longer answered and a new one was used.
+    reopened: bool,
+    /// The session was lost; the next run opens a new one.
+    ended: bool,
+    /// The kept session held an open transaction and no longer answered, so
+    /// nothing ran.
+    transaction: bool,
+}
+
 /// What the editor header says about the tab's session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SessionIndicator {
@@ -3364,15 +3531,10 @@ pub enum WorkspaceEvent {
     },
     /// The user chose another connection for this tab in the toolbar.
     ConnectionRequested(String),
-    /// Save the SQL in the library: as the saved query `id` when the tab
-    /// edits one, otherwise as a new one, which the host first asks a name
-    /// and tags for. The host answers with [`Workspace::saved`].
-    Saved {
-        id: Option<u64>,
-        title: String,
-        connection: String,
-        sql: String,
-    },
+    /// **Save** or **Save as…**: the host writes the tab's file, asking
+    /// where first for a tab without one or with `save_as`, and answers with
+    /// [`Workspace::link_file`].
+    Save { save_as: bool },
     /// A statement ended, in success, failure or cancellation: an entry for
     /// the history.
     Executed(jykre::workspace_state::QueryEntry),
@@ -3459,6 +3621,8 @@ impl Workspace {
             object: self.object.clone(),
             parameters: self.parameters.fields.clone(),
             data_sql: self.data_sql.clone(),
+            file: self.file.clone(),
+            recovery: self.recovery.clone(),
         }
     }
 
@@ -3475,6 +3639,8 @@ impl Workspace {
     pub fn restore(&mut self, state: &jykre::workspace_state::TabState, cx: &mut Context<Self>) {
         self.saved_sql = state.saved_sql.clone();
         self.saved_id = state.saved_id;
+        self.file = state.file.clone();
+        self.recovery = state.recovery.clone();
         self.object = state.object.clone();
         self.data_sql = state.data_sql.clone();
         self.opened_sql = state.opened_sql.clone();
@@ -3625,6 +3791,17 @@ impl Workspace {
 
     /// Opens the tab without its connection, which no longer exists, and
     /// says so.
+    /// Says what a reopened tab brings back and what it does not.
+    pub fn reopened(&mut self, cx: &mut Context<Self>) {
+        self.notice = Some(Feedback::new(
+            Tone::Info,
+            tr!(
+                "Tab reopened with its SQL. Nothing ran: its results, session and any transaction are not restored."
+            ),
+        ));
+        cx.notify();
+    }
+
     pub fn warn_missing_connection(&mut self, cx: &mut Context<Self>) {
         self.notice = Some(Feedback::new(
             Tone::Warning,
@@ -3659,9 +3836,36 @@ impl Workspace {
     }
 
     /// Tells the user when the session state they may rely on (current
-    /// schema, temporary tables, an open transaction) started over.
-    fn session_notice(&mut self, reopened: bool, ended: bool) {
-        if ended {
+    /// schema, temporary tables, an open transaction) started over, naming
+    /// the transaction the server rolled back with it (`rolled_back`).
+    fn session_notice(&mut self, lost: SessionLoss, rolled_back: bool) {
+        let SessionLoss {
+            reopened,
+            ended,
+            transaction,
+        } = lost;
+        if transaction {
+            self.notice = Some(Feedback::new(
+                Tone::Warning,
+                tr!(
+                    "The session that held the open transaction no longer answers, so the server rolled the transaction back and its uncommitted changes are lost. Nothing ran: run again to continue in a new session."
+                ),
+            ));
+        } else if ended && rolled_back {
+            self.notice = Some(Feedback::new(
+                Tone::Warning,
+                tr!(
+                    "The session was closed, so the server rolled back its open transaction and any uncommitted changes. The next run opens a new session, and session settings such as the current schema start over."
+                ),
+            ));
+        } else if reopened && rolled_back {
+            self.notice = Some(Feedback::new(
+                Tone::Warning,
+                tr!(
+                    "The previous session no longer answered, so the server rolled back its open transaction and any uncommitted changes. A new session was used, and session settings such as the current schema started over."
+                ),
+            ));
+        } else if ended {
             self.notice = Some(Feedback::new(
                 Tone::Warning,
                 tr!(
@@ -3957,13 +4161,59 @@ fn log_entry(index: usize, entry: &LogEntry, now: SystemTime) -> Stateful<Div> {
                 .pl(px(24.))
                 .text_size(px(12.))
                 .text_color(rgb(colors().faint))
-                .font_family("Cascadia Code")
+                .font_family(fonts().code.clone())
                 .truncate()
                 .child(entry.sql.clone()),
         )
 }
 
 /// Why a run did not start: the previous one is still stopping.
+/// Beside **Connected**: a lock when the session is encrypted, a warning
+/// that names the risk when it is plain text. A local file, or a driver
+/// that cannot tell, shows nothing.
+fn encryption_badge(encryption: &Encryption) -> Option<AnyElement> {
+    match encryption {
+        Encryption::Tls { version } => {
+            let tip = match version {
+                Some(version) => tr!("Encrypted ({0})", version),
+                None => tr!("Encrypted (TLS)").to_owned(),
+            };
+            Some(
+                div()
+                    .id("session-encrypted")
+                    .role(Role::Status)
+                    .aria_label(tip.clone())
+                    .child(icon(I::Lock, colors().faint).size(px(14.)))
+                    .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                    .into_any_element(),
+            )
+        }
+        Encryption::Plaintext => Some(
+            row()
+                .id("session-plaintext")
+                .role(Role::Status)
+                .aria_label(tr!("Not encrypted"))
+                .gap_1()
+                .px_1()
+                .child(icon(I::ShieldAlert, colors().amber).size(px(14.)))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(colors().amber))
+                        .child(tr!("Not encrypted")),
+                )
+                .tooltip(|window, cx| {
+                    Tooltip::new(tr!(
+                        "This session is not encrypted: anyone on the network path can read the SQL, the results and the password. Require TLS in the connection's settings."
+                    ))
+                    .build(window, cx)
+                })
+                .into_any_element(),
+        ),
+        _ => None,
+    }
+}
+
 fn stopping_notice() -> String {
     tr!("The previous run is still stopping. Run again when it ends.").into()
 }
@@ -4042,6 +4292,10 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
 /// After this long, a cancellation the driver has not finished is shown as
 /// slow, with what happens next.
 const CANCEL_SLOW: Duration = Duration::from_secs(5);
+
+/// How long typing in the result filter pauses before the grid filters, as
+/// the metadata search waits ([Performance](../../docs/standards/performance.md#rejected-patterns)).
+const FILTER_DELAY: Duration = Duration::from_millis(150);
 
 /// The statement timeouts a tab can choose; the default is five minutes.
 const TIMEOUTS: [Option<Duration>; 6] = [

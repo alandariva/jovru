@@ -1,6 +1,6 @@
 # ADR-0013: Thin ancestors for frequently notified views
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; not implemented: outside 0.2.0)
 - **Date:** 2026-11-02
 
 ## Context
@@ -64,7 +64,7 @@ RTX 4060 Ti), 2026-11-02, demo mode with synthetic results shaped like
    button.
 3. **Splitting the editor, the assistant and the explorer into cached
    entities** stays the standard of the
-   [UI guidelines](../ui-guidelines.md#how-gpui-renders-and-what-follows-from-it)
+   [UI guidelines](../standards/ui-guidelines.md#how-gpui-renders-and-what-follows-from-it)
    and a known deviation. It is done when the measured cost of the ancestors
    justifies it (today, about 1.5 ms p50 per grid frame), not as part of
    this decision.
@@ -95,16 +95,16 @@ RTX 4060 Ti), 2026-11-02, demo mode with synthetic results shaped like
 - Required: a change to `AppView`, `GroupedTabs` or `Workspace` that could
   grow a frame is measured with the frame probe during grid interactions.
   When this ADR is accepted, the paragraph on cached views in the
-  [UI guidelines](../ui-guidelines.md#how-gpui-renders-and-what-follows-from-it)
+  [UI guidelines](../standards/ui-guidelines.md#how-gpui-renders-and-what-follows-from-it)
   says that a cached view also renders when a view inside it is notified, and
   that a refresh ignores every cache.
 
 ## How to validate
 
-With the [frame probe](../performance.md#how-to-measure), in release:
+With the [frame probe](../standards/performance.md#how-to-measure), in release:
 
 - Hovering, scrolling and selecting in a 1,000-row and a 100,000-row result
-  stay within the [frame budget](../performance.md#budgets), also with a
+  stay within the [frame budget](../standards/performance.md#budgets), also with a
   1,000-statement script in the editor. `AppView` and `Workspace` render as
   often as `ResultGrid` in these scenarios; that is expected.
 - Typing in the editor with a 100,000-row result open does not run

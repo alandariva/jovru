@@ -40,3 +40,7 @@ multiple-versions = "warn"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# SQLx 0.9.0 plus public readers of the transaction state (ADR-0030), patched
+# in the root `Cargo.toml` at one pinned revision. Added 2026-11-07; remove it
+# when a SQLx release has these readers. Next review: 2027-02-01.
+allow-git = ["https://github.com/alandariva/sqlx"]

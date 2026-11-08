@@ -72,7 +72,7 @@ performance and bandwidth and say little.
 | --- | --- | --- | --- |
 | Ship the local log file to a collector (an agent tailing it) | No new dependency | No traces or spans; every machine needs an agent; the file holds what the local policy allows, not what may leave | External calls need traces; the export policy must be stricter |
 | Our own OTLP encoder | Fewer crates | Protobuf, gRPC, retries and batching to write and maintain | The OpenTelemetry crates are the reference implementation |
-| `reqwest-blocking-client` for HTTP | The SDK's default | A hidden second Tokio runtime per client | One runtime only ([Architecture](../architecture.md#concurrency)) |
+| `reqwest-blocking-client` for HTTP | The SDK's default | A hidden second Tokio runtime per client | One runtime only ([Architecture](../reference/architecture.md#concurrency)) |
 | The SDK's async-runtime batch processors | No adapter | Behind experimental features | The thread-based processors are the stable API |
 | Metrics now | Histograms of database and HTTP times | More code and data | Not asked for; derivable from spans in a collector |
 | Configuration through `OTEL_*` variables | Standard | Hidden from users; a second way to turn it on | Preferences are where users choose what leaves |
@@ -85,7 +85,7 @@ performance and bandwidth and say little.
 - Negative or costs: 15 more crates (`tonic`, `prost`, the OpenTelemetry
   family); background network traffic when the user turns it on (an
   exception to "nothing remote on the interactive path" in
-  [Performance](../performance.md)); every span field must be in the
+  [Performance](../standards/performance.md)); every span field must be in the
   allowlist to be exported.
 - Required: a new span around an external call uses `jykre::client_span!`
   (or the same fields in a backend crate) and only allowlisted names for

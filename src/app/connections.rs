@@ -248,6 +248,7 @@ impl AppView {
         self.command_matches.clear();
         self.command_revision += 1;
         self.search_revision += 1;
+        self.explorer_searching = false;
         self.explorer_signature.clear();
         self.refresh_connection_choices(cx);
         self.save_state_soon(cx);
@@ -673,7 +674,7 @@ impl AppView {
                     Err(_) => connection_store::latest_backup(&dir).await,
                     Ok(_) => None,
                 };
-                let (font_size, copy, state, reports, theme) =
+                let (font_size, copy, state, reports, theme, favorites, library) =
                     match ConfigRepository::open(&dir).await {
                         Ok(repository) => {
                             let font_size = repository.setting("editor.font_size").await;
@@ -681,10 +682,17 @@ impl AppView {
                             let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
                             let state = super::state::read_state(&repository).await;
                             let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
+                            let favorites =
+                                repository.setting(jykre::favorites::SETTINGS_KEY).await;
+                            let library = repository
+                                .setting(jykre::query_files::library::SETTINGS_KEY)
+                                .await;
                             repository.close().await;
-                            (font_size, copy, state, reports, theme)
+                            (font_size, copy, state, reports, theme, favorites, library)
                         }
                         Err(error) => (
+                            Err(error.clone()),
+                            Err(error.clone()),
                             Err(error.clone()),
                             Err(error.clone()),
                             Err(error.clone()),
@@ -692,12 +700,57 @@ impl AppView {
                             Err(error),
                         ),
                     };
-                Ok((connections, font_size, copy, state, reports, theme, backup))
+                // The tabs' text, from their recovery files and files, read
+                // here, off the UI thread.
+                let (state, filled) = match state {
+                    Ok(mut state) => {
+                        let data = dir.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            let filled = jykre::query_files::tabs::fill(&mut state, &data);
+                            (state, filled)
+                        })
+                        .await
+                        {
+                            Ok((state, filled)) => (Ok(state), filled),
+                            Err(_) => (
+                                Err(DriverError::new(
+                                    ErrorCode::Internal,
+                                    "Could not read the tabs' files",
+                                )),
+                                Default::default(),
+                            ),
+                        }
+                    }
+                    Err(error) => (Err(error), Default::default()),
+                };
+                Ok((
+                    connections,
+                    font_size,
+                    copy,
+                    state,
+                    reports,
+                    theme,
+                    favorites,
+                    library,
+                    filled,
+                    backup,
+                ))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.connections_loading = false;
-                let (connections, font_size, copy, state, reports, theme, backup) = match result {
+                let (
+                    connections,
+                    font_size,
+                    copy,
+                    state,
+                    reports,
+                    theme,
+                    favorites,
+                    library,
+                    filled,
+                    backup,
+                ) = match result {
                     Ok(parts) => parts,
                     Err(error) => (
                         Err(error.clone()),
@@ -705,7 +758,10 @@ impl AppView {
                         Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
+                        Err(error.clone()),
+                        Err(error.clone()),
                         Err(error),
+                        Default::default(),
                         None,
                     ),
                 };
@@ -755,10 +811,17 @@ impl AppView {
                         problems.push(tr!("Could not load the saved connections: {0}", error))
                     }
                 }
+                // The saved queries' local data, which the tabs' files are
+                // found in. The demo keeps none.
+                if !super::demo::enabled()
+                    && let Some(problem) = this.load_library(library)
+                {
+                    problems.push(problem);
+                }
                 // The demo keeps its fixed tabs and saves nothing.
                 let restored = match state {
                     _ if super::demo::enabled() => false,
-                    Ok(state) => this.restore_state(state, window, cx),
+                    Ok(state) => this.restore_state(state, filled, window, cx),
                     Err(error) => {
                         problems.push(tr!(
                             "Could not read the tabs of the last session: {0}",
@@ -767,6 +830,12 @@ impl AppView {
                         false
                     }
                 };
+                // The demo keeps no favorites.
+                if !super::demo::enabled()
+                    && let Some(problem) = this.load_favorites(favorites)
+                {
+                    problems.push(problem);
+                }
                 // The demo keeps no reports.
                 if !super::demo::enabled()
                     && let Some(problem) = this.load_reports(reports, cx)
@@ -775,6 +844,12 @@ impl AppView {
                 }
                 if !problems.is_empty() {
                     this.app_notice = Some(Feedback::new(Tone::Error, problems.join(" ")));
+                }
+                // The saved queries of an earlier version become files; the
+                // library is read from its directory.
+                if !super::demo::enabled() {
+                    this.migrate_saved_queries(cx);
+                    this.scan_library(cx);
                 }
                 // Without connections the explorer and the workspace show
                 // an empty state with the way forward; nothing pops up.
@@ -2363,6 +2438,7 @@ impl AppView {
             self.command_revision
         } else {
             self.search_revision += 1;
+            self.explorer_searching = !query.is_empty();
             self.search_revision
         };
         if !palette && query.is_empty() {
@@ -2473,6 +2549,7 @@ impl AppView {
                     this.command_matches
                         .retain(|item| matches!(item, super::PaletteItem::Saved(_)));
                 } else {
+                    this.explorer_searching = false;
                     for connection in &mut this.connections {
                         connection.set_search_rows(Vec::new());
                     }
@@ -2698,7 +2775,11 @@ impl AppView {
                     })
                     .context_menu({
                         let weak = weak.clone();
-                        move |menu, _, _| {
+                        move |menu, _, cx| {
+                            // Read when the menu opens.
+                            let favorite = weak
+                                .upgrade()
+                                .is_some_and(|view| view.read(cx).is_favorite(index, None));
                             let run = |action: fn(
                                 &mut AppView,
                                 usize,
@@ -2730,6 +2811,19 @@ impl AppView {
                                 .on_click(run(
                                     |this, index, _, cx| {
                                         this.toggle_refresh(index, ObjectPath::default(), cx)
+                                    },
+                                )),
+                            )
+                            .item(
+                                PopupMenuItem::new(if favorite {
+                                    tr!("Remove from favorites")
+                                } else {
+                                    tr!("Add to favorites")
+                                })
+                                .icon(if favorite { I::StarOff } else { I::Star })
+                                .on_click(run(
+                                    |this, index, _, cx| {
+                                        this.toggle_favorite(index, None, None, cx)
                                     },
                                 )),
                             )
@@ -3243,6 +3337,12 @@ impl AppView {
                 let query_path = path.clone();
                 let query_preview = preview.clone();
                 let relation_path = path.clone();
+                let favorite_path = path.clone();
+                let favorite_stored = preview.clone();
+                let favorite = opens
+                    && weak
+                        .upgrade()
+                        .is_some_and(|view| view.read(cx).is_favorite(index, Some(&path)));
                 menu.item(if opens {
                     PopupMenuItem::new(tr!("View data"))
                         .icon(I::Table2)
@@ -3309,6 +3409,24 @@ impl AppView {
                             .on_click(run(Box::new(move |this, _, cx| {
                                 this.inspect_node(index, inspect_path.clone(), cx)
                             }))),
+                    )
+                })
+                .when(opens, |menu| {
+                    menu.item(
+                        PopupMenuItem::new(if favorite {
+                            tr!("Remove from favorites")
+                        } else {
+                            tr!("Add to favorites")
+                        })
+                        .icon(if favorite { I::StarOff } else { I::Star })
+                        .on_click(run(Box::new(move |this, _, cx| {
+                            this.toggle_favorite(
+                                index,
+                                Some(favorite_path.clone()),
+                                Some(favorite_stored.clone()),
+                                cx,
+                            )
+                        }))),
                     )
                 })
                 .when(defined, |menu| {

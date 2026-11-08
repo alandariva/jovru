@@ -32,6 +32,6 @@ memory of large results.
   serialization, GPU rendering.
 - Negative: GPUI is young and its API moves; upgrades need a manual check of
   the whole application. Linux and macOS builds are not validated yet.
-- Required: views follow [UI guidelines](../ui-guidelines.md); in particular,
+- Required: views follow [UI guidelines](../standards/ui-guidelines.md); in particular,
   long collections are virtualized because GPUI rebuilds a notified view on
   every frame.

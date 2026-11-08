@@ -2,14 +2,16 @@
 //!
 //! After each run the driver reports what the server says
 //! ([`Session::transaction`](crate::drivers::Session::transaction)), and
-//! that wins ([`Transaction::reported`]). What it leaves unknown, and every
-//! driver that cannot report, falls back to inference from the SQL that ran
-//! and how each statement ended: `BEGIN` or `START TRANSACTION` opens a
-//! transaction, `COMMIT` and `ROLLBACK` end it, MySQL's `SET autocommit = 0`
-//! makes every statement wait for a commit and its DDL commits implicitly,
-//! and a failure inside a PostgreSQL transaction leaves it failed until
-//! `ROLLBACK`. Inference alone does not see a transaction opened inside a
-//! procedure ([technical debt TD-001](../docs/technical-debt.md)).
+//! that wins ([`Transaction::reported`]). What it leaves unknown (whether a
+//! MySQL or SQLite transaction wrote), and every driver that cannot report,
+//! falls back to inference from the SQL that ran and how each statement
+//! ended: `BEGIN` or `START TRANSACTION` opens a transaction, `COMMIT` and
+//! `ROLLBACK` end it (`AND CHAIN` opens the next one), MySQL's
+//! `SET autocommit = 0` makes every statement wait for a commit and its DDL
+//! commits implicitly, and a failure inside a PostgreSQL transaction leaves
+//! it failed until `ROLLBACK`. Inference alone does not see a transaction
+//! opened inside a procedure
+//! ([technical debt TD-001](../docs/plans/technical-debt.md)).
 use crate::drivers::{SqlDialect, TransactionStatus};
 use crate::sql::{self, TokenKind};
 
@@ -98,6 +100,19 @@ impl Transaction {
             _ => false,
         };
         if ends {
+            // `… AND CHAIN` (PostgreSQL, MySQL) opens the next transaction
+            // at once.
+            let mut rest = words
+                .iter()
+                .skip(1)
+                .map(String::as_str)
+                .skip_while(|word| matches!(*word, "WORK" | "TRANSACTION"));
+            if ok && rest.next() == Some("AND") && rest.next() == Some("CHAIN") {
+                return Self::Open {
+                    changes: false,
+                    manual,
+                };
+            }
             // A failed COMMIT in PostgreSQL rolls the transaction back.
             return if ok || postgres { ended } else { self };
         }
@@ -265,6 +280,19 @@ mod tests {
         assert_eq!(changed.after("COMMIT;", true, POSTGRES), AutoCommit);
         assert_eq!(changed.after("ROLLBACK", true, POSTGRES), AutoCommit);
         assert_eq!(changed.after("END", true, POSTGRES), AutoCommit);
+        // AND CHAIN commits and opens the next transaction; AND NO CHAIN
+        // does not.
+        let next = Open {
+            changes: false,
+            manual: false,
+        };
+        assert_eq!(changed.after("COMMIT AND CHAIN", true, POSTGRES), next);
+        assert_eq!(changed.after("rollback work and chain;", true, MYSQL), next);
+        assert_eq!(
+            changed.after("COMMIT AND NO CHAIN", true, POSTGRES),
+            AutoCommit
+        );
+        assert_eq!(changed.after("ROLLBACK TO chain", true, POSTGRES), changed);
         // Reads do not count as changes; unknown commands do.
         let read = run(&[("START TRANSACTION", true), ("SELECT 1", true)], MYSQL);
         assert!(!read.has_changes());

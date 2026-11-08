@@ -1,13 +1,13 @@
 # ADR-0014: A session per tab, kept between runs and after errors
 
-- **Status:** Proposed (amended for report tabs by [ADR-0025](0025-report-panels.md): a session per connection and database a report's panels use)
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented; amended for report tabs by [ADR-0025](0025-report-panels.md): a session per connection and database a report's panels use)
 - **Date:** 2026-11-03
 
 ## Context
 
 `Ctrl Enter` runs one statement at a time: the one at the cursor or the
 selected text. With a session per run
-([ADR-0002](0002-sqlx-for-postgres-and-mysql.md), [Reliability](../reliability.md)),
+([ADR-0002](0002-sqlx-for-postgres-and-mysql.md), [Reliability](../standards/reliability.md)),
 `USE sales` in one run did not apply to the `SELECT` run next, temporary tables
 vanished and a transaction could not span runs. A failed statement, a
 cancellation or a result cut by the row limit also discarded the session, so
@@ -39,7 +39,7 @@ statement was interrupted may be in an unknown protocol state.
   stream between pages.
 - Only autocommit is supported for now. An explicit transaction stays open in
   the session but is not shown nor confirmed on close (technical debt, see
-  [Architecture](../architecture.md#known-deviations)).
+  [Architecture](../reference/architecture.md#known-deviations)).
 - Databricks Statement Execution has no server session: the driver keeps the
   catalog and schema and follows successful `USE CATALOG`, `SET CATALOG` and
   `USE [SCHEMA | DATABASE]` statements.

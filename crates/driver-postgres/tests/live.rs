@@ -29,9 +29,9 @@ impl IntrospectionSink for Metadata {
 }
 fn input() -> ResolvedConnection {
     // The fixture port is chosen by Docker for each run: `cargo xtask check
-    // --full` sets it, and docs/testing.md shows how to run these by hand.
+    // --full` sets it, and docs/standards/testing.md shows how to run these by hand.
     let port: u16 = std::env::var("JYKRE_TEST_PORT")
-        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/testing.md)")
+        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/standards/testing.md)")
         .parse()
         .expect("JYKRE_TEST_PORT must be a valid port");
     ResolvedConnection {
@@ -94,6 +94,11 @@ async fn live_connection_queries_metadata_and_timeout() {
             .is_some()
     );
     let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
+    // The fixture's profile disables TLS: the server says it is plain text.
+    assert_eq!(
+        session.encryption(cancel.clone()).await.unwrap(),
+        Encryption::Plaintext
+    );
     keep_state(&mut session).await;
     let mut sink = Sink::default();
     session.execute(&QueryRequest{parameters:Vec::new(),sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
@@ -754,6 +759,47 @@ async fn live_the_transaction_state_is_reported_without_taking_a_snapshot() {
         assert!(failed.is_err());
         assert_eq!(state(&mut session).await, Some(TransactionStatus::Failed));
         text_in(&mut session, "ROLLBACK", &none).await;
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_commit_and_chain_opens_a_transaction_without_taking_its_snapshot() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let none = SessionContext::default();
+        text_in(&mut session, "BEGIN", &none).await;
+        text_in(&mut session, "SELECT 1", &none).await;
+        // The chained transaction is open, and neither the state nor the
+        // context took its snapshot: SET TRANSACTION still works.
+        text_in(&mut session, "COMMIT AND CHAIN", &none).await;
+        assert_eq!(
+            state(&mut session).await,
+            Some(TransactionStatus::Open {
+                changes: Some(false)
+            })
+        );
+        session.context(CancellationToken::new()).await.unwrap();
+        text_in(
+            &mut session,
+            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            &none,
+        )
+        .await;
+        assert_eq!(
+            text_in(&mut session, "SHOW transaction_isolation", &none).await,
+            "serializable"
+        );
+        // AND NO CHAIN leaves nothing open.
+        text_in(&mut session, "COMMIT AND NO CHAIN", &none).await;
         assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
         session.close().await.unwrap();
     })
