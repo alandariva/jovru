@@ -27,13 +27,18 @@ impl IntrospectionSink for Metadata {
         Ok(())
     }
 }
-fn input() -> ResolvedConnection {
+fn fixture_port() -> u16 {
     // The fixture port is chosen by Docker for each run: `cargo xtask check
     // --full` sets it, and docs/standards/testing.md shows how to run these by hand.
-    let port: u16 = std::env::var("JYKRE_TEST_PORT")
+    std::env::var("JYKRE_TEST_PORT")
         .expect("JYKRE_TEST_PORT must name the fixture port (see docs/standards/testing.md)")
         .parse()
-        .expect("JYKRE_TEST_PORT must be a valid port");
+        .expect("JYKRE_TEST_PORT must be a valid port")
+}
+fn input() -> ResolvedConnection {
+    input_at(fixture_port())
+}
+fn input_at(port: u16) -> ResolvedConnection {
     ResolvedConnection {
         config: ConnectionConfig {
             driver: DriverKind::MySql,
@@ -42,6 +47,97 @@ fn input() -> ResolvedConnection {
         credentials: Credentials {
             password: Some(SecretString::from("jykre-test".to_owned())),
         },
+    }
+}
+/// A relay on 127.0.0.1 to the fixture that hands the server's bytes on at
+/// [`SlowLink::RATE`], a piece at a time, so a client reading a long row
+/// waits for the rest of it between pieces. A direct connection does not
+/// guarantee that: under load the client falls behind the server, which
+/// through Docker's port forwarding can be many megabytes ahead, and its
+/// reads then never wait. Requests go through unchanged, and TLS is still
+/// negotiated end to end.
+struct SlowLink {
+    port: u16,
+    stop: CancellationToken,
+}
+impl SlowLink {
+    /// Well below what this debug client reads on a loaded machine (130 to
+    /// 160 MiB/s at a load average of 17 on 8 cores), and fast enough to
+    /// drain what the server sent ahead of an interruption well within the
+    /// driver's 5-second recovery (at most 0.7 s there).
+    const RATE: f64 = 32.0 * 1024.0 * 1024.0;
+    const PIECE: usize = 16 * 1024;
+    /// How far a late wake-up is made up for, so a loaded machine does not
+    /// slow the link down while it never bursts more than a few pieces.
+    const CATCH_UP: Duration = Duration::from_millis(5);
+
+    fn to(upstream: u16) -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the relay");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
+        // Its own thread and runtime, like a network link: the test's
+        // runtime runs the relay only when the client lets it.
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("start the relay's runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                loop {
+                    tokio::select! {
+                        _ = stopped.cancelled() => return,
+                        accepted = listener.accept() => match accepted {
+                            Ok((client, _)) => {
+                                tokio::spawn(Self::relay(client, upstream));
+                            }
+                            Err(_) => return,
+                        },
+                    }
+                }
+            });
+        });
+        Self { port, stop }
+    }
+
+    async fn relay(client: tokio::net::TcpStream, upstream: u16) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let Ok(server) = tokio::net::TcpStream::connect(("127.0.0.1", upstream)).await else {
+            return;
+        };
+        let (mut from_client, mut to_client) = client.into_split();
+        let (mut from_server, mut to_server) = server.into_split();
+        let requests = async {
+            let _ = tokio::io::copy(&mut from_client, &mut to_server).await;
+            let _ = to_server.shutdown().await;
+        };
+        let responses = async {
+            let mut piece = vec![0; Self::PIECE];
+            let mut due = tokio::time::Instant::now();
+            loop {
+                let read = match from_server.read(&mut piece).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => read,
+                };
+                if to_client.write_all(&piece[..read]).await.is_err() {
+                    break;
+                }
+                let now = tokio::time::Instant::now();
+                due = due.max(now.checked_sub(Self::CATCH_UP).unwrap_or(now))
+                    + Duration::from_secs_f64(read as f64 / Self::RATE);
+                tokio::time::sleep_until(due).await;
+            }
+            let _ = to_client.shutdown().await;
+        };
+        tokio::join!(requests, responses);
+    }
+}
+impl Drop for SlowLink {
+    /// Stops accepting and closes the relayed connections.
+    fn drop(&mut self) {
+        self.stop.cancel();
     }
 }
 /// Session state that must survive a failed, cancelled or interrupted
@@ -337,12 +433,20 @@ async fn live_connection_queries_metadata_and_timeout() {
 }
 
 /// SQLx reads a packet's header and its payload in separate steps. Rows of
-/// several megabytes keep the reader inside a payload most of the time, so a
-/// cancellation or a time limit almost always lands halfway through a row;
-/// the session must still be kept, with its state.
+/// several megabytes, handed on by a [`SlowLink`], keep the reader waiting
+/// inside a payload most of the time, so a cancellation or a time limit
+/// almost always lands halfway through a row; the session must still be
+/// kept, with its state.
+///
+/// Without the link, under load the server stays ahead of the client: the
+/// socket always holds more of the result, SQLx's reads never wait, and on
+/// this single-threaded runtime the sink that cancels does not run before
+/// the whole result has been read, while the time limit is only seen
+/// between rows (docs/standards/testing.md, *Flaky tests*).
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_interrupting_a_half_read_row_keeps_the_session() {
+    let link = SlowLink::to(fixture_port());
     tokio::time::timeout(Duration::from_secs(60), async {
         struct CancelAtFirst(CancellationToken);
         impl RowSink for CancelAtFirst {
@@ -357,7 +461,7 @@ async fn live_interrupting_a_half_read_row_keeps_the_session() {
         let wide = "SELECT n, REPEAT('x', 4194304) FROM (WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 32) SELECT n FROM s) t";
         let driver = MySqlDriver;
         let mut session = driver
-            .open_session(&input(), CancellationToken::new())
+            .open_session(&input_at(link.port), CancellationToken::new())
             .await
             .unwrap();
         keep_state(&mut session).await;
