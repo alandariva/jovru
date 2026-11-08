@@ -27,6 +27,10 @@ isolated folder for tests and manual checks).
 | `recovery/<name>.sql` | The text of a tab a crash must not lose: a draft, or a file tab's unsaved edits (plain UTF-8, `\n` line endings) | Written half a second after edits settle and on quit; removed once saved, discarded or closed; one no tab names reopens as a **Recovered** tab |
 | `backups/saved-queries-<millis>.json` | The saved queries `config.db` held, as they were before they moved to files | Kept until the user deletes it; outside the rotation of the `config.db` copies |
 | `<executable's folder>/.jykre-update/` | Not in the data folder: an update being installed (`staging-<id>/`: the downloaded archive and what it unpacks to), what it replaced (`trash-<id>/`, `done-<id>/`) ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Removed when the update ends; at the next start, `done-*` and anything older than an hour are removed (on Windows the replaced executable can only go then); safe to delete while no update runs |
+| `automation.db` | Automation: job definitions, published versions, run and chain-run history, opt-in declared outputs ([ADR-0034](../adr/0034-automation-database-service-and-lock.md)) | Permanent; losing it loses the user's jobs. History is pruned ([below](#automation-automationdb)) |
+| `automation.db.corrupt-<millis>` | An automation file set aside after confirmed corruption (with its `-wal`/`-shm` files) | Kept for diagnosis; safe to delete |
+| `automation.lock` | Empty file under an operating-system lock: the instance that holds it runs automation | Recreated as needed; its existence means nothing |
+| `automation/logs/<run-id>/` | `stdout.log`, `stderr.log` and, under `jjp/1`, `jjp.log` of one external-program run, at most 1 MiB each ([ADR-0037](../adr/0037-program-logs-on-disk.md)) | Deleted 7 days after the run ended, with **Delete logs**, or when the run's row is gone |
 | `connections.json` (legacy) | Profiles from earlier builds | Imported once into `config.db` in a single transaction, deleted only after the import is verified |
 
 ## SQLite configuration
@@ -38,6 +42,8 @@ Every file is opened by `open_pool`:
 - `synchronous=FULL` for `config.db` (user data) and `NORMAL` for metadata
   caches (rebuildable).
 - `PRAGMA quick_check` on open; a file that fails is not used.
+- `automation.db` is the one file opened with `synchronous=FULL` and
+  `secure_delete=ON` ([below](#automation-automationdb)).
 
 ## Schema: `config.db`
 
@@ -308,10 +314,96 @@ Readers that page through the cache compare the version before and after; if
 a refresh published in between, they stop and ask the user to expand the node
 again instead of mixing two reads.
 
+## Automation (`automation.db`)
+
+`jykre-storage` owns the file through `AutomationRepository`
+(`crates/storage/src/automation.rs`); no other crate opens it. It is separate
+from `config.db` because history grows and is pruned while `config.db` holds
+the only copy of the connection profiles
+([ADR-0034](../adr/0034-automation-database-service-and-lock.md)).
+
+| Table | Content |
+| --- | --- |
+| `jobs` | A job's canonical-JSON definition (kind `sql`, `process` or `chain`) and its `revision`, which grows with every save |
+| `job_versions` | A published version of a job: its frozen definition and fingerprint ([ADR-0036](../adr/0036-published-versions-and-chain-runs.md)). Deleting a job is refused while a chain names any of its versions |
+| `runs` | One row per admitted run: the snapshot (no values), state, cause, `effect_unknown`, counters (rows delivered and discarded, rows affected, `truncated`), the SQLSTATE or vendor code, exit code or signal, a program's `fail` code, log sizes, the program's process group and start time, and the SHA-256 of the program's entrypoint ([ADR-0038](../adr/0038-external-program-runs.md)) |
+| `chain_runs` | One row per chain run, with the step that stopped it |
+| `run_outputs` | The declared outputs of a run whose job opted in: name, kind, size and, until it expires, the value ([ADR-0035](../adr/0035-persisted-declared-outputs.md)) |
+
+- **Configuration.** WAL, `foreign_keys=ON`, `synchronous=FULL` (it holds job
+  definitions) and `secure_delete=ON`, so SQLite overwrites deleted content
+  and an expired output value does not linger in the file's free pages
+  (`open_pool_with`). The file opens only through the repository, after
+  `PRAGMA quick_check`.
+- **Migrations.** Forward-only, by `PRAGMA user_version`, each step in one
+  transaction on a connection with foreign keys off, checked with
+  `foreign_key_check` before the commit: 1 (jobs and runs,
+  [ADR-0034](../adr/0034-automation-database-service-and-lock.md)),
+  2 (`run_outputs` and `runs.outputs_stored`,
+  [ADR-0035](../adr/0035-persisted-declared-outputs.md)), 3 (kind `process`
+  and the program's columns, [ADR-0038](../adr/0038-external-program-runs.md);
+  `jobs` and `runs` are rebuilt) and 4 (kind `chain`, `job_versions`,
+  `chain_runs` and the chain columns of `runs`,
+  [ADR-0036](../adr/0036-published-versions-and-chain-runs.md)). A file whose
+  version is above 4 is refused untouched: automation is off with a message
+  and the rest of the application works. There is no backup copy before a
+  migration ([ADR-0034](../adr/0034-automation-database-service-and-lock.md)).
+- **Corruption.** A file that cannot be opened and is confirmed corrupt (not
+  a database, or `quick_check` fails) is set aside with its `-wal` and `-shm`
+  files as `automation.db.corrupt-<millis>` and an empty one is created; the
+  job definitions in it are lost and the application says so
+  (`Recovery::recreated`). Permission and I/O errors never trigger this.
+- **The lock.** `automation.lock` holds an exclusive operating-system lock
+  (`std::fs::File::try_lock`: `flock` on Unix, `LockFileEx` on Windows) for as
+  long as the engine lives. The system releases it when the process ends,
+  however it ends, so a lock is **never stranded**: the empty file left on
+  disk carries no meaning, and there is no PID file, timestamp or lease. A
+  second instance on the same folder cannot run or save anything: its
+  automation is read-only until the first one ends and **Try again** takes the
+  lock over. A process that is alive but hung keeps the lock, which is
+  correct. **Network file systems may not honour the lock**, so keep the
+  data folder on a local disk; when it is not, two instances could both
+  believe they hold it.
+- **Recovery.** The lock holder, before admitting anything, marks every run
+  and chain run still `running` as `interrupted` and never replays one.
+  `effect_unknown` is set on every interrupted program and on every SQL run
+  that was not `reads_only`; an interrupted chain has it when any of its
+  steps has. On Linux, a program run whose recorded process group still has
+  a leader with the recorded start time is listed as an **orphan** for the
+  user to end; a PID with another start time is never touched. Other systems
+  record no start time, so they list none; on Windows the Job Object ends the
+  tree with Studio.
+- **Retention.** Pruned in the background about once an hour, in transactions
+  of at most 500 rows that never block admission: output values are emptied
+  7 days after their run ended (name, kind and size stay, and
+  `secure_delete` overwrites the value); runs and chain runs (with their
+  steps and outputs) are deleted 90 days after they ended; a program's log
+  folder is deleted 7 days after its run ended, or when its run's row is gone
+  (a log folder is never deleted while its run is active). **Delete logs**
+  removes one run's folder at once and forgets its sizes.
+
+**What is never stored.** Input values, result cells, scalar results and
+server or program messages are written to no file of automation: not to
+`automation.db`, not to the application's log, not to telemetry (CA-13); the
+history says what ran, where, when and how it ended. The snapshot holds the
+job's definition (SQL text, parameter *specifications*, options) and the
+connection's ID and revision, never a password or a value. There are two
+exceptions, each bounded and visible to the user:
+
+1. **Declared outputs** ([ADR-0035](../adr/0035-persisted-declared-outputs.md)):
+   only for a job that opts in, at most 4 KiB of values per run and stored
+   all or none, readable for 7 days.
+2. **Program logs** ([ADR-0037](../adr/0037-program-logs-on-disk.md)): what a
+   program prints, and its `jjp/1` `log` and `fail` messages, are written
+   as received under `automation/logs/<run-id>/` because they are the only
+   way to diagnose it. At most 1 MiB per file, kept 7 days, never read except
+   when the user opens a run's log. The user is warned that a program should
+   print no secrets.
+
 ## Migrations
 
 Each file's schema version is `PRAGMA user_version`. `config.db` is at
-version 1. The metadata files are at version 3
+version 1; `automation.db` is at version 4 ([above](#automation-automationdb)). The metadata files are at version 3
 ([ADR-0018](../adr/0018-metadata-cache-migrations.md)): a new file is created at
 version 1 and then migrated, and an older one gets only the steps it lacks.
 A file with a higher version is refused ("created by a newer version of the
@@ -344,6 +436,10 @@ The standard for schema changes:
   renamed to `*.corrupt-<stamp>`, an empty cache is created and the UI tells
   the user to refresh. Permission and I/O errors never trigger this, so a
   valid cache is not set aside by mistake.
+- **`automation.db`:** set aside as `automation.db.corrupt-<millis>` and
+  recreated when corruption is confirmed, as described
+  [above](#automation-automationdb); a file from a newer version is left
+  untouched and automation stays off.
 - **Deleting a connection** removes its profile and every
   `connection.<connection-id>.*` setting in one transaction
   (`ConfigRepository::delete`, refused when the profile changed since it
@@ -360,13 +456,14 @@ The standard for schema changes:
 ## Rules
 
 - SQLite is accessed **only** through the repositories in `jykre-storage`
-  (`ConfigRepository`, `MetadataRepository`). Other crates do not write SQLite
+  (`ConfigRepository`, `MetadataRepository`, `AutomationRepository`). Other crates do not write SQLite
   SQL.
 - Repositories take and return `jykre-core` types, never raw rows.
 - Reads for the UI are paged (children of a node, search with a limit).
 - Nothing secret is stored, and no query result is written to disk, apart
   from a report's print HTML at the path the user picks
-  ([ADR-0024](../adr/0024-reports.md)).
+  ([ADR-0024](../adr/0024-reports.md)) and automation's two bounded
+  exceptions ([declared outputs and program logs](#automation-automationdb)).
 - A schema change follows [Migrations](#migrations) and needs an ADR when it
   changes what is stored.
 
@@ -375,4 +472,5 @@ The standard for schema changes:
 | Standard | Current code |
 | --- | --- |
 | Numbered forward-only migration steps | `config.db` has no step yet; the metadata files have their mechanism and step 2 |
+| An automation file is opened only by the instance that holds `automation.lock` | `Engine` opens, migrates and, if it is corrupt, sets aside `automation.db` even when another instance holds the lock; the second instance then stays read-only. A newer-version file is detected and left alone, but a missing migration or a corrupt file could be handled by the instance that does not own the lock |
 | `config.db` backup before migrating, restore offered on failure | The restore is offered, from the copies taken at each start (`backups/config-v<version>-<millis>.db`). The only migration so far (creating version 1) still copies to `backups/config-before-v1-<id>.db`, a name the restore does not list |

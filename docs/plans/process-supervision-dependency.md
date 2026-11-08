@@ -2,7 +2,7 @@
 
 **Date:** November 8, 2026
 **Approval:** Approved by the maintainer on 2026-11-08, as requested below (Q-11 of the [automation specification](automation-engine-specification.md#12-decisions-required-from-the-maintainer))
-**Implementation:** Not started
+**Implementation:** Complete on Linux, as approved: the dependency is declared with exactly the features requested (no `tracing` feature) and is used only by `jykre::automation::process`. **Windows is not validated yet**: the Job Object, `CREATE_NO_WINDOW` and the kill of the tree are checked by the maintainer's [checklist](releases/0.3.0-windows-checklist.md)
 **For:** [0.3.0](releases/0.3.0.md), milestone A3 (phase 3 — external program)
 
 ## Request

@@ -17,6 +17,9 @@
 | A saved connection, the font size or the last session's tabs cannot be read at start | That item is left out or takes its default, and the explorer says which | Hiding the other connections or the restored tabs |
 | An export fails or is cancelled (disk full, no permission, the server, the user) | The export bar says why; the temporary file is removed and the chosen file keeps what it had; the session comes back to the tab unless it was lost | A half-written file, a replaced file, or a session left out |
 | An update check fails (no network, GitHub limiting requests, an unreadable answer) | Nothing is shown outside **Preferences › About**, which says why; the next automatic check waits at least an hour, or what GitHub asks, at most a day | A dialog or a notice for a background check; checking again at once |
+| An automation run fails, times out or is stopped | The run's history row says its state, its cause and whether its effect is unknown; its session is closed or its program tree ended; other runs, tabs and sessions are untouched | Sending or starting it again; leaving a session or a descendant process running |
+| The history of a run cannot be written | Before it starts: the run is refused and nothing is sent. After it ended: the user is told, the run is not repeated, and recovery marks the row `interrupted` at the next start | Sending without a record; repeating a run to get its record |
+| Another instance holds `automation.lock`, or `automation.db` is from a newer version or corrupt | Automation is read-only or off, saying why; a corrupt file is set aside and recreated, and the user is told its jobs are lost. The rest of the application works | Two instances recovering each other's runs; the application failing to start |
 | An update fails or is cancelled (download, signature, unpacking, the swap) | About says why and offers the release page; the folder keeps the running version, the downloaded files are removed, and a failed swap is undone step by step | A half-replaced folder; installing an archive that did not verify |
 
 ## Mechanisms
@@ -93,7 +96,91 @@
 | Update download | 15 s to connect, 30 s of silence while the body arrives, 10 min in all; cancellable |
 | Update: verifying the signature and unpacking the archive | 120 s; cancellable. The swap that follows is renames only and is neither cancelled nor timed: a rename refused on Windows (an antivirus holding the file) is tried 5 times, 200 ms apart, then undone |
 
+| Automation: a SQL Job or a program run | The job's own timeout, default 300 s; reaching it fails the run with `timeout` |
+| Automation: a run waiting for a slot | 60 s in the queue (FIFO, at most 8 waiting, 4 per connection), then it leaves with `queue_timeout` |
+| Automation: a stopped SQL run bringing its session back | 11 s in all (the drivers' 5 s recovery plus the close's 5 s and a margin); past it the work is dropped, which drops the session |
+| Automation: a stopped program, from the request to end to the kill of its tree | 5 s; the pipes and the `jjp/1` connection then get 2 s to end and a killed leader 5 s to be reaped |
+| Automation: a `jjp/1` program saying `hello` | 30 s from its start; past it the run fails with `protocol` and the tree is killed |
+
 A new network operation gets an explicit timeout and a row in this table.
+
+## Automation
+
+The engine ([Architecture](../reference/architecture.md#run-a-job)) follows
+these rules; the specification explains why
+([sections 4.6, 5 and 9](../plans/automation-engine-specification.md)).
+
+- **No replay, ever.** A run is not sent or started a second time after a
+  failure, a timeout, a crash, a lost history write or a restart. There are no
+  retries, no leases and no resume; the user starts a new run on purpose,
+  knowing from the history what the earlier one did.
+- **Completion rule (SQL).** A run succeeds only once the statement is
+  confirmed complete. A statement that `reads_only` (by the dialect's tokens,
+  a warning and not a boundary) keeps up to the job's row limit and the
+  memory ceiling and stops reading there: the result is `truncated` and the
+  run still succeeds. Any other statement keeps the same rows but is read **to
+  its end** into a sink that counts and discards (`rows_discarded`) until the
+  driver reports the end, and the engine never asks the driver to stop early,
+  since stopping a write's result could cancel the statement. A page is not
+  proof that a write finished.
+- **`effect_unknown`.** Set when something may have been done that the
+  history cannot confirm: a SQL statement that is not `reads_only` and was
+  sent but neither confirmed nor refused by the server (a deadline, a Stop,
+  a lost connection, a protocol or internal failure); every program run that
+  started and did not succeed, since Studio cannot know what a program did;
+  and every run recovery marks `interrupted` (SQL that only reads excepted). It
+  is shown with the run and is never cleared by running again.
+- **Terminal write before publish.** The owner writes the run's terminal
+  state, and then publishes it. If the row cannot be written *before* the run
+  starts, the run is refused and nothing is sent or started. If the terminal
+  write fails *after* it ended, the user is told (`history_failed`), the run
+  is not repeated, and its row stays `running` until recovery marks it
+  `interrupted` at the next start, with `effect_unknown` as above. Chains
+  follow the same order.
+- **Arbitration.** The first event the owner observes decides the outcome and
+  later ones are ignored. A SQL run decides between the confirmed completion,
+  Stop and the deadline (a completion already confirmed wins over a Stop that
+  became ready in the same instant, since it is what happened). A program
+  decides between its exit, Stop, the deadline and a `jjp/1` protocol
+  failure. A Stop is `cancelled`; a deadline is `failed` with `timeout`.
+- **Stop and the deadline, SQL.** The work's token is cancelled; the driver
+  interrupts the server-side work and brings the session back to a known
+  state, or closes it, within 5 s. The owner waits for that for at most 11 s
+  and then drops the work, which drops the session. A write that was already
+  sent is `effect_unknown`.
+- **Stop and the deadline, programs.** The program is asked to end and its
+  whole tree is killed after 5 s ([Q-17](../plans/automation-engine-specification.md#12-decisions-required-from-the-maintainer)).
+  Under `jjp/1` the request is a `cancel` message that never waits for the
+  program to read it; otherwise it is `SIGTERM` to the process group on Unix.
+  A protocol failure kills the tree at once, a program that exits on its own
+  has whatever it left in its group or job killed, and a descendant that
+  left the group (`setsid`) and still holds the pipes is abandoned after 2 s
+  rather than keeping the run open. Dropping the run's future also kills the
+  tree. On Windows the program cannot be asked to end (see Known deviations):
+  it gets the 5 s and is then killed with its Job Object, which also ends the
+  tree if Studio itself dies.
+- **Queue.** At most 2 runs are active and 1 per connection profile (programs
+  count only towards the global limit); at most 8 wait, 4 per connection, in
+  FIFO order, for at most 60 s. A run beyond the queue is refused at once
+  with the limit it met; a run whose connection is busy does not block a
+  later one on another connection. Waiting runs live in memory and are
+  dropped when the application quits.
+- **Chains.** A chain holds no slot of its own, so a global limit of 1 still
+  progresses: each step releases its slot, session or program before the next
+  asks for one. The first step that does not succeed stops the chain, and
+  later steps never start. Stop cascades to the active or queued step; the
+  chain's deadline cancels the step and fails the chain with `timeout`. A step
+  whose connection profile changed after the plan was confirmed, or whose
+  published program file changed, fails with `plan_changed` (**PlanChanged**);
+  a step that finds the queue full fails with `queue_full`.
+- **Quit.** `Engine::shutdown` refuses new runs, empties the queue, stops
+  every run and chain, waits until each run has closed its session or its
+  program and written its terminal state, and releases the lock so another
+  instance can take over. With SQL runs that takes at most about 11 s, with
+  programs the 5 s grace; the interface asks before quitting with runs
+  active, and declining keeps the application open.
+- **Recovery and retention** are in
+  [Persistence](../reference/persistence.md#automation-automationdb).
 
 ## Error classification
 
@@ -190,4 +277,5 @@ parameters, and SQL above `trace`. See [Security](security.md#logs-and-diagnosti
 | Standard | Current code |
 | --- | --- |
 | Retries with backoff for idempotent reads | No automatic retries |
-| Clean shutdown with a deadline | Dropping a workspace cancels its run; there is no explicit shutdown sequence |
+| Clean shutdown with a deadline | Dropping a workspace cancels its run; there is no explicit shutdown sequence for tabs. Automation has one: `Engine::shutdown` stops its runs and waits for their terminal writes ([above](#automation)) |
+| Stop asks a program to end before killing it | On Windows a program is not asked: the graceful request there is `CTRL_BREAK_EVENT`, which needs `unsafe` Win32 calls (the workspace forbids `unsafe_code`) and a console the program does not have. A program with no `jjp/1` waits the 5 s grace and is killed with its Job Object; under `jjp/1` it still receives `cancel`. To be validated on Windows by the [checklist](../plans/releases/0.3.0-windows-checklist.md) |

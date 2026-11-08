@@ -6,7 +6,11 @@
 Q-01…Q-32 ([section 12](#12-decisions-required-from-the-maintainer)),
 ADR-0034 to ADR-0038 accepted, `process-wrap` approved (Q-11), and the
 phase 3, 4 and 5 revisions (sections 9.1–9.3) approved
-**Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
+**Implementation:** In progress. Phases 1, 3, 4 and 5 are implemented in `src/automation/`,
+`crates/storage` and `crates/core` (A2–A5 of [0.3.0](releases/0.3.0.md)); phase 2, the
+interface, is being written (A6). Windows is not validated yet
+([checklist](releases/0.3.0-windows-checklist.md)). Where the code differs from this text, see
+[Implementation notes (0.3.0)](#implementation-notes-030).
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
 
@@ -44,6 +48,7 @@ design IDs (`Dxx`) and question IDs (`Q-xx`) refer to the review.
 11. [Test matrix](#11-test-matrix)
 12. [Decisions required from the maintainer](#12-decisions-required-from-the-maintainer)
 13. [Glossary](#13-glossary)
+- [Implementation notes (0.3.0)](#implementation-notes-030)
 - [Appendix A — Future scenarios (non-normative)](#appendix-a--future-scenarios-non-normative)
 - [Appendix B — Traceability from version 1.0](#appendix-b--traceability-from-version-10)
 
@@ -1160,6 +1165,45 @@ each D-ID cited here applies that row.
 - **`jjp/1`:** the minimal protocol for external programs (phase 4).
 - **Chain:** a linear sequence of jobs whose outputs feed later inputs
   (phase 5).
+
+## Implementation notes (0.3.0)
+
+What the code chose or did differently from the text above. The code is
+authoritative; the sections above keep the approved design. Decisions of
+section 12 are not rewritten.
+
+| Subject | Specification | Code (`src/automation/`) | Reason |
+| --- | --- | --- | --- |
+| Cause for a chain step refused by a full queue | Not named | New cause `queue_full`, beside `queue_timeout` (section 9.3.7) | A step that finds the queue full is neither an input, a timeout nor an internal error; the history should say which |
+| Declared outputs of a SQL Job that fail their row rule | Section 9.3.2 describes it for a chain | The run fails with `Output` also when the job runs on its own, not only inside a chain | One rule: a job that declares outputs succeeds only when it produced them |
+| A chain step whose published program file changed after the plan was confirmed | Blocks the run until published again (Q-16) | The step fails the chain with `PlanChanged` (`plan_changed`); a changed profile of a SQL step's connection does the same | The chain runs exactly the plan the user confirmed, so a changed file cannot be a silent refusal in the middle of a run |
+| A program that exits on its own | Not specified | Whatever is left in its process group or Job Object is killed with it | A descendant holding the pipes would keep the run open and the logs unfinished |
+| Stop under `jjp/1` | Ask to end, then kill after 5 s | Stop and the deadline send only `cancel` (no `SIGTERM`), then kill the tree after 5 s | The protocol is the program's channel to end cleanly; a signal would race it |
+| Asking a program to end on Windows | `CTRL_BREAK_EVENT` to the group (9.1.5) | Windows cannot be asked: the program gets the 5 s grace and is then killed with its Job Object | `CTRL_BREAK_EVENT` needs `unsafe` Win32 calls (`unsafe_code = "forbid"`) and a console the program does not have. Recorded in [Reliability](../standards/reliability.md#known-deviations); to be validated by the [Windows checklist](releases/0.3.0-windows-checklist.md) |
+| A `jjp/1` disconnect without a terminal message | Ends without a terminal message: `Protocol` (9.1.5) | It decides at once: `Protocol`, and the tree is killed without waiting for the exit | A program that dropped the connection can no longer report; waiting only delays the run |
+| A `fail` message over 4 KiB | At most 4 KiB (9.2.2); beyond it is not said | The message is cut at 4 KiB in `jjp.log` rather than refused; the `fail` and its code are accepted | A program that fails with a long message still gets recorded as failed, with its code |
+| Limits of the host | 1 MiB lines, 10× quota (9.2.3) | Also: 4 MiB of responses a program may leave unread before its run fails with a quota error, 16 connections served at once (more are closed), and blank lines are ignored | A program that reads nothing, or opens many connections, must not grow memory or hold the listener |
+| A relative working directory | The job's folder, default the entrypoint's (Q-26) | A relative working directory is refused before the run (as is a relative entrypoint with no working directory) | Nothing should depend on the directory Studio was started in |
+| Recording the process group (9.1.6) | Recorded with the run | Recorded as soon as the program starts, through `set_process`, while it runs | A crash after the start but before the end still leaves the group for recovery |
+| The lock at the end of the process | Held for the life of the process | `Engine::shutdown` releases it once the runs have ended | Another instance can take over without waiting for the process to exit |
+| `automation.db` and `secure_delete` | Not specified | The file is opened with `secure_delete=ON` as well as `synchronous=FULL` | A value expired by ADR-0035 must not linger in the file's free pages |
+| Recovery of programs left running | Linux and other Unix systems (9.1.6) | Only Linux records a start time (`/proc`), so only Linux lists orphans; on Windows the Job Object ends the tree with Studio | A process ID without a start time cannot be told from a reused one |
+| `effect_unknown` after a failed `jjp/1` output check | Not specified | A program whose `complete` fails the declared outputs is `Failed` with `Output` and `effect_unknown` | Studio cannot know what a program that ran did |
+| Phase 2, the interface | Section 8 | In progress on the same branch (`src/app/automation/`); [User experience](../reference/ux.md) describes it | |
+
+Where the interface, once finished, differs from sections 8 and 8.1.1, it is
+recorded in [User experience](../reference/ux.md), not here.
+
+Answers of section 12 that the code now implements: Q-02, Q-04, Q-05, Q-06
+and Q-07 (ADR-0034 and the engine), Q-03 (ADR-0035), Q-08 (conservative, no
+contract change), Q-12 (token through stdin), Q-13 (the example is in
+`examples/jjp/`, no SDK), Q-15 (logs on disk, [ADR-0037](../adr/0037-program-logs-on-disk.md)),
+Q-16, Q-17, Q-18, Q-25 to Q-29 (programs and `jjp/1`; the recovery of Q-29 is
+offered by the engine as `Recovery::orphans` and `Engine::end_orphans`, the
+question to the user belongs to the interface). Q-23 (Databricks not
+validated) and Q-24 (Windows by checklist) are still open work for the
+maintainer; Q-10 and Q-19 depend on the interface; Q-20 to Q-22 and Q-31
+belong to phase 2.
 
 ## Appendix A — Future scenarios (non-normative)
 

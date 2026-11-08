@@ -186,6 +186,10 @@ These rules apply to any output, including the logs ([Reliability](reliability.m
   cell values or query parameters.
 - SQL text only at `trace`, which is off by default; at higher levels, log its
   length.
+- Automation never logs an input value, a result, a server or program
+  message, a program's path, arguments or environment, or a `jjp/1` token;
+  the program's own output goes to its run's log files, not to the
+  application's log ([above](#automation-external-programs-and-jjp1)).
 - No header logging in `reqwest`, and statement logging in SQLx turned off
   (`disable_statement_logging()`) in every driver and in `jykre-storage`,
   because SQLx logs SQL by default.
@@ -206,6 +210,78 @@ never reach connection options or the select's state.
 - Its output contains the token: never log stdout. On failure, report the exit
   status and a filtered message, not the raw output.
 - The process has a timeout (60 s) and `kill_on_drop(true)`.
+
+## Automation: external programs and `jjp/1`
+
+An automation job can start an external program
+([ADR-0038](../adr/0038-external-program-runs.md)). **The program is trusted
+code**: it runs with the user's privileges and is supervised, never
+sandboxed. Studio ends its process tree on Stop and on a deadline; it cannot
+stop the program from reading the user's files or using the network. The
+interface says so on the first run of each version
+([specification](../plans/automation-engine-specification.md), Q-10), and
+there is no import or export of jobs that could bring code in unseen.
+
+**Starting a program** (`automation::process`):
+
+- The program is started **without a shell**: `Command::new(program)` with
+  the arguments as a vector, so no argument is parsed by `sh` or `cmd.exe`.
+  A `.bat` or `.cmd` file, which Windows would run through `cmd.exe`, is
+  refused before the run, whether it is named or found on `PATH`.
+- A program is an absolute path or a bare name looked up on `PATH` (and
+  `PATHEXT` on Windows, so `tool` finds `tool.exe`). A relative path such as
+  `bin/tool` is refused, as is a relative working directory: nothing depends
+  on the directory Studio was started in.
+- **The environment is inherited** from Studio, minus a denylist: `JYKRE_*`,
+  `OTEL_*`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP` and `PYTHONHOME`
+  (matched without regard to case on Windows). Everything else, **secrets
+  included**, reaches the program, and the interface lists what is removed. The job's
+  own `unset` and `set` apply after the denylist.
+- A published version of a program **pins its entrypoint file by SHA-256**.
+  Nothing is copied: the program runs from its path, and a file that
+  changed or disappeared blocks the run until the version is published again.
+  The hash identifies what ran; it does not make the file safe.
+- The program's stdin carries only the `jjp/1` token line (or end of file);
+  its stdout and stderr are captured to log files and never inherit Studio's
+  console. On Windows it starts without a console window.
+- No program path, argument, environment value, log content, token, input or
+  output reaches `tracing`, an error message or a `Debug` output. The
+  telemetry allowlist gains no attribute for it: a program run's span carries
+  only the exit code and the error type.
+
+**`jjp/1`** is how a program receives inputs and returns outputs
+([specification](../plans/automation-engine-specification.md), section 9.2):
+
+- A loopback listener (`127.0.0.1`, a port the system picks) exists **only
+  while a `jjp/1` run is registered**: the first run opens it and the last to
+  end closes it. Nothing listens at startup, and nothing listens for other
+  hosts.
+- Each run gets a **256-bit random token**. It reaches the program **through
+  its stdin only**, never through the environment, an argument, a log or
+  telemetry. The program presents it in `hello`, which **consumes** it at
+  once: a wrong token, a reused one, a second connection and any message
+  before `hello` are refused and close the connection. No `hello` within 30 s
+  ends the run.
+- Messages are one JSON-RPC object per line, at most 1 MiB, enforced before
+  the line is buffered; at most 16 connections are served at once; a program
+  that leaves more than 4 MiB of responses unread, or sends more than ten
+  times the log quota, fails its run. Only `hello`, `progress`, `log`,
+  `complete` and `fail` are accepted.
+- Same-user debugging (ptrace, `/proc/<pid>/mem`) can read a process's
+  memory, including its token; the token protects against other local users
+  and other programs guessing the port, not against the same user.
+- The values of a run never go to `tracing`, spans, history or errors
+  (CA-13). `log` messages and the `fail` message go to the run's `jjp.log`
+  only.
+
+**Program logs** are the exception to "no cell or message is stored":
+stdout, stderr and `jjp.log` are written as received under
+`automation/logs/<run-id>/`, at most 1 MiB each and kept 7 days
+([Persistence](../reference/persistence.md#automation-automationdb),
+[ADR-0037](../adr/0037-program-logs-on-disk.md)). A program must not print
+secrets, and the interface warns the user of it. They are read back only when
+the user opens a run's log. Declared outputs the user chose to persist are
+the other exception ([ADR-0035](../adr/0035-persisted-declared-outputs.md)).
 
 ## Untrusted content
 
@@ -292,6 +368,17 @@ and a review date in `deny.toml`.
 - [ ] No generated SQL builds values by concatenation; identifiers are quoted
       by the driver.
 - [ ] External processes run without a shell and with a timeout.
+- [ ] An automation change keeps values (inputs, cells, scalars, outputs,
+      messages, program output) out of `automation.db`, the application log,
+      spans and errors, except declared outputs and program logs within
+      their limits; the CA-13 tests still pass.
+- [ ] An external program is never started through `cmd.exe` or `sh`, its
+      environment is Studio's minus the denylist, and the `jjp/1` token
+      reaches it only through stdin and is consumed by `hello`.
+- [ ] The `jjp/1` listener exists only while a `jjp/1` run is registered and
+      binds the loopback address only.
+- [ ] Anything that can end a program ends its whole tree, and nothing
+      replays a run.
 - [ ] New network calls use HTTPS/TLS as configured, with an explicit timeout,
       and follow no redirect (the update download's allowlist is the one
       exception, [Updates](#updates)).
@@ -304,7 +391,12 @@ and a review date in `deny.toml`.
 
 ## Known deviations
 
-None at the moment. The last one, showing whether the session is encrypted
+| Standard | Current code |
+| --- | --- |
+| A program's environment holds no secret Studio did not mean to give | Automation inherits Studio's environment minus a short denylist ([Q-27](../plans/automation-engine-specification.md#12-decisions-required-from-the-maintainer)); variables that hold secrets reach the program. Accepted by the maintainer, shown in the interface |
+| An external program is sandboxed | It is not: it runs with the user's privileges and may read files and reach the network (Q-10). Supervised, not contained |
+
+The last closed deviation, showing whether the session is encrypted
 and warning on plain text, was closed in 0.2.0 M3: the server's answer is
 shown beside **Connected**
 ([ADR-0032](../adr/0032-session-encryption-reported-by-drivers.md)).

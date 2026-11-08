@@ -71,10 +71,11 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | --- | --- |
 | [Technical debt](plans/technical-debt.md) | Accepted debts, severity, status and completion criteria |
 | [Version 0.2.0](plans/releases/0.2.0.md) | Daily-use hardening, application icon, Linux validation and release acceptance |
-| [Version 0.3.0](plans/releases/0.3.0.md) | Approved milestones for the first automation: SQL → script |
-| [Automation engine specification](plans/automation-engine-specification.md) | Version 1.2, approved for 0.3.0 on 2026-11-08: SQL → script first; ADR-0034, ADR-0035 and ADR-0036 accepted; phase 5 specified; Q-15…Q-32 answered, ADR-0037 accepted; phases 3–5 specified, ADR-0038 accepted |
-| [Process-tree supervision dependency](plans/process-supervision-dependency.md) | `process-wrap` for automation's external programs, approved 2026-11-08 (Q-11) |
-| [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes; complete, with measurements on every relational driver |
+| [Version 0.3.0](plans/releases/0.3.0.md) | Approved milestones for the first automation: SQL → script; implementation in progress |
+| [Version 0.3.0 Windows checklist](plans/releases/0.3.0-windows-checklist.md) | What the maintainer runs on Windows to validate automation (Q-24), with the results to fill in |
+| [Automation engine specification](plans/automation-engine-specification.md) | Version 1.2, approved for 0.3.0 on 2026-11-08: SQL → script first; ADR-0034 to ADR-0038 accepted and implemented; phases 1, 3, 4 and 5 in code, the interface in progress; implementation notes list where the code differs |
+| [Process-tree supervision dependency](plans/process-supervision-dependency.md) | `process-wrap` for automation's external programs, approved 2026-11-08 (Q-11); implemented, Windows pending |
+| [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes; complete, with measurements on every relational driver; phase 1 was built on it |
 | [Large `.sql` files in the editor](plans/editor-large-files.md) | Proposal for ADR-0031's D7 file limit: the editor component's soft wrap on opening, measured options and a recommendation |
 | [SQL catalog proposal](plans/sql-catalog-proposal.md) | Original format proposal and future standalone catalog repository; see the reference for current behavior |
 
