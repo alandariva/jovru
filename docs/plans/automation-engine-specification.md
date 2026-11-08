@@ -4,7 +4,7 @@
 **Date:** November 8, 2026 (1.1: November 7, 2026)
 **Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
 Q-01…Q-32 ([section 12](#12-decisions-required-from-the-maintainer)),
-ADR-0033 to ADR-0037 accepted, `process-wrap` approved (Q-11), and the
+ADR-0034 to ADR-0038 accepted, `process-wrap` approved (Q-11), and the
 phase 3, 4 and 5 revisions (sections 9.1–9.3) approved
 **Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
 **Audience:** product, UX, architecture, Rust engineering and testing
@@ -24,8 +24,8 @@ design IDs (`Dxx`) and question IDs (`Q-xx`) refer to the review.
 > delivery is now **SQL → script** in version 0.3.0 (Q-01), built straight
 > through phases 1, 3, 4 and 5 with the interface at the end. Text that said
 > *pending Q-xx* now states the answer.
-> [ADR-0033](../adr/0033-automation-database-service-and-lock.md),
-> [ADR-0034](../adr/0034-persisted-declared-outputs.md) and the
+> [ADR-0034](../adr/0034-automation-database-service-and-lock.md),
+> [ADR-0035](../adr/0035-persisted-declared-outputs.md) and the
 > [0.3.0 plan](releases/0.3.0.md) were accepted on 2026-11-08, and the
 > process-supervision dependency was approved the same day (Q-11).
 
@@ -124,7 +124,7 @@ ships when all of them are accepted. Phases 6 and 7 stay later.
 | Phase | Priority | Delivery | Blocked by |
 | --- | --- | --- | --- |
 | PoC | Optional | Headless SQL executor and engine without persistence or UI, to measure the open risks ([plan](automation-sql-job-poc.md)) | Nothing |
-| 0 — Decisions | P0 | Answers to Q-01…Q-14, ADR-0033 and ADR-0034 with the DDL (all done 2026-11-08) | — |
+| 0 — Decisions | P0 | Answers to Q-01…Q-14, ADR-0034 and ADR-0035 with the DDL (all done 2026-11-08) | — |
 | 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Phase 0 |
 | 3 — External program | P0 | Section 9.1 | Phase 1 |
 | 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3 |
@@ -378,7 +378,7 @@ The engine is an **application-root service**. Views subscribe to it; closing
 a view does not cancel its runs. Quitting the application with runs active
 asks the user, then cancels them and waits for the shutdown to finish before
 exiting. This deviates from the rule that dropping a view cancels its
-operations, and [ADR-0033](../adr/0033-automation-database-service-and-lock.md)
+operations, and [ADR-0034](../adr/0034-automation-database-service-and-lock.md)
 records the deviation (D07, P-27, Q-05).
 
 ### 5.3 Admission and concurrency
@@ -436,9 +436,9 @@ never a terminal state. Run lists are virtualized.
 ## 6. Persistence and recovery
 
 This section is decided by
-[ADR-0033](../adr/0033-automation-database-service-and-lock.md) (Q-02,
+[ADR-0034](../adr/0034-automation-database-service-and-lock.md) (Q-02,
 Q-06) and, for declared outputs,
-[ADR-0034](../adr/0034-persisted-declared-outputs.md) (Q-03), both accepted.
+[ADR-0035](../adr/0035-persisted-declared-outputs.md) (Q-03), both accepted.
 Where they differ from the text below, the ADRs win.
 
 ### 6.1 `automation.db`
@@ -479,14 +479,14 @@ Persisted operational data: delivered row count, `rows_affected`,
 The history shows *what ran, when and how it ended*, not what it returned.
 
 The one exception is declared scalar outputs for chains (phase 5), under
-[ADR-0034](../adr/0034-persisted-declared-outputs.md): opt-in per job, at
+[ADR-0035](../adr/0035-persisted-declared-outputs.md): opt-in per job, at
 most 4 KiB per run, values kept 7 days, metadata 90 days, and an extra
 confirmation for production jobs (D29, Q-03).
 
-### 6.5 Phase 1 schema (superseded by ADR-0033)
+### 6.5 Phase 1 schema (superseded by ADR-0034)
 
 The approved DDL is in
-[ADR-0033](../adr/0033-automation-database-service-and-lock.md#2-migration-1-jobs-and-runs);
+[ADR-0034](../adr/0034-automation-database-service-and-lock.md#2-migration-1-jobs-and-runs);
 the sketch below is kept as the 1.1 text.
 
 ```sql
@@ -636,7 +636,7 @@ outcome. The maintainer set this requirement on 2026-11-08.
 | Output row rules (9.3.2) | The output editor explains `exactly_one`, `at_most_one` and `first` with their zero/one/several cases |
 | One confirmation for the whole plan (9.3.4) | The dialog lists every step, connection, production risk and new external program; `PlanChanged` says which connection changed |
 | Steps after a failure do not run (9.3.5) | The chain run marks them **Not run**, with the step and cause that stopped the chain |
-| Persisted outputs (ADR-0034) | Turning it on states the 4 KiB, 7-day and 90-day limits; a run whose outputs were not stored says why |
+| Persisted outputs (ADR-0035) | Turning it on states the 4 KiB, 7-day and 90-day limits; a run whose outputs were not stored says why |
 | External code is trusted, not sandboxed (Q-10) | The warning on the first run of each version (there is no import, Q-19) |
 | Program logs are kept on disk for 7 days (Q-15) | The program editor and every run's log view say so, with the 1 MiB limit per stream and a reminder not to print secrets or personal data |
 | The program runs from its own file, checked by hash (Q-16) | A run refused because the file changed names the file and offers **Publish**; the version shows the path and hash it expects |
@@ -663,7 +663,7 @@ honour, not as finished designs.
 ### 9.1 Phase 3 — External program
 
 **Revision of 2026-11-08, approved by the maintainer the same day**
-together with [ADR-0037](../adr/0037-external-program-runs.md), which holds
+together with [ADR-0038](../adr/0038-external-program-runs.md), which holds
 its schema. It folds in Q-10, Q-11, Q-15…Q-19 and Q-25…Q-29 and replaces the
 constraints version 1.1 listed here.
 
@@ -740,7 +740,7 @@ runtime are neither copied nor checked, and the interface says so (P-24).
 - stdin: for `jjp/1`, the token line and then end of file (9.2.1); for
   `none`, end of file at once.
 - stdout and stderr are drained into the run's log files, at most 1 MiB per
-  stream, kept 7 days ([ADR-0036](../adr/0036-program-logs-on-disk.md),
+  stream, kept 7 days ([ADR-0037](../adr/0037-program-logs-on-disk.md),
   Q-15). A full pipe never blocks the child or Studio (P-13).
 - **Stop and the deadline** first ask the program to end (`cancel` under
   `jjp/1`; `SIGTERM` to the group on Unix or `CTRL_BREAK_EVENT` to the group
@@ -821,7 +821,7 @@ Q-13, Q-18 and Q-28.
   `complete` or `fail`.
 - `fail`'s `code` is at most 64 characters of `A-Z a-z 0-9 _ . -` and is
   recorded; its `message`, at most 4 KiB, goes to the run's `jjp.log` only
-  (ADR-0036), since it may hold values.
+  (ADR-0037), since it may hold values.
 - After an accepted `complete` or `fail` the host accepts nothing else; the
   run ends with the process's exit (9.1.5).
 
@@ -837,7 +837,7 @@ Errors use JSON-RPC's codes (`-32700` parse error, `-32600` invalid request,
 
 #### 9.2.3 Quotas (Q-28)
 
-- `log` content shares the 1 MiB `jjp.log` limit of ADR-0036; beyond it,
+- `log` content shares the 1 MiB `jjp.log` limit of ADR-0037; beyond it,
   messages are dropped and counted, and the file ends with the count.
 - `progress` is coalesced to at most **10 per second**; extra ones replace
   the pending one.
@@ -854,7 +854,7 @@ tests; there is no published SDK until `jjp/1` is stable (D24, Q-13).
 ### 9.3 Phase 5 — Linear chain
 
 **Revision of 2026-11-08, approved by the maintainer the same day**
-together with [ADR-0035](../adr/0035-published-versions-and-chain-runs.md),
+together with [ADR-0036](../adr/0036-published-versions-and-chain-runs.md),
 which holds its schema. This section is normative for phase 5; it replaces
 the constraints version 1.1 listed here.
 
@@ -872,7 +872,7 @@ the constraints version 1.1 listed here.
 #### 9.3.2 Declared outputs
 
 A job declares the outputs a chain may read, by name and `ParameterKind`
-([ADR-0034](../adr/0034-persisted-declared-outputs.md), decision 1):
+([ADR-0035](../adr/0035-persisted-declared-outputs.md), decision 1):
 
 - **SQL Job:** each output names a result column **by position** (1-based;
   names may repeat, P-06), and the job states one row rule for all of them:
@@ -893,7 +893,7 @@ A job declares the outputs a chain may read, by name and `ParameterKind`
   checked against its kind (`jykre_core::is_parameter_value`; `Text` takes
   any text). In memory one value takes at most **64 KiB** and one step's
   outputs at most **256 KiB**; beyond either, cause `Output`. Persistence
-  has its own, smaller limit (ADR-0034: 4 KiB per run, opt-in).
+  has its own, smaller limit (ADR-0035: 4 KiB per run, opt-in).
 
 #### 9.3.3 Chain definition
 
@@ -997,7 +997,7 @@ cause `PlanChanged`.
   the user runs the chain again, as a new run.
 - A step run again on its own from a chain run's history opens that job's
   form, prefilled from the outputs the earlier step stored, when its job
-  opted in and the values have not expired (ADR-0034). It never runs
+  opted in and the values have not expired (ADR-0035). It never runs
   without the form.
 
 #### 9.3.6 Queue
@@ -1030,7 +1030,7 @@ review's "8/4/60 s" is read as:
   the same bounded channel as a run (section 5.6), with the step index.
 - History records the chain run (state, cause, `failed_step`, timing,
   `effect_unknown`, plan fingerprint) and each step's run linked to it, never
-  input values; outputs only under ADR-0034.
+  input values; outputs only under ADR-0035.
 
 ### 9.4 Phase 6 — On-demand capabilities
 
@@ -1104,8 +1104,8 @@ and the measured budgets.
 | ID | Question | Proposal | Blocks | Status |
 | --- | --- | --- | --- | --- |
 | Q-01 | First indispensable flow: reusable manual SQL, SQL → script, or an SFMC/HTTP connector? | Manual SQL Job (D01) | Phase 0 | **SQL → script**, built straight through phases 1, 3, 4 and 5 for 0.3.0 |
-| Q-02 | Approve the automation ADR: `automation.db`, minimal schema, recorded run data (D05, D14–D16)? | Approve as in section 6 | Phase 1 | **Approved**; ADR-0033 accepted |
-| Q-03 | Allow persisting declared scalar outputs by ADR, with which defaults? | D29; no values without an ADR | Phase 5 | **D29 defaults approved**; ADR-0034 accepted |
+| Q-02 | Approve the automation ADR: `automation.db`, minimal schema, recorded run data (D05, D14–D16)? | Approve as in section 6 | Phase 1 | **Approved**; ADR-0034 accepted |
+| Q-03 | Allow persisting declared scalar outputs by ADR, with which defaults? | D29; no values without an ADR | Phase 5 | **D29 defaults approved**; ADR-0035 accepted |
 | Q-04 | Approve minimal pure automation DTOs in `jykre-core`? | Approve | Phase 1 | **Approved** |
 | Q-05 | Application-root service and coordinated quit, deviating from view-owned cancellation? | Accept D07 | Phase 1 | **Accepted** |
 | Q-06 | A second instance on the same data directory cannot run automation? | Accept D17 | Phase 1 | **Accepted**, with an OS lock that the system releases when the process ends |
@@ -1117,7 +1117,7 @@ and the measured budgets.
 | Q-12 | Accept per-run IPC tokens in the environment, visible to same-user processes during the run? | Accept, with `hello` consumption and documented risk | Phase 4 | **Token through stdin**, not the environment (section 9.2) |
 | Q-13 | Keep the SDK out of the repository until `jjp/1` stabilizes? | Yes (D24) | Phase 4 | **Yes** |
 | Q-14 | Durable scheduling consent and execution while the application is closed? | Design with scheduling | Phase 7 | **Only while the application is open**; execution while it is closed is excluded |
-| Q-15 | Where do program logs (stdout, stderr, `jjp/1` `log`) live? | Memory, disk opt-in per job | Phase 3 | **Always on disk**, 1 MiB per stream, deleted after 7 days, with a warning; [ADR-0036](../adr/0036-program-logs-on-disk.md) |
+| Q-15 | Where do program logs (stdout, stderr, `jjp/1` `log`) live? | Memory, disk opt-in per job | Phase 3 | **Always on disk**, 1 MiB per stream, deleted after 7 days, with a warning; [ADR-0037](../adr/0037-program-logs-on-disk.md) |
 | Q-16 | What of the program is frozen? | The entrypoint file, by hash | Phase 3 | **Nothing is copied**: it runs from its path; the version keeps its hash and a changed file blocks the run until published again |
 | Q-17 | How does Stop end a program? | Ask, then kill the tree after 5 s | Phase 3 | **As proposed** |
 | Q-18 | How long may a `jjp/1` program take to send `hello`? | 10 s | Phase 4 | **30 s**, then `Protocol` and the tree is killed |

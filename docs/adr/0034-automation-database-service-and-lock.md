@@ -1,4 +1,4 @@
-# ADR-0033: Automation in `automation.db`, run by an application-root service under a data-folder lock
+# ADR-0034: Automation in `automation.db`, run by an application-root service under a data-folder lock
 
 - **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
 - **Date:** 2026-11-08
@@ -55,7 +55,7 @@ Forces:
 Definitions are canonical JSON (specification, section 6.2). Runs record
 what ran, where, when and how it ended, never values, cells, scalars or
 server messages (section 6.4); declared outputs are the subject of
-[ADR-0034](0034-persisted-declared-outputs.md). Timestamps are UTC text,
+[ADR-0035](0035-persisted-declared-outputs.md). Timestamps are UTC text,
 `strftime('%Y-%m-%dT%H:%M:%fZ','now')`, as in `config.db`.
 
 ```sql
@@ -199,7 +199,7 @@ record. No I/O and no dependency beyond what core already has.
   per run.
 - What becomes required: every schema change of `automation.db` is a new
   migration; nothing writes input values, cells, scalars or server messages
-  to it outside ADR-0034; the architecture documents the service exception.
+  to it outside ADR-0035; the architecture documents the service exception.
 - What becomes forbidden: replaying a run; a second automation file or data
   root; lock files whose existence carries meaning.
 

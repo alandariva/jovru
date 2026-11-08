@@ -1,4 +1,4 @@
-# ADR-0036: External programs' logs kept on disk for 7 days
+# ADR-0037: External programs' logs kept on disk for 7 days
 
 - **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
 - **Date:** 2026-11-08
@@ -11,7 +11,7 @@ runs external programs whose stdout and stderr must always be drained, so a
 full pipe never blocks them (section 9.1, P-13); phase 4 adds the `log`
 message of `jjp/1`. What a program prints is not under Studio's control: it
 may hold input values, rows or tokens. Section 6.4 and CA-13 forbid writing
-values to disk, and [ADR-0034](0034-persisted-declared-outputs.md) is the
+values to disk, and [ADR-0035](0035-persisted-declared-outputs.md) is the
 only exception so far. On 2026-11-08 the maintainer answered Q-15: program
 logs are **always kept on disk**, at most 1 MiB per stream, deleted after
 7 days, with a warning.
@@ -41,7 +41,7 @@ logs are **always kept on disk**, at most 1 MiB per stream, deleted after
    (specification, section 8.1.1).
 
 This ADR amends the specification's section 6.4 and CA-13 for program logs
-only, as ADR-0034 does for declared outputs.
+only, as ADR-0035 does for declared outputs.
 
 ## Alternatives considered
 
@@ -50,7 +50,7 @@ only, as ADR-0034 does for declared outputs.
 | Memory only | Nothing at rest | Lost on quit or crash, when diagnosing matters most | Q-15 |
 | Memory by default, disk opt-in per job | Values at rest only by choice | One more setting; the first failure of a job has no logs | Q-15 chose always |
 | Logs in `automation.db` | One file to back up | Large blobs in the history database, slower pruning, values next to the run metadata | Files are bounded, deletable on their own, and keep the database small |
-| Longer retention | Older failures can be read | More exposure of whatever programs print | 7 days matches ADR-0034 |
+| Longer retention | Older failures can be read | More exposure of whatever programs print | 7 days matches ADR-0035 |
 
 ## Consequences
 

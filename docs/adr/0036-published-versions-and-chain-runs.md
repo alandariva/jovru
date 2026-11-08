@@ -1,4 +1,4 @@
-# ADR-0035: Published job versions and chain runs in `automation.db`
+# ADR-0036: Published job versions and chain runs in `automation.db`
 
 - **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
 - **Date:** 2026-11-08
@@ -11,9 +11,9 @@ Version 0.3.0 ships SQL → script as a linear chain
 revision of 2026-11-08). A chain must run exactly what was confirmed, so it
 names **published versions** of its jobs, not their editable definitions; and
 its history must link each step's run to the chain run that started it.
-[ADR-0033](0033-automation-database-service-and-lock.md) created `jobs` and
+[ADR-0034](0034-automation-database-service-and-lock.md) created `jobs` and
 `runs` for SQL Jobs and said later kinds widen them with migrations of their
-own; [ADR-0034](0034-persisted-declared-outputs.md) added `run_outputs`.
+own; [ADR-0035](0035-persisted-declared-outputs.md) added `run_outputs`.
 A persistence schema change needs an ADR
 ([Workflow](../standards/workflow.md#architecture-decisions)).
 
@@ -22,9 +22,9 @@ Forces:
 - Editing a job must never change a chain that was already confirmed, nor
   a run already in the history.
 - A chain run has no connection of its own; its steps do.
-- Recovery must stay deterministic and never replay (ADR-0033, decision 5).
+- Recovery must stay deterministic and never replay (ADR-0034, decision 5).
 - Nothing about values changes: inputs are never stored, outputs only under
-  ADR-0034.
+  ADR-0035.
 
 ## Decision
 
@@ -42,7 +42,7 @@ Forces:
 4. **Admission is durable in two steps.** The chain run's row is written,
    `running`, when the plan is confirmed and before any step starts; each
    step's row is written when that step is admitted, before its own I/O, as
-   ADR-0033 decision 3 says. A step that never started has no row.
+   ADR-0034 decision 3 says. A step that never started has no row.
 5. **Recovery** marks a `running` chain run `interrupted` after its steps were
    recovered, with `effect_unknown` when any of its step runs has it. It
    never starts a remaining step.
@@ -104,7 +104,7 @@ CREATE INDEX chain_runs_open     ON chain_runs(state) WHERE state = 'running';
 ```
 
 - `chain_runs` are pruned with their steps 90 days after `finished_at`, as
-  runs are (ADR-0033); deleting a chain run deletes its step runs and, through
+  runs are (ADR-0034); deleting a chain run deletes its step runs and, through
   them, their outputs.
 - `job_versions` are never pruned: a chain may name a version for as long as
   it exists. Deleting a job deletes its versions only when no chain names

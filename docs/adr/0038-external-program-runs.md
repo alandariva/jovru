@@ -1,4 +1,4 @@
-# ADR-0037: External program runs in `automation.db`
+# ADR-0038: External program runs in `automation.db`
 
 - **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
 - **Date:** 2026-11-08
@@ -8,18 +8,18 @@
 
 Phase 3 of the [automation specification](../plans/automation-engine-specification.md)
 (section 9.1, revision of 2026-11-08) runs external programs. The schema of
-[ADR-0033](0033-automation-database-service-and-lock.md) was written for SQL
+[ADR-0034](0034-automation-database-service-and-lock.md) was written for SQL
 Jobs: every run has a connection, a statement and row counters, and `jobs`
 accepts only the kind `sql`. A program run has no connection; it has an exit
 code, a process group to recover, a file whose hash the version pins, and
-logs on disk ([ADR-0036](0036-program-logs-on-disk.md)).
-[ADR-0035](0035-published-versions-and-chain-runs.md) assumes this migration
+logs on disk ([ADR-0037](0037-program-logs-on-disk.md)).
+[ADR-0036](0036-published-versions-and-chain-runs.md) assumes this migration
 comes before its own. A persistence schema change needs an ADR.
 
 ## Decision
 
 1. **One `runs` table for both kinds**, with a `kind` column, so history,
-   pruning, recovery and the chain links of ADR-0035 stay one code path.
+   pruning, recovery and the chain links of ADR-0036 stay one code path.
    Columns that belong to one kind are `NULL` for the other, and `CHECK`s
    keep each kind's required columns.
 2. **What a program run records:** the exit code or the Unix signal; the
@@ -29,7 +29,7 @@ comes before its own. A persistence schema change needs an ADR.
    arguments' values beyond the definition, environment values, log content
    or the `fail` message.
 3. **The version's file** (path and SHA-256) lives in the version's
-   definition JSON (ADR-0035's `job_versions`), not in a column: it is part of
+   definition JSON (ADR-0036's `job_versions`), not in a column: it is part of
    what was published.
 4. **Recovery** marks `running` program runs `interrupted` with
    `effect_unknown`, and offers to end a group whose leader still has the
@@ -82,7 +82,7 @@ CREATE TABLE runs_new (
   log_bytes_stdout    INTEGER,
   log_bytes_stderr    INTEGER,
   log_bytes_jjp       INTEGER,
-  outputs_stored      INTEGER,                     -- ADR-0034
+  outputs_stored      INTEGER,                     -- ADR-0035
   started_at          TEXT NOT NULL,
   finished_at         TEXT,
   CHECK ((state = 'running') = (finished_at IS NULL)),
@@ -99,7 +99,7 @@ CREATE INDEX runs_by_start ON runs(started_at);
 CREATE INDEX runs_open     ON runs(state) WHERE state = 'running';
 ```
 
-`outputs_stored`, added to `runs` by ADR-0034's migration 2, is carried into
+`outputs_stored`, added to `runs` by ADR-0035's migration 2, is carried into
 the rebuilt table.
 
 ## Alternatives considered

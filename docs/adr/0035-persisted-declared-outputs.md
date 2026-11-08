@@ -1,4 +1,4 @@
-# ADR-0034: Declared scalar outputs persisted for chains, small, opt-in and short-lived
+# ADR-0035: Declared scalar outputs persisted for chains, small, opt-in and short-lived
 
 - **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
 - **Date:** 2026-11-08
@@ -44,7 +44,7 @@ Forces:
    not fail for it.
 4. **Short-lived.** Values are deleted **7 days** after the run finished,
    leaving their name, kind and size; that metadata goes with the run row
-   after **90 days** ([ADR-0033](0033-automation-database-service-and-lock.md)).
+   after **90 days** ([ADR-0034](0034-automation-database-service-and-lock.md)).
    Pruning runs in the background and never blocks admission.
 5. **Never elsewhere.** Values never reach logs, spans, telemetry, error
    reports or the snapshot. They are not secrets: the editor says outputs
