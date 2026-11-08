@@ -59,3 +59,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0034](0034-persisted-declared-outputs.md) | Declared scalar outputs persisted for chains, small, opt-in and short-lived | Accepted (not implemented) |
 | [0035](0035-published-versions-and-chain-runs.md) | Published job versions and chain runs in `automation.db` | Accepted (not implemented) |
 | [0036](0036-program-logs-on-disk.md) | External programs' logs kept on disk for 7 days | Accepted (not implemented) |
+| [0037](0037-external-program-runs.md) | External program runs in `automation.db` | Proposed |

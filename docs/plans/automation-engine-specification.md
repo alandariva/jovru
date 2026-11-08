@@ -5,7 +5,8 @@
 **Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
 Q-01…Q-14 ([section 12](#12-decisions-required-from-the-maintainer)),
 ADR-0033 to ADR-0036 accepted, `process-wrap` approved (Q-11),
-and the phase 5 revision (section 9.3) approved
+and the phase 5 revision (section 9.3) approved. The phase 3 and 4
+revisions (sections 9.1 and 9.2) and ADR-0037 are proposed
 **Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
@@ -126,8 +127,8 @@ ships when all of them are accepted. Phases 6 and 7 stay later.
 | PoC | Optional | Headless SQL executor and engine without persistence or UI, to measure the open risks ([plan](automation-sql-job-poc.md)) | Nothing |
 | 0 — Decisions | P0 | Answers to Q-01…Q-14, ADR-0033 and ADR-0034 with the DDL (all done 2026-11-08) | — |
 | 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Phase 0 |
-| 3 — External process without protocol | P0 | Section 9.1 | Phase 1 |
-| 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3 |
+| 3 — External program | P0 | Section 9.1 | Phase 1; approval of the 9.1 revision and ADR-0037 |
+| 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3; approval of the 9.2 revision |
 | 5 — Linear chain | P0 | Section 9.3; SQL → script | Phases 1 and 4 |
 | 2 — Interface | P0 | Section 8, for SQL Jobs, processes and chains | Phase 5 |
 | 6 — On-demand capabilities | P2 | Section 9.4 | One ADR per capability |
@@ -642,6 +643,9 @@ outcome. The maintainer set this requirement on 2026-11-08.
 | The program runs from its own file, checked by hash (Q-16) | A run refused because the file changed names the file and offers **Publish**; the version shows the path and hash it expects |
 | Stop on a program waits up to 5 s (Q-17) | **Stop** shows **Stopping…** and then whether the tree ended on its own or was killed |
 | The `jjp/1` token uses stdin (9.2) | The external-program editor says that stdin is reserved |
+| Programs inherit Studio's environment, minus a denylist (Q-27) | The program editor lists what is removed and warns that anything else in the environment, secrets included, reaches the program |
+| Only `jjp/1` programs take inputs and return outputs (Q-25) | The editor offers inputs and outputs only with `jjp/1`; a chain cannot read a `none` step |
+| Programs left running after a crash (Q-29, Unix) | At the next start, a dialog lists them and asks whether to end them |
 
 A rule without a place in this table is not ready to ship (CA-15).
 
@@ -657,81 +661,195 @@ virtualized. Phase 2 reports these numbers for the run and history paths.
 These phases are specified as **constraints** that a future revision must
 honour, not as finished designs.
 
-### 9.1 Phase 3 — External process without protocol
+### 9.1 Phase 3 — External program
 
-- **Prerequisite:** process-tree supervision through an approved dependency:
-  a kill-on-close Job Object on Windows and process groups on Unix. `unsafe`
-  is forbidden and `kill_on_drop` kills only the direct child (P-07).
-  `process-wrap` is the candidate to evaluate for license, weight, advisories
-  and features through a formal proposal (Q-11), approved on 2026-11-08
-  ([proposal](process-supervision-dependency.md)).
-- Unix residual risk is documented: if Studio crashes, the group survives.
-  Recovery records group ID and start time, warns, and never kills a PID or
-  PGID that may have been reused.
-- Spawn with an argument vector and no shell. The environment is an
-  operating-system and runtime allowlist (for example `SystemRoot`, `PATH`,
-  `TEMP` on Windows; `HOME`, `LANG` on Unix) plus explicit passthrough. No
-  default `NODE_OPTIONS`, `PYTHONPATH` or `JYKRE_CONFIG_DIR` (P-19). The
-  `jjp/1` token never travels in the environment (section 9.2).
-- **No snapshot is copied** (Q-16). The program runs from its original
-  path; a published version records the path of its entrypoint file and its
-  SHA-256. Before each run the engine hashes the file again: a missing file
-  or a different hash refuses the run, naming the file, until the user
-  publishes a new version. Local imports, `node_modules` and runtimes found
-  on `PATH` are neither copied nor checked, and the interface says so (P-24).
-- stdout and stderr, and the messages of `jjp/1`'s `log`, are drained into
-  **files on disk**, at most **1 MiB per stream per run**; excess is
-  discarded with a marker. They are deleted **7 days** after the run
-  finished, and with the run's row if that goes first. A full pipe never
-  blocks the child or Studio (P-13). Programs may print values, so this is an
-  exception to section 6.4, recorded in
-  [ADR-0036](../adr/0036-program-logs-on-disk.md) (Q-15).
+**Revision of 2026-11-08: Proposed**, awaiting the maintainer's approval
+together with [ADR-0037](../adr/0037-external-program-runs.md), which holds
+its schema. It folds in Q-10, Q-11, Q-15…Q-19 and Q-25…Q-29 and replaces the
+constraints version 1.1 listed here.
+
+#### 9.1.1 Supervision
+
+- Process trees are supervised with `process-wrap`, approved on 2026-11-08
+  ([proposal](process-supervision-dependency.md), Q-11): a Job Object with
+  kill-on-close and `CREATE_NO_WINDOW` on Windows, a process group on Unix.
+  `unsafe` stays forbidden in our crates, and `kill_on_drop` alone kills only
+  the direct child (P-07).
+- On Windows the system kills the tree when Studio ends, crash included. On
+  Unix the group survives a crash of Studio; recovery handles it (9.1.6).
+
+#### 9.1.2 Program job definition
+
+```json
+{
+  "schema_version": "1.0",
+  "id": "b81d…",
+  "name": "Export a Data Extension",
+  "kind": "process",
+  "program": "node",
+  "arguments": ["/home/me/jobs/export.js", "--format", "csv"],
+  "entrypoint": "/home/me/jobs/export.js",
+  "working_directory": null,
+  "environment": { "unset": ["AWS_PROFILE"], "set": { "LOG_FORMAT": "plain" } },
+  "protocol": "jjp/1",
+  "inputs":  [ { "name": "address", "kind": "text", "required": true } ],
+  "outputs": [ { "name": "rows", "kind": "number" } ],
+  "timeout_ms": 300000
+}
+```
+
+- `program` is an absolute path or a name looked up on `PATH` when the run
+  starts; `arguments` are passed as a vector, never through a shell.
+  `.bat` and `.cmd` files are refused as `program`, since Windows runs them
+  through `cmd.exe`; a user who names `cmd.exe` chooses a shell knowingly.
+- `entrypoint` is the file a published version pins (Q-16): the script an
+  interpreter runs, or the program itself for a compiled one (the default
+  when it is absent). It is not copied.
+- `working_directory` defaults to the entrypoint's folder; it must exist
+  (Q-26). There is no per-run folder in 0.3.0.
+- `protocol` is `none` or `jjp/1`. **Only a `jjp/1` program has inputs and
+  outputs** (Q-25): values never travel in arguments or the environment. A
+  `none` program runs with its fixed arguments, declares neither, and can be
+  a chain step only where no later step reads it.
+- `environment.set` holds constants, never secrets: they are stored in the
+  definition and shown in the editor.
+
+#### 9.1.3 Environment
+
+The program **inherits Studio's environment** (Q-27), minus:
+
+- a fixed denylist: `JYKRE_*`, `OTEL_*` (the collector's headers may be
+  there), `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP` and `PYTHONHOME`;
+- the job's `environment.unset` names;
+
+then `environment.set` is applied, and for `jjp/1` the host adds
+`JYKRE_JJP_ADDRESS` (9.2.1) after the denylist. Anything secret that is in
+Studio's environment (a cloud token, a CLI profile variable) reaches the
+program; the editor says so (section 8.1.1) and lists what will be removed.
+
+#### 9.1.4 Before the run: the version's file
+
+A published version records the entrypoint's path and SHA-256 (Q-16). Before
+each run of that version the engine hashes the file again; a missing file or
+a different hash refuses the run, naming the file and offering **Publish**.
+A run of the job on its own, outside a chain, uses the current definition
+and hashes the file only to record it. Local imports, `node_modules` and the
+runtime are neither copied nor checked, and the interface says so (P-24).
+
+#### 9.1.5 Running, Stop and outcome
+
+- stdin: for `jjp/1`, the token line and then end of file (9.2.1); for
+  `none`, end of file at once.
+- stdout and stderr are drained into the run's log files, at most 1 MiB per
+  stream, kept 7 days ([ADR-0036](../adr/0036-program-logs-on-disk.md),
+  Q-15). A full pipe never blocks the child or Studio (P-13).
 - **Stop and the deadline** first ask the program to end (`cancel` under
-  `jjp/1`; `SIGTERM` to the group on Unix, `CTRL_BREAK_EVENT` to the group on
-  Windows, without it), then kill the whole tree after **5 s** (Q-17).
-- Success is exit code 0; anything else, a timeout or Stop fails. The first
-  run of each version warns that it runs with the user's privileges, and
-  explains that grants protect Studio's APIs, not the machine (Q-10). There
-  is no import or export of jobs in 0.3.0 (Q-19).
+  `jjp/1`; `SIGTERM` to the group on Unix or `CTRL_BREAK_EVENT` to the group
+  on Windows without it), then kill the whole tree after **5 s** (Q-17).
+- Outcome, decided by the run's owner from the process's exit and, under
+  `jjp/1`, its terminal message (section 5.5):
+
+  | Terminal message | Exit | Run |
+  | --- | --- | --- |
+  | none (`protocol: none`) | 0 | `Succeeded` |
+  | none (`protocol: none`) | not 0, or a signal | `Failed`, cause `Exit` |
+  | `complete` | 0 | `Succeeded`, with its outputs |
+  | `complete` | not 0, or a signal | `Failed`, cause `Exit` |
+  | `fail` | any | `Failed`, cause `Program`, with its code |
+  | none (`jjp/1`) | any | `Failed`, cause `Protocol` (ended without a terminal message) |
+
+  The exit code, or the Unix signal, is recorded. A program that could not
+  start (not found, not executable, no permission) fails with `NotFound` or
+  `PermissionDenied` and no `effect_unknown`.
+- `effect_unknown` is set for every program run that was started and did not
+  succeed: Studio cannot know what a program did.
+- The first run of each version warns that it runs with the user's
+  privileges and that grants protect Studio's APIs, not the machine (Q-10).
+  There is no import or export of jobs in 0.3.0 (Q-19).
+
+#### 9.1.6 Recovery of programs left running (Unix)
+
+The run records its process group ID and the process's start time as the
+system reports it (`/proc/<pid>/stat` on Linux). At the next start, recovery
+marks the run `Interrupted` with `effect_unknown`, and for each such run
+whose group leader still exists **with the same start time**, Studio lists
+the programs left running by the previous session and asks whether to end
+them (Q-29). Ending sends `SIGKILL` to the group. A process whose start time
+differs is never touched: its ID was reused.
 
 ### 9.2 Phase 4 — Minimal `jjp/1`
 
-- One `127.0.0.1` listener, created on the first external run, never at
-  startup. One session per run, no reconnection, no batches.
-- NDJSON framing with a 1 MiB limit enforced before allocating. JSON-RPC 2.0
-  messages.
-- Authentication: a 256-bit per-run token, written by the host as the first
-  line of the child's **stdin**, which the host then closes, and consumed
-  atomically by `hello`; reuse fails. The environment carries only the
-  listener's address, which is not a secret. Unlike an environment variable,
-  the token is not inherited by the processes the job starts and cannot be
-  read from `/proc/<pid>/environ` or the process environment by other
-  processes of the same user; a same-user process allowed to debug the job
-  can still read its memory, which is documented. A job therefore cannot use
-  stdin for anything else. The token and inputs travel only in stdin and the
-  `hello` exchange (Q-12).
-- Jobs are **pure clients** (P-12): there is no `execute`, `accepted` or
-  `ping`. The host sends only a `cancel` notification.
+**Revision of 2026-11-08: Proposed**, together with 9.1. It folds in Q-12,
+Q-13, Q-18 and Q-28.
 
-| Method | Direction | Kind | Purpose |
-| --- | --- | --- | --- |
-| `hello` | job → host | request | Authenticate; receive inputs, deadline and `max_message_bytes` |
-| `log` | job → host | notification | Append a log line (job log, not telemetry) |
-| `progress` | job → host | notification | 0–100 and an optional stage |
-| `complete` | job → host | request | Terminal intent with outputs |
-| `fail` | job → host | request | Terminal intent with a code and message |
-| `cancel` | host → job | notification | Cooperative cancellation before forced termination |
+#### 9.2.1 Transport and authentication
 
-- A program declared as `jjp/1` must send `hello` within **30 s** of its
-  start; otherwise the run fails with cause `Protocol` and its tree is
-  killed (Q-18).
-- The host always drains the socket. Logs over quota are dropped and counted;
-  control and terminal messages are outside the quota. Persistent abuse ends
-  the run. Cancellation never waits for the job to read anything.
-- A terminal intent is decided by the run owner together with process exit
-  (section 5.5): `complete` followed by a nonzero exit fails.
-- A testable JavaScript example lives in `examples/`; there is no published
-  SDK until `jjp/1` is stable (D24, Q-13).
+- One `127.0.0.1` listener on a port the system picks, created when the first
+  `jjp/1` run starts and closed when the last one ends; never at startup.
+  One connection per run, no reconnection, no batches.
+- NDJSON framing: one JSON-RPC 2.0 message per line, UTF-8, at most
+  **1 MiB per line**, enforced before allocating. A longer line, invalid
+  UTF-8 or invalid JSON closes the connection and fails the run with cause
+  `Protocol`.
+- The program finds the listener in `JYKRE_JJP_ADDRESS` (`127.0.0.1:<port>`),
+  which is not a secret. The token is the first line of its **stdin**,
+  `{"jjp":"1","token":"<64 hex digits>"}`, followed by end of file (Q-12).
+  The token is 256 random bits, valid for that run only, consumed atomically
+  by `hello`; reuse, a second connection or a wrong token is refused. A
+  same-user process allowed to debug the program can still read its memory,
+  which is documented.
+- Programs are **pure clients** (P-12): there is no `execute`, `accepted` or
+  `ping`. The host sends only the `cancel` notification.
+
+#### 9.2.2 Messages
+
+| Method | Direction | Kind | Params | Result |
+| --- | --- | --- | --- | --- |
+| `hello` | program → host | request | `{"token": "…", "protocol": "jjp/1"}` | `{"run_id": "…", "inputs": {"<name>": "<text>" \| null}, "deadline_ms": <ms left>, "max_message_bytes": 1048576}` |
+| `log` | program → host | notification | `{"level": "info" \| "warn" \| "error", "message": "…"}` | — |
+| `progress` | program → host | notification | `{"percent": 0–100, "stage": "…"}` (`stage` optional, at most 200 characters) | — |
+| `complete` | program → host | request | `{"outputs": {"<name>": "<text>" \| null}}` | `{}` |
+| `fail` | program → host | request | `{"code": "…", "message": "…"}` | `{}` |
+| `cancel` | host → program | notification | `{}` | — |
+
+- `hello` comes first and only once, within **30 s** of the start (Q-18);
+  otherwise the run fails with cause `Protocol` and its tree is killed.
+- Values are the exact text of their kind (`jykre_core::is_parameter_value`)
+  or `null`; never JSON numbers, so nothing passes through floating point.
+- `complete` must carry every declared output and nothing else (section
+  9.3.2); otherwise its error says which, and the program may send a correct
+  `complete` or `fail`.
+- `fail`'s `code` is at most 64 characters of `A-Z a-z 0-9 _ . -` and is
+  recorded; its `message`, at most 4 KiB, goes to the run's `jjp.log` only
+  (ADR-0036), since it may hold values.
+- After an accepted `complete` or `fail` the host accepts nothing else; the
+  run ends with the process's exit (9.1.5).
+
+Errors use JSON-RPC's codes (`-32700` parse error, `-32600` invalid request,
+`-32601` unknown method, `-32602` invalid params) and these:
+
+| Code | Meaning |
+| --- | --- |
+| `-32001` | Invalid or already used token |
+| `-32002` | `hello` is required first, or was already sent |
+| `-32003` | A terminal message was already accepted |
+| `-32004` | Quota exceeded |
+
+#### 9.2.3 Quotas (Q-28)
+
+- `log` content shares the 1 MiB `jjp.log` limit of ADR-0036; beyond it,
+  messages are dropped and counted, and the file ends with the count.
+- `progress` is coalesced to at most **10 per second**; extra ones replace
+  the pending one.
+- A message over 1 MiB, or traffic beyond **10 times** the log quota, ends
+  the run with cause `Protocol`. Control and terminal messages are never
+  dropped. The host always drains the socket, and cancellation never waits
+  for the program to read anything.
+
+#### 9.2.4 Example and SDK
+
+A testable JavaScript example lives in `examples/`, exercised by the phase 4
+tests; there is no published SDK until `jjp/1` is stable (D24, Q-13).
 
 ### 9.3 Phase 5 — Linear chain
 
@@ -903,6 +1021,8 @@ review's "8/4/60 s" is read as:
 
 #### 9.3.7 Causes, events and history
 
+- Phase 3 adds the causes `Exit` (a nonzero exit or a signal) and `Program`
+  (the program sent `fail`).
 - New causes: `Output` (outputs did not match the declaration), `Input`
   (mapped inputs did not pass the form's checks), `PlanChanged` and
   `QueueTimeout`.
@@ -1007,8 +1127,16 @@ and the measured budgets.
 | Q-22 | History views? | Per job and a global list | Phase 2 | **As proposed** |
 | Q-23 | Databricks validation of SQL Jobs? | A test workspace | Phase 1 | **Not validated in 0.3.0**, documented as such |
 | Q-24 | Windows validation (Job Objects, visual checks)? | A checklist the maintainer runs | Phases 3 and 2 | **As proposed**: a checklist the maintainer runs on Windows; results recorded from the report |
+| Q-25 | How do inputs reach a program? | Only through `jjp/1` | Phase 3 | **As proposed** |
+| Q-26 | The program's working directory? | The job's, default the entrypoint's folder | Phase 3 | **As proposed** |
+| Q-27 | The program's environment? | A minimal allowlist plus passthrough | Phase 3 | **Inherit Studio's environment minus a denylist** (9.1.3) |
+| Q-28 | `jjp/1` quotas? | 1 MiB of logs, 10 progress/s, 10× ends the run | Phase 4 | **As proposed** |
+| Q-29 | Programs left running after a crash (Unix)? | Ask at the next start | Phase 3 | **As proposed** |
+| Q-30 | Where does the MySQL `CALL` fix land? | `release/0.2.0` first, then merged into automation | 0.2.0 | **As proposed** |
+| Q-31 | Visual check on Linux? | Try `Xvfb` here, else the maintainer's checklist | Phase 2 | **As proposed** |
+| Q-32 | Branches for 0.3.0? | `release/0.3.0` now, one PR per milestone | All | **As proposed** |
 
-Answers to Q-15…Q-24 given by the maintainer on 2026-11-08, after the
+Answers to Q-15…Q-32 given by the maintainer on 2026-11-08, after the
 phase 5 revision. Answers to Q-01…Q-14 given the same day, together with the release
 decision R: automation is the thesis of [0.3.0](releases/0.3.0.md), which
 ships SQL → script.
@@ -1060,7 +1188,7 @@ phases. The scenarios remain useful as targets, not as contracts:
 | §6.3 Structured result | In memory; ordered, exact representation | P-01, P-06 |
 | §6.4 Sessions and transactions | New session per run, autocommit, no `shared_session` | P-02, P-04 |
 | §6.5 Multiple statements and large results | One statement; completion rule | P-05 |
-| §7 External jobs | Phase 3, supervision prerequisite, environment allowlist | P-07, P-19, P-24 |
+| §7 External jobs | Phase 3, supervision prerequisite, environment allowlist (replaced by inheritance minus a denylist, Q-27) | P-07, P-19, P-24 |
 | §8 JJP | Minimal `jjp/1`, jobs as pure clients | P-12, P-13, P-30 |
 | §9 Capabilities and SDK | Phase 4–6; JS example only | P-12, P-30 |
 | §10 Inputs, outputs, interaction | `ParameterSpec`; no persisted values; `ask` in phase 6 | P-01, P-20 |
