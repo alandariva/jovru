@@ -127,7 +127,8 @@ impl ParameterSpec {
         }
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    /// The spec a stored value holds; `None` when it has no valid name.
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         let name = object.get("name")?.as_str()?;
         if !jykre_core::is_parameter_name(name) {
@@ -154,7 +155,8 @@ impl ParameterSpec {
         })
     }
 
-    fn to_value(&self) -> Value {
+    /// The stored value, unknown fields included.
+    pub(crate) fn to_value(&self) -> Value {
         with_extra(
             &self.extra,
             json!({
@@ -1054,7 +1056,7 @@ fn context_from(value: &Value) -> SessionContext {
 }
 
 /// The entries of `object` whose keys are not in `known`.
-fn unknown(object: &Map<String, Value>, known: &[&str]) -> Map<String, Value> {
+pub(crate) fn unknown(object: &Map<String, Value>, known: &[&str]) -> Map<String, Value> {
     object
         .iter()
         .filter(|(key, _)| !known.contains(&key.as_str()))
@@ -1063,7 +1065,7 @@ fn unknown(object: &Map<String, Value>, known: &[&str]) -> Map<String, Value> {
 }
 
 /// `known` (an object) over the kept unknown entries.
-fn with_extra(extra: &Map<String, Value>, known: Value) -> Value {
+pub(crate) fn with_extra(extra: &Map<String, Value>, known: Value) -> Value {
     let mut object = extra.clone();
     if let Value::Object(known) = known {
         object.extend(known);

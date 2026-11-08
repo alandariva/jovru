@@ -1,6 +1,7 @@
 //! UI-independent contracts shared by database drivers and the application.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod automation;
 mod connection;
 mod driver;
 mod error;
