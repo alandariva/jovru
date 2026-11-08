@@ -257,6 +257,11 @@ impl DatabaseSession {
 
 #[async_trait]
 impl Session for DatabaseSession {
+    /// A database file on this computer: nothing travels on a network.
+    async fn encryption(&mut self, _: CancellationToken) -> DriverResult<Encryption> {
+        Ok(Encryption::Local)
+    }
+
     async fn execute(
         &mut self,
         request: &QueryRequest,

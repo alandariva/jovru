@@ -1,6 +1,6 @@
 # ADR-0022: Result pages shared across threads with `Arc`
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-04
 - **Authors:** AI agent, at the maintainer's request (decision approved by the maintainer on 2026-11-04)
 - **Supersedes in part:** [ADR-0012](0012-result-grid-as-a-cached-entity.md), the point that a result page is shared as `Rc<ResultData>`

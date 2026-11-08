@@ -1,6 +1,6 @@
 # ADR-0018: Numbered migrations for the metadata cache, starting with search names and publication times
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-03
 - **Authors:** Maintainer, with an AI agent
 

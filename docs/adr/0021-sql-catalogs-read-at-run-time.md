@@ -1,6 +1,6 @@
 # ADR-0021: SQL dialect catalogs read at run time from a data directory
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-04
 - **Authors:** AI agent, at the maintainer's request (plan approved 2026-11-04)
 

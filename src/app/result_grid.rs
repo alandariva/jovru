@@ -15,7 +15,7 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
-use jykre::copy_as::{self, CopyFormat, CopyOptions, CopyRequest, CopySource};
+use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
 use jykre::grid::{
     self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, selection_block,
 };
@@ -235,6 +235,21 @@ pub struct ResultGrid {
 }
 
 impl EventEmitter<ResultGridEvent> for ResultGrid {}
+
+impl super::copying::CopyHost for ResultGrid {
+    fn copy_job(&mut self) -> &mut Option<super::copying::CopyJob> {
+        &mut self.copy_job
+    }
+
+    /// Bumped whenever another page is shown.
+    fn copy_epoch(&self) -> u64 {
+        self.version
+    }
+
+    fn copy_notice(&mut self, feedback: Feedback, cx: &mut Context<Self>) {
+        cx.emit(ResultGridEvent::Notice(feedback));
+    }
+}
 
 impl ResultGrid {
     pub(super) fn benchmark_begin(&mut self, bottom: bool, cx: &mut Context<Self>) {
@@ -962,7 +977,7 @@ impl ResultGrid {
             },
             options,
         );
-        self.start_copy(request, window, cx);
+        self.start_copy(request, super::copying::CopyWhat::Selection, window, cx);
     }
 
     fn copy_request(&self, source: CopySource, options: CopyOptions) -> CopyRequest {
@@ -991,230 +1006,32 @@ impl ResultGrid {
             header: true,
             ..CopyOptions::default()
         };
-        self.start_copy(self.copy_request(CopySource::Page, options), window, cx);
+        let request = self.copy_request(CopySource::Page, options);
+        self.start_copy(request, super::copying::CopyWhat::Page, window, cx);
     }
 
-    fn start_copy(&mut self, request: CopyRequest, window: &mut Window, cx: &mut Context<Self>) {
-        let generation = super::copying::next_generation(cx);
-        let cancel = jykre::drivers::CancellationToken::new();
-        super::copying::set_cancel(generation, cancel.clone(), cx);
-        self.copy_job = Some(super::copying::CopyJob {
-            generation,
-            cancel: cancel.clone(),
-            started: std::time::Instant::now(),
-            progress: Default::default(),
-        });
-        let request = Arc::new(super::copying::CopySnapshot(request));
-        let version = self.version;
-        self.watch_copy(generation, cx);
-        cx.spawn_in(window, async move |weak, cx| {
-            let snapshot = request.clone();
-            let estimated = jykre::backend::run(async move {
-                tokio::task::spawn_blocking(move || snapshot.0.estimate(&cancel)).await
-                    .map_err(|_| jykre::drivers::DriverError::new(jykre::drivers::ErrorCode::Internal, "Copy task failed"))?
-            }).await;
-            let _ = weak.update_in(cx, |this, window, cx| {
-                if !this.copy_is_current(generation, cx) {
-                    this.discard_copy(generation, cx);
-                    return;
-                }
-                match estimated {
-                    Ok(bytes) if bytes > grid::COPY_CONFIRM_BYTES => {
-                        this.copy_job = None;
-                        let grid = cx.weak_entity();
-                        super::confirm(window, cx, super::Confirmation {
-                            title: tr!("Copy about {0} MB?", bytes / (1024 * 1024)),
-                            description: tr!("The selection is large: copying it can take a moment and holds all of it in the clipboard.").to_string(),
-                            ok: tr!("Copy"), cancel: tr!("Cancel"), focus: super::ConfirmFocus::Dialog,
-                        }, move |_, cx| {
-                            let _ = grid.update(cx, |this, cx| {
-                                if this.version == version && super::copying::is_current(generation, cx) {
-                                    this.encode_copy(request.clone(), generation, cx);
-                                }
-                            });
-                        });
-                        cx.notify();
-                    }
-                    Ok(_) => this.encode_copy(request.clone(), generation, cx),
-                    Err(error) => this.copy_failed(error, cx),
-                }
-            });
-        }).detach();
-    }
-
-    fn discard_copy(&mut self, generation: u64, cx: &mut Context<Self>) {
-        if self
-            .copy_job
-            .as_ref()
-            .is_some_and(|job| job.generation == generation)
-        {
-            self.copy_job = None;
-            cx.notify();
-        }
-    }
-
-    fn watch_copy(&self, generation: u64, cx: &mut Context<Self>) {
-        // Show a cancellable status only after the 100 ms copy budget.
-        cx.spawn(async move |weak, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(100))
-                .await;
-            let _ = weak.update(cx, |this, cx| {
-                if this
-                    .copy_job
-                    .as_ref()
-                    .is_some_and(|job| job.generation == generation)
-                {
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-    }
-
-    fn copy_is_current(&self, generation: u64, cx: &App) -> bool {
-        super::copying::is_current(generation, cx)
-            && self
-                .copy_job
-                .as_ref()
-                .is_some_and(|job| job.generation == generation && !job.cancel.is_cancelled())
-    }
-
-    fn encode_copy(
+    fn start_copy(
         &mut self,
-        request: Arc<super::copying::CopySnapshot>,
-        generation: u64,
+        request: CopyRequest,
+        what: super::copying::CopyWhat,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cancel = jykre::drivers::CancellationToken::new();
-        super::copying::set_cancel(generation, cancel.clone(), cx);
-        self.copy_job = Some(super::copying::CopyJob {
-            generation,
-            cancel: cancel.clone(),
-            started: std::time::Instant::now(),
-            progress: Default::default(),
-        });
-        self.watch_copy(generation, cx);
-        let (progress, mut watched) = tokio::sync::watch::channel(copy_as::Progress::default());
-        cx.spawn(async move |weak, cx| {
-            while watched.changed().await.is_ok() {
-                let progress = *watched.borrow_and_update();
-                let active = weak
-                    .update(cx, |this, cx| {
-                        if !this.copy_is_current(generation, cx) {
-                            return false;
-                        }
-                        if let Some(job) = &mut this.copy_job {
-                            job.progress = progress;
-                            if job.started.elapsed() >= Duration::from_millis(100) {
-                                cx.notify();
-                            }
-                        }
-                        true
-                    })
-                    .unwrap_or(false);
-                if !active {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.spawn(async move |weak, cx| {
-            let options = request.0.options;
-            let page = matches!(request.0.source, CopySource::Page);
-            let copied = jykre::backend::run(async move {
-                tokio::task::spawn_blocking(move || {
-                    copy_as::generate(&request.0, &cancel, |state| {
-                        progress.send_replace(state);
-                    })
-                })
-                .await
-                .map_err(|_| {
-                    jykre::drivers::DriverError::new(
-                        jykre::drivers::ErrorCode::Internal,
-                        "Copy task failed",
-                    )
-                })?
-            })
-            .await;
-            let mut copied = Some(copied);
-            let _ = weak.update(cx, |this, cx| {
-                if !this.copy_is_current(generation, cx) {
-                    this.discard_copy(generation, cx);
-                    return;
-                }
-                this.copy_job = None;
-                match copied.take() {
-                    Some(Ok(Some((text, count)))) => {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                        let message = if page {
-                            tr!("CSV copied. Paste it into a spreadsheet or file.").to_string()
-                        } else {
-                            match (options.format, count) {
-                                (CopyFormat::Text, 1) => tr!("Cell copied.").to_string(),
-                                (CopyFormat::Text, count) => tr!("{0} cells copied.", count),
-                                (format, 1) => tr!("Cell copied as {0}.", format_name(format)),
-                                (format, count) => {
-                                    tr!("{0} cells copied as {1}.", count, format_name(format))
-                                }
-                            }
-                        };
-                        cx.emit(ResultGridEvent::Notice(Feedback::new(
-                            Tone::Success,
-                            message,
-                        )));
-                    }
-                    Some(Ok(None)) => cx.emit(ResultGridEvent::Notice(Feedback::new(
-                        Tone::Info,
-                        tr!("Select cells to copy."),
-                    ))),
-                    Some(Err(error)) => this.copy_failed(error, cx),
-                    None => {}
-                }
-                cx.notify();
-            });
-            // Superseded/closed copies can hold a large generated string.
-            if let Some(copied) = copied {
-                jykre::backend::release(copied);
-            }
-        })
-        .detach();
+        super::copying::start(self, request, what, window, cx);
     }
 
-    fn copy_failed(&mut self, error: jykre::drivers::DriverError, cx: &mut Context<Self>) {
-        self.copy_job = None;
-        let feedback = match error.code {
-            jykre::drivers::ErrorCode::Cancelled => Feedback::new(
-                Tone::Info,
-                tr!("Copy cancelled. The clipboard was not changed."),
-            ),
-            jykre::drivers::ErrorCode::Timeout => {
-                Feedback::new(Tone::Error, tr!("Copy timed out. Try a smaller selection."))
-            }
-            _ => Feedback::new(Tone::Error, tr!("Could not copy the selection. Try again.")),
-        };
-        cx.emit(ResultGridEvent::Notice(feedback));
-        cx.notify();
+    fn cancel_copy(&mut self, cx: &mut Context<Self>) {
+        super::copying::cancel(self, cx);
     }
 
-    /// Copies the whole value the viewer shows.
-    fn copy_value(&mut self, cx: &mut Context<Self>) {
-        super::copying::next_generation(cx);
-        self.copy_job = None;
-        let value = self
-            .inspected
-            .and_then(|(row, column)| self.result.value(row, column));
-        let notice = match value {
-            Some(value) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(value.to_owned()));
-                Feedback::new(Tone::Success, tr!("Value copied."))
-            }
-            None => Feedback::new(
-                Tone::Info,
-                tr!("The value is NULL: there is nothing to copy."),
-            ),
+    /// Copies the whole value the viewer shows, never only the part it
+    /// shows, off the UI thread like any other copy.
+    fn copy_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, column)) = self.inspected else {
+            return;
         };
-        cx.emit(ResultGridEvent::Notice(notice));
+        let request = self.copy_request(CopySource::Value { row, column }, CopyOptions::default());
+        self.start_copy(request, super::copying::CopyWhat::Value, window, cx);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1257,13 +1074,7 @@ impl ResultGrid {
                     self.jump_selection(Jump::Rows(rows), shift, cx)
                 }
                 "enter" if self.inspected.is_some() => self.open_inspector(Inspector::Value, cx),
-                "escape" if self.copy_job.is_some() => self.copy_failed(
-                    jykre::drivers::DriverError::new(
-                        jykre::drivers::ErrorCode::Cancelled,
-                        "Copy cancelled",
-                    ),
-                    cx,
-                ),
+                "escape" if self.copy_job.is_some() => self.cancel_copy(cx),
                 // Esc closes what is on top first: the panel, the records
                 // view, then the selection.
                 "escape" if self.inspector.is_some() => self.set_inspector(None, cx),
@@ -2334,21 +2145,29 @@ impl ResultGrid {
             .child(
                 row()
                     .flex_none()
+                    .gap_2()
                     .justify_between()
-                    .child(label(match value {
-                        Some(value) if value.len() > VIEWER_BYTES => tr!(
-                            "{0} characters · shows the first 1 MB; Copy copies all of it",
-                            cell_format::count(value.chars().count())
-                        ),
-                        Some(value) => {
-                            tr!("{0} characters", cell_format::count(value.chars().count()))
-                        }
-                        None => String::new(),
-                    }))
+                    // The text wraps, so a long note (or a longer language)
+                    // never pushes Copy out of the panel.
                     .child(
-                        button("copy-value", I::Copy, tr!("Copy"))
-                            .on_click(cx.listener(|this, _, _, cx| this.copy_value(cx))),
-                    ),
+                        label(match value {
+                            Some(value) if value.len() > VIEWER_BYTES => tr!(
+                                "{0} characters · shows the first 1 MB; Copy copies all of it",
+                                cell_format::count(value.chars().count())
+                            ),
+                            Some(value) => {
+                                tr!("{0} characters", cell_format::count(value.chars().count()))
+                            }
+                            None => String::new(),
+                        })
+                        .flex_1()
+                        .min_w_0(),
+                    )
+                    .child(div().flex_none().child(
+                        button("copy-value", I::Copy, tr!("Copy")).on_click(
+                            cx.listener(|this, _, window, cx| this.copy_value(window, cx)),
+                        ),
+                    )),
             )
     }
 
@@ -2881,21 +2700,9 @@ impl Render for ResultGrid {
                     .min_w_0()
                     .h_full()
                     .child(main)
-                    .when(
-                        self.copy_job
-                            .as_ref()
-                            .is_some_and(|job| job.started.elapsed() >= Duration::from_millis(100)),
-                        |s| {
-                            let progress = self
-                                .copy_job
-                                .as_ref()
-                                .map(|job| job.progress)
-                                .unwrap_or_default();
-                            let elapsed = self
-                                .copy_job
-                                .as_ref()
-                                .map(|job| job.started.elapsed())
-                                .unwrap_or_default();
+                    .when_some(
+                        self.copy_job.as_ref().and_then(super::copying::status),
+                        |s, status| {
                             s.child(
                                 row()
                                     .id("copy-progress")
@@ -2909,32 +2716,11 @@ impl Render for ResultGrid {
                                     .border_1()
                                     .border_color(rgb(colors().border))
                                     .rounded_md()
-                                    .child(label(if progress.total == 0 {
-                                        tr!("Preparing copy…").to_string()
-                                    } else if elapsed >= Duration::from_secs(2) {
-                                        tr!(
-                                            "Copying… {0} of {1} rows · {2}",
-                                            progress.rows,
-                                            progress.total,
-                                            cell_format::duration(elapsed.as_millis() as u64)
-                                        )
-                                    } else {
-                                        tr!(
-                                            "Copying… {0} of {1} rows",
-                                            progress.rows,
-                                            progress.total
-                                        )
-                                    }))
+                                    .child(label(status))
                                     .child(
                                         button("cancel-copy", I::X, tr!("Cancel copy")).on_click(
                                             cx.listener(|this, _, window, cx| {
-                                                this.copy_failed(
-                                                    jykre::drivers::DriverError::new(
-                                                        jykre::drivers::ErrorCode::Cancelled,
-                                                        "Copy cancelled",
-                                                    ),
-                                                    cx,
-                                                );
+                                                this.cancel_copy(cx);
                                                 window.focus(&this.focus, cx);
                                             }),
                                         ),

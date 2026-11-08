@@ -1,6 +1,6 @@
 # ADR-0027: SQLite database files through SQLx's bundled SQLite
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-06
 - **Authors:** Alan de Oliveira (decisions), drafted with an AI agent
 

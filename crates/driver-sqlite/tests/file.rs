@@ -202,6 +202,11 @@ async fn values_keep_their_storage_class_and_null_is_not_text() {
         .open_session(&input(&path, false), CancellationToken::new())
         .await
         .unwrap();
+    // A file on this computer: nothing travels on a network.
+    assert_eq!(
+        session.encryption(CancellationToken::new()).await.unwrap(),
+        Encryption::Local
+    );
     let (outcome, sink) = run(
         &mut session,
         "SELECT 42 AS i, 2.5 AS r, 'NULL' AS t, NULL AS n, x'00ff' AS b, \

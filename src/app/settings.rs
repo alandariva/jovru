@@ -421,6 +421,75 @@ impl AppView {
                         "Keywords, functions and types the editor suggests and colours, read from the SQL catalogs at start."
                     ))),
             )
+            .child(
+                setting_section(tr!("Saved queries"))
+                    .child(setting_row(
+                        tr!("Folder of saved queries"),
+                        tr!(
+                            "The library lists the .sql files in it and its subfolders. Changing it moves, copies or deletes nothing."
+                        ),
+                        row()
+                            .gap_1()
+                            .child(
+                                button("library-folder", I::FolderOpen, tr!("Change…"))
+                                    .when(!self.persist_library, |s| s.opacity(0.5).cursor_default())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.choose_library_dir(cx)
+                                    })),
+                            )
+                            .when(self.query_library.directory.is_some(), |s| {
+                                s.child(
+                                    button("library-folder-default", I::RotateCcw, tr!("Use the default"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.set_library_dir(None, cx)
+                                        })),
+                                )
+                            }),
+                    ))
+                    .child(
+                        div()
+                            .id("library-folder-path")
+                            .role(Role::Status)
+                            .text_size(px(12.))
+                            .text_color(rgb(colors().muted))
+                            .child(self.library_dir().display().to_string()),
+                    ),
+            )
+    }
+
+    /// **Change…**: a folder chosen in the system dialog becomes the
+    /// library's.
+    fn choose_library_dir(&mut self, cx: &mut Context<Self>) {
+        if !self.persist_library {
+            return;
+        }
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(tr!("Choose").into()),
+        });
+        cx.spawn(async move |weak, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            if let Some(path) = paths.into_iter().next() {
+                let _ = weak.update(cx, |this, cx| this.set_library_dir(Some(path), cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Points the library at `directory` (`None`: the default). Files stay
+    /// where they are; open tabs keep their files.
+    fn set_library_dir(&mut self, directory: Option<std::path::PathBuf>, cx: &mut Context<Self>) {
+        self.query_library.directory = directory;
+        self.library_found.clear();
+        self.library_scanned_at = None;
+        self.save_library_soon(cx);
+        self.rebuild_library_view(cx);
+        self.scan_library(cx);
+        cx.notify();
     }
 }
 

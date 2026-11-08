@@ -408,13 +408,14 @@ pub fn shortcut(value: &'static str) -> Div {
 fn base_button(
     id: impl Into<ElementId>,
     name: IconName,
-    title: &'static str,
+    title: impl Into<SharedString>,
     color: u32,
 ) -> Stateful<Div> {
+    let title = title.into();
     row()
         .id(id)
         .role(Role::Button)
-        .aria_label(title)
+        .aria_label(title.clone())
         .focusable()
         .tab_index(0)
         .border_1()
@@ -430,7 +431,11 @@ fn base_button(
         .child(title)
 }
 
-pub fn button(id: impl Into<ElementId>, name: IconName, title: &'static str) -> Stateful<Div> {
+pub fn button(
+    id: impl Into<ElementId>,
+    name: IconName,
+    title: impl Into<SharedString>,
+) -> Stateful<Div> {
     base_button(id, name, title, colors().muted)
         .hover(|s| s.bg(rgb(colors().hover)).text_color(rgb(colors().text)))
 }

@@ -1,6 +1,6 @@
 # ADR-0025: Report panels, each with its connection, database, SQL and chart, run on a session per connection and database
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-05 (revised the same day, before acceptance: panels may
   run on different connections, and a report tab has a group of its own)
 - **Authors:** AI agent, at the maintainer's request (plans approved on

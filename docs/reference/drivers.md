@@ -329,6 +329,16 @@ fresh token.
   Whether a MySQL or SQLite transaction wrote is still inferred from the
   statements; see
   [technical debt TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol).
+- `Session::encryption` reports whether the session's traffic is encrypted
+  (`Encryption`: TLS with its version, plain text, local, or unknown), as
+  the connection negotiated it, not as the profile asked
+  ([ADR-0032](../adr/0032-session-encryption-reported-by-drivers.md)). The
+  application asks once, right after a run opened the session and before
+  its first statement. PostgreSQL reads `pg_stat_ssl` for its backend (and
+  answers unknown, without querying, inside a transaction that has no
+  snapshot yet); MySQL reads the `Ssl_version` session status, empty for
+  plain text; Databricks answers TLS, since profiles need an `https` URL;
+  SQLite answers local. The default answers unknown.
 - `Session::close` consumes the session and can report close failures.
   Relational sessions keep physical state (`USE`, `SET`, temporary tables,
   transactions). Databricks warehouses keep a logical catalog/schema context sent with

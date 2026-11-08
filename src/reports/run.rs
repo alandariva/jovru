@@ -1108,6 +1108,7 @@ mod tests {
             transaction_closed: false,
             context: None,
             transaction: None,
+            encryption: None,
         })
     }
 

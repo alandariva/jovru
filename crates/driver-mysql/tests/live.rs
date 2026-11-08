@@ -94,6 +94,11 @@ async fn live_connection_queries_metadata_and_timeout() {
             .is_some()
     );
     let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
+    // The fixture's profile requires TLS: the server names its version.
+    assert!(matches!(
+        session.encryption(cancel.clone()).await.unwrap(),
+        Encryption::Tls { version: Some(version) } if version.starts_with("TLS")
+    ));
     keep_state(&mut session).await;
     let mut sink = Sink::default();
     session.execute(&QueryRequest{parameters:Vec::new(),sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();

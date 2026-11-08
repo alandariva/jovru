@@ -1,6 +1,6 @@
 # ADR-0017: Cache identity, reading levels and on-demand inspection in the driver contract
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-03
 - **Authors:** Maintainer, with an AI agent
 

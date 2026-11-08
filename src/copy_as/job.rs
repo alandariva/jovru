@@ -15,6 +15,9 @@ pub enum CopySource {
         view: Arc<GridView>,
         selection: CellSelection,
     },
+    /// One cell's whole value, exactly as stored (the value inspector's
+    /// Copy): never the part the inspector shows, and no copy settings.
+    Value { row: usize, column: usize },
 }
 
 /// Owned copy inputs, safe to send to a worker without cloning cell values.
@@ -44,6 +47,7 @@ impl CopyRequest {
             )),
             CopySource::Selection { view, selection } => selection_block(*selection, &view.rows)
                 .map(|(rows, cols)| (*rows.start()..rows.end() + 1, cols)),
+            CopySource::Value { .. } => None,
         }
     }
 
@@ -51,6 +55,16 @@ impl CopyRequest {
         match &self.source {
             CopySource::Page => Some(position),
             CopySource::Selection { view, .. } => view.rows.get(position).copied(),
+            CopySource::Value { .. } => None,
+        }
+    }
+
+    /// The whole value of a [`CopySource::Value`]; `None` for NULL or a
+    /// cell the page does not have.
+    fn value(&self) -> Option<&str> {
+        match self.source {
+            CopySource::Value { row, column } => self.result.value(row, column),
+            _ => None,
         }
     }
 
@@ -60,6 +74,9 @@ impl CopyRequest {
     pub fn estimate(&self, cancel: &CancellationToken) -> DriverResult<usize> {
         let started = Instant::now();
         checkpoint(cancel, started)?;
+        if matches!(self.source, CopySource::Value { .. }) {
+            return Ok(self.value().map_or(0, str::len));
+        }
         let Some((rows, cols)) = self.bounds() else {
             return Ok(0);
         };
@@ -105,6 +122,14 @@ pub fn generate(
 ) -> DriverResult<Option<(String, usize)>> {
     let started = Instant::now();
     checkpoint(cancel, started)?;
+    if matches!(request.source, CopySource::Value { .. }) {
+        // One value, whole and exact: NULL copies nothing.
+        progress(Progress { rows: 0, total: 1 });
+        let copied = request.value().map(|value| (value.to_owned(), 1));
+        checkpoint(cancel, started)?;
+        progress(Progress { rows: 1, total: 1 });
+        return Ok(copied);
+    }
     let Some((rows, cols)) = request.bounds() else {
         return Ok(None);
     };
@@ -486,6 +511,74 @@ mod tests {
                 cell_format::result_csv(&result)
             );
         }
+    }
+
+    #[test]
+    fn a_report_panel_copy_for_a_spreadsheet_is_tab_separated_text_with_names() {
+        // The panel's **Copy for a spreadsheet** is the page as text with the
+        // column names, NULL as an empty field, whatever the copy menu says.
+        let result = fixture();
+        let request = request(
+            result.clone(),
+            CopyOptions {
+                format: CopyFormat::Text,
+                header: true,
+                ..Default::default()
+            },
+        );
+        let names: Vec<&str> = result.columns().iter().map(|c| c.name.as_str()).collect();
+        let rows: Vec<Vec<Option<&str>>> = (0..result.row_count())
+            .map(|row| result.row(row).collect())
+            .collect();
+        assert_eq!(
+            generate(&request, &CancellationToken::new(), |_| {})
+                .unwrap()
+                .unwrap()
+                .0,
+            cell_format::copy_cells(Some(&names), &rows)
+        );
+    }
+
+    #[test]
+    fn a_value_is_copied_whole_and_exact_whatever_the_copy_settings() {
+        // Past the 1 MiB the inspector shows, with characters other formats
+        // would quote: the copy is the stored value, not what is shown.
+        let long = format!("{}\t\"x\"\n{}", "a".repeat(3 * 1024 * 1024), "é😀");
+        let result = Arc::new(ResultData::from_rows(
+            vec![ResultColumn::new("doc", "text")],
+            [[Some(long.as_str())], [None]],
+        ));
+        let mut request = request(
+            result,
+            CopyOptions {
+                format: CopyFormat::Csv,
+                header: true,
+                null: NullText::Null,
+                ..Default::default()
+            },
+        );
+        request.source = CopySource::Value { row: 0, column: 0 };
+        let cancel = CancellationToken::new();
+        assert_eq!(request.estimate(&cancel).unwrap(), long.len());
+        let mut reports = Vec::new();
+        let (text, count) = generate(&request, &cancel, |progress| reports.push(progress))
+            .unwrap()
+            .unwrap();
+        assert_eq!((text.as_str(), count), (long.as_str(), 1));
+        assert_eq!(reports.last().map(|p| (p.rows, p.total)), Some((1, 1)));
+        // NULL, or a cell the page no longer has, copies nothing.
+        for (row, column) in [(1, 0), (5, 0), (0, 3)] {
+            request.source = CopySource::Value { row, column };
+            assert_eq!(request.estimate(&cancel).unwrap(), 0);
+            assert!(generate(&request, &cancel, |_| {}).unwrap().is_none());
+        }
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        request.source = CopySource::Value { row: 0, column: 0 };
+        assert_eq!(
+            generate(&request, &cancelled, |_| {}).unwrap_err().code,
+            ErrorCode::Cancelled
+        );
     }
 
     #[test]

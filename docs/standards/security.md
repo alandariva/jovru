@@ -257,6 +257,7 @@ and a review date in `deny.toml`.
 
 ## Known deviations
 
-| Standard | Current code |
-| --- | --- |
-| The UI shows whether the connection is encrypted and warns on fallback to plain text | Not shown; the TLS mode is only visible in the connection form |
+None at the moment. The last one, showing whether the session is encrypted
+and warning on plain text, was closed in 0.2.0 M3: the server's answer is
+shown beside **Connected**
+([ADR-0032](../adr/0032-session-encryption-reported-by-drivers.md)).

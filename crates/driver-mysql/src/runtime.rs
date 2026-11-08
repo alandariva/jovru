@@ -197,6 +197,9 @@ enum Command {
     Transaction {
         reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
     },
+    Encryption {
+        reply: oneshot::Sender<DriverResult<Encryption>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
@@ -339,6 +342,19 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
+    /// Read from the session's `Ssl_version` status, which is empty when the
+    /// connection did not negotiate TLS.
+    async fn encryption(&mut self, cancel: CancellationToken) -> DriverResult<Encryption> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Encryption { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -465,6 +481,44 @@ impl Server {
                 Command::Transaction { reply } => {
                     let _ = reply.send(Ok(Some(transaction_status(&connection))));
                     Flow::Ready
+                }
+                Command::Encryption { reply } => {
+                    // The text protocol, like the statements the user runs.
+                    let found = tokio::time::timeout(
+                        RECOVERY,
+                        sqlx::raw_sql("SHOW SESSION STATUS LIKE 'Ssl_version'")
+                            .fetch_optional(&mut connection),
+                    )
+                    .await
+                    .map(|row| {
+                        row.and_then(|row| {
+                            row.map(|row| sqlx::Row::try_get::<String, _>(&row, 1))
+                                .transpose()
+                        })
+                    });
+                    match found {
+                        Ok(Ok(found)) => {
+                            let _ = reply.send(Ok(match found {
+                                Some(version) if version.is_empty() => Encryption::Plaintext,
+                                Some(version) => Encryption::Tls {
+                                    version: Some(version),
+                                },
+                                None => Encryption::Unknown,
+                            }));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
+                            Flow::Broken
+                        }
+                    }
                 }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);

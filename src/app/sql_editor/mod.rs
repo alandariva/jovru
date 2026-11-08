@@ -22,7 +22,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 pub use jykre_sql_language::catalog::SqlCatalogs;
 pub use jykre_sql_language::completion::NameIndex;
@@ -33,6 +34,21 @@ pub enum SqlEditorEvent {
     Reveal(ObjectPath),
     /// How Format went, for the notice bar.
     Notice(Feedback),
+    /// A Format started, ended or ran another second past 2 s: the button
+    /// that shows it and cancels it is drawn again.
+    Formatting,
+}
+
+/// How long a Format runs before its button shows the time.
+const FORMAT_ELAPSED_AFTER: Duration = Duration::from_secs(2);
+
+/// A Format running off the UI thread.
+struct FormatJob {
+    started: Instant,
+    /// Asked by the formatter before each statement.
+    stop: Arc<AtomicBool>,
+    /// Tells this Format's outcome from a cancelled or later one's.
+    revision: u64,
 }
 
 /// Quotes a name for SQL the application writes, when the dialect needs it.
@@ -58,8 +74,9 @@ pub struct SqlEditor {
     /// read.
     columns: Arc<HashMap<ObjectPath, Vec<MetadataObject>>>,
     columns_loading: HashSet<ObjectPath>,
-    /// The SQL is being formatted off the UI thread.
-    formatting: bool,
+    /// The Format running off the UI thread, if any.
+    formatting: Option<FormatJob>,
+    format_revision: u64,
 }
 
 impl EventEmitter<SqlEditorEvent> for SqlEditor {}
@@ -81,7 +98,8 @@ impl SqlEditor {
             names: Arc::default(),
             columns: Arc::default(),
             columns_loading: HashSet::new(),
-            formatting: false,
+            formatting: None,
+            format_revision: 0,
         }
     }
 
@@ -389,20 +407,29 @@ impl SqlEditor {
     /// one, the whole script, statement by statement. Only whitespace and
     /// keyword case change, so the caret, the selection and the caret's
     /// place on screen are kept. A result for SQL edited meanwhile is
-    /// dropped.
+    /// dropped. While it runs, the same button cancels it.
     pub fn format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.formatting.is_some() {
+            self.cancel_format(cx);
+            return;
+        }
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
-        if self.formatting {
-            return;
-        }
         let (sql, selection) = {
             let editor = editor.read(cx);
             (editor.text().to_string(), editor.selected_range())
         };
         let dialect = self.dialect;
-        self.formatting = true;
+        self.format_revision += 1;
+        let revision = self.format_revision;
+        let stop = Arc::new(AtomicBool::new(false));
+        self.formatting = Some(FormatJob {
+            started: Instant::now(),
+            stop: stop.clone(),
+            revision,
+        });
+        cx.emit(SqlEditorEvent::Formatting);
         cx.emit(SqlEditorEvent::Notice(Feedback::new(
             Tone::Info,
             if selection.is_empty() {
@@ -413,21 +440,73 @@ impl SqlEditor {
         )));
         let source = sql.clone();
         let task = cx.background_spawn(async move {
+            let stop = || stop.load(Ordering::Relaxed);
             if selection.is_empty() {
-                jykre_sql_language::format::format(&source, dialect)
+                jykre_sql_language::format::format_until(&source, dialect, &stop)
             } else {
-                jykre_sql_language::format::format_range(&source, selection, dialect)
+                jykre_sql_language::format::format_range_until(&source, selection, dialect, &stop)
                     .map(|(formatted, _)| formatted)
             }
         });
+        self.tick_format(revision, cx);
         cx.spawn_in(window, async move |weak, cx| {
             let result = task.await;
             let _ = weak.update_in(cx, |this, window, cx| {
-                this.formatting = false;
+                // A cancelled Format, or one a later one replaced, says
+                // nothing more.
+                if this.formatting.as_ref().map(|job| job.revision) != Some(revision) {
+                    return;
+                }
+                this.formatting = None;
+                cx.emit(SqlEditorEvent::Formatting);
                 if let Some(notice) = this.apply_format(&sql, result, window, cx) {
                     cx.emit(SqlEditorEvent::Notice(notice));
                 }
             });
+        })
+        .detach();
+    }
+
+    /// Stops the running Format: the SQL is left as it was. The formatter
+    /// stops before its next statement, off the UI thread.
+    pub fn cancel_format(&mut self, cx: &mut Context<Self>) {
+        let Some(job) = self.formatting.take() else {
+            return;
+        };
+        job.stop.store(true, Ordering::Relaxed);
+        cx.emit(SqlEditorEvent::Formatting);
+        cx.emit(SqlEditorEvent::Notice(Feedback::new(
+            Tone::Info,
+            tr!("Format cancelled. The SQL was left as it was."),
+        )));
+    }
+
+    /// How long the running Format has run, or `None` when none runs.
+    pub fn formatting_for(&self) -> Option<Duration> {
+        self.formatting.as_ref().map(|job| job.started.elapsed())
+    }
+
+    /// Past 2 s, asks for the Format button to be drawn again each second
+    /// so it shows the time, until this Format ends.
+    fn tick_format(&self, revision: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| {
+            cx.background_executor().timer(FORMAT_ELAPSED_AFTER).await;
+            loop {
+                let running = weak
+                    .update(cx, |this, cx| {
+                        let running =
+                            this.formatting.as_ref().map(|job| job.revision) == Some(revision);
+                        if running {
+                            cx.emit(SqlEditorEvent::Formatting);
+                        }
+                        running
+                    })
+                    .unwrap_or(false);
+                if !running {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+            }
         })
         .detach();
     }
@@ -469,6 +548,12 @@ impl SqlEditor {
                 return notice(
                     Tone::Info,
                     tr!("The SQL changed while it was being formatted. Format it again."),
+                );
+            }
+            Err(FormatError::Cancelled) => {
+                return notice(
+                    Tone::Info,
+                    tr!("Format cancelled. The SQL was left as it was."),
                 );
             }
             Err(FormatError::Failed) => {

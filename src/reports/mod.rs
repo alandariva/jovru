@@ -63,7 +63,7 @@ impl ConnectionRef {
         }
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         Some(Self {
             id: object
@@ -78,7 +78,7 @@ impl ConnectionRef {
         })
     }
 
-    fn to_value(&self) -> Value {
+    pub(crate) fn to_value(&self) -> Value {
         json!({
             "id": self.id.map(|id| id.to_string()),
             "name": self.name,

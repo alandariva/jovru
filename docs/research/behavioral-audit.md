@@ -24,7 +24,7 @@ The main divergences are at the edges:
 4. **Connection flows without dialogue:** unsaved passwords are never requested; saving a profile destroys active work without warning.
 5. **Opening tables does not display data:** references open data/object editors with paging; Jykre opens an unexecuted `SELECT … LIMIT 100` draft.
 
-There are 47 findings: 10 high, 22 medium, 15 low, none critical; 15 reconfirm previous-backlog items. **46 are approved.** N001–N016 were approved/implemented November 3 (`f18136c`), with November 4 commits `8208602` for N008 and `66f262b` for N010. N017–N047 except N043 were approved November 4: 29 were implemented in that slice; N040/N044 already met requirements and were verified. N031's grid/query-page scope was implemented November 7 in 0.2.0 M2; other synchronous copy buttons remain documented in `docs/reference/results.md`. N043 was **rejected**.
+There are 47 findings: 10 high, 22 medium, 15 low, none critical; 15 reconfirm previous-backlog items. **46 are approved.** N001–N016 were approved/implemented November 3 (`f18136c`), with November 4 commits `8208602` for N008 and `66f262b` for N010. N017–N047 except N043 were approved November 4: 29 were implemented in that slice; N040/N044 already met requirements and were verified. N031 was implemented November 7 in 0.2.0 M2: grid and query-page copies first, then the value inspector's **Copy** and report-panel copy menus. N043 was **rejected**.
 
 ## 2. Divergences
 
@@ -458,14 +458,14 @@ There are 47 findings: 10 high, 22 medium, 15 low, none critical; 15 reconfirm p
 
 - **Priority:** Medium
 - **Approval:** Approved (November 4, 2026)
-- **Status:** Implemented for grid/query-page scope (November 7; 0.2.0 M2, uncommitted local changes). `copy_as::CopyRequest` shares page/display order through `Arc`, estimates size and generates all 11 formats off-thread. Confirmation above 50 MiB uses the original snapshot. After 100 ms show progress/cancellation via button or Esc; each phase has a 60 s limit. Cancelled, page-switched or superseded requests never publish. Value-inspector Copy and report-panel menus remain synchronous, documented in `docs/reference/results.md`, outside this finding's scope.
+- **Status:** Implemented (November 7; 0.2.0 M2: grid/query-page scope in `fa97819`, then the value inspector's **Copy** and report-panel **Copy as CSV** / **Copy for a spreadsheet**). `copy_as::CopyRequest` shares page/display order through `Arc`, estimates size and generates all 11 formats, a single whole value (`CopySource::Value`) and report-panel copies off-thread; `src/app/copying.rs` runs every copy for any view implementing `CopyHost`. Confirmation above 50 MiB uses the original snapshot. After 100 ms show progress/cancellation via button or Esc (report panels in their notice line); each phase has a 60 s limit. Cancelled, page-switched, result-replaced or superseded requests never publish. The inspector copies the whole stored value, never its 1 MB display. Only handing complete text to the OS clipboard stays on the UI thread.
 - **Feature:** Clipboard
-- **Current recorded behavior:** Copy this page as CSV, Ctrl+C/Ctrl+Shift+C and grid menu formats estimate/generate on the blocking pool; only complete-text delivery to the OS clipboard stays on UI.
+- **Current recorded behavior:** Copy this page as CSV, Ctrl+C/Ctrl+Shift+C, grid menu formats, the value inspector's Copy and report-panel copy menus estimate/generate on the blocking pool; only complete-text delivery to the OS clipboard stays on UI.
 - **Reference behavior:** Principle/Jykre rule: confirm above 50 MiB and copy off-thread.
-- **Difference:** Resolved for these paths; other synchronous buttons are named in Results.
-- **Impact:** The window can freeze on affected synchronous paths.
+- **Difference:** Resolved for every result copy.
+- **Impact:** None remaining for result copies.
 - **Recommendation:** Estimate, confirm above 50 MiB, generate off-thread.
-- **Project evidence:** `src/copy_as/job.rs`; grid `start_copy`, `encode_copy`; workspace `copy_page_csv`.
+- **Project evidence:** `src/copy_as/job.rs`; `src/app/copying.rs` (`start`, `encode`, `CopyHost`); grid `copy`, `copy_value`, `copy_page_csv`; report panel `copy`.
 - **Confidence:** Confirmed.
 
 ### N032 — Long execution does not show elapsed time (Backlog: N036)
@@ -728,7 +728,7 @@ Reference letters identify documentation supporting the behavior. P means a prin
 | N028 | Connection | No test cancellation | User trapped waiting | A, P | Medium | Approved · Implemented |
 | N029 | Persistence | Non-atomic save | Partial state | P | Medium | Approved · Implemented |
 | N030 | Gutter | Whitespace in literals | False checkmark | P | Medium | Approved · Implemented |
-| N031 | Clipboard | Large copy on UI | Freeze | P | Medium | Approved · Implemented (grid/query page) |
+| N031 | Clipboard | Large copy on UI | Freeze | P | Medium | Approved · Implemented |
 | N032 | Progress | No elapsed time | Invisible timeout | A, P | Medium | Approved · Implemented |
 | N033 | Search | Hidden pending state | Stale match opens | P | Low | Approved · Implemented |
 | N034 | Tabs | Duplicates | Cluttered bar | C, A~ | Low | Approved · Implemented |

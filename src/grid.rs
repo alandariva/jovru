@@ -421,51 +421,6 @@ pub fn selected_rows(selection: Option<CellSelection>, visible: &[usize]) -> Vec
 /// ([Results](../docs/reference/results.md#copying)).
 pub const COPY_CONFIRM_BYTES: usize = 50 * 1024 * 1024;
 
-/// About how many bytes [`copy_selection`] would produce: the text of the
-/// selected cells plus a separator after each, and the headers. Quotes
-/// added around special values are not counted. It reads only cell lengths,
-/// so it costs far less than the copy itself.
-pub fn selection_bytes(
-    result: &ResultData,
-    visible: &[usize],
-    selection: Option<CellSelection>,
-    headers: bool,
-) -> usize {
-    let Some((rows, cols)) = selection.and_then(|selection| selection_block(selection, visible))
-    else {
-        return 0;
-    };
-    let names = if headers {
-        cols.clone()
-            .filter_map(|col| result.columns().get(col))
-            .map(|column| column.name.len() + 1)
-            .sum()
-    } else {
-        0
-    };
-    names
-        + rows
-            .filter_map(|position| visible.get(position))
-            .map(|row| {
-                cols.clone()
-                    .map(|col| result.value(*row, col).map_or(0, str::len) + 1)
-                    .sum::<usize>()
-            })
-            .sum::<usize>()
-}
-
-/// About how many bytes [`cell_format::result_csv`] would produce for a
-/// page: the headers and every value quoted, with a separator after each.
-pub fn csv_bytes(result: &ResultData) -> usize {
-    let cells = result.row_count() * result.column_count();
-    let headers: usize = result
-        .columns()
-        .iter()
-        .map(|column| column.name.len() + 3)
-        .sum();
-    headers + result.text_bytes() + cells * 3 + result.row_count()
-}
-
 /// Number of cells in the visible part of a selection.
 pub fn selected_cells(selection: Option<CellSelection>, visible: &[usize]) -> usize {
     selection
@@ -751,24 +706,6 @@ mod tests {
         let (block, _) = jump(Jump::Last, true);
         assert_eq!((block.anchor, block.focus), ((3, 1), (0, 2)));
         assert_eq!(CellSelection::jumped(None, &[], 3, Jump::Last, false), None);
-    }
-
-    #[test]
-    fn copy_sizes_are_estimated_from_the_cell_lengths() {
-        let result = ResultData::from_rows(
-            vec![
-                ResultColumn::new("id", "int8"),
-                ResultColumn::new("note", "text"),
-            ],
-            [vec![Some("1"), Some("abc")], vec![Some("22"), None]],
-        );
-        let all = CellSelection::all(&[0, 1], 2);
-        // "1\tabc\n22\t" is 9 bytes; the estimate counts a separator per cell.
-        assert_eq!(selection_bytes(&result, &[0, 1], all, false), 10);
-        assert_eq!(selection_bytes(&result, &[0, 1], all, true), 18);
-        assert_eq!(selection_bytes(&result, &[0, 1], None, true), 0);
-        let csv = cell_format::result_csv(&result).len();
-        assert!(csv_bytes(&result) >= csv, "{csv}");
     }
 
     #[test]

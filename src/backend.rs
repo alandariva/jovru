@@ -1116,6 +1116,10 @@ pub struct SessionRun {
     /// could not be asked, under the same conditions as `context`; the
     /// caller then infers it.
     pub transaction: Option<TransactionStatus>,
+    /// Whether the session this run opened is encrypted, asked before its
+    /// first statement ([`Session::encryption`]). `None` when the run kept
+    /// the tab's session, whose answer has not changed, or opened none.
+    pub encryption: Option<Encryption>,
 }
 
 /// A tab's kept session, and whether the tab knows it holds an open
@@ -1448,12 +1452,14 @@ async fn run_statements(
         transaction_closed: false,
         context: None,
         transaction: None,
+        encryption: None,
     };
     if let Some(error) = requests.iter().find_map(|request| request.validate().err()) {
         run.batch = Err(error);
         run.session = session;
         return run;
     }
+    let kept = session.is_some();
     let (session, lost) =
         session_for_run(&*driver, &input, session, &cancel, !holds_transaction).await;
     if lost && holds_transaction {
@@ -1469,6 +1475,17 @@ async fn run_statements(
             return run;
         }
     };
+    if !kept || lost {
+        // Asked once per session, before any result is open or any
+        // transaction has a snapshot. Not knowing never stops the run.
+        run.encryption = Some(match session.encryption(cancel.clone()).await {
+            Ok(encryption) => encryption,
+            Err(error) => {
+                tracing::debug!(error_code = ?error.code, "could not read the session's encryption");
+                Encryption::Unknown
+            }
+        });
+    }
     let mut results = Vec::new();
     let mut failure = None;
     let descriptor = driver.descriptor();
@@ -2411,6 +2428,17 @@ mod tests {
             Ok(())
         }
 
+        /// Each session names itself, so a test tells which one was asked;
+        /// asking with a result open or a statement run would be a bug.
+        async fn encryption(&mut self, _: CancellationToken) -> DriverResult<Encryption> {
+            if self.pending > 0 || !self.settings.is_empty() || self.in_transaction {
+                return Err(DriverError::validation("asked after a statement"));
+            }
+            Ok(Encryption::Tls {
+                version: Some(format!("session {}", self.id)),
+            })
+        }
+
         async fn close(self: Box<Self>) -> DriverResult<()> {
             Ok(())
         }
@@ -2628,6 +2656,36 @@ mod tests {
             opened,
             [Some("archive".to_owned()), Some("archive".to_owned())]
         );
+    }
+
+    #[tokio::test]
+    async fn a_new_session_is_asked_its_encryption_once_before_its_statements() {
+        let tls = |id: usize| {
+            Some(Encryption::Tls {
+                version: Some(format!("session {id}")),
+            })
+        };
+        let driver = Arc::new(StateDriver::default());
+        let (run, _) = run_on(&driver, None, &["SET schema=sales", "SELECT"]).await;
+        assert_eq!(run.encryption, tls(1));
+        // A kept session is not asked again: its answer has not changed.
+        let (run, _) = run_on(&driver, run.session, &["SELECT"]).await;
+        assert_eq!(run.encryption, None);
+        // A session opened in place of a lost one is asked.
+        let (run, _) = run_on(&driver, run.session, &["LOSE"]).await;
+        assert_eq!(run.encryption, None);
+        let (run, _) = run_on(&driver, run.session, &["SELECT"]).await;
+        assert_eq!(run.encryption, tls(2));
+        // So is one replacing a kept session that stopped answering.
+        let driver = Arc::new(StateDriver::default());
+        driver.dead.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (run, _) = run_on(&driver, None, &["SELECT"]).await;
+        driver
+            .dead
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let (run, _) = run_on(&driver, run.session, &["SELECT"]).await;
+        assert!(run.reopened);
+        assert_eq!(run.encryption, tls(2));
     }
 
     #[tokio::test]

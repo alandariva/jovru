@@ -191,7 +191,8 @@ alignment only; the value itself is never converted.
 - A double click on a cell, or `Enter`, opens the side panel on the cell's
   **full value**: read-only text that can be selected, JSON laid out with
   indentation without changing any token, up to the first 1 MB (**Copy**
-  copies all of it), NULL shown as NULL. The panel follows the focused cell.
+  copies all of it, exactly as stored, like the other copies below), NULL
+  shown as NULL. The panel follows the focused cell.
   Its other tab, **Statistics**, summarizes one of three things, chosen at
   its top:
   - **Selection**: the selected cells (two or more): how many rows and
@@ -239,7 +240,8 @@ alignment only; the value itself is never converted.
 - Right-clicking outside the selection selects the cell under the pointer
   first, so the context menu acts on what is under it.
 - The filter bar matches text in any column, ignoring case, and stops hiding
-  rows when it is closed. It matches values, not how they are drawn: a NULL
+  rows when it is closed. It applies once typing pauses for 150 ms, so a
+  burst of keystrokes rebuilds the grid's view once. It matches values, not how they are drawn: a NULL
   never matches, even a filter for "null", while the text 'NULL' does.
 - The filter searches only the rows held for the page on screen. Below the
   field it says so ("Filters this page only (1,000 rows)…") whenever the
@@ -294,16 +296,21 @@ alignment only; the value itself is never converted.
 - **Copy this page as CSV** copies the page on screen with headers, `;` as the
   separator and every value quoted, using the original values regardless of
   presentation; NULL becomes an empty field. The copy settings do not apply.
-- Grid selections (every menu format) and **Copy this page as CSV** estimate
-  their size and generate their text on the runtime's blocking pool, sharing
-  the immutable page and display order rather than cloning the cells. Copies
-  estimated above 50 MiB ask for confirmation before generating the text.
-  The confirmation keeps the selection/page that was requested.
-- Past the 100 ms copy budget, the grid shows progress and **Cancel copy**;
-  `Esc` cancels too. Encoding reports rows at most every 100 ms. Estimation
-  and encoding each have a 60 s deadline, checked between rows/cells.
-  Cancellation, closing the grid, changing its page, or requesting a newer
-  result copy prevents the old text from reaching the clipboard. Partial text
+- Every copy of a result runs the same way (`copy_as::CopyRequest`, run by
+  `src/app/copying.rs`): grid selections (every menu format), **Copy this
+  page as CSV**, the inspector's **Copy** (the whole value, never the part
+  the inspector shows) and a report panel's **Copy as CSV** and **Copy for a
+  spreadsheet**. Each estimates its size and generates its text on the
+  runtime's blocking pool, sharing the immutable page and display order
+  rather than cloning the cells. Copies estimated above 50 MiB ask for
+  confirmation before generating the text. The confirmation keeps the
+  selection, page or value that was requested.
+- Past the 100 ms copy budget, the grid shows progress and **Cancel copy**
+  (a report panel, in its notice line); `Esc` cancels too. Encoding reports
+  rows at most every 100 ms. Estimation and encoding each have a 60 s
+  deadline, checked between rows/cells. Cancellation, closing the grid or
+  panel, changing its page or result, or requesting a newer copy anywhere in
+  the window prevents the old text from reaching the clipboard. Partial text
   is never published; large discarded text and snapshots are freed off the UI
   thread. Only handing the completed text to the OS clipboard stays on the UI
   thread.
@@ -388,7 +395,9 @@ report holds no more than one query tab.
 - What a panel draws is computed off the UI thread, with its result, and
   again when its chart changes.
 - **Copy as CSV** and **Copy for a spreadsheet**, in a panel's menu, copy its
-  result with the rules above, asking first above 50 MiB.
+  whole result with the column names, as **Copy this page as CSV** and as
+  tab-separated text, whatever the copy menu says. They run off the UI thread
+  like every copy ([Copying](#copying)), asking first above 50 MiB.
 - **Export for printing or PDF…** (`jykre::reports::export`) writes one HTML
   file where the user chooses: the title, description, the connections, the
   values the panels ran with, and each panel with its connection and
@@ -422,6 +431,5 @@ format ([User experience](ux.md#feedback)).
 
 ## Known deviations
 
-| Standard | Current code |
-| --- | --- |
-| Copy off the UI thread when large | Grid selections and **Copy this page as CSV** run off the UI thread, with cancellation and progress (0.2.0 M2). The full-value inspector's **Copy** and the report panel's own **Copy as CSV** / **Copy for a spreadsheet** menu still build text synchronously; report menus keep the 50 MiB confirmation |
+None at the moment. Copies off the UI thread when large, the last one
+listed here, were completed in 0.2.0 M2.

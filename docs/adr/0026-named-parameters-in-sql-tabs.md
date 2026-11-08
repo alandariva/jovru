@@ -1,6 +1,6 @@
 # ADR-0026: Named parameters in SQL tabs, and typed literals on classic Databricks clusters
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-05
 - **Authors:** AI agent, at the maintainer's request (plan approved 2026-11-05)
 - **Amends:** [ADR-0023](0023-named-parameters-bound-by-drivers.md), which

@@ -204,6 +204,9 @@ enum Command {
     Transaction {
         reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
     },
+    Encryption {
+        reply: oneshot::Sender<DriverResult<Encryption>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
@@ -339,6 +342,19 @@ impl Session for DatabaseSession {
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(Command::Transaction { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+    /// Read from `pg_stat_ssl` for this backend, so a profile that only
+    /// prefers TLS tells whether it fell back to plain text.
+    async fn encryption(&mut self, cancel: CancellationToken) -> DriverResult<Encryption> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Encryption { reply })
             .await
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
@@ -611,6 +627,44 @@ impl Server {
                             let _ = reply.send(Ok(SessionContext {
                                 catalog: Some(database),
                                 schema,
+                            }));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
+                            Flow::Broken
+                        }
+                    }
+                }
+                Command::Encryption { reply } if self.unread => {
+                    // Querying would take the new transaction's snapshot.
+                    let _ = reply.send(Ok(Encryption::Unknown));
+                    Flow::Ready
+                }
+                Command::Encryption { reply } => {
+                    let found = tokio::time::timeout(
+                        RECOVERY,
+                        sqlx::query_as::<_, (bool, Option<String>)>(
+                            "SELECT ssl, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+                        )
+                        .fetch_optional(&mut connection),
+                    )
+                    .await;
+                    match found {
+                        Ok(Ok(found)) => {
+                            let _ = reply.send(Ok(match found {
+                                Some((true, version)) => Encryption::Tls { version },
+                                Some((false, _)) => Encryption::Plaintext,
+                                // A server without the view's row (a
+                                // compatible database) does not tell.
+                                None => Encryption::Unknown,
                             }));
                             Flow::Ready
                         }

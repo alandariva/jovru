@@ -72,7 +72,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), driver composition (`drivers`), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)) | Depend on a specific view; use the editor's language features |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
@@ -110,6 +110,10 @@ edge, including dev and build dependencies:
    query's result only through `src/assistant/released.rs`, the one file
    allowed to name a result
    ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)).
+8. The saved-query files' code (`src/query_files/`) names no session, driver,
+   request or query run, so opening, discovering, migrating or recovering
+   files can never run SQL
+   ([ADR-0031](../adr/0031-saved-queries-as-sql-files.md)).
 
 Transitive dependencies and where logic lives inside the `jykre` crate are
 checked in review.
@@ -284,12 +288,14 @@ sequenceDiagram
 
 ### Copy a result
 
-Clipboard copies of grid selections and query pages use `copy_as::CopyRequest`:
-an `Arc<ResultData>` and, for a selection, an `Arc<GridView>` freeze the page
-and display order without a data-sized UI-thread clone. Estimation and encoding
-run on the runtime's blocking pool, with cancellation and bounded progress
-notifications. The grid publishes a complete string only while its request is
-still current. See [Results](results.md#copying).
+Clipboard copies of grid selections, query pages, the inspector's value and
+report panels' results use `copy_as::CopyRequest`: an `Arc<ResultData>` and,
+for a selection, an `Arc<GridView>` freeze the page and display order without
+a data-sized UI-thread clone. `src/app/copying.rs` runs every one of them
+(`copying::start`, for any view that implements `CopyHost`): estimation and
+encoding run on the runtime's blocking pool, with cancellation and bounded
+progress notifications, and the view publishes a complete string only while
+its request is still the window's latest. See [Results](results.md#copying).
 
 ### Export a result
 

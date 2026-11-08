@@ -23,11 +23,17 @@ const APP_DIR: &str = if cfg!(any(windows, target_os = "macos")) {
     "jykre-studio"
 };
 
+/// The variable that sets the data folder (tests and manual checks).
+pub const CONFIG_DIR_VARIABLE: &str = "JYKRE_CONFIG_DIR";
+
 /// `JYKRE_CONFIG_DIR`, else the per-user local data directory:
 /// `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS and
 /// `$XDG_DATA_HOME` (default `~/.local/share`) on Linux.
 pub fn data_dir() -> PathBuf {
-    resolve_data_dir(std::env::var_os("JYKRE_CONFIG_DIR"), dirs::data_local_dir())
+    resolve_data_dir(
+        std::env::var_os(CONFIG_DIR_VARIABLE),
+        dirs::data_local_dir(),
+    )
 }
 
 fn resolve_data_dir(configured: Option<OsString>, platform: Option<PathBuf>) -> PathBuf {

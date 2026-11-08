@@ -621,6 +621,12 @@ fn execution_deadline(options: &ExecutionOptions) -> DriverResult<Option<Instant
 
 #[async_trait]
 impl Session for ClusterSession {
+    /// Every request goes over HTTPS: CLI profiles are accepted only with an
+    /// `https` workspace URL (`auth::parse_profiles`).
+    async fn encryption(&mut self, _: CancellationToken) -> DriverResult<Encryption> {
+        Ok(Encryption::Tls { version: None })
+    }
+
     async fn execute(
         &mut self,
         request: &QueryRequest,

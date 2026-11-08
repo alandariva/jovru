@@ -1,6 +1,6 @@
 # ADR-0020: Editor language features in their own crates, apart from query execution
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-04
 - **Authors:** AI agent, at the maintainer's request (plan approved 2026-11-04)
 

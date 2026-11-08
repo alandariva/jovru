@@ -9,8 +9,10 @@ A native desktop workspace written in Rust and [GPUI](https://www.gpui.rs/) to
 register PostgreSQL, MySQL, Databricks and SQLite connections, explore metadata
 and run real SQL.
 
-> **Status:** early prototype (`0.1.0`). Windows is the primary and only
-> validated platform. The AI assistant talks to Anthropic, OpenAI, an
+> **Status:** early prototype; `0.2.0` (in preparation) makes daily use
+> reliable and adds saved queries as `.sql` files, reopening closed tabs and
+> explorer favorites. Windows is the primary platform; Linux is validated
+> since 0.2.0 (Ubuntu 24.04 on X11). The AI assistant talks to Anthropic, OpenAI, an
 > OpenAI-compatible server or Ollama, once set up in Preferences; it sees
 > SQL, errors, row counts and structure, and values only from a query it
 > asked for, after you approve the query and send its result.
@@ -18,8 +20,14 @@ and run real SQL.
 ## Requirements
 
 - Rust stable 1.95 or newer (`rustup update stable`).
-- Windows 10/11. Linux and macOS builds go through GPUI but are not validated;
-  on Linux install the GPUI system packages first (see the CI workflow).
+- Windows 10/11, or Linux (validated on Ubuntu 24.04 with X11; Wayland and
+  macOS builds go through GPUI but are not validated). On Linux install the
+  GPUI system packages first: `pkg-config libxkbcommon-dev
+  libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev
+  libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev
+  libdbus-1-dev libssl-dev` on Debian and Ubuntu (as the CI workflow does),
+  plus a Vulkan driver; the file dialogs need `xdg-desktop-portal` with a
+  backend such as `xdg-desktop-portal-gtk`, which desktops ship.
 - Optional: Docker with Compose v2 and `cargo-deny` for the full test gate.
 - Optional: the [Databricks CLI](https://docs.databricks.com/dev-tools/cli/)
   with an authenticated profile for Databricks connections.
@@ -100,8 +108,9 @@ Started without the entry, the window keeps the desktop's generic icon.
   when nothing is selected, in place of the result tab on screen (pin a
   result tab to keep it); `Ctrl Shift Enter` does the same in a new result tab and `Ctrl Alt Enter` runs every
   statement, one result tab each. Results are read page by page, and the
-  statement timeout is chosen in the editor toolbar. Open tabs, saved queries
-  and history are kept between sessions.
+  statement timeout is chosen in the editor toolbar. Open tabs and history are
+  kept between sessions; a tab's unsaved text survives a crash in a recovery
+  file. `Ctrl F2` stops a run, as the Stop button does.
   Each tab keeps its own session between runs, so `USE`, `SET`, temporary
   tables and transactions carry over; a failed statement keeps it. The
   toolbar shows the session's transaction as PostgreSQL, MySQL and SQLite
@@ -117,6 +126,27 @@ Started without the entry, the window keeps the desktop's generic icon.
   per result and a 300 s timeout. The run button can cancel.
 - Tabs keep their SQL. Moving a tab to another group changes its connection and
   cancels a running execution. Review the context before running.
+- **Saved queries are plain `.sql` files.** `Ctrl S` saves a tab to its file
+  (or asks where, starting in `Documents/Jykre Studio/Queries`), `Ctrl Shift
+  S` saves elsewhere and `Ctrl O` opens any file; the file name is the title,
+  and nothing but SQL is written into it, so the folder can be backed up,
+  edited elsewhere or kept in Git. The library lists the folder's files (the
+  folder is chosen in **Preferences › Editor**); tags and each file's
+  connection stay on this computer. A file changed on disk is noticed before
+  it is overwritten, and closing a tab or the application with unsaved edits
+  offers to save them. Saved queries of `0.1.0` move to files at the first
+  start, with a backup of the originals.
+- **Reopen closed query tab** (`Ctrl Shift T`, or the title bar's button)
+  brings back the tabs closed in this session with their SQL, connection,
+  context and `:name` fields; it runs nothing.
+- **Favorites**: **Add to favorites** in the explorer's menu of a connection,
+  table or view keeps it above the connections; a table or view opens as
+  **View data**.
+- Beside **Connected**, a lock shows that the session is encrypted (with the
+  TLS version) and an amber **Not encrypted** that it is not, as the server
+  reports it, even when the profile only preferred TLS.
+- **Format** runs off the UI thread; past 2 s its button shows the time and
+  cancels it.
 - Result headers show `name : type`, with the SQL type in a neutral tone.
   Values use colours and alignment by type; NULL, empty text and whitespace
   are distinct. Click a cell, then Shift+click or Shift+arrows to select a
@@ -168,7 +198,9 @@ the demo data are not translatable yet.
 
 | Data | Location |
 | --- | --- |
-| Connections, preferences, report definitions | `config.db` in the data folder |
+| Connections, preferences, report definitions, saved queries' tags and connections, explorer favorites | `config.db` in the data folder |
+| Saved queries | `.sql` files in `Documents/Jykre Studio/Queries`, or the folder chosen in Preferences (`<JYKRE_CONFIG_DIR>/Queries` when that variable is set) |
+| Unsaved text of open tabs | `recovery/` in the data folder, until saved, discarded or closed |
 | A report's print document | Only where you save it with **Export for printing or PDF…** |
 | Metadata cache | `metadata/<connection-id>.db` in the data folder |
 | Copies of `config.db` (the five most recent, one per start) | `backups/` in the data folder; offered for restore when `config.db` cannot be opened |

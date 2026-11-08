@@ -1267,6 +1267,12 @@ fn decimal_type(value: &str) -> Option<String> {
 
 #[async_trait]
 impl Session for DatabricksSession {
+    /// Every request goes over HTTPS: CLI profiles are accepted only with an
+    /// `https` workspace URL (`auth::parse_profiles`).
+    async fn encryption(&mut self, _: CancellationToken) -> DriverResult<Encryption> {
+        Ok(Encryption::Tls { version: None })
+    }
+
     async fn execute(
         &mut self,
         request: &QueryRequest,

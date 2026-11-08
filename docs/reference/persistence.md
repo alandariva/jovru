@@ -24,6 +24,8 @@ isolated folder for tests and manual checks).
 | `backups/config-v<version>-<millis>.db` | Copies of `config.db`: one each start whose configuration opened and was read, unless it equals the newest copy; the five most recent are kept | Rotated automatically; restored from when `config.db` cannot be opened |
 | `config.db.broken-<millis>` | A configuration set aside when a backup was restored in its place | Kept for diagnosis; safe to delete |
 | `logs/jykre.<date>.log` | JSON log lines, one file per day; the last 7 are kept ([Reliability](../standards/reliability.md#logs)) | Rotated automatically; safe to delete |
+| `recovery/<name>.sql` | The text of a tab a crash must not lose: a draft, or a file tab's unsaved edits (plain UTF-8, `\n` line endings) | Written half a second after edits settle and on quit; removed once saved, discarded or closed; one no tab names reopens as a **Recovered** tab |
+| `backups/saved-queries-<millis>.json` | The saved queries `config.db` held, as they were before they moved to files | Kept until the user deletes it; outside the rotation of the `config.db` copies |
 | `connections.json` (legacy) | Profiles from earlier builds | Imported once into `config.db` in a single transaction, deleted only after the import is verified |
 
 ## SQLite configuration
@@ -104,8 +106,12 @@ defaults are used.
 
 `workspace.state` keeps the workspace between sessions
 (`jykre::workspace_state`): the open query tabs in order (title, connection
-name, SQL, the SQL last saved to the library and the identity of that saved
-query, the table or view the tab was opened for, its context, the
+name, the identity of its saved query, the file it edits as `{"path",
+"base": {"size", "modified", "digest"}, "line_ending", "bom"}` (what it was
+loaded or last saved from, [ADR-0031](../adr/0031-saved-queries-as-sql-files.md)),
+the name of its recovery file, the SQL only when neither the file nor a
+recovery file holds it (a tab of an earlier version, or a recovery file that
+could not be written), the table or view the tab was opened for, its context, the
 statement timeout and its `:name` parameter fields: name, type chosen
 (`auto` or a type), the text typed and whether it binds NULL,
 [ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)), the tab on screen, the saved queries, each with a stable
@@ -121,7 +127,46 @@ written half a second after changes settle and when the application quits
 (closing the window included, see `src/app/exit_writes.rs`), and read once
 the connections are loaded. A tab whose connection no longer
 exists reopens in a group of its own, without a connection. A value that
-cannot be read starts an empty workspace. Results are never stored.
+cannot be read starts an empty workspace. Results are never stored. Query
+tabs closed during a session (`jykre::closed_tabs`, for **Reopen closed
+query tab**) are kept in memory only and are never written. Its saved
+queries are only those of an earlier version not moved to files yet; the
+recovery files a snapshot names are written before it, and the ones no
+tab needs any more are removed after it.
+
+Saved queries are plain UTF-8 `.sql` files holding only SQL
+([ADR-0031](../adr/0031-saved-queries-as-sql-files.md), `jykre::query_files`):
+a query's title is its file name. The library's folder defaults to
+`<Documents>/Jykre Studio/Queries` (`<home>/Documents/…` without a Documents
+folder, the data folder's `Queries` without a home), or
+`<JYKRE_CONFIG_DIR>/Queries` when that variable is set, and is created when
+something is first saved into it. A file is opened only when it is UTF-8
+(a byte order mark allowed) and at most 4 MiB; its line endings and byte
+order mark are written back as they were. Writes go to a temporary file in
+the same folder, flushed, synced and renamed over the file. Opening,
+discovering, migrating or recovering files never writes to the user's
+folder and never runs SQL.
+
+`query_library` keeps what is local to this machine about those files
+(`jykre::query_files::library`): `{"version": 1, "directory": null or the
+folder chosen, "next_id": n, "entries": [{"id", "path", "tags",
+"connection": {"id", "name"}}], "migration": null or [{"id", "path"}]}`.
+Each file has a stable identity, its tags (labels without `#`, each once
+ignoring case) and the connection its tab opens on (by identity, then by
+name); never its SQL or title. `migration` is the plan of a migration that
+has not finished, written before its files. Keys this version does not know
+are kept. It lives apart from `workspace.state`, so an older version cannot
+erase it; a value that cannot be read is reported and never written over.
+It is written 300 ms after a change settles.
+
+At start, saved queries `workspace.state` still holds move to files in the
+library's folder: named by their title (made safe for a file name, numbered
+`(2)`, `(3)` on a collision, never over an existing file), written and read
+back, the originals backed up to `backups/saved-queries-<millis>.json`, and
+only then recorded in `query_library` with their identity, tags and
+connection and dropped from `workspace.state`. Tabs that edited them now
+edit their files. A query that could not move stays listed and is tried
+again at the next start.
 
 `reports` keeps the report definitions ([ADR-0024](../adr/0024-reports.md),
 [ADR-0025](../adr/0025-report-panels.md), `jykre::reports`):
@@ -141,6 +186,17 @@ only the fields it knows, so an older version cannot erase reports. A missing
 value is an empty library; a value that cannot be read is reported and never
 written over. It is written half a second after changes settle and when the
 application quits, closing the window included; the demo writes nothing.
+
+`explorer.favorites` keeps the explorer's favorites (`jykre::favorites`):
+`{"version": 1, "favorites": [{"connection": "<connection-id>", "path":
+[segments] or null, "stored_at": [segments] or null}]}`, a `null` path being
+the connection itself. Connections are named by identity, so a rename keeps
+them, and objects by their structural path, never by a label. Keys this
+version does not know are kept, in the value and in each entry, and entries
+it cannot read are written back as they were. It is read once at start, with
+the connections, and written 300 ms after a change settles, the last list
+winning; a value that cannot be read is reported and never written over.
+The demo writes nothing.
 
 `connection.<connection-id>.explorer` keeps what the explorer shows expanded
 for that connection (`{"expanded": [paths]}`), written half a second after a

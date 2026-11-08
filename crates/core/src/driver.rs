@@ -1,8 +1,8 @@
 use crate::{
     CancellationToken, ConnectionConfig, DriverError, DriverKind, DriverOutcome, DriverResult,
-    ExecutionOptions, Inspection, IntrospectionLevel, IntrospectionReport, MetadataObject,
-    ObjectKind, ObjectPath, QueryRequest, ResolvedConnection, RowSink, ServerInfo, SessionContext,
-    SqlDialect, TransactionStatus,
+    Encryption, ExecutionOptions, Inspection, IntrospectionLevel, IntrospectionReport,
+    MetadataObject, ObjectKind, ObjectPath, QueryRequest, ResolvedConnection, RowSink, ServerInfo,
+    SessionContext, SqlDialect, TransactionStatus,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -126,6 +126,16 @@ pub trait Session: Debug + Send {
     ) -> DriverResult<Option<TransactionStatus>> {
         let _ = cancel;
         Ok(None)
+    }
+
+    /// Whether the session's traffic is encrypted, as the server reports it
+    /// for this connection: a profile that only prefers TLS may have fallen
+    /// back to plain text. Callers ask once, right after the session opened
+    /// and before any statement, so no result is open and no transaction
+    /// has a snapshot to take. The default knows nothing.
+    async fn encryption(&mut self, cancel: CancellationToken) -> DriverResult<Encryption> {
+        let _ = cancel;
+        Ok(Encryption::Unknown)
     }
 
     /// Checks, before a kept session is reused, that the server still
