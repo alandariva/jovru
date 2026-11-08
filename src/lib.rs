@@ -34,6 +34,7 @@ pub mod reports;
 pub mod result;
 pub mod result_tabs;
 pub mod run_log;
+pub mod script_outline;
 pub mod stats;
 pub mod telemetry;
 pub mod theme;

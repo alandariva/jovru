@@ -73,6 +73,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | [Version 0.2.0](plans/releases/0.2.0.md) | Daily-use hardening, application icon, Linux validation and release acceptance |
 | [Automation engine specification](plans/automation-engine-specification.md) | Version 1.1 proposal consolidating the architecture review; manual SQL Job first, decisions still open |
 | [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes |
+| [Large `.sql` files in the editor](plans/editor-large-files.md) | Proposal for ADR-0031's D7 file limit: the editor component's soft wrap on opening, measured options and a recommendation |
 | [SQL catalog proposal](plans/sql-catalog-proposal.md) | Original format proposal and future standalone catalog repository; see the reference for current behavior |
 
 ### Research and decisions

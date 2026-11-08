@@ -1,6 +1,6 @@
 # ADR-0031: Saved queries as plain `.sql` files named by their title, with tags and associations kept locally
 
-- **Status:** Accepted (by the maintainer on 2026-11-07; implemented and checked in the application on Windows the same day; the 4 MiB limit failed its measurement and awaits the maintainer's decision, see D7)
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented and checked in the application on Windows the same day; the 4 MiB limit failed its measurement; on 2026-11-08 the maintainer kept it, with soft wrap off above 256 KiB, to be confirmed on the reference machine, see D7)
 - **Date:** 2026-11-07
 - **Authors:** AI agent, at the maintainer's request (milestone M7 of
   [Version 0.2.0](../plans/releases/0.2.0.md); decisions D1–D7 below approved
@@ -291,7 +291,12 @@ Constraints found in the code and the standards:
   number found then replaces it here. Measured on 2026-11-07: no size measured meets the
   budget, since opening a file blocks the UI thread about 1.4 ms per KiB
   ([Performance](../standards/performance.md#the-editor-with-a-large-sql-file));
-  the maintainer decides the number.
+  the maintainer decides the number. Decided on 2026-11-08: the limit stays
+  4 MiB, and a tab whose text exceeds 256 KiB does not soft-wrap (wrapping
+  comes back at 192 KiB or less), since the editor component's wrapping
+  measures every line when the file opens; typing no longer reads the
+  whole text on the UI thread. To be confirmed by measuring on the
+  reference machine ([Large `.sql` files in the editor](../plans/editor-large-files.md)).
 - The limits are documented in [Persistence](../reference/persistence.md) and
   [User experience](../reference/ux.md); content is never truncated to fit.
 

@@ -8,6 +8,7 @@
 use crate::drivers::{DriverError, ErrorCode, SqlDialect};
 use crate::{sql, tr};
 use std::ops::Range;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Which statements a run executes.
@@ -140,9 +141,13 @@ pub struct QueryRun {
     statuses: Vec<StatementStatus>,
     /// Normalised text of each statement when its status was recorded. A
     /// status survives edits only while its statement is unchanged.
-    status_sql: Vec<String>,
+    status_sql: Arc<[String]>,
     /// The editor's text as last seen.
     sql: String,
+    /// `sql` split into statements by `dialect`, normalised as statuses
+    /// compare them; read again when `statements_stale`.
+    statements: Arc<[String]>,
+    statements_stale: bool,
     /// How the editor's text splits into statements; `None` for a tab
     /// without a connection.
     dialect: Option<SqlDialect>,
@@ -155,12 +160,14 @@ pub struct QueryRun {
 
 impl QueryRun {
     pub fn new(sql: &str) -> Self {
-        let status_sql = sql::normalized_statements(sql, None);
+        let statements: Arc<[String]> = sql::normalized_statements(sql, None).into();
         Self {
             state: RunState::Idle,
-            statuses: vec![StatementStatus::Ready; status_sql.len()],
-            status_sql,
+            statuses: vec![StatementStatus::Ready; statements.len()],
+            status_sql: statements.clone(),
             sql: sql.to_owned(),
+            statements,
+            statements_stale: false,
             dialect: None,
             current: RunId(0),
             planned: Vec::new(),
@@ -177,10 +184,20 @@ impl QueryRun {
     /// Statements whose boundaries change go back to `Ready`.
     pub fn set_dialect(&mut self, dialect: Option<SqlDialect>) {
         if self.dialect != dialect {
-            self.dialect = dialect;
+            self.use_dialect(dialect);
             if !self.is_active() {
                 self.sync();
             }
+        }
+    }
+
+    /// Splits by `dialect` from now on without reading the text again: the
+    /// caller follows with [`QueryRun::apply_outline`] for that dialect, read
+    /// off the UI thread. Until then statuses keep the previous split.
+    pub fn use_dialect(&mut self, dialect: Option<SqlDialect>) {
+        if self.dialect != dialect {
+            self.dialect = dialect;
+            self.statements_stale = true;
         }
     }
 
@@ -255,7 +272,22 @@ impl QueryRun {
     pub fn edit(&mut self, sql: &str) {
         if self.sql != sql {
             self.sql = sql.to_owned();
+            self.statements_stale = true;
         }
+        if !self.is_active() {
+            self.sync();
+        }
+    }
+
+    /// [`QueryRun::edit`] with the statements already read: `statements`
+    /// are `sql` split by the current dialect and normalised
+    /// ([`sql::normalized_statements`]), as a tab reads them off the UI
+    /// thread ([`crate::script_outline::Outline`]). Nothing here grows with
+    /// the text but comparing the statements with the previous ones.
+    pub fn apply_outline(&mut self, sql: String, statements: Vec<String>) {
+        self.sql = sql;
+        self.statements = statements.into();
+        self.statements_stale = false;
         if !self.is_active() {
             self.sync();
         }
@@ -284,7 +316,10 @@ impl QueryRun {
         if statements.is_empty() {
             return None;
         }
-        self.sql = sql.to_owned();
+        if self.sql != sql {
+            self.sql = sql.to_owned();
+            self.statements_stale = true;
+        }
         self.sync();
         self.statuses.resize(ranges.len(), StatementStatus::Ready);
         self.current = RunId(self.current.0 + 1);
@@ -558,9 +593,12 @@ impl QueryRun {
     }
 
     fn sync(&mut self) {
-        let statements = sql::normalized_statements(&self.sql, self.dialect);
-        self.statuses = carry_statuses(&self.status_sql, &self.statuses, &statements);
-        self.status_sql = statements;
+        if self.statements_stale {
+            self.statements = sql::normalized_statements(&self.sql, self.dialect).into();
+            self.statements_stale = false;
+        }
+        self.statuses = carry_statuses(&self.status_sql, &self.statuses, &self.statements);
+        self.status_sql = self.statements.clone();
     }
 }
 
@@ -916,6 +954,56 @@ mod tests {
         assert_eq!(run.statuses(), [Success, Ready, Ready]);
         run.edit("");
         assert!(run.statuses().is_empty());
+    }
+
+    #[test]
+    fn an_outline_read_elsewhere_carries_statuses_like_an_edit() {
+        let outline = |sql: &str| (sql.to_owned(), sql::normalized_statements(sql, None));
+        let (mut run, plan) = started(TWO);
+        let outcome = Outcome::Batch {
+            completed: 1,
+            error: Some(DriverError::new(ErrorCode::Database, "x")),
+        };
+        run.finish(plan.id, outcome);
+        let (sql, statements) = outline("SELECT\n  1;\nSELECT 3;");
+        run.apply_outline(sql, statements);
+        assert_eq!(run.statuses(), [Success, Ready]);
+        // While a run is active the statuses wait, and the run's end uses
+        // the statements it was given instead of reading the text again.
+        let plan = run
+            .start("SELECT\n  1;\nSELECT 3;", Scope::All)
+            .expect("a run");
+        run.statement_started(plan.id, 1);
+        let (sql, statements) = outline("SELECT 1;\nSELECT 30;");
+        run.apply_outline(sql, statements);
+        assert_eq!(run.statuses(), [Success, Running]);
+        let outcome = Outcome::Batch {
+            completed: 2,
+            error: None,
+        };
+        run.finish(plan.id, outcome);
+        assert_eq!(run.statuses(), [Success, Ready]);
+    }
+
+    #[test]
+    fn a_dialect_used_before_its_outline_still_runs_by_its_rules() {
+        let sql = "CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END;";
+        let mut run = QueryRun::new(sql);
+        run.use_dialect(Some(SqlDialect::MySql));
+        // The statuses wait for the outline read by the new dialect...
+        assert_eq!(run.statuses().len(), 3);
+        run.apply_outline(
+            sql.to_owned(),
+            sql::normalized_statements(sql, Some(SqlDialect::MySql)),
+        );
+        assert_eq!(run.statuses().len(), 1);
+        // ...but a run started before it already splits by that dialect.
+        let mut early = QueryRun::new(sql);
+        early.use_dialect(Some(SqlDialect::MySql));
+        let plan = early.start(sql, Scope::Cursor(10)).expect("the procedure");
+        assert_eq!(plan.statements, [(0, sql.to_owned())]);
+        assert!(early.queue_all(plan.id));
+        assert_eq!(early.statuses().len(), 1);
     }
 
     #[test]

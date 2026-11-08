@@ -1,5 +1,6 @@
 //! Benchmarks for the hot paths listed in ADR-0010: building the grid view,
-//! converting driver rows to result data, splitting large scripts, paging
+//! converting driver rows to result data, splitting large scripts and
+//! reading a query tab's outline of them, paging
 //! metadata children from a large local cache and encoding a result for an
 //! export.
 //!
@@ -168,6 +169,31 @@ fn sql_tokens(c: &mut Criterion) {
     });
     group.bench_function("after one keystroke", |b| {
         b.iter(|| jykre::sql::relex(black_box(&tokens), black_box(&edited), edit, None))
+    });
+    // What the highlighter runs on the UI thread for a keystroke.
+    group.bench_function("after one keystroke, in place", |b| {
+        b.iter_batched(
+            || tokens.clone(),
+            |mut tokens| {
+                jykre::sql::relex_in_place(&mut tokens, black_box(&edited), edit, None);
+                tokens
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    group.finish();
+}
+
+/// What a query tab reads off the UI thread after an edit to a 4 MiB file,
+/// the largest it opens: statements, their lines and the parameters.
+fn editor_outline(c: &mut Criterion) {
+    let line =
+        "SELECT 00000000 AS n, 'synthetic row number 00000000' AS label, 42 AS answer FROM dual;\n";
+    let script = line.repeat(4 * 1024 * 1024 / line.len());
+    let mut group = c.benchmark_group("editor outline of a 4 MiB script");
+    group.sample_size(10);
+    group.bench_function("read", |b| {
+        b.iter(|| jykre::script_outline::Outline::read(1, black_box(&script), None))
     });
     group.finish();
 }
@@ -406,6 +432,7 @@ criterion_group!(
     result_conversion,
     statement_splitting,
     sql_tokens,
+    editor_outline,
     metadata_paging,
     export_encoding,
     clipboard_encoding

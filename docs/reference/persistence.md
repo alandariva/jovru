@@ -141,7 +141,8 @@ a query's title is its file name. The library's folder defaults to
 folder, the data folder's `Queries` without a home), or
 `<JYKRE_CONFIG_DIR>/Queries` when that variable is set, and is created when
 something is first saved into it. A file is opened only when it is UTF-8
-(a byte order mark allowed) and at most 4 MiB; its line endings and byte
+(a byte order mark allowed) and at most 4 MiB (above 256 KiB the editor
+does not soft-wrap it, see [User experience](ux.md)); its line endings and byte
 order mark are written back as they were. Writes go to a temporary file in
 the same folder, flushed, synced and renamed over the file. Opening,
 discovering, migrating or recovering files never writes to the user's

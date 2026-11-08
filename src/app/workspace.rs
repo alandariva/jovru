@@ -7,7 +7,9 @@ use super::result_grid::{GridSql, ResultGrid, ResultGridEvent, Summary};
 use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
-use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::input::{
+    Editor, EditorState, Input, InputEditsEvent, InputEvent, InputState, Rope,
+};
 use gpui_kit::component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::{
@@ -17,6 +19,7 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
+use jykre::script_outline::{Outline, Revisions, apply_edit};
 use jykre::tr;
 use jykre::{
     assistant::{
@@ -34,6 +37,7 @@ use jykre::{
     run_log::{LogEntry, LogOutcome, RunLog},
     transaction::Transaction,
 };
+use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -154,7 +158,21 @@ pub struct Workspace {
     cache_id: Option<ConnectionId>,
     /// The run state and the status of each statement in the editor.
     run: QueryRun,
+    /// The editor's text, kept in step with its edits so a keystroke costs
+    /// what it changes ([`jykre::script_outline`]).
     editor_sql: String,
+    /// The version of `editor_sql` and the dialect, and the one the
+    /// statement lines, statuses and parameters were read from.
+    revisions: Revisions,
+    /// Reads the outline of the latest text off the UI thread; replaced, and
+    /// so dropped, by the next edit.
+    outline_task: Option<Task<()>>,
+    /// Whether closing would lose edits, for the text revision it was
+    /// worked out for; forgotten when the saved text changes.
+    unsaved: Cell<Option<(u64, bool)>>,
+    /// Whether the editor soft-wraps: not for a long script
+    /// ([`jykre::script_outline::soft_wrap`]).
+    soft_wrap: bool,
     /// The line where each statement of `editor_sql` starts and its line
     /// count, kept when the SQL changes so a frame never splits the script.
     statement_lines: Rc<[usize]>,
@@ -301,18 +319,18 @@ impl Workspace {
         let query_resize = cx.observe(&query_split, |_, _, cx| cx.notify());
         // Editing the SQL never discards results, messages or a running
         // execution. Only the gutter status of statements that changed resets.
-        let editor_observation = cx.observe(&editor, |this, editor, cx| {
-            let sql = editor.read(cx).text().to_string();
-            if this.editor_sql != sql {
-                this.run.edit(&sql);
-                this.statement_lines = jykre::sql::statement_lines(&sql, this.run.dialect()).into();
-                this.line_count = sql.split('\n').count();
-                this.editor_sql = sql;
-                this.sync_parameters();
-                cx.emit(WorkspaceEvent::Changed);
-            }
-            cx.notify();
-        });
+        // The editor notifies on every scroll, cursor move and blink: the
+        // gutter follows it, and nothing else is read.
+        let editor_observation = cx.observe(&editor, |_, _, cx| cx.notify());
+        // Only edits change the text, each with the text after it.
+        let editor_edits = cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &InputEditsEvent, window, cx| {
+                this.text_edited(event, cx);
+                this.follow_soft_wrap(window, cx);
+            },
+        );
         let demo = demo::enabled();
         let mut workspace = Self {
             input: None,
@@ -385,9 +403,16 @@ impl Workspace {
             assistant_lease: 0,
             pending_assistant: None,
             cache_id: None,
-            run: QueryRun::new(sql),
+            // The statements, their lines and the parameters are read off
+            // the UI thread below; a long script shows its gutter a moment
+            // after it opens.
+            run: QueryRun::new(""),
             editor_sql: sql.to_string(),
-            statement_lines: jykre::sql::statement_lines(sql, None).into(),
+            revisions: Revisions::default(),
+            outline_task: None,
+            unsaved: Cell::new(None),
+            soft_wrap: true,
+            statement_lines: Rc::from([]),
             line_count: sql.split('\n').count(),
             saved_sql: None,
             file: None,
@@ -408,11 +433,14 @@ impl Workspace {
                 resize_subscription,
                 query_resize,
                 editor_observation,
+                editor_edits,
                 sql_editor_subscription,
                 copy_observation,
             ],
         };
-        workspace.sync_parameters();
+        // Before the first layout, so a long script is never wrapped.
+        workspace.follow_soft_wrap(window, cx);
+        workspace.text_replaced(cx);
         workspace
     }
 
@@ -733,6 +761,111 @@ impl Workspace {
         &self.editor_sql
     }
 
+    /// The editor applied `event`'s edits: the text is brought in step with
+    /// them, and its outline is read again off the UI thread.
+    fn text_edited(&mut self, event: &InputEditsEvent, cx: &mut Context<Self>) {
+        let _timer = jykre::logging::UiTimer::start("editor edit");
+        let Some((_, after)) = event.edits().last() else {
+            self.editor_sql = self.editor.read(cx).text().to_string();
+            self.text_replaced(cx);
+            cx.emit(WorkspaceEvent::Changed);
+            return;
+        };
+        let mut in_step = true;
+        for (edit, text) in event.edits() {
+            in_step = in_step
+                && edit.start_byte <= edit.new_end_byte
+                && edit.new_end_byte <= text.len()
+                && apply_edit(
+                    &mut self.editor_sql,
+                    edit.start_byte,
+                    edit.old_end_byte,
+                    &text.slice(edit.start_byte..edit.new_end_byte).to_string(),
+                );
+        }
+        if !in_step || self.editor_sql.len() != after.len() {
+            // Edits that do not fit what is kept: the whole text, once.
+            self.editor_sql = after.to_string();
+        }
+        self.revisions.bump();
+        self.read_outline(after.clone(), cx);
+        cx.emit(WorkspaceEvent::Changed);
+    }
+
+    /// Soft-wraps the editor or not by the length of its text, changing it
+    /// only when the answer changes.
+    fn follow_soft_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let wrap = jykre::script_outline::soft_wrap(self.editor_sql.len(), self.soft_wrap);
+        if wrap != self.soft_wrap {
+            self.soft_wrap = wrap;
+            self.editor
+                .update(cx, |editor, cx| editor.set_soft_wrap(wrap, window, cx));
+        }
+    }
+
+    /// The text or the dialect changed without an edit (the tab opened, a
+    /// file reloaded, another dialect): its outline is read again.
+    fn text_replaced(&mut self, cx: &mut Context<Self>) {
+        self.revisions.bump();
+        let text = self.editor.read(cx).text().clone();
+        self.read_outline(text, cx);
+    }
+
+    /// Reads the statements, their lines and the parameters of `text`, the
+    /// current revision, on the background executor. A long script waits
+    /// for a pause in typing; a newer edit replaces the task, and an outline
+    /// that arrives after one is not applied.
+    fn read_outline(&mut self, text: Rope, cx: &mut Context<Self>) {
+        let revision = self.revisions.current();
+        let dialect = self.run.dialect();
+        let pause = (text.len() > OUTLINE_IMMEDIATE_BYTES).then_some(OUTLINE_PAUSE);
+        self.outline_task = Some(cx.spawn(async move |this, cx| {
+            if let Some(pause) = pause {
+                cx.background_executor().timer(pause).await;
+            }
+            let (sql, outline) = cx
+                .background_spawn(async move {
+                    let started = std::time::Instant::now();
+                    let sql = text.to_string();
+                    let outline = Outline::read(revision, &sql, dialect);
+                    jykre::logging::timing("editor outline", started, OUTLINE_PAUSE);
+                    (sql, outline)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| this.apply_outline(sql, outline, cx));
+        }));
+    }
+
+    /// Shows `outline`, read from `sql`, when it is still the text's.
+    fn apply_outline(&mut self, sql: String, outline: Outline, cx: &mut Context<Self>) {
+        if !self.revisions.accept(outline.revision) {
+            return;
+        }
+        let _timer = jykre::logging::UiTimer::start("apply editor outline");
+        self.run.apply_outline(sql, outline.statements);
+        self.statement_lines = outline.statement_lines.into();
+        self.line_count = outline.line_count;
+        self.apply_parameter_names(outline.parameters);
+        cx.notify();
+    }
+
+    /// Reads the outline now when the latest one has not arrived: a run
+    /// needs the parameters of the text it runs. Only a run started within
+    /// a moment of an edit to a long script pays for it.
+    fn flush_outline(&mut self, cx: &mut Context<Self>) {
+        if !self.revisions.is_stale() {
+            return;
+        }
+        let _timer = jykre::logging::UiTimer::start("editor outline before a run");
+        self.outline_task = None;
+        let outline = Outline::read(
+            self.revisions.current(),
+            &self.editor_sql,
+            self.run.dialect(),
+        );
+        self.apply_outline(self.editor_sql.clone(), outline, cx);
+    }
+
     pub fn title(&self) -> SharedString {
         self.title.clone()
     }
@@ -764,6 +897,7 @@ impl Workspace {
         self.saved_id = Some(id);
         self.saved_sql = Some(text);
         self.file = Some(file);
+        self.unsaved.set(None);
         cx.emit(WorkspaceEvent::Changed);
         cx.notify();
     }
@@ -799,9 +933,14 @@ impl Workspace {
         self.editor.update(cx, |editor, cx| {
             editor.set_value(text.clone(), window, cx);
         });
+        // Setting the value is no edit: the statements, their lines and the
+        // parameters are read again from the new text.
         self.editor_sql = text.clone();
         self.saved_sql = Some(text);
         self.file = Some(file);
+        self.unsaved.set(None);
+        self.follow_soft_wrap(window, cx);
+        self.text_replaced(cx);
         self.notice = Some(Feedback::new(Tone::Info, tr!("Reloaded from the file.")));
         cx.emit(WorkspaceEvent::Changed);
         cx.notify();
@@ -815,17 +954,28 @@ impl Workspace {
 
     /// Closing or quitting would lose edits: SQL not in the tab's file, or a
     /// draft's SQL the user wrote.
+    /// Compared once per version of the text, not on every event that
+    /// asks.
     pub fn has_unsaved_changes(&self) -> bool {
-        match &self.file {
+        let revision = self.revisions.current();
+        if let Some((known, unsaved)) = self.unsaved.get()
+            && known == revision
+        {
+            return unsaved;
+        }
+        let unsaved = match &self.file {
             Some(_) => self.saved_sql.as_deref() != Some(self.editor_sql.as_str()),
             None => self.has_unsaved_sql(),
-        }
+        };
+        self.unsaved.set(Some((revision, unsaved)));
+        unsaved
     }
 
     /// Opens the tab as the saved query `id`, whose SQL it holds.
     pub fn open_saved(&mut self, id: u64, sql: &str) {
         self.saved_id = Some(id);
         self.saved_sql = Some(sql.to_owned());
+        self.unsaved.set(None);
     }
 
     /// Gives the tab another title, as when its saved query is named or
@@ -849,6 +999,7 @@ impl Workspace {
         if self.saved_id == Some(id) {
             self.saved_id = None;
             self.saved_sql = None;
+            self.unsaved.set(None);
             cx.emit(WorkspaceEvent::Changed);
             cx.notify();
         }
@@ -1243,6 +1394,7 @@ impl Workspace {
             cx.emit(WorkspaceEvent::PasswordRequired);
             return;
         }
+        self.flush_outline(cx);
         let sql = self.editor.read(cx).text().to_string();
         let confirmed = std::mem::take(&mut self.risk_confirmed);
         // The values of the statements' `:name` markers, bound by the driver
@@ -3644,6 +3796,7 @@ impl Workspace {
         self.object = state.object.clone();
         self.data_sql = state.data_sql.clone();
         self.opened_sql = state.opened_sql.clone();
+        self.unsaved.set(None);
         self.restore_parameters(&state.parameters);
         self.update_grid_sql(cx);
         self.timeout = state.timeout(self.timeout);
@@ -3925,10 +4078,10 @@ impl Workspace {
             editor.set_dialect(dialect, cx);
         });
         if dialect != self.run.dialect() {
-            self.run.set_dialect(dialect);
-            self.statement_lines = jykre::sql::statement_lines(&self.editor_sql, dialect).into();
-            // A colon means another thing in each dialect.
-            self.sync_parameters();
+            // Statements end and a colon means another thing in each
+            // dialect: the outline is read again by its rules.
+            self.run.use_dialect(dialect);
+            self.text_replaced(cx);
         }
         self.update_grid_sql(cx);
     }
@@ -4296,6 +4449,12 @@ const CANCEL_SLOW: Duration = Duration::from_secs(5);
 /// How long typing in the result filter pauses before the grid filters, as
 /// the metadata search waits ([Performance](../../docs/standards/performance.md#rejected-patterns)).
 const FILTER_DELAY: Duration = Duration::from_millis(150);
+/// A text up to this size has its outline read as soon as it changes, in
+/// a few milliseconds off the UI thread; a longer one waits for
+/// [`OUTLINE_PAUSE`] without edits, so typing is not followed by reading
+/// the whole script for every key.
+const OUTLINE_IMMEDIATE_BYTES: usize = 64 * 1024;
+const OUTLINE_PAUSE: Duration = Duration::from_millis(150);
 
 /// The statement timeouts a tab can choose; the default is five minutes.
 const TIMEOUTS: [Option<Duration>; 6] = [

@@ -134,8 +134,10 @@ The existing frame probe below remains the tool for the frame budget.
   driver rows to result data, splitting a 10,000-statement script and, in a
   cache of 500,000 objects, opening the file to read a first page (what every
   expansion cost before the cache stayed open) and reading the first page and
-  the page after 4,800 children through the cache kept open, and encoding
-  100,000 rows for an export as CSV, JSON Lines and `INSERT`s.
+  the page after 4,800 children through the cache kept open, encoding
+  100,000 rows for an export as CSV, JSON Lines and `INSERT`s, the
+  editor's tokens of a 10 MB script (whole, and after a keystroke, also in
+  place) and a query tab's outline of a 4 MiB script.
   `cargo xtask check --full` runs
   them in quick mode, only to prove they work. A task that touches one of
   these paths compares against a baseline and reports the result:
@@ -198,11 +200,82 @@ Taken for ADR-0031's limit (D7) on 2026-11-07, release build, Windows,
 | 1 MiB | 12,021 | 1,426.7 ms / 1,423.7 ms | 8.5–13.4 ms / 17.3 ms | 7.6–8.1 ms / 53.0 ms |
 | 4 MiB (4.18 MB) | 46,815 | 5,734 ms / 6,093 ms | 12.2–18.6 ms / 33.0 ms | 14.0 ms / 676.7 ms |
 
-Opening grows by about 1.4 ms per KiB on the UI thread. On every change the
-workspace copies the editor's whole text into a `String`, compares it, and
-then finds every statement's line again and scans the parameters
-(`src/app/workspace.rs`, the editor observation); every notification of the
-editor (a scroll, a cursor move) also copies and compares the text.
+Opening grows by about 1.4 ms per KiB on the UI thread. At the time, on
+every change the workspace copied the editor's whole text into a `String`,
+compared it, and then found every statement's line again and scanned the
+parameters on the UI thread; every notification of the editor (a scroll, a
+cursor move, the caret blinking) also copied and compared the text.
+
+#### Since 2026-11-08
+
+What the tab does with its text now (`src/app/workspace.rs`,
+`jykre::script_outline`):
+
+- The editor's notifications only redraw; nothing reads the text.
+- Each edit arrives with its range and the text after it
+  (`InputEditsEvent`), and the tab's copy of the text takes only that range,
+  so a keystroke moves the bytes after it and copies nothing else.
+- The statements, their lines, the line count and the `:name` parameters
+  (the *outline*) are read on the background executor, at once for a text
+  up to 64 KiB and after a 150 ms pause in typing above that. Each change of
+  the text or the dialect takes a new revision, and an outline read from an
+  older one is never applied. A run started before the latest outline
+  arrived reads it first, on the UI thread, so its parameters are those of
+  the text it runs.
+- Whether the tab has unsaved changes is compared once per revision.
+- The highlighter relexes in place (`jykre::sql::relex_in_place`): the tokens
+  around the edit are replaced and the rest moved, instead of a new list of
+  every token on each keystroke.
+
+Measured on 2026-11-08 on Linux, before and after the change, release build,
+an 8-vCPU KVM virtual machine with no GPU (Xvfb with Mesa's software Vulkan,
+lavapipe), `JYKRE_PROBE=1`, an isolated data folder and a SQLite connection
+to a synthetic file, so that the tab shows the editor. Files of numbered
+one-line `SELECT`s (about 89 bytes a line) were opened from the library, then
+a script posted 180 wheel notches 33 ms apart, typed 24 characters 150 ms
+apart and moved the cursor down 30 lines, 100 ms apart, each from one
+`xdotool` process. *Ours* is the UI-thread time of our code, from
+`UiTimer` timings at `jykre::ui_thread=debug` (temporary ones, for the
+before column). The heartbeat's floor on this machine is 30–50 ms, as the
+one-line file shows; scrolling a large file stalls up to about 180 ms before
+and after the change, in the software renderer's compiled shaders (`perf`),
+which a GPU does not have.
+
+| File | Opening: longest frame / stall / ours, before | After | Typing: frame p95 / longest stall / ours per key, before | After |
+| --- | --- | --- | --- | --- |
+| One line | 10.5 ms / 43.6 ms / 0.3 ms | 9.9 ms / 40.0 ms / 0.3 ms | 4.6 ms / 30.5 ms / 0.01 ms | 7.3 ms / 49.0 ms / 0.01 ms |
+| 64 KiB | 86.0 ms / 117.0 ms / 5.7 ms | 81.2 ms / 108.7 ms / 0.4 ms | 5.4 ms / 41.2 ms / 2.4 ms (4.7 ms max) | 6.0 ms / 36.2 ms / 0.01 ms (0.02 ms max) |
+| 256 KiB | Not captured / 350.7 ms / not captured | 316.2 ms / 342.3 ms / 0.8 ms | 7.1 ms / 47.6 ms / 9.6 ms (12.8 ms max) | 7.2 ms / 42.8 ms / 0.04 ms (0.07 ms max) |
+| 1 MiB | 1,230 ms / 1,334 ms / 71.4 ms | 1,220 ms / 1,248 ms / 3.4 ms | 6.7 ms / 142.1 ms / 36.0 ms (38.2 ms max) | 7.1 ms / 51.2 ms / 0.13 ms (0.30 ms max) |
+| 4 MiB | 4,988 ms / 5,306 ms / 285.6 ms | 5,074 ms / 5,113 ms / 13.1 ms | 7.5 ms / 3,697 ms / 140.9 ms (145.1 ms max) | 7.2 ms / 56.3 ms / 0.49 ms (1.12 ms max) |
+
+- In the 4 MiB file the outline takes 151 ms off the UI thread and 2.7 ms to
+  apply on it (0.8 ms at 1 MiB). Scrolling and moving the cursor cost our
+  code nothing; before, every notification copied and compared the text,
+  2.5 ms at 4 MiB.
+- Of the 13.1 ms of ours on opening 4 MiB, 6.5 ms is creating the editor
+  with its text (the component builds its rope).
+- A run started within the pause after an edit reads the outline on the UI
+  thread first: 42.7 ms in a 1 MiB file (about 150 ms at 4 MiB, from the
+  outline's time). A run started later reads nothing more than before.
+- The rest of opening is the editor component's: `gpui-kit` 0.9.0 soft-wraps
+  by default, and its first layout measures every line of the document with
+  the text shaper (`TextWrapper::update_wrapped`, `perf`). The maintainer
+  chose on 2026-11-08 to keep the 4 MiB limit and turn soft wrap off for a
+  text above 256 KiB (back on at 192 KiB or less,
+  `jykre::script_outline::soft_wrap`;
+  [Large `.sql` files in the editor](../plans/editor-large-files.md)).
+  Measured again with it, same machine and script, longest frame / longest
+  stall on opening: 64 KiB (still wrapped) 84.6 ms / 115.8 ms; 256 KiB
+  13.5 ms / 43.3 ms; 1 MiB 29.3 ms / 56.2 ms; 4 MiB 62.0 ms / 100.1 ms.
+  Typing kept a frame p95 of 5.8–6.5 ms and a longest stall of 40–51 ms
+  (the floor) at every size; our code took 0.56 ms a key in the 4 MiB file
+  (1.22 ms at most). At 4 MiB the rest of opening is reading the
+  highlighter's tokens of the whole text and building the rope, once.
+- Benchmarks (`benches/hot_paths.rs`, release, Linux, the machine above):
+  reading the outline of a 4 MiB script takes 145 ms (off the UI thread);
+  relexing a 10 MB script after a keystroke takes 3.8 ms in place, against
+  52.7 ms for building a new list of its tokens as the highlighter did.
 
 ## Known deviations
 
@@ -212,7 +285,7 @@ off the UI thread. These measure encoding, not the OS clipboard handoff.
 
 | Standard | Current code |
 | --- | --- |
-| A file the library opens stays within the frame budget ([ADR-0031](../adr/0031-saved-queries-as-sql-files.md) D7) | Not met at any measured size: opening blocks the UI thread about 1.4 ms per KiB (131 ms at 64 KiB, 1.4 s at 1 MiB, 6 s at the 4 MiB limit), and typing in a 4 MiB file stalls it up to 677 ms, because the editor observation copies and re-reads the whole text on the UI thread ([measurements](#the-editor-with-a-large-sql-file)). The limit stays 4 MiB until the maintainer decides between a lower limit and moving that work off the UI thread |
+| A file the library opens stays within the frame budget ([ADR-0031](../adr/0031-saved-queries-as-sql-files.md) D7) | Typing and scrolling meet it since 2026-11-08. Opening does not: up to 256 KiB the editor component's soft wrap measures every line on the first layout, about 1.2–1.4 ms per KiB in one frame (85 ms at 64 KiB, about 310 ms just under 256 KiB); above it the tab does not wrap, and the longest frame on opening is 13.5–62 ms up to 4 MiB ([measurements](#since-2026-11-08)). Measured on Linux with software rendering; not yet on the reference machine. Lazy wrapping upstream would remove the rest ([Large `.sql` files in the editor](../plans/editor-large-files.md)) |
 | No UI-thread stall above 16 ms while an export runs | Not demonstrated. The export runs off the UI thread and adds nothing the heartbeat can tell from its floor, which on Windows is at the budget (idle probe lines reach 16–19 ms). Probe lines in which the native save dialog opened, before any export, read up to 24.3 ms ([measurements](#startup-memory-and-export-measurements)) |
 | Long collections are virtualized | The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`). Saved queries and history are virtualized |
 | Metadata search within budget at any length | A query of one or two characters, which the trigram index cannot match, scans the name index: about 93 ms at 500,000 objects. Three characters or more take about 7.4 ms. Every search runs off the UI thread after a 150 ms pause, and since 0.2.0 M3 both the palette and the explorer's search field show a spinner while one runs |
