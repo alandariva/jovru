@@ -140,6 +140,7 @@ fn request(
             ..ExportOptions::default()
         },
         columns: page.columns().to_vec(),
+        shown: None,
         sql: SqlTarget::default(),
         pages: vec![Arc::new(page)],
         read,

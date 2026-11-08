@@ -1,14 +1,16 @@
 //! Cancellable clipboard encoding over shared, immutable result snapshots.
 use super::*;
+use crate::column_layout::ColumnLayout;
 use crate::drivers::{CancellationToken, DriverError, ErrorCode};
-use crate::grid::GridView;
-use std::ops::{Range, RangeInclusive};
+use crate::grid::{GridView, block_columns};
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// The exact page or displayed selection captured when Copy was requested.
 pub enum CopySource {
-    /// Every row and column, regardless of the grid's filter or sort.
+    /// Every row, regardless of the grid's filter or sort, and the columns
+    /// the layout shows, in its order.
     Page,
     /// A selection in the captured display order.
     Selection {
@@ -29,6 +31,9 @@ pub struct CopyRequest {
     pub table: String,
     /// Names already quoted by the editor's dialect, one per result column.
     pub quoted_columns: Vec<String>,
+    /// The grid's columns as shown: a page or a selection copies the shown
+    /// columns in display order, never the hidden ones.
+    pub layout: Arc<ColumnLayout>,
 }
 
 /// Encoding progress; only counts, never database values.
@@ -39,14 +44,28 @@ pub struct Progress {
 }
 
 impl CopyRequest {
-    fn bounds(&self) -> Option<(Range<usize>, RangeInclusive<usize>)> {
+    /// The rows (positions in the source's order) and the result columns,
+    /// in display order, that the copy writes.
+    fn bounds(&self) -> Option<(Range<usize>, Vec<usize>)> {
         match &self.source {
-            CopySource::Page => Some((
-                0..self.result.row_count(),
-                0..=self.result.column_count().checked_sub(1)?,
-            )),
-            CopySource::Selection { view, selection } => selection_block(*selection, &view.rows)
-                .map(|(rows, cols)| (*rows.start()..rows.end() + 1, cols)),
+            CopySource::Page => {
+                let columns: Vec<usize> = self
+                    .layout
+                    .visible()
+                    .iter()
+                    .copied()
+                    .filter(|column| *column < self.result.column_count())
+                    .collect();
+                (!columns.is_empty()).then(|| (0..self.result.row_count(), columns))
+            }
+            CopySource::Selection { view, selection } => {
+                selection_block(*selection, &view.rows, &self.layout).map(|(rows, cols)| {
+                    (
+                        *rows.start()..rows.end() + 1,
+                        block_columns(&self.layout, cols),
+                    )
+                })
+            }
             CopySource::Value { .. } => None,
         }
     }
@@ -81,17 +100,17 @@ impl CopyRequest {
             return Ok(0);
         };
         let mut bytes = cols
-            .clone()
-            .filter_map(|col| self.result.columns().get(col))
+            .iter()
+            .filter_map(|col| self.result.columns().get(*col))
             .map(|column| column.name.len() + 3)
             .sum::<usize>();
         if self.options.format != CopyFormat::ColumnNames {
             for position in rows {
                 checkpoint(cancel, started)?;
                 if let Some(row) = self.row(position) {
-                    for col in cols.clone() {
+                    for col in &cols {
                         bytes = bytes
-                            .saturating_add(self.result.value(row, col).map_or(0, str::len) + 3);
+                            .saturating_add(self.result.value(row, *col).map_or(0, str::len) + 3);
                     }
                 }
             }
@@ -133,16 +152,16 @@ pub fn generate(
     let Some((rows, cols)) = request.bounds() else {
         return Ok(None);
     };
-    let count = rows.len() * cols.clone().count();
+    let count = rows.len() * cols.len();
     let mut block = Block {
         names: cols
-            .clone()
-            .filter_map(|col| request.result.columns().get(col))
+            .iter()
+            .filter_map(|col| request.result.columns().get(*col))
             .map(|column| column.name.as_str())
             .collect(),
         families: cols
-            .clone()
-            .filter_map(|col| request.result.columns().get(col))
+            .iter()
+            .filter_map(|col| request.result.columns().get(*col))
             .map(|column| cell_format::family(&column.data_type))
             .collect(),
         rows: Vec::with_capacity(1),
@@ -208,9 +227,9 @@ pub fn generate(
         // Read one row at a time; no table of borrowed cells proportional
         // to the selection and no second complete encoded string.
         let mut cells = Vec::with_capacity(block.names.len());
-        for col in cols.clone() {
+        for col in &cols {
             checkpoint(cancel, started)?;
-            cells.push(request.result.value(row, col));
+            cells.push(request.result.value(row, *col));
         }
         block.rows.push(cells);
         match options.format {
@@ -361,6 +380,7 @@ mod tests {
                 .iter()
                 .map(|column| format!("\"{}\"", column.name))
                 .collect(),
+            layout: Arc::new(ColumnLayout::new(result.column_count())),
             result,
             options,
             source: CopySource::Page,
@@ -369,70 +389,84 @@ mod tests {
         }
     }
 
+    /// The fixture's columns shown as `flag`, `id`, with `text` hidden.
+    fn moved_layout() -> Arc<ColumnLayout> {
+        let mut layout = ColumnLayout::new(3);
+        layout.freeze(2);
+        layout.hide(1);
+        Arc::new(layout)
+    }
+
     #[test]
     fn every_format_matches_the_existing_rules_in_sorted_selections() {
-        for dialect in [
-            None,
-            Some(SqlDialect::Postgres),
-            Some(SqlDialect::MySql),
-            Some(SqlDialect::DatabricksSql),
-        ] {
-            for format in CopyFormat::ALL {
-                for header in [false, true] {
-                    for null in [NullText::Empty, NullText::Null] {
-                        for separator in [Separator::Comma, Separator::Semicolon, Separator::Tab] {
-                            for quoting in [Quoting::All, Quoting::Needed] {
-                                let result = fixture();
-                                let view = Arc::new(GridView::new(
-                                    &result,
-                                    GridKey {
-                                        sort: Some(ColumnSort {
-                                            column: 0,
-                                            descending: true,
-                                        }),
-                                        ..Default::default()
-                                    },
-                                ));
-                                let selection =
-                                    CellSelection::all(&view.rows, result.column_count()).unwrap();
-                                let mut request = request(
-                                    result,
-                                    CopyOptions {
-                                        format,
-                                        header,
-                                        null,
-                                        separator,
-                                        quoting,
-                                    },
-                                );
-                                request.dialect = dialect;
-                                request.source = CopySource::Selection {
-                                    view: view.clone(),
-                                    selection,
-                                };
-                                let block = Block::new(
-                                    &request.result,
-                                    &view.rows,
-                                    Some(selection),
-                                    &view.families,
-                                )
-                                .unwrap();
-                                let quote = |name: &str| format!("\"{name}\"");
-                                let style = SqlStyle {
-                                    dialect,
-                                    table: &request.table,
-                                    quote_name: &quote,
-                                };
-                                let expected = copy_as(&request.options, &block, &style);
-                                let (actual, cells) =
-                                    generate(&request, &CancellationToken::new(), |_| {})
-                                        .unwrap()
-                                        .unwrap();
-                                assert_eq!(
-                                    actual, expected,
-                                    "{format:?}, {header}, {null:?}, {separator:?}, {quoting:?}"
-                                );
-                                assert_eq!(cells, block.cells());
+        for layout in [Arc::new(ColumnLayout::new(3)), moved_layout()] {
+            for dialect in [
+                None,
+                Some(SqlDialect::Postgres),
+                Some(SqlDialect::MySql),
+                Some(SqlDialect::DatabricksSql),
+            ] {
+                for format in CopyFormat::ALL {
+                    for header in [false, true] {
+                        for null in [NullText::Empty, NullText::Null] {
+                            for separator in
+                                [Separator::Comma, Separator::Semicolon, Separator::Tab]
+                            {
+                                for quoting in [Quoting::All, Quoting::Needed] {
+                                    let result = fixture();
+                                    let view = Arc::new(GridView::new(
+                                        &result,
+                                        GridKey {
+                                            sort: Some(ColumnSort {
+                                                column: 0,
+                                                descending: true,
+                                            }),
+                                            ..Default::default()
+                                        },
+                                    ));
+                                    let selection =
+                                        CellSelection::all(&view.rows, &layout).unwrap();
+                                    let mut request = request(
+                                        result,
+                                        CopyOptions {
+                                            format,
+                                            header,
+                                            null,
+                                            separator,
+                                            quoting,
+                                        },
+                                    );
+                                    request.dialect = dialect;
+                                    request.layout = layout.clone();
+                                    request.source = CopySource::Selection {
+                                        view: view.clone(),
+                                        selection,
+                                    };
+                                    let block = Block::new(
+                                        &request.result,
+                                        &view.rows,
+                                        &layout,
+                                        Some(selection),
+                                        &view.families,
+                                    )
+                                    .unwrap();
+                                    let quote = |name: &str| format!("\"{name}\"");
+                                    let style = SqlStyle {
+                                        dialect,
+                                        table: &request.table,
+                                        quote_name: &quote,
+                                    };
+                                    let expected = copy_as(&request.options, &block, &style);
+                                    let (actual, cells) =
+                                        generate(&request, &CancellationToken::new(), |_| {})
+                                            .unwrap()
+                                            .unwrap();
+                                    assert_eq!(
+                                        actual, expected,
+                                        "{format:?}, {header}, {null:?}, {separator:?}, {quoting:?}"
+                                    );
+                                    assert_eq!(cells, block.cells());
+                                }
                             }
                         }
                     }
@@ -467,8 +501,14 @@ mod tests {
                         view: view.clone(),
                         selection,
                     };
-                    let block =
-                        Block::new(&result, &view.rows, Some(selection), &view.families).unwrap();
+                    let block = Block::new(
+                        &result,
+                        &view.rows,
+                        &request.layout,
+                        Some(selection),
+                        &view.families,
+                    )
+                    .unwrap();
                     let quote = |name: &str| name.to_owned();
                     let expected = copy_as(
                         &request.options,
@@ -511,6 +551,30 @@ mod tests {
                 cell_format::result_csv(&result)
             );
         }
+    }
+
+    #[test]
+    fn a_page_copies_the_shown_columns_in_display_order() {
+        let mut request = request(
+            fixture(),
+            CopyOptions {
+                format: CopyFormat::Csv,
+                header: true,
+                ..Default::default()
+            },
+        );
+        request.layout = moved_layout();
+        let (text, cells) = generate(&request, &CancellationToken::new(), |_| {})
+            .unwrap()
+            .unwrap();
+        assert_eq!(cells, 8);
+        assert_eq!(
+            text,
+            "\"flag\";\"id\"\n\"t\";\"1.500000000000000001\"\n\"f\";\"2\"\n;\"1.500000000000000001\"\n\"true\";"
+        );
+        // Names are estimated for the shown columns only.
+        request.options.format = CopyFormat::ColumnNames;
+        assert_eq!(request.estimate(&CancellationToken::new()).unwrap(), 12);
     }
 
     #[test]

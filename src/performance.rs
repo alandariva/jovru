@@ -32,6 +32,33 @@ pub fn fixture(rows: usize) -> ResultData {
     )
 }
 
+/// A result `columns` wide, for sideways scrolling with frozen columns:
+/// numbers, text and dates in turn, each column named `c<n>`.
+pub fn wide_fixture(rows: usize, columns: usize) -> ResultData {
+    let kinds = ["int8", "text", "numeric", "date"];
+    let names: Vec<ResultColumn> = (0..columns)
+        .map(|column| ResultColumn::new(format!("c{column}"), kinds[column % kinds.len()]))
+        .collect();
+    let values: Vec<Vec<String>> = (1..=rows)
+        .map(|n| {
+            (0..columns)
+                .map(|column| match column % kinds.len() {
+                    0 => (n * columns + column).to_string(),
+                    1 => format!("value {n}-{column}"),
+                    2 => format!("{n}.{column:02}"),
+                    _ => format!("2026-01-{:02}", 1 + (n + column) % 28),
+                })
+                .collect()
+        })
+        .collect();
+    ResultData::from_rows(
+        names,
+        values
+            .iter()
+            .map(|row| row.iter().map(|v| Some(v.as_str()))),
+    )
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Counters {
     pub cpu_seconds: f64,
@@ -149,5 +176,9 @@ mod tests {
         assert_eq!(data.row_count(), 1000);
         assert_eq!(data.column_count(), 5);
         assert_eq!(data.value(999, 0), Some("1000"));
+        let wide = wide_fixture(10, 400);
+        assert_eq!((wide.row_count(), wide.column_count()), (10, 400));
+        assert_eq!(wide.columns()[399].name, "c399");
+        assert_eq!(wide.value(9, 1), Some("value 10-1"));
     }
 }

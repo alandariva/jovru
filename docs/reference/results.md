@@ -86,7 +86,18 @@ alignment only; the value itself is never converted.
 - Selections are stored as data-row indices, so filtering or sorting the view
   does not change what is selected; typing in the filter keeps the selection,
   a selection whose ends are hidden is not shown (and counts as no cells), and
-  it shows again when they are.
+  it shows again when they are. Its columns are result columns too: a block
+  spans the display positions between its ends, so moving or hiding a column
+  between them changes which columns it covers, and an end in a hidden column
+  hides the selection until that column is shown.
+- `jykre::column_layout::ColumnLayout` is how the grid lays out a result's
+  columns: every column in display order, which are hidden, and how many
+  lead the order frozen. It maps display positions to result columns and
+  back, and belongs to the result tab: kept in memory while the tab is open
+  (its pages share it and switching tabs restores it, as the widths), never
+  saved, and started again when the tab's result has other columns. The
+  grid shares it (`Arc`) with what reads the result as shown: copies,
+  exports, the records view and the statistics.
 
 ## Limits
 
@@ -183,6 +194,31 @@ alignment only; the value itself is never converted.
   shared page in place
   ([ADR-0022](../adr/0022-result-pages-shared-across-threads.md)). A drag is
   summarized when it ends.
+- **Column layout.** Any column can be hidden and shown again, moved to
+  another place and frozen at the left edge, in every result grid (query
+  tabs, report panels and a job's result). With the mouse, a header dragged
+  onto another takes its place (onto a frozen header it is frozen there;
+  out of the frozen ones it scrolls again); with the keyboard, `Shift F10`
+  opens the menu on the focused header's column or the focused cell's. The
+  menu has **Hide the column**, **Freeze the column at the left** (checked
+  while frozen; choosing it again unfreezes), **Move the column left**,
+  **right**, **to the start** and **to the end** (within the frozen columns
+  or within the others), **Show a hidden column** (the first 20 by name;
+  finding a column by name reaches the rest), **Show all columns** and
+  **Reset the column layout**. The last column shown cannot be hidden.
+  While any column is hidden, a line above the table (and the records)
+  says how many, with **Show all columns**. The values, their types and
+  NULLs are untouched; only where a column is drawn changes.
+- Frozen columns keep their place at the left edge, after the row numbers,
+  which stay with them, while the other columns pan under them; without
+  frozen columns the row numbers pan with the rest, as before. Moving the
+  focused cell into a scrolling column pans it into the room the frozen
+  ones leave.
+- Only the columns in view are built: a row draws its frozen columns and
+  the scrolling ones that cross the viewport, with the width of the others
+  kept as room (`column_layout::shown_columns`), so a frame costs the
+  columns on screen, not the result's. The demo result, whose five columns
+  share the width in proportion, draws them all.
 - A header's right edge resizes its column (48 to 1,600 px); a double click on
   it, or **Fit the column to its values** in the menu, fits the column to its
   header and the values of the first 5,000 displayed rows. **Reset column
@@ -195,6 +231,8 @@ alignment only; the value itself is never converted.
   shown as NULL. The panel follows the focused cell.
   Its other tab, **Statistics**, summarizes one of three things, chosen at
   its top:
+  The columns of each scope are the ones shown, in display order; hidden
+  columns are left out.
   - **Selection**: the selected cells (two or more): how many rows and
     columns, values and NULLs, the sum, average, median, minimum and maximum
     of the numbers of number columns together (as the footer shows), and one
@@ -231,9 +269,9 @@ alignment only; the value itself is never converted.
   second click closes the panel. The menu has **Statistics** and **Column
   statistics** too.
 - **Show the selected rows as records** (toolbar or menu) shows the rows of
-  the selection side by side: one line per column, one column per row, up to
-  50 rows. A click on a value shows it in the side panel. `Esc` goes back to
-  the table.
+  the selection side by side: one line per column shown, in display order,
+  one column per row, up to 50 rows. A click on a value shows it in the side
+  panel. `Esc` goes back to the table.
 - Result tabs can be dragged to another place in their bar, or moved with
   `Ctrl Shift ←` and `Ctrl Shift →` on the focused tab. The tab on screen,
   numbers, pins and what a run replaces do not change.
@@ -293,6 +331,9 @@ alignment only; the value itself is never converted.
   strings (`jykre::sql::string_literal`: PostgreSQL doubles the quote, MySQL
   and Databricks escape with a backslash). Names are quoted only when the
   dialect needs it, as the editor's suggestions quote them.
+- Every copy of cells follows the column layout: the selection's columns,
+  or the page's, are the ones shown, in display order; hidden columns are
+  never copied. The inspector's **Copy** copies its one value.
 - **Copy this page as CSV** copies the page on screen with headers, `;` as the
   separator and every value quoted, using the original values regardless of
   presentation; NULL becomes an empty field. The copy settings do not apply.
@@ -319,7 +360,9 @@ alignment only; the value itself is never converted.
 
 **Export the result to a file** (the toolbar's download button, or
 `Ctrl Shift E`) opens a bar under the result toolbar for the result tab on
-screen. It writes the whole result, not the page, to a file chosen in the
+screen. It writes the whole result, not the page, with the columns the
+grid shows, in display order (hidden columns are not written; with the
+result's own layout every column is, in its order), to a file chosen in the
 system's save dialog (`jykre::export`, `backend::export`).
 
 - **Formats:** CSV, Excel (XLSX), JSON (an array laid out as **Copy as
@@ -396,15 +439,18 @@ report holds no more than one query tab.
   again when its chart changes.
 - **Copy as CSV** and **Copy for a spreadsheet**, in a panel's menu, copy its
   whole result with the column names, as **Copy this page as CSV** and as
-  tab-separated text, whatever the copy menu says. They run off the UI thread
-  like every copy ([Copying](#copying)), asking first above 50 MiB.
+  tab-separated text, whatever the copy menu says, with the columns the
+  panel's grid shows, in display order. They run off the UI thread like
+  every copy ([Copying](#copying)), asking first above 50 MiB.
 - **Export for printing or PDF…** (`jykre::reports::export`) writes one HTML
   file where the user chooses: the title, description, the connections, the
   values the panels ran with, and each panel with its connection and
   database, its chart (as SVG) or number and, when it shows one, its table, in two columns like the report, with every text
   escaped, nothing loaded from elsewhere and print styles (A4, the header
-  repeated on each page). Like an export, it reaches the disk only at the
-  user's request, at the path they chose ([Persistence](persistence.md)).
+  repeated on each page). Its tables keep every column in the result's
+  order: the grid's column layout is not part of a report. Like an export,
+  it reaches the disk only at the user's request, at the path they chose
+  ([Persistence](persistence.md)).
 
 ## Footer
 

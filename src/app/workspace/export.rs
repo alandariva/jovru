@@ -449,10 +449,16 @@ impl Workspace {
             }
         })
         .detach();
+        // The columns as the grid shows them: the tab on screen's layout.
+        let shown = (self.results.active().map(|tab| tab.id) == Some(id))
+            .then(|| self.grid.read(cx).layout())
+            .filter(|layout| layout.len() == columns.len() && !layout.is_identity())
+            .map(|layout| layout.visible().to_vec());
         let request = ExportRequest {
             target: path.clone(),
             options,
             columns,
+            shown,
             sql,
             pages,
             read,

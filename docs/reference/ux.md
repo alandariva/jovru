@@ -512,6 +512,7 @@ Rules:
 | Grid: show the focused cell's full value in the side panel | `Enter` (or a double click) |
 | Grid: close the side panel, then the records view, then clear the selection | `Esc` |
 | Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |
+| Grid (a query tab's, a report panel's or a job's): the menu on the focused header's column, or the focused cell's, to hide, freeze at the left or move the column, show hidden columns or reset the layout. With the mouse, a header dragged onto another takes its place | `Shift F10` |
 | Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
 | Tab bar: move between tabs | Arrows, `Home`, `End` |
 | A job's tab: reach **Editor**, **Inputs** or **Runs**, open it (the keyboard goes to its first field, or the history) | `Tab`, then `Enter` or `Space` |
@@ -585,4 +586,4 @@ interactive elements expose a role, a label and their state. Details are in
 | Standard | Current code |
 | --- | --- |
 | Error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message, and their drivers read it from there (since 0.3.0 A9). MySQL quotes only syntax errors, so its other errors (an unknown column, a missing table) are not marked. Not marked either: a MySQL or Databricks cluster statement with `:name` parameters, whose text the driver changed. PostgreSQL's position with `:name` parameters is in the text sent, with each marker replaced, so it lands off by the difference in length when a parameter comes before the error |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines, going to a line (`Ctrl G`) and the explorer's context menu and quick search mode are actions ([UI guidelines](../standards/ui-guidelines.md#known-deviations)). Stopping a run (`Ctrl F2`), reopening a closed tab (`Ctrl Shift T`), opening and saving files (`Ctrl O`, `Ctrl S`, `Ctrl Shift S`) are actions too |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines, going to a line (`Ctrl G`), the explorer's context menu and quick search mode and the result grid's menu (`Shift F10`) are actions ([UI guidelines](../standards/ui-guidelines.md#known-deviations)). Stopping a run (`Ctrl F2`), reopening a closed tab (`Ctrl Shift T`), opening and saving files (`Ctrl O`, `Ctrl S`, `Ctrl Shift S`) are actions too |

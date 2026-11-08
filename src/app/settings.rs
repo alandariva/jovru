@@ -755,6 +755,10 @@ fn shortcuts_page() -> Div {
                 (tr!("Copy, with the column names"), "Ctrl C / Ctrl Shift C"),
                 (tr!("Select all"), "Ctrl A"),
                 (tr!("Show the cell's full value"), "Enter"),
+                (
+                    tr!("The column's menu: hide, freeze or move it"),
+                    "Shift F10",
+                ),
                 (tr!("Move a result tab"), "Ctrl Shift ← / →"),
             ],
         ),

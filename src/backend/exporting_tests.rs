@@ -222,6 +222,7 @@ fn request(target: PathBuf, pages: Vec<Arc<ResultData>>, read: ExportRead) -> Ex
         target,
         options: crate::export::ExportOptions::default(),
         columns: columns(),
+        shown: None,
         sql: SqlTarget::default(),
         pages,
         read,

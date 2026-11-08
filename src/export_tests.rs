@@ -1,5 +1,6 @@
 use super::*;
 use crate::cell_format::result_csv;
+use crate::column_layout::ColumnLayout;
 use crate::copy_as::{Block, CopyFormat, CopyOptions, SqlStyle, copy_as};
 use crate::grid::CellSelection;
 use std::time::{Duration, Instant};
@@ -66,10 +67,12 @@ fn copied(format: CopyFormat, data: &ResultData) -> String {
         .map(|column| family(&column.data_type))
         .collect();
     let visible: Vec<usize> = (0..data.row_count()).collect();
+    let layout = ColumnLayout::new(data.column_count());
     let block = Block::new(
         data,
         &visible,
-        CellSelection::all(&visible, data.column_count()),
+        &layout,
+        CellSelection::all(&visible, &layout),
         &families,
     )
     .unwrap();
@@ -192,10 +195,12 @@ fn csv_and_json_lines_copies_are_what_the_export_writes() {
         .map(|column| family(&column.data_type))
         .collect();
     let visible: Vec<usize> = (0..data.row_count()).collect();
+    let layout = ColumnLayout::new(data.column_count());
     let block = Block::new(
         &data,
         &visible,
-        CellSelection::all(&visible, data.column_count()),
+        &layout,
+        CellSelection::all(&visible, &layout),
         &families,
     )
     .unwrap();
@@ -314,6 +319,78 @@ fn a_file_replaces_the_destination_only_when_it_is_finished() {
 }
 
 #[test]
+fn an_export_writes_the_shown_columns_in_display_order() {
+    let dir = scratch("shown");
+    let data = data();
+    // `active` and the second `id` shown, in that order; the rest hidden.
+    let shown = [2, 3];
+    let target = dir.join("people.sql");
+    let mut file = ExportFile::create_shown(
+        &target,
+        &options(ExportFormat::Insert),
+        data.columns(),
+        Some(&shown),
+        &sql(),
+    )
+    .unwrap();
+    file.write(&data).unwrap();
+    file.finish().unwrap();
+    let text = std::fs::read_to_string(&target).unwrap();
+    let first = text.lines().next().unwrap();
+    assert_eq!(
+        first,
+        "INSERT INTO public.people (active, \"id\") VALUES (TRUE, 1);"
+    );
+    assert_eq!(text.lines().count(), 6);
+    // CSV names and values follow the same columns.
+    let target = dir.join("people.csv");
+    let mut file = ExportFile::create_shown(
+        &target,
+        &ExportOptions::default(),
+        data.columns(),
+        Some(&shown),
+        &sql(),
+    )
+    .unwrap();
+    file.write(&data).unwrap();
+    file.finish().unwrap();
+    let text = std::fs::read_to_string(&target).unwrap();
+    assert_eq!(
+        text.lines().take(3).collect::<Vec<_>>(),
+        ["\"active\";\"id\"", "\"t\";\"1\"", "\"f\";\"2\""]
+    );
+    // Every column in the result's order is the same as no layout.
+    let target = dir.join("all.csv");
+    let mut file = ExportFile::create_shown(
+        &target,
+        &ExportOptions::default(),
+        data.columns(),
+        Some(&[0, 1, 2, 3]),
+        &sql(),
+    )
+    .unwrap();
+    file.write(&data).unwrap();
+    file.finish().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        format!("{}\n", result_csv(&data))
+    );
+    // An Excel sheet takes the shown columns too.
+    let target = dir.join("people.xlsx");
+    let mut file = ExportFile::create_shown(
+        &target,
+        &options(ExportFormat::Xlsx),
+        data.columns(),
+        Some(&shown),
+        &sql(),
+    )
+    .unwrap();
+    file.write(&data).unwrap();
+    assert_eq!(file.finish().unwrap().rows, 6);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn an_abandoned_file_leaves_nothing_and_the_destination_untouched() {
     let dir = scratch("abandon");
     let target = dir.join("people.json");
@@ -419,7 +496,10 @@ fn an_excel_file_is_a_workbook_within_excel_limits() {
     // Rows past the last one of a sheet fail before any is written.
     let mut sheet = Sheet::new(&dir, data.columns(), true).unwrap();
     sheet.next_row = XLSX_MAX_ROWS - 5;
-    assert_eq!(sheet.rows(&data).unwrap_err().code, ErrorCode::Validation);
+    assert_eq!(
+        sheet.rows(&data, None).unwrap_err().code,
+        ErrorCode::Validation
+    );
     drop(sheet);
     assert_eq!(names(&dir), ["people.xlsx"]);
     std::fs::remove_dir_all(dir).unwrap();

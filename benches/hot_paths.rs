@@ -339,12 +339,14 @@ fn export_encoding(c: &mut Criterion) {
 }
 
 fn clipboard_encoding(c: &mut Criterion) {
+    use jykre::column_layout::ColumnLayout;
     use jykre::copy_as::{self, Block, CopyFormat, CopyOptions, CopyRequest, CopySource, SqlStyle};
     use jykre::grid::CellSelection;
     use std::sync::Arc;
     let result = Arc::new(event_log(100_000));
     let view = Arc::new(GridView::new(&result, GridKey::default()));
-    let selection = CellSelection::all(&view.rows, result.column_count());
+    let layout = Arc::new(ColumnLayout::new(result.column_count()));
+    let selection = CellSelection::all(&view.rows, &layout);
     let quote = |name: &str| name.to_owned();
     let style = SqlStyle {
         dialect: None,
@@ -372,11 +374,12 @@ fn clipboard_encoding(c: &mut Criterion) {
                 .iter()
                 .map(|column| column.name.clone())
                 .collect(),
+            layout: layout.clone(),
         };
         group.bench_function(format!("{format:?} legacy"), |b| {
             b.iter(|| {
-                let block =
-                    Block::new(&result, &view.rows, selection, &view.families).expect("block");
+                let block = Block::new(&result, &view.rows, &layout, selection, &view.families)
+                    .expect("block");
                 copy_as::copy_as(&options, &block, &style)
             })
         });
@@ -411,6 +414,7 @@ fn clipboard_encoding(c: &mut Criterion) {
         dialect: None,
         table: String::new(),
         quoted_columns: vec!["payload".to_owned()],
+        layout: Arc::new(ColumnLayout::new(1)),
     };
     let mut group = c.benchmark_group("clipboard, page above 50 MiB");
     group.sample_size(10);

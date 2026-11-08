@@ -977,6 +977,8 @@ impl ReportPanel {
             dialect: None,
             table: String::new(),
             quoted_columns: Vec::new(),
+            // The columns as the panel's grid shows them.
+            layout: self.grid.read(cx).layout(),
         };
         // Its status, then its outcome, take the notice line.
         copying::start(self, request, what, window, cx);

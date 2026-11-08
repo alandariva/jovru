@@ -60,6 +60,10 @@ pub struct ExportRequest {
     pub options: ExportOptions,
     /// The result's columns, as its first page has them.
     pub columns: Vec<ResultColumn>,
+    /// The result columns the file holds, in order: the grid's shown
+    /// columns in display order. `None` writes every column in the
+    /// result's order.
+    pub shown: Option<Vec<usize>>,
     pub sql: SqlTarget,
     /// The pages the tab holds, from the first row of the result, in order.
     pub pages: Vec<Arc<ResultData>>,
@@ -202,13 +206,17 @@ async fn write(
         target,
         options,
         columns,
+        shown,
         sql,
         pages,
         read,
     } = request;
     let created = {
         let columns = columns.clone();
-        on_disk(move || ExportFile::create(&target, &options, &columns, &sql)).await
+        on_disk(move || {
+            ExportFile::create_shown(&target, &options, &columns, shown.as_deref(), &sql)
+        })
+        .await
     };
     let file = match created {
         Ok(file) => file,

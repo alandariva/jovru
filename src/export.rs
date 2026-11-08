@@ -478,7 +478,9 @@ impl Sheet {
         })
     }
 
-    fn rows(&mut self, data: &ResultData) -> DriverResult<()> {
+    /// Writes the rows of `data`, the cells of the `shown` result columns
+    /// in that order, or every cell without them.
+    fn rows(&mut self, data: &ResultData, shown: Option<&[usize]>) -> DriverResult<()> {
         if self.next_row + data.row_count() as u64 > XLSX_MAX_ROWS {
             return Err(DriverError::validation(tr!(
                 "An Excel sheet holds at most 1,048,576 rows. Export as CSV or JSON instead."
@@ -488,7 +490,11 @@ impl Sheet {
         for row in 0..data.row_count() {
             // Checked above against Excel's row count, far below u32::MAX.
             let at = u32::try_from(self.next_row).map_err(|_| too_many_rows())?;
-            for (column, value) in data.row(row).enumerate() {
+            let cells: Box<dyn Iterator<Item = Option<&str>>> = match shown {
+                Some(shown) => Box::new(shown.iter().map(|column| data.value(row, *column))),
+                None => Box::new(data.row(row)),
+            };
+            for (column, value) in cells.enumerate() {
                 let Some(value) = value else {
                     // NULL leaves the cell empty.
                     continue;
@@ -600,6 +606,8 @@ pub struct ExportFile {
     temp: PathBuf,
     /// `None` once finished, or while dropping.
     output: Option<Output>,
+    /// The result columns written, in order; `None` writes every one.
+    shown: Option<Vec<usize>>,
     rows: u64,
     bytes: u64,
 }
@@ -626,6 +634,54 @@ impl ExportFile {
         columns: &[ResultColumn],
         sql: &SqlTarget,
     ) -> DriverResult<Self> {
+        Self::create_shown(target, options, columns, None, sql)
+    }
+
+    /// [`ExportFile::create`] for the result columns `shown`, in that order
+    /// (the grid's visible columns in display order); `None` writes every
+    /// column in the result's order. `columns` and `sql.columns` are the
+    /// result's; the file names only the shown ones.
+    pub fn create_shown(
+        target: &Path,
+        options: &ExportOptions,
+        columns: &[ResultColumn],
+        shown: Option<&[usize]>,
+        sql: &SqlTarget,
+    ) -> DriverResult<Self> {
+        let shown: Option<Vec<usize>> = shown
+            .map(|shown| {
+                shown
+                    .iter()
+                    .copied()
+                    .filter(|column| *column < columns.len())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|shown| !shown.iter().copied().eq(0..columns.len()));
+        let projected: Option<(Vec<ResultColumn>, SqlTarget)> = shown.as_ref().map(|shown| {
+            let columns: Vec<ResultColumn> = shown
+                .iter()
+                .map(|column| columns[*column].clone())
+                .collect();
+            let sql = SqlTarget {
+                dialect: sql.dialect,
+                table: sql.table.clone(),
+                columns: shown
+                    .iter()
+                    .zip(&columns)
+                    .map(|(at, column)| {
+                        sql.columns
+                            .get(*at)
+                            .cloned()
+                            .unwrap_or_else(|| column.name.clone())
+                    })
+                    .collect(),
+            };
+            (columns, sql)
+        });
+        let (columns, sql) = match &projected {
+            Some((columns, sql)) => (columns.as_slice(), sql),
+            None => (columns, sql),
+        };
         let name = target
             .file_name()
             .ok_or_else(|| DriverError::validation(tr!("Choose a file to export to.")))?;
@@ -644,6 +700,7 @@ impl ExportFile {
             target: target.to_path_buf(),
             temp,
             output: None,
+            shown,
             rows: 0,
             bytes: 0,
         };
@@ -682,14 +739,19 @@ impl ExportFile {
                 buffer,
             }) => {
                 for row in 0..data.row_count() {
-                    encoder.row(data.row(row), buffer);
+                    match &self.shown {
+                        Some(shown) => {
+                            encoder.row(shown.iter().map(|column| data.value(row, *column)), buffer)
+                        }
+                        None => encoder.row(data.row(row), buffer),
+                    }
                     if buffer.len() >= FLUSH_BYTES {
                         self.bytes += write_out(file, buffer)?;
                     }
                 }
                 self.bytes += write_out(file, buffer)?;
             }
-            Some(Output::Xlsx(sheet)) => sheet.rows(data)?,
+            Some(Output::Xlsx(sheet)) => sheet.rows(data, self.shown.as_deref())?,
             None => return Err(finished()),
         }
         self.rows += data.row_count() as u64;

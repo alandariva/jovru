@@ -185,7 +185,10 @@ actions!(
         /// without one, a tab that asks for a connection.
         NewTab,
         /// Ctrl+,: opens Preferences.
-        ShowPreferences
+        ShowPreferences,
+        /// Shift+F10 in a result grid: its menu on the focused header's
+        /// column, or the focused cell's, to hide, freeze or move it.
+        ResultGridMenu
     ]
 );
 
@@ -3772,6 +3775,7 @@ pub fn run() {
                 ToggleExplorerFilter,
                 Some(quick_search::EXPLORER_CONTEXT),
             ),
+            KeyBinding::new("shift-f10", ResultGridMenu, Some(result_grid::GRID_CONTEXT)),
         ]);
         // The system's theme until the preference is read.
         theme::apply(jykre::theme::ThemeChoice::System, None, cx);
