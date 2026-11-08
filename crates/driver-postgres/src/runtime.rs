@@ -84,9 +84,56 @@ async fn bounded<T>(
     timeout: Option<Duration>,
     work: impl Future<Output = DriverResult<T>>,
 ) -> DriverResult<T> {
-    tokio::select! { biased;
-    _ = cancel.cancelled() => Err(DriverError::cancelled()),
-    result = async { match timeout { Some(limit) => tokio::time::timeout(limit, work).await.map_err(|_| DriverError::new(ErrorCode::Timeout,"Database operation timed out"))?, None => work.await } } => result }
+    Limit::new(cancel, timeout).bound(work).await
+}
+fn timed_out() -> DriverError {
+    DriverError::new(ErrorCode::Timeout, "Database operation timed out")
+}
+/// When a statement must stop: when it is cancelled, or when its time is up.
+struct Limit<'a> {
+    cancel: &'a CancellationToken,
+    deadline: Option<tokio::time::Instant>,
+}
+impl<'a> Limit<'a> {
+    fn new(cancel: &'a CancellationToken, timeout: Option<Duration>) -> Self {
+        Self {
+            cancel,
+            deadline: timeout.map(|limit| tokio::time::Instant::now() + limit),
+        }
+    }
+
+    /// Drives `work` until it ends, or until the limit comes while it waits.
+    async fn bound<T>(&self, work: impl Future<Output = DriverResult<T>>) -> DriverResult<T> {
+        tokio::select! { biased;
+            _ = self.cancel.cancelled() => Err(DriverError::cancelled()),
+            result = async {
+                match self.deadline {
+                    Some(deadline) => tokio::time::timeout_at(deadline, work)
+                        .await
+                        .map_err(|_| timed_out())?,
+                    None => work.await,
+                }
+            } => result,
+        }
+    }
+
+    /// The error to stop with, when the statement must stop now. While a
+    /// result arrives faster than it is read, SQLx's reads never wait, so the
+    /// session's task keeps its thread: [`Limit::bound`] is not polled again
+    /// and no worker turns Tokio's timer. The token and the clock are read
+    /// here instead.
+    fn passed(&self) -> Option<DriverError> {
+        if self.cancel.is_cancelled() {
+            Some(DriverError::cancelled())
+        } else if self
+            .deadline
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+        {
+            Some(timed_out())
+        } else {
+            None
+        }
+    }
 }
 async fn connect(
     input: &ResolvedConnection,
@@ -821,18 +868,17 @@ impl Server {
         let mut ahead = None;
         let mut affected = None;
         loop {
-            let page = bounded(
-                &cancel,
-                options.timeout,
-                read_page(
+            let limit = Limit::new(&cancel, options.timeout);
+            let page = limit
+                .bound(read_page(
                     &mut stream,
                     &mut ahead,
                     &mut affected,
                     options.max_rows,
                     &events,
-                ),
-            )
-            .await;
+                    &limit,
+                ))
+                .await;
             match page {
                 Ok(PageEnd::Finished) => {
                     drop(stream);
@@ -942,12 +988,15 @@ impl Server {
 
 /// Sends up to `max_rows` rows, starting with the one read ahead last time,
 /// and reads one row ahead to tell a full page from the end of the result.
+/// `limit` is checked before every read, so a statement stops at its next
+/// row even when its reads never wait.
 async fn read_page<S>(
     stream: &mut S,
     ahead: &mut Option<Row>,
     affected: &mut Option<u64>,
     max_rows: u32,
     events: &mpsc::Sender<Event>,
+    limit: &Limit<'_>,
 ) -> DriverResult<PageEnd>
 where
     S: futures_util::Stream<
@@ -964,7 +1013,13 @@ where
         }
         count = 1;
     }
-    while let Some(item) = stream.try_next().await.map_err(map_error)? {
+    loop {
+        if let Some(error) = limit.passed() {
+            return Err(error);
+        }
+        let Some(item) = stream.try_next().await.map_err(map_error)? else {
+            break;
+        };
         match item {
             sqlx::Either::Left(result) => *affected = Some(result.rows_affected()),
             sqlx::Either::Right(row) => {
@@ -1534,8 +1589,17 @@ ORDER BY n.nspname, c.relname, k.conname"#;
 
 #[cfg(test)]
 mod tests {
-    use super::{SnapshotEffect, parameter_reference, parameter_settings, snapshot_effect};
-    use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+    use super::{
+        EVENT_BUFFER, Limit, SnapshotEffect, parameter_reference, parameter_settings, read_page,
+        snapshot_effect,
+    };
+    use futures_util::Stream as _;
+    use jykre_core::{
+        CancellationToken, ErrorCode, ExecutionOptions, ParameterKind, QueryParameter, QueryRequest,
+    };
+    use sqlx::postgres::{PgQueryResult, PgRow};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
 
     fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
         QueryParameter {
@@ -1618,5 +1682,63 @@ mod tests {
         ] {
             assert_eq!(snapshot_effect(sql), SnapshotEffect::Takes, "{sql}");
         }
+    }
+
+    /// While a result arrives faster than it is read, SQLx's reads never
+    /// wait, so the session's task keeps its thread: a cancellation's wake-up
+    /// is not seen, and no worker turns Tokio's timer. A stream that is
+    /// always ready does the same here, and blocking the runtime's only
+    /// thread lets the deadline pass without the timer.
+    #[tokio::test]
+    async fn a_page_that_never_waits_still_stops_at_its_limit() {
+        let results = |cancel_at_ten: Option<CancellationToken>| {
+            futures_util::stream::iter((0..10_000).map(move |index| {
+                if index == 10
+                    && let Some(cancel) = &cancel_at_ten
+                {
+                    cancel.cancel();
+                }
+                Ok::<_, sqlx::Error>(sqlx::Either::<_, PgRow>::Left(PgQueryResult::default()))
+            }))
+        };
+        let (events, _receiver) = mpsc::channel(EVENT_BUFFER);
+
+        let cancel = CancellationToken::new();
+        let limit = Limit::new(&cancel, None);
+        let mut stream = results(Some(cancel.clone()));
+        let page = limit
+            .bound(read_page(
+                &mut stream,
+                &mut None,
+                &mut None,
+                1_000,
+                &events,
+                &limit,
+            ))
+            .await;
+        assert_eq!(
+            page.err().map(|error| error.code),
+            Some(ErrorCode::Cancelled)
+        );
+        assert!(
+            stream.size_hint().0 > 9_900,
+            "read on after the cancellation"
+        );
+
+        let cancel = CancellationToken::new();
+        let limit = Limit::new(&cancel, Some(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(20));
+        let mut stream = results(None);
+        let page = limit
+            .bound(read_page(
+                &mut stream,
+                &mut None,
+                &mut None,
+                1_000,
+                &events,
+                &limit,
+            ))
+            .await;
+        assert_eq!(page.err().map(|error| error.code), Some(ErrorCode::Timeout));
     }
 }
