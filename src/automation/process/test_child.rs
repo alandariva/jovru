@@ -34,19 +34,19 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 /// What the child does.
-pub(super) const MODE: &str = "AUTOMATION_TEST_CHILD";
+pub(crate) const MODE: &str = "AUTOMATION_TEST_CHILD";
 /// `127.0.0.1:<port>` of the test's listener, for `hold`.
-pub(super) const PEER: &str = "AUTOMATION_TEST_PEER";
+pub(crate) const PEER: &str = "AUTOMATION_TEST_PEER";
 /// `complete`'s outputs, as a JSON object.
-pub(super) const OUTPUTS: &str = "AUTOMATION_TEST_OUTPUTS";
+pub(crate) const OUTPUTS: &str = "AUTOMATION_TEST_OUTPUTS";
 /// The exit code after `complete`.
-pub(super) const EXIT: &str = "AUTOMATION_TEST_EXIT";
+pub(crate) const EXIT: &str = "AUTOMATION_TEST_EXIT";
 
 /// The libtest name of [`automation_test_child`].
 const NAME: &str = "automation::process::test_child::automation_test_child";
 
 /// What starts this binary on the helper alone.
-pub(super) fn arguments() -> Vec<String> {
+pub(crate) fn arguments() -> Vec<String> {
     [
         NAME,
         "--exact",
@@ -60,7 +60,7 @@ pub(super) fn arguments() -> Vec<String> {
 }
 
 /// This test binary, as an absolute path.
-pub(super) fn program() -> String {
+pub(crate) fn program() -> String {
     std::env::current_exe()
         .expect("the test binary has a path")
         .to_string_lossy()
@@ -69,7 +69,7 @@ pub(super) fn program() -> String {
 
 /// A job that runs this binary in `mode`, with more constants in its
 /// environment.
-pub(super) fn body(mode: &str, protocol: Protocol, set: &[(&str, &str)]) -> ProcessBody {
+pub(crate) fn body(mode: &str, protocol: Protocol, set: &[(&str, &str)]) -> ProcessBody {
     ProcessBody {
         program: program(),
         arguments: arguments(),

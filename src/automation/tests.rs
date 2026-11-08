@@ -1531,3 +1531,279 @@ async fn a_terminal_state_that_cannot_be_written_is_never_replayed() {
     );
     assert_eq!(driver.opened.load(Ordering::SeqCst), 1);
 }
+
+// ---------------------------------------------------------------------------
+// External programs through the engine (sections 9.1, 9.2, CA-07, CA-09).
+
+use super::definition::{OutputSpec, Protocol};
+use super::process::test_child;
+
+/// A program job that runs this test binary in `mode`.
+/// Its entrypoint is a small file: hashing the test binary itself would
+/// take most of a test's time.
+fn program_job(mode: &str, protocol: Protocol, set: &[(&str, &str)]) -> JobDefinition {
+    let mut job = JobDefinition::new_process("program");
+    let mut body = test_child::body(mode, protocol, set);
+    body.entrypoint = Some(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("Cargo.toml")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    job.body = JobBody::Process(body);
+    job
+}
+
+fn program_body(job: &mut JobDefinition) -> &mut definition::ProcessBody {
+    match &mut job.body {
+        JobBody::Process(body) => body,
+        _ => unreachable!("a program"),
+    }
+}
+
+fn program_run(job: JobDefinition, values: &[(&str, &str)]) -> JobRequest {
+    JobRequest {
+        definition: job,
+        stored: None,
+        values: values
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect(),
+        connection: None,
+    }
+}
+
+fn fast_engine_timings() -> process::Timings {
+    process::Timings {
+        grace: Duration::from_millis(500),
+        drain: Duration::from_millis(500),
+        reap: Duration::from_secs(2),
+    }
+}
+
+async fn program_engine() -> Engine {
+    let engine = Engine::with_limits(
+        Handle::current(),
+        data_dir(),
+        Limits::default(),
+        crate::result::DEFAULT_MEMORY_CEILING,
+        fast_engine_timings(),
+    );
+    assert_eq!(engine.started().await, Availability::Ready);
+    engine
+}
+
+#[tokio::test]
+async fn a_program_run_is_recorded_with_its_exit_and_logs() {
+    let engine = program_engine().await;
+    let mut handle = engine
+        .submit(program_run(
+            program_job("print:hello-out", Protocol::None, &[]),
+            &[],
+        ))
+        .unwrap();
+    let outcome = finished(&mut handle).await;
+    assert_eq!(outcome.state, RunState::Succeeded, "{outcome:?}");
+    assert!(!outcome.effect_unknown);
+    let program = outcome.program.as_ref().unwrap();
+    assert_eq!(program.exit_code, Some(0));
+    assert!(program.program_fingerprint.is_some());
+    let recorded = record(&engine, handle.id).await;
+    assert_eq!(
+        (recorded.kind, recorded.state, recorded.exit_code),
+        (JobKind::Process, RunState::Succeeded, Some(0))
+    );
+    assert!(recorded.log_bytes_stdout.unwrap_or(0) >= "hello-out".len() as i64);
+    #[cfg(unix)]
+    assert!(recorded.process_group.is_some(), "recorded for recovery");
+    let log = logs::read_log(engine.data_dir(), handle.id, logs::Stream::Stdout)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(log.text.contains("hello-out"));
+    // Delete logs removes the folder and the sizes.
+    engine.delete_logs(handle.id).await;
+    assert!(
+        logs::read_log(engine.data_dir(), handle.id, logs::Stream::Stdout)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(record(&engine, handle.id).await.log_bytes_stdout, None);
+}
+
+#[tokio::test]
+async fn a_nonzero_exit_fails_with_exit_and_an_unknown_effect() {
+    let engine = program_engine().await;
+    let mut handle = engine
+        .submit(program_run(program_job("exit:3", Protocol::None, &[]), &[]))
+        .unwrap();
+    let outcome = finished(&mut handle).await;
+    assert_eq!(
+        (outcome.state, outcome.cause, outcome.effect_unknown),
+        (RunState::Failed, Some(Cause::Exit), true)
+    );
+    let recorded = record(&engine, handle.id).await;
+    assert_eq!(recorded.exit_code, Some(3));
+}
+
+#[tokio::test]
+async fn a_program_that_cannot_start_fails_without_an_unknown_effect() {
+    let engine = program_engine().await;
+    let mut job = program_job("exit:0", Protocol::None, &[]);
+    program_body(&mut job).program = "jykre-no-such-program-4f1".into();
+    let mut handle = engine.submit(program_run(job, &[])).unwrap();
+    let outcome = finished(&mut handle).await;
+    assert_eq!(
+        (outcome.state, outcome.cause, outcome.effect_unknown),
+        (RunState::Failed, Some(Cause::NotFound), false)
+    );
+}
+
+#[tokio::test]
+async fn stop_on_a_program_cancels_it_with_an_unknown_effect() {
+    let engine = program_engine().await;
+    let mut handle = engine
+        .submit(program_run(program_job("sleep", Protocol::None, &[]), &[]))
+        .unwrap();
+    eventually(Duration::from_secs(10), || {
+        matches!(
+            handle.status(),
+            RunStatus::Active(Progress {
+                phase: Phase::Running,
+                ..
+            })
+        )
+    })
+    .await;
+    assert!(engine.stop_run(handle.id));
+    let outcome = finished(&mut handle).await;
+    assert_eq!(
+        (outcome.state, outcome.effect_unknown),
+        (RunState::Cancelled, true)
+    );
+    assert!(outcome.program.as_ref().unwrap().stop.is_some());
+}
+
+fn echo_job(persist: bool) -> JobDefinition {
+    let mut job = program_job("jjp-echo", Protocol::Jjp1, &[]);
+    let body = program_body(&mut job);
+    body.inputs = vec![ParameterSpec::new("address")];
+    body.outputs = vec![OutputSpec {
+        name: "address".into(),
+        kind: ParameterKind::Text,
+    }];
+    body.persist_outputs = persist;
+    job
+}
+
+#[tokio::test]
+async fn a_jjp_program_gets_its_inputs_and_returns_its_outputs() {
+    let engine = program_engine().await;
+    let mut handle = engine
+        .submit(program_run(echo_job(true), &[("address", "out-9b2c")]))
+        .unwrap();
+    let outcome = finished(&mut handle).await;
+    assert_eq!(outcome.state, RunState::Succeeded, "{outcome:?}");
+    assert_eq!(
+        outcome.output_values().unwrap()[0].value.as_deref(),
+        Some("out-9b2c")
+    );
+    assert_eq!(outcome.outputs_stored, Some(true));
+    // A required input left empty is refused before anything starts.
+    assert!(matches!(
+        engine.submit(program_run(echo_job(false), &[])),
+        Err(Refusal::Inputs(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_sql_output_feeds_an_external_program_in_a_chain() {
+    let file = SqliteFile::new(&chain_file_setup()).await;
+    let engine = program_engine().await;
+    engine.set_connection_revisions(HashMap::from([(file.id, 1)]));
+    let mut lookup = file.job("SELECT k, address FROM d WHERE k = :key");
+    lookup.name = "lookup".into();
+    body(&mut lookup).parameters = vec![ParameterSpec::new("key")];
+    with_outputs(&mut lookup, RowRule::ExactlyOne);
+    let (lookup_id, lookup_version) = saved(&engine, &lookup).await;
+    let (echo_id, echo_version) = saved(&engine, &echo_job(false)).await;
+    let mut first = ChainStep::new("lookup", lookup_id, lookup_version);
+    first
+        .inputs
+        .push(("key".into(), Source::Input("key".into())));
+    let mut second = ChainStep::new("export", echo_id, echo_version);
+    second.inputs.push((
+        "address".into(),
+        Source::Step {
+            step: "lookup".into(),
+            output: "address".into(),
+        },
+    ));
+    let chain = chain_of(vec![first, second], vec![ParameterSpec::new("key")]);
+    let outcome = chain_run(&engine, &file, &chain, "a").await;
+    assert_eq!(outcome.state, RunState::Succeeded, "{outcome:?}");
+    assert_eq!(
+        outcome.outputs().unwrap()[0].value.as_deref(),
+        Some("addr-1"),
+        "the program received the SQL output"
+    );
+    let steps = engine
+        .repository()
+        .unwrap()
+        .chain_steps(outcome.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        steps.iter().map(|step| step.kind).collect::<Vec<_>>(),
+        vec![JobKind::Sql, JobKind::Process]
+    );
+}
+
+#[tokio::test]
+async fn a_changed_program_file_stops_its_chain_step_until_published_again() {
+    let file = SqliteFile::new(&chain_file_setup()).await;
+    let engine = program_engine().await;
+    engine.set_connection_revisions(HashMap::from([(file.id, 1)]));
+    let entrypoint = std::env::temp_dir().join(format!("jykre-entry-{}.txt", RunId::new()));
+    std::fs::write(&entrypoint, b"version one").unwrap();
+    let mut program = program_job("exit:0", Protocol::None, &[]);
+    program_body(&mut program).entrypoint = Some(entrypoint.to_string_lossy().into_owned());
+    let (program_id, program_version) = saved(&engine, &program).await;
+    let versions = engine
+        .repository()
+        .unwrap()
+        .versions(program_id)
+        .await
+        .unwrap();
+    let pinned = JobDefinition::from_json(&versions[0].definition_json).unwrap();
+    let JobBody::Process(pinned) = pinned.body else {
+        unreachable!("a program");
+    };
+    assert!(pinned.pinned.unwrap().sha256.starts_with("sha256:"));
+    let mut lookup = file.job("SELECT k, address FROM d WHERE k = :key");
+    body(&mut lookup).parameters = vec![ParameterSpec::new("key")];
+    let (lookup_id, lookup_version) = saved(&engine, &lookup).await;
+    let mut first = ChainStep::new("lookup", lookup_id, lookup_version);
+    first
+        .inputs
+        .push(("key".into(), Source::Input("key".into())));
+    let chain = chain_of(
+        vec![first, ChainStep::new("run", program_id, program_version)],
+        vec![ParameterSpec::new("key")],
+    );
+    assert_eq!(
+        chain_run(&engine, &file, &chain, "a").await.state,
+        RunState::Succeeded
+    );
+    std::fs::write(&entrypoint, b"version two").unwrap();
+    let outcome = chain_run(&engine, &file, &chain, "a").await;
+    assert_eq!(
+        (outcome.state, outcome.cause, outcome.failed_step.as_deref()),
+        (RunState::Failed, Some(Cause::PlanChanged), Some("run"))
+    );
+    // The job on its own runs its current definition.
+    let mut handle = engine.submit(program_run(program, &[])).unwrap();
+    assert_eq!(finished(&mut handle).await.state, RunState::Succeeded);
+    let _ = std::fs::remove_file(entrypoint);
+}

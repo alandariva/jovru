@@ -26,7 +26,7 @@ mod prepare;
 mod recovery;
 mod run;
 #[cfg(test)]
-mod test_child;
+pub(crate) mod test_child;
 #[cfg(test)]
 mod tests;
 
