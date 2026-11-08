@@ -6,9 +6,9 @@
 Q-01…Q-32 ([section 12](#12-decisions-required-from-the-maintainer)),
 ADR-0034 to ADR-0038 accepted, `process-wrap` approved (Q-11), and the
 phase 3, 4 and 5 revisions (sections 9.1–9.3) approved
-**Implementation:** In progress. Phases 1, 3, 4 and 5 are implemented in `src/automation/`,
-`crates/storage` and `crates/core` (A2–A5 of [0.3.0](releases/0.3.0.md)); phase 2, the
-interface, is being written (A6). Windows is not validated yet
+**Implementation:** Implemented for 0.3.0 on Linux. Phases 1, 3, 4 and 5 are in `src/automation/`,
+`crates/storage` and `crates/core` (A2–A5 of [0.3.0](releases/0.3.0.md)), and phase 2, the
+interface, in `src/app/automation/` (A6). Windows is not validated yet
 ([checklist](releases/0.3.0-windows-checklist.md)). Where the code differs from this text, see
 [Implementation notes (0.3.0)](#implementation-notes-030).
 **Audience:** product, UX, architecture, Rust engineering and testing
