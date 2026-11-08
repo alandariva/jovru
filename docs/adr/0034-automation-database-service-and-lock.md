@@ -1,6 +1,6 @@
 # ADR-0034: Automation in `automation.db`, run by an application-root service under a data-folder lock
 
-- **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
+- **Status:** Accepted (by the maintainer on 2026-11-08; implemented in 0.3.0)
 - **Date:** 2026-11-08
 - **Authors:** Alan de Oliveira (decisions Q-02, Q-04, Q-05, Q-06, Q-07), Claude (draft)
 

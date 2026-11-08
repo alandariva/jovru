@@ -1540,3 +1540,82 @@ async fn deleted_values_are_overwritten_in_the_file() {
         .unwrap();
     assert_eq!(on, 1);
 }
+
+#[tokio::test]
+async fn a_read_only_open_never_creates_migrates_or_writes() {
+    let dir = dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    // No file: nothing is created.
+    assert!(
+        AutomationRepository::open_read_only(&dir)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!dir.join(AUTOMATION_FILE).exists());
+    // A file at an older schema is left as it is.
+    let pool = open_pool_with(&dir.join(AUTOMATION_FILE), true, true)
+        .await
+        .unwrap();
+    migrate(&pool, 2).await.unwrap();
+    pool.close().await;
+    assert!(
+        AutomationRepository::open_read_only(&dir)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let pool = open_pool_with(&dir.join(AUTOMATION_FILE), true, true)
+        .await
+        .unwrap();
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(version, 2);
+    pool.close().await;
+    // At this version's schema it reads, and refuses writes.
+    let repo = ready(&dir).await;
+    repo.insert_job(JobId::new(), JobKind::Sql, "{}", T0)
+        .await
+        .unwrap();
+    let Some(Opened::Ready(reader)) = AutomationRepository::open_read_only(&dir).await.unwrap()
+    else {
+        unreachable!("a current file opens");
+    };
+    assert_eq!(reader.jobs().await.unwrap().len(), 1);
+    assert!(
+        reader
+            .insert_job(JobId::new(), JobKind::Sql, "{}", T0)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn a_version_number_that_runs_still_name_is_never_given_again() {
+    let dir = dir();
+    let repo = ready(&dir).await;
+    let id = JobId::new();
+    repo.insert_job(id, JobKind::Sql, &sql_def("job"), T0)
+        .await
+        .unwrap();
+    repo.publish(id, &sql_def("v1"), T0).await.unwrap();
+    repo.publish(id, &sql_def("v2"), T0).await.unwrap();
+    // A chain ran version 2, which is then deleted.
+    let chain = chain_run(None, T0);
+    repo.admit_chain_run(&chain).await.unwrap();
+    repo.admit_run(&step_of(process_run(Some(id), T0), chain.id, 0, 2))
+        .await
+        .unwrap();
+    repo.delete_version(id, 2).await.unwrap().unwrap();
+    let next = repo.publish(id, &sql_def("v3"), T0).await.unwrap();
+    assert_eq!(next.version, 3);
+    // Debug never shows a stored value.
+    let value = OutputValue {
+        name: "n".into(),
+        kind: jykre_core::ParameterKind::Text,
+        value: Some("secret-value-1".into()),
+    };
+    assert!(!format!("{value:?}").contains("secret-value-1"));
+}

@@ -13,6 +13,7 @@ use jykre_core::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -108,6 +109,18 @@ pub(super) struct Execution {
     pub transaction_rolled_back: bool,
 }
 
+/// Where an execution reports while it runs: its progress, and the moment
+/// its statement is confirmed complete.
+pub(super) struct Report<'a> {
+    pub status: &'a watch::Sender<RunStatus>,
+    pub confirmed: &'a AtomicBool,
+}
+
+/// `confirmed` is set the moment the driver reports the end of the
+/// statement's result, before the transaction check and the close, so the
+/// run's owner knows a write finished even if Stop comes while the session
+/// closes.
+///
 /// Runs `prepared` on a new session opened in its context, the same way a
 /// report panel's session opens ([`Driver::session_connection`]), and
 /// always closes it. `cancel` stops the work (Stop or the deadline, as the
@@ -128,8 +141,9 @@ pub(super) async fn execute(
     memory_ceiling: usize,
     cancel: CancellationToken,
     deadline: Instant,
-    status: &watch::Sender<RunStatus>,
+    report: Report<'_>,
 ) -> Execution {
+    let Report { status, confirmed } = report;
     let mut execution = Execution::default();
     let request = &prepared.request;
     let input = match driver.session_connection(&input, &request.options.context) {
@@ -163,6 +177,7 @@ pub(super) async fn execute(
     match session.execute(&request, &mut sink, cancel.clone()).await {
         Ok(outcome) if prepared.reads_only => {
             execution.confirmed = true;
+            confirmed.store(true, Ordering::SeqCst);
             execution.rows_affected = outcome.rows_affected;
             // The rest stays unread; closing the session discards it.
             execution.truncated = outcome.has_more || outcome.truncated;
@@ -182,6 +197,8 @@ pub(super) async fn execute(
             match completed.last {
                 Ok(last) => {
                     execution.confirmed = true;
+                    confirmed.store(true, Ordering::SeqCst);
+                    confirmed.store(true, Ordering::SeqCst);
                     execution.rows_affected = completed.rows_affected;
                     execution.truncated = last.truncated;
                 }

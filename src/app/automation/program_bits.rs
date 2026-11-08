@@ -144,7 +144,11 @@ pub fn start_error(program: &ProgramOutcome) -> Option<String> {
             process::StartError::Listener => {
                 tr!("The jjp/1 listener could not take the run.")
             }
-            process::StartError::Other => tr!("The system refused to start the program."),
+            process::StartError::Stopped => {
+                tr!("Stopped before the program started: nothing ran.")
+            }
+            // `Other`, and reasons the executor may add later.
+            _ => tr!("The system refused to start the program."),
         }
         .to_owned(),
     )

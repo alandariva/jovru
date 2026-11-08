@@ -19,7 +19,7 @@ use jykre_core::{
 use sha2::{Digest, Sha256};
 use sqlx::{
     ConnectOptions, Row, SqliteConnection, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteRow},
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
 };
 use std::{
     collections::HashMap,
@@ -532,11 +532,23 @@ pub struct NewRun {
 }
 
 /// One declared output to store (ADR-0035). `value` is `None` for NULL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` never shows the value.
+#[derive(Clone, PartialEq, Eq)]
 pub struct OutputValue {
     pub name: String,
     pub kind: ParameterKind,
     pub value: Option<String>,
+}
+
+impl std::fmt::Debug for OutputValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutputValue")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("null", &self.value.is_none())
+            .field("bytes", &self.value.as_deref().map_or(0, str::len))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -949,6 +961,44 @@ impl AutomationRepository {
         })
     }
 
+    /// Opens `dir/automation.db` for reading only, for an instance that does
+    /// not hold the [`AutomationLock`]: it never creates, migrates or sets
+    /// aside the file, which belongs to the lock holder (ADR-0034, decision
+    /// 4). `Ok(None)` when there is no file yet, or it is not yet at this
+    /// version's schema (the holder migrates it); `Newer` when a newer
+    /// version wrote it.
+    pub async fn open_read_only(dir: &Path) -> DriverResult<Option<Opened>> {
+        let path = dir.join(AUTOMATION_FILE);
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(None);
+        }
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .read_only(true)
+                    .create_if_missing(false)
+                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .disable_statement_logging(),
+            )
+            .await
+            .map_err(sql_error)?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .map_err(sql_error)?;
+        if version > LATEST_VERSION {
+            pool.close().await;
+            return Ok(Some(Opened::Newer));
+        }
+        if version < LATEST_VERSION {
+            pool.close().await;
+            return Ok(None);
+        }
+        Ok(Some(Opened::Ready(Self { pool })))
+    }
+
     /// A write transaction that takes the write lock at once, so a read
     /// followed by a write cannot fail on a stale snapshot.
     async fn write(&self) -> DriverResult<sqlx::Transaction<'static, sqlx::Sqlite>> {
@@ -1113,8 +1163,12 @@ impl AutomationRepository {
             }
             Some(_) => {}
         }
+        // A number is never given twice while anything still names it: past
+        // the versions kept and the step runs that ran a deleted one, so its
+        // history and the first-run warning (Q-10) never mix two definitions.
         let version: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM job_versions WHERE job_id=?",
+            "SELECT MAX(COALESCE((SELECT MAX(version) FROM job_versions WHERE job_id=?1), 0), \
+             COALESCE((SELECT MAX(job_version) FROM runs WHERE job_id=?1), 0)) + 1",
         )
         .bind(job.to_string())
         .fetch_one(&mut *tx)

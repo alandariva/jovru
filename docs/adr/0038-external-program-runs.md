@@ -1,6 +1,6 @@
 # ADR-0038: External program runs in `automation.db`
 
-- **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
+- **Status:** Accepted (by the maintainer on 2026-11-08; implemented in 0.3.0)
 - **Date:** 2026-11-08
 - **Authors:** Alan de Oliveira (decisions Q-15…Q-19, Q-25…Q-29), Claude (draft)
 

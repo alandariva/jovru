@@ -43,9 +43,15 @@ pub(super) async fn run(
     status.send_replace(RunStatus::Active(Progress::new(Phase::Starting)));
     // The files as they are now; a published version's changed file is
     // refused before admission (Q-16).
-    let checked = {
+    let checking = {
         let body = body.clone();
-        tokio::task::spawn_blocking(move || process::prepare(&body, std::env::vars_os())).await
+        tokio::task::spawn_blocking(move || process::prepare(&body, std::env::vars_os()))
+    };
+    // Hashing a large entrypoint takes a while; Stop meanwhile means it
+    // never runs and leaves no history.
+    let checked = tokio::select! { biased;
+        () = stop.cancelled() => return Ended::Refused(Refusal::Withdrawn),
+        checked = checking => checked,
     };
     let prepared = match checked {
         Ok(Ok(prepared)) => prepared,

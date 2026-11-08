@@ -2,7 +2,7 @@
 
 **Date:** November 7, 2026
 **Approval:** Proposed
-**Implementation:** Complete on 2026-11-08 ([Findings](#8-findings)); Databricks not run, as planned
+**Implementation:** Complete on 2026-11-08 ([Findings](#8-findings)); Databricks not run, as planned. Phase 1 was then built on it ([What became of it](#9-what-became-of-it))
 **Specification:** [Automation engine specification](automation-engine-specification.md), version 1.1
 
 ## 1. Purpose
@@ -232,3 +232,44 @@ Every hypothesis is confirmed, none refuted (section 7). The proof of
 concept is the base of phase 1, with the changes of 8.6 already folded into
 the specification, version 1.2. Left outside it: Databricks (no profile in
 the gate) and the MySQL `CALL` columns, a driver fix of its own.
+
+## 9. What became of it
+
+Phase 1 of the specification was built on this proof of concept, in the same
+`src/automation/` module (milestone A2 of [0.3.0](releases/0.3.0.md)); the
+rest of this document stays as the history of what was measured. The current
+description is [Architecture](../reference/architecture.md#run-a-job), the
+[specification](automation-engine-specification.md#implementation-notes-030)
+and the accepted ADRs.
+
+**Kept as it was proved:** the SQL Job (`SqlJob`, `executor::prepare`: one
+statement, markers bound as values and never put in the SQL); a session of
+its own per run, opened as a report panel's is and always closed; the
+completion rule (a `reads_only` statement stops at its limits, anything else
+is read to its end into a sink that counts and discards, section 5); one
+owner task per run with the first event observed deciding; Stop and the
+deadline as different causes; the in-memory result with its columns,
+duplicates, exact text and NULL; the live experiments (`tests/live.rs`,
+`mod automation`) and `examples/automation_drain.rs`.
+
+**Changed by phase 1:**
+
+- **History is durable.** The in-memory run list became `automation.db`
+  ([ADR-0034](../adr/0034-automation-database-service-and-lock.md)): a run is
+  inserted as `running` before anything is sent and its terminal state is
+  written before it is published.
+- **Recovery exists.** `Interrupted` is written for runs a closed application
+  left `running`, under the data-folder lock; no run is replayed.
+- **A queue replaced the immediate refusal.** Admission now waits: at most 2
+  active and 1 per connection, with 8 waiting (4 per connection) for up to
+  60 s, and a refusal only beyond that (Q-07, section 9.3.6 of the
+  specification).
+- **The engine is an application-root service**, started once, with the
+  coordinated quit (Q-05).
+- **The result stays out of the history.** Only counters and codes are
+  stored; declared outputs are stored only when a job opts in
+  ([ADR-0035](../adr/0035-persisted-declared-outputs.md)).
+
+Its other findings (the MySQL `CALL` columns, the SQLite writer wait, the
+late confirmation after Stop) were folded into the specification, version
+1.2, and the driver fix.

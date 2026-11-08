@@ -154,6 +154,15 @@ async fn execute(request: ProgramRequest) -> ProgramReport {
         }
     }
 
+    // Stop before anything started: nothing runs (section 5.5).
+    if stop.is_cancelled() {
+        if let Some(session) = session {
+            session.finish(Duration::ZERO).await;
+        }
+        drop((stdout_log, stderr_log));
+        discard_logs(&data_dir, run).await;
+        return not_started(report, StartError::Stopped, started);
+    }
     let child = match spawn(&launch, &environment) {
         Ok(child) => child,
         Err(error) => {

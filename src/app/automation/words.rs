@@ -517,7 +517,7 @@ pub fn refusal(refusal: &Refusal) -> String {
             "It waited in the queue for 60 s without a free place, so it left the queue without running."
         )
         .to_owned(),
-        Refusal::Withdrawn => tr!("Stopped while it waited in the queue: it never ran.").to_owned(),
+        Refusal::Withdrawn => tr!("Stopped before it started (in the queue, or while its file was checked): it never ran.").to_owned(),
         Refusal::ShuttingDown => tr!("Jykre Studio is closing.").to_owned(),
         Refusal::History => tr!(
             "Its history row could not be written, so nothing was sent."

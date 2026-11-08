@@ -67,6 +67,9 @@ pub enum StartError {
     Listener,
     /// The system refused to start it for another reason.
     Other,
+    /// Stop or the deadline came before the program was started: nothing
+    /// ran.
+    Stopped,
 }
 
 impl StartError {

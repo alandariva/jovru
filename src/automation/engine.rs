@@ -257,6 +257,10 @@ pub(super) struct Inner {
     recovery: Mutex<Option<Recovery>>,
     registry: Mutex<Registry>,
     revisions: Mutex<HashMap<ConnectionId, i64>>,
+    /// One `open` at a time: a second **Try again** waits for the first.
+    opening: tokio::sync::Mutex<()>,
+    /// One shutdown at a time; the lock is released only after it.
+    closing: tokio::sync::Mutex<()>,
 }
 
 /// Who to tell when a queued run's place changes.
@@ -404,6 +408,8 @@ impl Engine {
                     chains: Vec::new(),
                 }),
                 revisions: Mutex::new(HashMap::new()),
+                opening: tokio::sync::Mutex::new(()),
+                closing: tokio::sync::Mutex::new(()),
             }),
         };
         // The background task holds the service weakly, so dropping every
@@ -414,7 +420,6 @@ impl Engine {
                 return;
             };
             Engine { inner }.open().await;
-            Engine::prune_loop(starting).await;
         }));
         engine
     }
@@ -483,6 +488,14 @@ impl Engine {
     }
 
     async fn open(&self) {
+        let _opening = self.inner.opening.lock().await;
+        if matches!(
+            self.availability(),
+            Availability::Ready | Availability::Off(_)
+        ) || self.inner.registry().shutting_down
+        {
+            return;
+        }
         let dir = self.inner.data_dir.clone();
         let acquired = {
             let dir = dir.clone();
@@ -504,6 +517,25 @@ impl Engine {
                 return;
             }
         };
+        if !lock_taken {
+            // The file belongs to the lock holder: read it as it is, never
+            // create, migrate or set it aside (ADR-0034, decision 4).
+            match AutomationRepository::open_read_only(&dir).await {
+                Ok(Some(Opened::Newer)) => {
+                    self.set_availability(Availability::Off(OffReason::Newer));
+                }
+                Ok(Some(Opened::Ready(repository) | Opened::Recreated(repository))) => {
+                    *lock(&self.inner.repository) = Some(repository);
+                    self.set_availability(Availability::ReadOnly);
+                }
+                Ok(None) | Err(_) => {
+                    *lock(&self.inner.repository) = None;
+                    self.set_availability(Availability::ReadOnly);
+                }
+            }
+            tracing::info!("automation is read-only: another instance holds its lock");
+            return;
+        }
         let opened = AutomationRepository::open(&dir).await;
         let (repository, recreated) = match opened {
             Ok(Opened::Ready(repository)) => (repository, false),
@@ -521,11 +553,6 @@ impl Engine {
             }
         };
         *lock(&self.inner.repository) = Some(repository.clone());
-        if !lock_taken {
-            tracing::info!("automation is read-only: another instance holds its lock");
-            self.set_availability(Availability::ReadOnly);
-            return;
-        }
         let mut recovery = Recovery {
             recreated,
             ..Recovery::default()
@@ -560,6 +587,14 @@ impl Engine {
         }
         *lock(&self.inner.recovery) = Some(recovery);
         self.set_availability(Availability::Ready);
+        // Pruning runs while this process holds the lock, however it got
+        // it (at start or through **Try again**).
+        let pruning = Arc::downgrade(&self.inner);
+        drop(
+            self.inner
+                .runtime
+                .spawn(async move { Engine::prune_loop(pruning).await }),
+        );
     }
 
     /// Ends the programs a previous session left running, each only while
@@ -653,7 +688,7 @@ impl Engine {
     // Jobs.
 
     fn writable(&self) -> Result<AutomationRepository, SaveError> {
-        if self.availability() != Availability::Ready {
+        if self.availability() != Availability::Ready || self.inner.registry().shutting_down {
             return Err(SaveError::Unavailable);
         }
         self.repository().ok_or(SaveError::Unavailable)
@@ -941,11 +976,14 @@ impl Engine {
                 })
             }
             Err(refusal) => {
-                let withdrawn = registry.admission.withdraw(number);
+                registry.admission.withdraw(number);
                 registry.waiters.remove(&number);
+                // Admitted in the same instant only if it holds a slot now;
+                // a queue emptied by the shutdown holds none.
+                let admitted = registry.admission.is_active(number);
                 self.inner.refresh_queue(&mut registry);
                 drop(registry);
-                if withdrawn {
+                if !admitted {
                     self.inner.changed();
                     return Err(refusal);
                 }
@@ -1251,6 +1289,9 @@ impl Engine {
     /// until each has closed its session or its program and written its
     /// terminal state (section 5.2).
     pub async fn shutdown(&self) {
+        // A second call waits for the first, so the lock is never released
+        // while runs are still stopping.
+        let _closing = self.inner.closing.lock().await;
         let tasks: Vec<JoinHandle<()>> = {
             let mut registry = self.inner.registry();
             registry.shutting_down = true;

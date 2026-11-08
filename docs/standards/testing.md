@@ -82,11 +82,11 @@ then in `jykre` (`tests/live.rs`, with `JYKRE_TEST_DRIVER` set to `postgres`
 or `mysql`), which exports 250,000 generated rows through the application's
 backend: the rest of an open result to CSV, a statement run again to XLSX,
 and a cancellation that must leave the chosen file as it was. The same file
-runs the SQL Job proof of concept's experiments
-([plan](../plans/automation-sql-job-poc.md)) on tables it creates and drops:
-a write returning more rows than the limit, the same write past its
-deadline, a job beside a tab's open transaction, and exact values in the
-job's result:
+(`mod automation`) runs the automation engine's SQL Jobs, the experiments of
+the [proof of concept](../plans/automation-sql-job-poc.md), through
+`automation::Engine` on tables it creates and drops: a write returning more
+rows than the limit, the same write past its deadline and never run again, a
+job beside a tab's open transaction, and exact values in the job's result:
 
 | Database | Image | Compose service |
 | --- | --- | --- |
@@ -272,6 +272,56 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   configured headers, a 401 as an authentication failure) and a closed gRPC
   port. A real collector is checked by hand, with an isolated
   `JYKRE_CONFIG_DIR`.
+- **Automation** ([specification](../plans/automation-engine-specification.md),
+  section 11) is tested without a window, a server or the user's data. Every
+  engine test opens a unique temporary data folder (never
+  `connection_store::data_dir()`) and uses synthetic data:
+  - `src/automation/tests.rs`: the engine through a scripted driver that
+    answers as the test says (pages, errors, hangs, a lost connection) and
+    synthetic SQLite files. They cover the completion rule, truncation, the
+    deadline, Stop, arbitration, the queue and its limits, durable admission,
+    a history that cannot be written (nothing sent; a terminal state never
+    written means no replay), recovery, a second engine on the same folder,
+    the quit, declared outputs, chains (a global limit of 1, a failed step,
+    `plan_changed`, input mapping, published versions) and CA-13: sentinel
+    values are searched for in every byte of `automation.db` and in the log.
+  - `crates/storage/src/automation_tests.rs`: each migration keeps every row
+    (seeded at each earlier version), a newer file is refused untouched, a
+    corrupt one is set aside and recreated, the lock is exclusive and a
+    process killed while holding it releases it (a child re-executes the test
+    binary), recovery marks only `running` rows, pruning expires values and
+    deletes old rows, outputs are stored all or none, history merges by
+    keyset, deleted values are overwritten in the file (`secure_delete`), and
+    no input value reaches the file.
+  - `src/automation/process/tests.rs`: programs. The test binary **starts
+    itself again as the child program**: `AUTOMATION_TEST_CHILD` (passed
+    through the job's `environment.set`) selects a mode in
+    `process/test_child.rs` (exit code, print, spam, `sleep`, a process
+    tree, an orphan that holds the pipes, the `jjp/1` modes), so the same
+    tests run on every platform without `sh`. They cover the environment
+    denylist, no shell, `.bat`/`.cmd` refusal, the pinned SHA-256, Stop, the
+    deadline and the 5 s grace with shortened timings, grandchildren killed,
+    the bounded logs and a left-over group found by its start time.
+  - `src/automation/jjp/tests.rs`: the protocol over a real loopback
+    connection, no child needed: framing across chunks and UTF-8
+    boundaries, the line cap, invalid and reused tokens, `hello` once,
+    conflicting terminals, disconnects, `cancel` while the program reads
+    nothing, the method allowlist, quotas, and tokens and values absent from
+    logs and `Debug`.
+  - The Node.js example (`examples/jjp/export.js`) has an end-to-end test,
+    `automation::process::tests::the_node_example_exports_and_completes`.
+    It is `#[ignore]`d with the reason "needs node on PATH" because CI
+    runners are not required to have Node.js; run it with
+    `cargo test --lib automation::process::tests::the_node_example -- --ignored`.
+    Not running it is reported, not hidden.
+  - Windows (Job Objects, no console window, `PATHEXT`, killing grandchildren,
+    the lock after a kill) and the visual flows are checked by the
+    maintainer with the
+    [Windows checklist](../plans/releases/0.3.0-windows-checklist.md); their
+    results are recorded there, and a Windows behaviour is not claimed before.
+  - `examples/automation_drain.rs` measures the completion rule on a driver
+    (SQLite by default, the local fixtures with `JYKRE_CONNECTION`); it is a
+    measurement, not part of the gate.
 - UI changes require opening the app and checking the affected flow, tabs,
   content preservation, shortcuts, focus and dividers where relevant. Record
   that check separately. Use `JYKRE_CONFIG_DIR` with an isolated folder and

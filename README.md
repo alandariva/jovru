@@ -194,6 +194,61 @@ zipsign verify tar jykre-studio-v0.2.1-linux-x86_64.tar.gz release-key.pub
 - `Ctrl B` toggles the explorer and `Ctrl Shift B` the assistant. Dividers and
   the SQL font size are adjustable.
 
+## Automation
+
+Automation (a section of the rail) saves work you run by hand and keeps a
+history of what ran and how it ended. It runs only while Jykre Studio is
+open, and **nothing runs when the application is closed**. Each job opens in
+a tab of its own with its **Editor**, its run form under **Inputs** and its
+history under **Runs**; **Runs** in the section lists every run, with the
+ones active or queued on top.
+
+- **SQL Jobs.** One statement on a connection, with typed inputs filled in a
+  form before each run (bound by the database driver, never written into the
+  SQL), a timeout and a row limit. A job that writes is read to the end of
+  its result before it counts as done. If it cannot be confirmed, the run
+  says `effect_unknown`; a run is **never replayed** by the application.
+- **External programs.** A program you name, started without a shell, with
+  its arguments, its working folder and environment. **Stop** and the timeout
+  end the program and everything it started. `.bat` and `.cmd` files are not
+  accepted.
+- **`jjp/1`.** A small protocol over a local connection for a program that
+  takes inputs and returns outputs. The Node.js program in
+  [`examples/jjp/`](examples/jjp/README.md) shows it in under 200
+  lines; there is no SDK.
+- **Chains.** A SQL Job can feed an external program: a chain runs published
+  versions of jobs in order, passes declared outputs on to the next step and
+  stops at the first step that fails. Outputs are kept only for jobs you
+  allow it for, small, for 7 days.
+- **History.** Every run records its state, cause, counters and times in
+  `automation.db`, per job and in a list of all runs, for 90 days. It never
+  stores input values, result cells or server messages.
+- Up to 2 runs are active at a time (1 per connection); more wait in a queue
+  of at most 8 for up to 60 s.
+
+What to know before using it:
+
+- **There is no sandbox.** An external program is code you trust: it runs
+  with your privileges and can read your files and use your network. Studio
+  supervises it; it does not contain it. It inherits Studio's environment
+  (secrets in it included) except `JYKRE_*`, `OTEL_*`, `NODE_OPTIONS` and the
+  `PYTHON*` variables that load code.
+- **A program's output is kept on this computer.** stdout, stderr and its
+  `jjp/1` log messages are written to files under `automation/logs/` in the
+  data folder, at most 1 MiB each, for 7 days. Never print passwords, tokens
+  or personal data from a program. **Delete logs** removes them sooner.
+- **SQL Jobs on Databricks are not validated against a workspace**; they are
+  covered by local tests only.
+- **macOS is not validated** for Automation. Windows and Linux are the
+  validated platforms, and Windows is checked by a checklist.
+- Only one Jykre Studio window runs automation on a data folder; a second one
+  shows it read-only until the first closes. Keep the data folder on a local
+  disk.
+
+See [Persistence](docs/reference/persistence.md#automation-automationdb),
+[Security](docs/standards/security.md#automation-external-programs-and-jjp1)
+and [Reliability](docs/standards/reliability.md#automation).
+
 ## Languages
 
 The interface is available in English and Brazilian Portuguese (`pt-BR`).
@@ -224,6 +279,8 @@ the demo data are not translatable yet.
 | Unsaved text of open tabs | `recovery/` in the data folder, until saved, discarded or closed |
 | A report's print document | Only where you save it with **Export for printing or PDF…** |
 | Metadata cache | `metadata/<connection-id>.db` in the data folder |
+| Automation jobs, versions and run history (90 days) | `automation.db` in the data folder |
+| An external program's stdout, stderr and `jjp/1` log (7 days, at most 1 MiB each) | `automation/logs/<run-id>/` in the data folder |
 | Copies of `config.db` (the five most recent, one per start) | `backups/` in the data folder; offered for restore when `config.db` cannot be opened |
 | Passwords (only with **Remember password**) | OS vault, service `JykreStudio` |
 

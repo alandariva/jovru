@@ -883,6 +883,11 @@ impl AppView {
                             .text_color(rgb(colors().muted))
                             .child(if self.automation.jobs_loading {
                                 tr!("Reading the jobs…")
+                            } else if self.automation.availability
+                                == Some(Availability::ReadOnly)
+                            {
+                                // The holder may not have migrated the file yet.
+                                tr!("No jobs can be read here until the other window lets automation go.")
                             } else {
                                 tr!(
                                     "Create a SQL Job, a program or a chain with the + button. A job runs by hand with the values its form asks for; a chain runs published versions of jobs in order."

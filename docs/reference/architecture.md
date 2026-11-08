@@ -27,6 +27,7 @@ flowchart TB
         I18n[i18n]
         Tabs[grouped_tabs component]
         Drivers[drivers: registry composition]
+        Automation[automation: engine, programs, chains]
     end
 
     subgraph Crates["UI-independent crates (crates/)"]
@@ -52,6 +53,8 @@ flowchart TB
     Backend --> Storage
     Store --> Storage
     Store --> Secrets
+    Automation --> Storage
+    Automation --> Core
     Drivers --> PG
     Drivers --> MY
     Drivers --> DBX
@@ -72,9 +75,9 @@ flowchart TB
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread and reports through events ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine, an application-root service the views in `src/app/automation/` start, read and drive (`automation`, [specification](../plans/automation-engine-specification.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Depend on a specific view; use the editor's language features |
-| **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
-| **Storage** | `crates/storage` | SQLite repositories for configuration, preferences and per-connection metadata | Store secrets; know drivers or the UI |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine: SQL Jobs, external programs, `jjp/1` and linear chains, run by an application-root service that records what ran in `automation.db` (`automation`, [specification](../plans/automation-engine-specification.md), [ADR-0034](../adr/0034-automation-database-service-and-lock.md) to [ADR-0038](../adr/0038-external-program-runs.md); its interface is `src/app/automation/`, see [User experience](ux.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Depend on a specific view; use the editor's language features |
+| **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry, and automation's pure types (`automation`: IDs, `RunState`, `Cause`, run records) | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
+| **Storage** | `crates/storage` | SQLite repositories for configuration, preferences, per-connection metadata and automation (`AutomationRepository` and `AutomationLock` own `automation.db` and `automation.lock`, [Persistence](persistence.md#automation-automationdb)) | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
 | **Drivers** | `crates/driver-*` | Validate configuration, connect, execute, cancel, introspect and classify errors for one database | Persist; talk to the UI; know another driver |
 | **AI providers** | `crates/assistant` (`jykre-assistant`) | The canonical request of a round, one streamed round against Anthropic, OpenAI, OpenAI-compatible servers or Ollama (through `genai`, private to its transport), error classification, prices and the SQL blocks of an answer ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)) | Know the cache, the vault, sessions or the UI; decide what a request contains |
@@ -132,8 +135,11 @@ checked in review.
 │   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
 │   │                       # drivers, grouped_tabs, i18n, parameters, query, reports (definitions,
 │   │                       # parameters, charts, runs, print), sql (jykre-sql)
+│   ├── automation/         # the automation engine (GPUI-free): engine, queue, SQL and
+│   │                       # chain runs, external programs (process/), jjp/1 (jjp/), logs
 │   └── app/                # the application's GPUI views; demo/ holds the demo data,
-│                           # sql_editor/ the editor's language features adapter
+│                           # sql_editor/ the editor's language features adapter,
+│                           # automation/ the automation interface
 ├── crates/
 │   ├── core/               # jykre-core
 │   ├── driver-postgres/    # jykre-driver-postgres
@@ -146,7 +152,8 @@ checked in review.
 │   ├── sql/                # jykre-sql
 │   └── sql-language/       # jykre-sql-language
 ├── catalog/                # SQL dialect catalogs read at run time (ADR-0021)
-├── examples/               # runnable examples (connect, drivers, grouped_tabs)
+├── examples/               # runnable examples (connect, drivers, grouped_tabs, automation_drain);
+│                           # jjp/ is a Node.js program that speaks jjp/1
 ├── locales/                # translation catalogs (pt-BR.json)
 ├── tests/fixtures/         # seeds for the gate's disposable databases
 ├── dev/seed/               # seeds for the local manual-testing databases
@@ -373,6 +380,95 @@ its panels and closes its sessions.
    meanwhile is dropped. The panel's `ResultGrid` and `ReportChart` entities
    show it; a chart change is derived again off the UI thread.
 
+### Run a job
+
+A job is a SQL Job (one statement) or an external program. `automation::Engine`
+is a service of the application root, not of a view
+([ADR-0034](../adr/0034-automation-database-service-and-lock.md)); the view
+resolves the connection, its password and the production confirmation, then
+submits a `JobRequest` and watches the `RunHandle` it gets back.
+
+```mermaid
+sequenceDiagram
+    participant V as Interface (UI thread)
+    participant E as Engine.submit
+    participant Q as Admission and queue
+    participant O as Owner task (Tokio)
+    participant H as automation.db
+    participant X as Session or program
+    V->>E: JobRequest (definition, form values, connection)
+    E->>E: check the statement or the form values; refusals leave no history
+    E->>Q: ask for a slot (2 active, 1 per connection)
+    Q-->>O: admitted now, or queued in memory until a slot frees
+    O->>H: durable admission: insert the run as running, with its snapshot
+    O->>X: execute on a session of its own, or start the program
+    X-->>O: completion, Stop, the deadline, or an exit (the first observed wins)
+    O->>H: terminal write: state, cause, effect_unknown, counters, opted-in outputs
+    O-->>V: publish Finished on the run's watch channel; give the slot back
+```
+
+1. **Admission.** `Engine::submit` refuses what cannot run as written
+   (automation not `Ready`, not exactly one statement, a missing or malformed
+   value, a `.bat`/`.cmd` program, a published file that changed). Such a
+   request is not a run: nothing is sent or started and no history row is
+   written.
+2. **Queue.** `queue::Admission` is a pure state machine the engine drives
+   under its registry lock. At most 2 runs are active and 1 per connection
+   profile (a program counts only towards the global limit). A run that
+   finds a limit full waits in a FIFO queue of at most 8 runs, 4 per
+   connection, for at most 60 s; a run whose connection is busy does not hold
+   back a later run on another connection. Beyond that it is refused at
+   once. Queued runs exist in memory only.
+3. **One owner per run.** `submit` spawns a task on the application's
+   runtime that waits for the slot (Stop, the 60 s limit and the shutdown end
+   the wait), runs the work and releases the slot. `sql_run` and
+   `program_run` are the two owners.
+4. **Durable admission.** Before any network I/O or process start, the owner
+   inserts the run as `running` with its snapshot. If that fails the run is
+   refused (`Refusal::History`) and nothing is sent.
+5. **Execution.** A SQL Job runs on a new session opened in its context and
+   always closed afterwards, never on a tab's session; a write's result is
+   read to its end ([Reliability](../standards/reliability.md#automation)). A
+   program starts without a shell in a process group (Unix) or a Job Object
+   (Windows); its group is recorded as soon as it starts.
+6. **Arbitration and the terminal write.** The first event the owner
+   observes decides (completion or exit, Stop, the deadline, a `jjp/1`
+   protocol failure). The owner writes the terminal state, and the declared
+   outputs of a job that opted in to keep them, **before** it publishes
+   anything.
+7. **Publication.** Each run has a `watch` channel: the latest status
+   replaces the previous one, so a slow subscriber skips progress but never
+   the end. `Engine::changes` is a counter that lists redraw on, coalesced
+   per frame. The result of a SQL run (`RunOutcome`) lives in memory only,
+   until the last handle to the run is dropped.
+
+### Run a chain
+
+A chain is a linear sequence of published versions of jobs
+([ADR-0036](../adr/0036-published-versions-and-chain-runs.md)).
+
+1. `Engine::plan` reads the versions the chain names and checks the
+   definition against them (`Plan`, with its `problems`); the view asks the
+   passwords of the connections the SQL steps use and shows the plan.
+   `Engine::submit_chain` starts **exactly the plan confirmed**.
+2. One owner task per chain run (`chain_run`) inserts the `chain_runs` row,
+   then admits each step as an ordinary run: step runs are registered with the
+   engine, so they appear in the lists, wait in the queue and answer Stop.
+   **The chain holds no slot of its own**: a step releases its slot before
+   the next one asks for one, so a chain progresses even with a global limit
+   of 1.
+3. After each step the owner maps its declared outputs to the next step's
+   inputs (`chain::step_inputs`). The values stay in memory unless the job
+   opted in to persist its outputs
+   ([ADR-0035](../adr/0035-persisted-declared-outputs.md)).
+4. The first step that does not succeed stops the chain: later steps never
+   start. Stop reaches the active or queued step; the chain's own deadline
+   cancels it and fails the chain with `timeout`. A connection whose profile
+   changed after the plan was confirmed, or a published program file that
+   changed, fails the step with `plan_changed`.
+5. The chain's terminal write (`finish_chain_run`) precedes its publication,
+   as for a run, and its `effect_unknown` is set when any step's was.
+
 ### Refresh metadata
 
 A connection introspects only what the user chose in the connection dialog
@@ -484,7 +580,21 @@ GitHub's releases are checked and installed by `jykre::update`, driven by
   `tokio::task::spawn_blocking`, or on GPUI's background executor
   (`cx.background_spawn`); never in a view method or in `render`.
 - **Cancellation.** Every long operation takes a `CancellationToken`
-  (`tokio-util`). Dropping a view cancels its operations.
+  (`tokio-util`). Dropping a view cancels its operations. **One documented
+  exception:** the automation engine is a service of the application root
+  ([ADR-0034](../adr/0034-automation-database-service-and-lock.md)); a run
+  belongs to the engine, not to the view that started it, so closing a tab
+  or the screen never stops it. Runs end through **Stop**, their deadline or
+  the coordinated quit.
+- **Automation tasks.** The engine spawns its tasks on the application's
+  only runtime through `backend::runtime_handle()`; it creates no runtime of
+  its own. Each run has one owner task and each chain run one more, and
+  each owner holds a `CancellationToken`: Stop, the deadline and the
+  shutdown reach the work only through tokens. The engine's registry sits
+  behind a `std::sync::Mutex` never held across `.await`. Quitting calls
+  `Engine::shutdown`, which refuses new runs, empties the queue, stops every
+  run, waits until each has closed its session or its program and written its
+  terminal state, and releases the data folder's lock.
 - **Stale results.** Async work reports back with `WeakEntity::update` and
   checks a generation counter (for example `execution_id`), so a result from a
   superseded run is discarded instead of overwriting a newer one.
@@ -505,6 +615,18 @@ holds one value per operation, for example:
 - Metadata scope: `Idle { last_success_at } | Refreshing | Failed { error, last_success_at }`
   (stored as `RefreshStatus` in the metadata file, its state read as
   `jykre_storage::RefreshState`).
+
+- Automation run: the persisted `RunState`
+  (`Running | Succeeded | Failed | Cancelled | Interrupted`, with a `Cause`
+  when `Failed`; `jykre_core::automation`) and, in memory only, the
+  `RunStatus` the engine publishes: `Queued { position, leaves_at, blocked }
+  | Active(Progress) | Finished | Refused`. `Progress` carries a `Phase`
+  (`Admitted | Opening | Executing | Completing | Starting | Running |
+  Stopping`), which is never recorded. `Interrupted` is written by recovery
+  only. A chain run has the same `RunState` and a `ChainStatus`
+  (`Running { step, run } | Finished | Refused`).
+- Automation availability: `Starting | Ready | ReadOnly | Off(reason)`
+  (`automation::Availability`); only `Ready` admits runs or saves jobs.
 
 The footer, the gutter and every other indicator derive from that single
 value, so they cannot disagree.
