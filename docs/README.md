@@ -71,7 +71,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | --- | --- |
 | [Technical debt](plans/technical-debt.md) | Accepted debts, severity, status and completion criteria |
 | [Version 0.2.0](plans/releases/0.2.0.md) | Daily-use hardening, application icon, Linux validation and release acceptance |
-| [Version 0.3.0](plans/releases/0.3.0.md) | Approved milestones for the first automation: SQL → script |
+| [Version 0.3.0](plans/releases/0.3.0.md) | Approved milestones for the first automation: SQL → script. Also editor search and go to line, editing in the grid, CSV/Excel import, user shortcuts, schedules while open, and grid column layout and search (A8–A15, not started) |
 | [Automation engine specification](plans/automation-engine-specification.md) | Version 1.2, approved for 0.3.0 on 2026-11-08: SQL → script first; ADR-0034, ADR-0035 and ADR-0036 accepted; phase 5 specified; Q-15…Q-32 answered, ADR-0037 accepted; phases 3–5 specified, ADR-0038 accepted |
 | [Process-tree supervision dependency](plans/process-supervision-dependency.md) | `process-wrap` for automation's external programs, approved 2026-11-08 (Q-11) |
 | [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes; complete, with measurements on every relational driver |
