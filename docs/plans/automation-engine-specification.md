@@ -4,8 +4,8 @@
 **Date:** November 8, 2026 (1.1: November 7, 2026)
 **Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
 Q-01…Q-14 ([section 12](#12-decisions-required-from-the-maintainer)),
-ADR-0033 and ADR-0034 accepted, `process-wrap` approved (Q-11). The phase 5
-revision (section 9.3) and ADR-0035 are proposed, awaiting approval
+ADR-0033, ADR-0034 and ADR-0035 accepted, `process-wrap` approved (Q-11),
+and the phase 5 revision (section 9.3) approved
 **Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
@@ -128,7 +128,7 @@ ships when all of them are accepted. Phases 6 and 7 stay later.
 | 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Phase 0 |
 | 3 — External process without protocol | P0 | Section 9.1 | Phase 1 |
 | 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3 |
-| 5 — Linear chain | P0 | Section 9.3; SQL → script | Phases 1 and 4; approval of the section 9.3 revision and ADR-0035 |
+| 5 — Linear chain | P0 | Section 9.3; SQL → script | Phases 1 and 4 |
 | 2 — Interface | P0 | Section 8, for SQL Jobs, processes and chains | Phase 5 |
 | 6 — On-demand capabilities | P2 | Section 9.4 | One ADR per capability |
 | 7 — Evolution | P3 | Section 9.5 | Q-14 and per-capability decisions |
@@ -683,10 +683,10 @@ honour, not as finished designs.
 
 ### 9.3 Phase 5 — Linear chain
 
-**Revision of 2026-11-08: Proposed**, awaiting the maintainer's approval
+**Revision of 2026-11-08, approved by the maintainer the same day**
 together with [ADR-0035](../adr/0035-published-versions-and-chain-runs.md),
-which holds its schema. This section is normative for phase 5 once
-approved; it replaces the constraints version 1.1 listed here.
+which holds its schema. This section is normative for phase 5; it replaces
+the constraints version 1.1 listed here.
 
 #### 9.3.1 Published versions
 

@@ -72,7 +72,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | [Technical debt](plans/technical-debt.md) | Accepted debts, severity, status and completion criteria |
 | [Version 0.2.0](plans/releases/0.2.0.md) | Daily-use hardening, application icon, Linux validation and release acceptance |
 | [Version 0.3.0](plans/releases/0.3.0.md) | Approved milestones for the first automation: SQL → script |
-| [Automation engine specification](plans/automation-engine-specification.md) | Version 1.2, approved for 0.3.0 on 2026-11-08: SQL → script first; ADR-0033 and ADR-0034 accepted; the phase 5 revision and ADR-0035 proposed |
+| [Automation engine specification](plans/automation-engine-specification.md) | Version 1.2, approved for 0.3.0 on 2026-11-08: SQL → script first; ADR-0033, ADR-0034 and ADR-0035 accepted; phase 5 specified |
 | [Process-tree supervision dependency](plans/process-supervision-dependency.md) | `process-wrap` for automation's external programs, approved 2026-11-08 (Q-11) |
 | [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes; complete, with measurements on every relational driver |
 | [Large `.sql` files in the editor](plans/editor-large-files.md) | Proposal for ADR-0031's D7 file limit: the editor component's soft wrap on opening, measured options and a recommendation |

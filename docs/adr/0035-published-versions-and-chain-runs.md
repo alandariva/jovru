@@ -1,6 +1,6 @@
 # ADR-0035: Published job versions and chain runs in `automation.db`
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
 - **Date:** 2026-11-08
 - **Authors:** Claude (draft), for the maintainer's review
 
