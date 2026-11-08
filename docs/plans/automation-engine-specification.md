@@ -3,10 +3,9 @@
 **Version:** 1.2, decisions answered
 **Date:** November 8, 2026 (1.1: November 7, 2026)
 **Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
-Q-01…Q-14 ([section 12](#12-decisions-required-from-the-maintainer)),
-ADR-0033 to ADR-0036 accepted, `process-wrap` approved (Q-11),
-and the phase 5 revision (section 9.3) approved. The phase 3 and 4
-revisions (sections 9.1 and 9.2) and ADR-0037 are proposed
+Q-01…Q-32 ([section 12](#12-decisions-required-from-the-maintainer)),
+ADR-0033 to ADR-0037 accepted, `process-wrap` approved (Q-11), and the
+phase 3, 4 and 5 revisions (sections 9.1–9.3) approved
 **Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
@@ -127,8 +126,8 @@ ships when all of them are accepted. Phases 6 and 7 stay later.
 | PoC | Optional | Headless SQL executor and engine without persistence or UI, to measure the open risks ([plan](automation-sql-job-poc.md)) | Nothing |
 | 0 — Decisions | P0 | Answers to Q-01…Q-14, ADR-0033 and ADR-0034 with the DDL (all done 2026-11-08) | — |
 | 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Phase 0 |
-| 3 — External program | P0 | Section 9.1 | Phase 1; approval of the 9.1 revision and ADR-0037 |
-| 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3; approval of the 9.2 revision |
+| 3 — External program | P0 | Section 9.1 | Phase 1 |
+| 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3 |
 | 5 — Linear chain | P0 | Section 9.3; SQL → script | Phases 1 and 4 |
 | 2 — Interface | P0 | Section 8, for SQL Jobs, processes and chains | Phase 5 |
 | 6 — On-demand capabilities | P2 | Section 9.4 | One ADR per capability |
@@ -663,7 +662,7 @@ honour, not as finished designs.
 
 ### 9.1 Phase 3 — External program
 
-**Revision of 2026-11-08: Proposed**, awaiting the maintainer's approval
+**Revision of 2026-11-08, approved by the maintainer the same day**
 together with [ADR-0037](../adr/0037-external-program-runs.md), which holds
 its schema. It folds in Q-10, Q-11, Q-15…Q-19 and Q-25…Q-29 and replaces the
 constraints version 1.1 listed here.
@@ -779,7 +778,8 @@ differs is never touched: its ID was reused.
 
 ### 9.2 Phase 4 — Minimal `jjp/1`
 
-**Revision of 2026-11-08: Proposed**, together with 9.1. It folds in Q-12,
+**Revision of 2026-11-08, approved by the maintainer the same day**,
+together with 9.1. It folds in Q-12,
 Q-13, Q-18 and Q-28.
 
 #### 9.2.1 Transport and authentication
