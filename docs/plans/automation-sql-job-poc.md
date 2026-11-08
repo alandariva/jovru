@@ -213,7 +213,8 @@ returned rows were confirmed in under 2 s on PostgreSQL and MySQL and under
   tabs and reports today, not only jobs. The completion rule is unaffected
   (the rows are read to the end and counted), but a SQL → script chain fed by
   a procedure would get nothing. It needs a driver fix of its own before
-  phase 5.
+  phase 5. *Fixed on 2026-11-08: the columns now come with the first row;
+  see [Drivers](../reference/drivers.md#real-use-and-limits).*
 
 ### 8.7 Recommendations
 
