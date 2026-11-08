@@ -1,6 +1,7 @@
 # ADR-0040: Importing CSV and XLSX files into a table, streamed through the driver's write path (amends the `Session` contract and the stack)
 
-- **Status:** Proposed
+- **Status:** Accepted on 2026-11-08 by the maintainer, with every
+  recommendation of the decisions below (I-0 to I-5)
 - **Date:** 2026-11-08
 - **Authors:** Claude (draft), for the maintainer's review (milestone A11 of
   [Version 0.3.0](../plans/releases/0.3.0.md))

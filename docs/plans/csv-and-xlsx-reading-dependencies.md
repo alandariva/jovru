@@ -1,9 +1,10 @@
 # Proposal: `csv`, `calamine` and `encoding_rs` for reading CSV and XLSX files
 
 **Date:** November 8, 2026
-**Approval:** Proposed. It awaits the maintainer's decision, together with
-[ADR-0040](../adr/0040-importing-files-into-a-table.md) and the open
-decisions [below](#open-decisions-of-a11).
+**Approval:** Approved by the maintainer on 2026-11-08, together with
+[ADR-0040](../adr/0040-importing-files-into-a-table.md), with every
+recommendation of the open decisions [below](#open-decisions-of-a11)
+(I-1 (a), I-2 (c), I-3 (a), I-4 (b), I-5 `.xlsx` only).
 **Implementation:** Not started.
 **For:** [0.3.0](releases/0.3.0.md), milestone A11 (importing a CSV or Excel
 file into a table)
