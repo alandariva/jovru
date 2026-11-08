@@ -13,9 +13,12 @@
 //! Whether this code becomes the base of phase 1 or is discarded is decided
 //! with the plan's findings.
 
+pub mod chain;
 pub mod definition;
 mod engine;
 mod executor;
+pub mod outputs;
+pub mod queue;
 #[cfg(test)]
 mod tests;
 
