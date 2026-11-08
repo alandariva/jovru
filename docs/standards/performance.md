@@ -24,7 +24,7 @@ numbers.
 | Cold start to an interactive window | ≤ 1.5 s | 835 ms to a window that accepts input (865 ms to the main window) on the first launch from an empty data folder; 241–254 ms on the next four launches (release, Windows, 2026-11-07; see [Startup, memory and export](#startup-memory-and-export-measurements)). Not measured after a reboot | Stopwatch and a startup timestamp |
 | Idle memory, no connection | ≤ 200 MB | 79.0 MB working set, 106.4 MB private bytes 15 s after start (release, Windows, 2026-11-07) | Task manager |
 | Expand an explorer node from the local cache | ≤ 50 ms p95 | 0.65 ms for a first page and 0.68 ms for the page after 4,800 children, in a cache of 500,000 objects kept open, with paths rebuilt from compact keys (benchmark, release, 2026-11-03); opening the file costs about 680 ms, once per connection at start. Not measured in the app | Timing around the cache read, benchmark |
-| Longest UI-thread stall while an export runs | ≤ 16 ms | Not demonstrated (release, Windows, 2026-11-07): probe windows that held a 100,000-row CSV export read 14.7–17.6 ms, the same as windows with no export (12.2–18.8 ms); the heartbeat's floor on Windows is at the budget. See [Startup, memory and export](#startup-memory-and-export-measurements) | Heartbeat |
+| Longest UI-thread stall while an export runs | ≤ 16 ms | 6.3 ms at most while a 100,000-row CSV export (53.3 MB) is written; 15.8 ms at most over the whole export, native save dialog included (release, Windows, 2026-11-08, `WM_NULL` round trips; see [Startup, memory and export](#startup-memory-and-export-measurements)) | `WM_NULL` round trips on Windows; heartbeat elsewhere |
 | Encoding an export part, off the UI thread | No budget; it bounds how fast an export writes | 13 ms as CSV, 26 ms as JSON Lines, 30 ms as `INSERT` for 100,000 × 5 cells (benchmark, release, 2026-11-04); a unit test keeps 100,000 × 10 CSV cells under 3 s in debug | Benchmark, unit test budget |
 | Metadata search (`Ctrl Shift P`) over the local cache | ≤ 50 ms p95 | 7.4 ms for a name of three characters or more among 500,000 objects (trigram index); 93 ms for one or two characters (benchmark, release, 2026-11-03, after the compact keys of [ADR-0019](../adr/0019-compact-metadata-cache-keys.md)) | Timing around the search, benchmark |
 
@@ -186,6 +186,23 @@ only for the measurement.
   floor, but the heartbeat cannot show that the budget holds: on Windows
   its 5 ms sleep wakes on the system timer (about 15.6 ms), so idle lines
   already reach 16–19 ms.
+- **Export, measured again on 2026-11-08** (release 0.2.0-rc.1, same
+  machine, isolated data folder, SQLite file with 100,000 synthetic rows of
+  three columns, about 530 bytes a row). A separate process sends
+  `WM_NULL` to the main window with `SendMessageTimeout`, waits 1 ms by
+  spinning and sends again, timing each round trip with
+  `QueryPerformanceCounter`: a round trip lasts as long as the window's
+  thread is busy, so its length is the stall, without the system timer's
+  floor. The longest gap between a reply and the next send was 3.4 ms, so
+  no longer stall can hide between samples. Idle: 0.03 ms median, 1.7 ms
+  at most. The same process clicks **Exportar…** and fills the native
+  save dialog with `PostMessage`, four exports in a row (53.3 MB each,
+  written in 64–76 ms off the UI thread per the log's `export finished`).
+  Longest round trip per export, from the click to 5 s after the file was
+  chosen: 15.8, 6.0, 6.3 and 6.7 ms. The longest ones fall within 40 ms
+  of the click, while the native dialog opens (15.8 ms the first time),
+  and when it closes; while the file is written the longest was 6.3 ms.
+  The budget holds. Opening the export bar itself took up to 10.9 ms.
 
 ### The editor with a large `.sql` file
 
@@ -281,6 +298,36 @@ which a GPU does not have.
   relexing a 10 MB script after a keystroke takes 3.8 ms in place, against
   52.7 ms for building a new list of its tokens as the highlighter did.
 
+#### On the reference machine, 2026-11-08
+
+Release 0.2.0-rc.1 on Windows, `JYKRE_PROBE=1`, isolated data folder, the
+same kind of files opened from the library, each in a new tab. Stalls are
+`WM_NULL` round trips (see [Startup, memory and
+export](#startup-memory-and-export-measurements); gaps between samples of
+6.7 ms at most), frames are the probe's. Per file: open it and wait 7 s,
+60 wheel steps of three notches 100 ms apart, then click into the text and
+type 24 characters 150 ms apart.
+
+| File | Opening: longest frame / stall | Scrolling: longest stall | Typing: longest stall after the click; ours per key | A click into the text: longest stall (4 clicks) |
+| --- | --- | --- | --- | --- |
+| One line | Not measured (opened before the probe) | Not measured | 10.8 ms; under 0.01 ms | 9.6 ms |
+| 64 KiB (wrapped) | 114.6 ms / 115.3 ms | 20.5 ms | 15.9 ms; under 0.1 ms | 15.4 ms |
+| 256 KiB (wrapped) | 184.9 ms / 185.4 ms | 25.2 ms | 16.8 ms | 13.4 ms |
+| 1 MiB (not wrapped) | 21.0 ms / 21.0 ms | 17.2 ms | 11.1 ms | 23.4–29.2 ms |
+| 4 MiB (not wrapped) | 54.1 ms / 54.2 ms | 26.5 ms | 21.2 ms; 1.6–2.3 ms, 3.8 ms to apply an outline | 97.4–117.3 ms |
+
+- Opening follows the Linux measurements: what is wrapped costs the editor
+  component's first layout (185 ms just under 256 KiB), what is not opens
+  in one frame of 21–54 ms. The 4 MiB limit of D7 is therefore within one
+  frame of about 54 ms on this machine; files just under the 256 KiB wrap
+  threshold are the slowest to open.
+- A click into a text that is not wrapped stalls the UI thread in
+  proportion to its size, about 25 ms per MiB (four clicks each at 1 and
+  4 MiB, and five more at 4 MiB of 89–131 ms). None of our `UiTimer`
+  timings ran during them; the time is the editor component's handling of
+  the click, not yet located. Arrow keys and the wheel in the same 4 MiB
+  tab stall 15–18 ms.
+
 ## Known deviations
 
 M2 clipboard encoding measurements (release, Windows, 2026-11-07): 49 ms for
@@ -289,8 +336,8 @@ off the UI thread. These measure encoding, not the OS clipboard handoff.
 
 | Standard | Current code |
 | --- | --- |
-| A file the library opens stays within the frame budget ([ADR-0031](../adr/0031-saved-queries-as-sql-files.md) D7) | Typing and scrolling meet it since 2026-11-08. Opening does not: up to 256 KiB the editor component's soft wrap measures every line on the first layout, about 1.2–1.4 ms per KiB in one frame (85 ms at 64 KiB, about 310 ms just under 256 KiB); above it the tab does not wrap, and the longest frame on opening is 13.5–62 ms up to 4 MiB ([measurements](#since-2026-11-08)). Measured on Linux with software rendering; not yet on the reference machine. Lazy wrapping upstream would remove the rest ([Large `.sql` files in the editor](../plans/editor-large-files.md)) |
-| No UI-thread stall above 16 ms while an export runs | Not demonstrated. The export runs off the UI thread and adds nothing the heartbeat can tell from its floor, which on Windows is at the budget (idle probe lines reach 16–19 ms). Probe lines in which the native save dialog opened, before any export, read up to 24.3 ms ([measurements](#startup-memory-and-export-measurements)) |
+| A file the library opens stays within the frame budget ([ADR-0031](../adr/0031-saved-queries-as-sql-files.md) D7) | Typing and scrolling meet it since 2026-11-08. Opening does not: up to 256 KiB the editor component's soft wrap measures every line on the first layout, about 1.2–1.4 ms per KiB in one frame (85 ms at 64 KiB, about 310 ms just under 256 KiB); above it the tab does not wrap, and the longest frame on opening is 13.5–62 ms up to 4 MiB ([measurements](#since-2026-11-08)). On the reference machine (2026-11-08): 115 ms at 64 KiB and 185 ms at 256 KiB, wrapped; 21 ms at 1 MiB and 54 ms at 4 MiB ([measurements](#on-the-reference-machine-2026-11-08)). Lazy wrapping upstream would remove the rest ([Large `.sql` files in the editor](../plans/editor-large-files.md)) |
+| A click stays within the frame budget | A click into a text that is not wrapped (above 256 KiB) stalls the UI thread about 25 ms per MiB, 97–131 ms at 4 MiB, inside the editor component; not yet located ([measurements](#on-the-reference-machine-2026-11-08)) |
 | Long collections are virtualized | The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`). Saved queries and history are virtualized |
 | Metadata search within budget at any length | A query of one or two characters, which the trigram index cannot match, scans the name index: about 93 ms at 500,000 objects. Three characters or more take about 7.4 ms. Every search runs off the UI thread after a 150 ms pause, and since 0.2.0 M3 both the palette and the explorer's search field show a spinner while one runs |
 | Frequently changing regions are cached entities | The result grid is (`ResultGrid`, [ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md)); so is the assistant panel (`src/app/assistant_panel.rs`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)). The editor still renders inside `Workspace` |
