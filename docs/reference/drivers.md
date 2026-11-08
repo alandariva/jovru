@@ -470,6 +470,21 @@ Each run accepts one SQL statement. Columns are delivered even for a SELECT
 without rows. Text protocol values are `Cell::Text`, keeping decimals without
 rounding; NULL is `Cell::Null` and MySQL binaries are `Cell::Binary`.
 
+MySQL takes a statement's columns from preparing it, and sends the
+statement itself through the text protocol. When preparing describes no
+columns (a `CALL`, whose procedure's results are unknown until it runs, or
+a statement MySQL cannot prepare, error 1295), the columns come with the
+first row instead, so a procedure's rows arrive with their names and the
+same exact values and NULL as the `SELECT` run directly. A procedure can
+return several result sets, but a run delivers one result: the first result
+set that has rows is delivered and paged like any other, and the result sets
+after it are read to the end of the procedure and dropped, without being
+reported. A result set without rows shows no columns, since SQLx gives a
+result set's columns only with its rows, so a procedure whose only result is
+empty looks like a statement without rows. When rows came back,
+`rows_affected` is `None`, as for a `SELECT`; a procedure that returns no
+rows reports what its last statement changed.
+
 A database error keeps the relational session and its state, including an
 open transaction (which PostgreSQL then requires to be rolled back). After a
 cancellation, a timeout, an interruption by a limit or the sink, or a value
