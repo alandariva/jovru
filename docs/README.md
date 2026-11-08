@@ -71,7 +71,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | --- | --- |
 | [Technical debt](plans/technical-debt.md) | Accepted debts, severity, status and completion criteria |
 | [Version 0.2.0](plans/releases/0.2.0.md) | Daily-use hardening, application icon, Linux validation and release acceptance |
-| [Version 0.3.0](plans/releases/0.3.0.md) | Approved milestones for the first automation: SQL → script; implemented on Linux, Windows checklist pending |
+| [Version 0.3.0](plans/releases/0.3.0.md) | Approved milestones for the first automation: SQL → script; implemented on Linux, Windows checklist pending. Also editor search and go to line, editing in the grid, CSV/Excel import, user shortcuts, schedules while open, and grid column layout and search (A8–A15, not started) |
 | [Version 0.3.0 Windows checklist](plans/releases/0.3.0-windows-checklist.md) | What the maintainer runs on Windows to validate automation (Q-24), with the results to fill in |
 | [Automation engine specification](plans/automation-engine-specification.md) | Version 1.2, approved for 0.3.0 on 2026-11-08: SQL → script first; ADR-0034 to ADR-0038 accepted and implemented; phases 1–5 in code, the interface included; implementation notes list where the code differs |
 | [Process-tree supervision dependency](plans/process-supervision-dependency.md) | `process-wrap` for automation's external programs, approved 2026-11-08 (Q-11); implemented, Windows pending |
