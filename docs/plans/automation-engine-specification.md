@@ -608,6 +608,35 @@ never blocks admission. Nothing else is stored to retain in phase 1.
   [UI guidelines](../standards/ui-guidelines.md); error messages follow
   [UX](../reference/ux.md).
 
+#### 8.1.1 Rules the user must be able to see
+
+The engine's rules are chosen, not discovered: the interface states each one
+where it applies, in plain words, so a user never has to infer it from an
+outcome. The maintainer set this requirement on 2026-11-08.
+
+| Rule | Where the user sees it |
+| --- | --- |
+| Limits: 2 runs at once, 1 per connection (5.3) | A refused or queued run says which limit it met and which run holds it |
+| Queue: up to 8 waiting, 4 per connection, 60 s at most (9.3.6) | A queued run shows **Queued**, its place and the time left; past 60 s it says it waited too long; a full queue says so on **Run** |
+| Timeouts: 300 s per job, 3,600 s per chain (4.8, 9.3.3) | The editor shows the effective timeout; a run that reaches it says **Timed out after …**, distinct from **Stopped** |
+| `effect_unknown` (4.6) | The run says the change may or may not have been applied and that it was not run again |
+| Truncated results and discarded rows (4.6) | The run says how many rows it kept and that the rest were read and discarded, or left unread for a query |
+| One statement per job (4.3) | The editor marks the extra statements before saving; **Run** names the problem |
+| A refused run leaves no history (4.3) | The form shows the reason in place; the history explains that refused runs are not recorded |
+| A transaction left open is rolled back (4.4) | The run says so |
+| SQLite: one writer per file (5.3) | A failure while a tab writes the same file names the cause |
+| Another instance holds automation (6.6) | The Automation screen is read-only and says why, with **Try again** |
+| Quit with runs active (5.2) | The dialog names the active runs and says they will be stopped |
+| Published versions (9.3.1) | A chain step shows the job and version it runs, and whether the job has changed since; deleting a version or job a chain uses names the chains |
+| Output row rules (9.3.2) | The output editor explains `exactly_one`, `at_most_one` and `first` with their zero/one/several cases |
+| One confirmation for the whole plan (9.3.4) | The dialog lists every step, connection, production risk and new external program; `PlanChanged` says which connection changed |
+| Steps after a failure do not run (9.3.5) | The chain run marks them **Not run**, with the step and cause that stopped the chain |
+| Persisted outputs (ADR-0034) | Turning it on states the 4 KiB, 7-day and 90-day limits; a run whose outputs were not stored says why |
+| External code is trusted, not sandboxed (Q-10) | The warning on import and first run of each version |
+| The `jjp/1` token uses stdin (9.2) | The external-program editor says that stdin is reserved |
+
+A rule without a place in this table is not ready to ship (CA-15).
+
 ### 8.2 Performance
 
 The existing [budgets](../standards/performance.md) apply from phase 2:
@@ -901,7 +930,7 @@ alternative transports and execution while the application is closed.
 | CA-11 | 1 | After a forced exit, runs left `Running` become `Interrupted`, with `effect_unknown` when they may have written; none is replayed or reported as successful. |
 | CA-13 | 1 | No input value, cell, scalar or server message is stored in `automation.db`, logs or telemetry. |
 | CA-14 | 1 | A write whose result exceeds the row limit either completes and succeeds or ends with `effect_unknown`; it never succeeds on a partial page. |
-| CA-15 | 2 | Create, run, stop, fail and navigate with keyboard and focus; budgets in section 8.2 hold. |
+| CA-15 | 2 | Create, run, stop, fail and navigate with keyboard and focus; every rule of section 8.1.1 is shown where it applies; budgets in section 8.2 hold. |
 | CA-03 | 3 | stdout and stderr are captured without blocking; cancelling or timing out kills grandchildren. |
 | CA-07 | 3–4 | Exit 0 (or `complete` plus exit 0) succeeds; `fail`, nonzero exit, timeout or Stop produce one consistent state and cause. |
 | CA-04 | 4 | *Replaced.* Framing survives partial and joined chunks, invalid UTF-8 and oversized frames; invalid or reused tokens and duplicate terminals are rejected. |
