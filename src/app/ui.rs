@@ -390,7 +390,7 @@ pub fn badge(value: impl Into<SharedString>, color: u32) -> Div {
         .child(value.into())
 }
 
-pub fn shortcut(value: &'static str) -> Div {
+pub fn shortcut(value: impl Into<SharedString>) -> Div {
     div()
         .px(px(5.))
         .py(px(2.))
@@ -399,7 +399,7 @@ pub fn shortcut(value: &'static str) -> Div {
         .border_color(rgb(colors().border))
         .text_size(px(12.))
         .text_color(rgb(colors().faint))
-        .child(value)
+        .child(value.into())
 }
 
 /// A focusable control with `on_click`: GPUI turns Enter and Space on the
@@ -455,11 +455,16 @@ pub fn primary_button(
         })
 }
 
-pub fn icon_button(id: impl Into<ElementId>, name: IconName, title: &'static str) -> Stateful<Div> {
+pub fn icon_button(
+    id: impl Into<ElementId>,
+    name: IconName,
+    title: impl Into<SharedString>,
+) -> Stateful<Div> {
+    let title: SharedString = title.into();
     div()
         .id(id)
         .role(Role::Button)
-        .aria_label(title)
+        .aria_label(title.clone())
         .focusable()
         .tab_index(0)
         .border_1()
@@ -471,7 +476,7 @@ pub fn icon_button(id: impl Into<ElementId>, name: IconName, title: &'static str
         .justify_center()
         .rounded(px(5.))
         .cursor_pointer()
-        .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
+        .tooltip(move |window, cx| Tooltip::new(title.clone()).build(window, cx))
         .hover(|s| s.bg(rgb(colors().hover)))
         .child(icon(name, colors().muted))
 }

@@ -44,7 +44,9 @@ impl SettingsPage {
             Self::Editor => tr!("How SQL is shown in query tabs and report panels."),
             Self::Assistant => tr!("The AI model that answers in the assistant panel."),
             Self::Diagnostics => tr!("The application's log and the export of logs and traces."),
-            Self::Shortcuts => tr!("Keys that work across the window."),
+            Self::Shortcuts => {
+                tr!("The keys of the window's actions and of the editor, which you can change.")
+            }
             Self::About => tr!("The version, updates and where the preferences are kept."),
         }
     }
@@ -143,12 +145,21 @@ impl AppView {
                                     ),
                             )
                             .child(
-                                row().gap_2().child(shortcut("Esc")).child(
-                                    icon_button("settings-close", I::X, tr!("Close Preferences"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_settings(window, cx)
-                                        })),
-                                ),
+                                row()
+                                    .gap_2()
+                                    .child(shortcut(shortcuts::label::<shortcuts::Dismiss>(cx)))
+                                    .child(
+                                        icon_button(
+                                            "settings-close",
+                                            I::X,
+                                            tr!("Close Preferences"),
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.close_settings(window, cx)
+                                            }),
+                                        ),
+                                    ),
                             ),
                     )
                     .child(
@@ -282,7 +293,7 @@ impl AppView {
                         .child(self.telemetry_settings.clone()),
                 )
                 .into_any_element(),
-            SettingsPage::Shortcuts => shortcuts_page().into_any_element(),
+            SettingsPage::Shortcuts => self.shortcut_editor.clone().into_any_element(),
             SettingsPage::About => about_page(cx.theme().mono_font_family.clone())
                 .child(setting_section(tr!("Updates")).child(self.update_settings.clone()))
                 .into_any_element(),
@@ -362,7 +373,12 @@ impl AppView {
                 setting_section(tr!("Font"))
                     .child(setting_row(
                         tr!("SQL font size"),
-                        tr!("Also Ctrl + and Ctrl − in the window; Ctrl 0 resets it."),
+                        tr!(
+                            "Also {0} and {1} in the window; {2} resets it.",
+                            shortcuts::label::<shortcuts::LargerFont>(cx),
+                            shortcuts::label::<shortcuts::SmallerFont>(cx),
+                            shortcuts::label::<shortcuts::ResetFont>(cx)
+                        ),
                         row()
                             .gap_1()
                             .child(
@@ -506,7 +522,11 @@ fn setting_section(title: &'static str) -> Div {
 
 /// One setting: what it is and what it does on the left, its control on
 /// the right.
-fn setting_row(title: &'static str, detail: &'static str, control: impl IntoElement) -> Div {
+fn setting_row(
+    title: &'static str,
+    detail: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
     row()
         .justify_between()
         .gap_4()
@@ -516,7 +536,7 @@ fn setting_row(title: &'static str, detail: &'static str, control: impl IntoElem
                 .gap(px(2.))
                 .min_w_0()
                 .child(div().text_size(px(14.)).child(title))
-                .child(label(detail)),
+                .child(label(detail.into())),
         )
         .child(div().flex_none().child(control))
 }
@@ -694,105 +714,6 @@ fn sql_preview() -> StyledText {
         })
         .collect();
     StyledText::new(PREVIEW_SQL).with_highlights(highlights)
-}
-
-/// The editor component's keys for adding a cursor on the line above or
-/// below (`gpui-base`'s `AddCursorAbove` and `AddCursorBelow`), which differ
-/// by platform: Linux desktops may reserve `Ctrl Alt` with the arrows.
-#[cfg(target_os = "windows")]
-const ADD_CURSOR_KEYS: &str = "Ctrl Alt ↑ / ↓";
-#[cfg(target_os = "macos")]
-const ADD_CURSOR_KEYS: &str = "Cmd Alt ↑ / ↓";
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
-const ADD_CURSOR_KEYS: &str = "Shift Alt ↑ / ↓";
-
-/// Every shortcut of the window, by where it works
-/// ([User experience](../../docs/reference/ux.md#keyboard-shortcuts)).
-fn shortcuts_page() -> Div {
-    let groups: [(&'static str, &[(&'static str, &'static str)]); 4] = [
-        (
-            tr!("Window"),
-            &[
-                (tr!("Search tables and saved queries"), "Ctrl Shift P"),
-                (tr!("New tab on the tab's connection"), "Ctrl T"),
-                (tr!("New query on the active connection"), "Ctrl N"),
-                (tr!("Close the tab"), "Ctrl W"),
-                (tr!("Next or previous tab"), "Ctrl Tab / Ctrl Shift Tab"),
-                (tr!("Show or hide the explorer"), "Ctrl B"),
-                (tr!("Show or hide the assistant"), "Ctrl Shift B"),
-                (tr!("Preferences"), "Ctrl ,"),
-                (
-                    tr!("SQL font: larger, smaller, reset"),
-                    "Ctrl + / Ctrl − / Ctrl 0",
-                ),
-            ],
-        ),
-        (
-            tr!("SQL editor"),
-            &[
-                (
-                    tr!("Run the selection or the statement at the cursor"),
-                    "Ctrl ↵",
-                ),
-                (tr!("The same, in a new result tab"), "Ctrl Shift ↵"),
-                (tr!("Run every statement"), "Ctrl Alt ↵"),
-                (tr!("Show suggestions"), "Ctrl Space"),
-                (tr!("Comment or uncomment lines"), "Ctrl /"),
-                (tr!("Search in the SQL"), "Ctrl F"),
-                (tr!("Search and replace in the SQL"), "Ctrl H"),
-                (
-                    tr!("In the search: next or previous match, close"),
-                    "Enter / Shift Enter / Esc",
-                ),
-                (tr!("Add a cursor above or below"), ADD_CURSOR_KEYS),
-                (tr!("Go to a line, or a line and a column"), "Ctrl G"),
-            ],
-        ),
-        (
-            tr!("Results"),
-            &[
-                (tr!("Open or close the export bar"), "Ctrl Shift E"),
-                (tr!("Copy, with the column names"), "Ctrl C / Ctrl Shift C"),
-                (tr!("Select all"), "Ctrl A"),
-                (tr!("Show the cell's full value"), "Enter"),
-                (
-                    tr!("The column's menu: hide, freeze or move it"),
-                    "Shift F10",
-                ),
-                (tr!("Find a column by name"), "Ctrl Shift F"),
-                (tr!("Move a result tab"), "Ctrl Shift ← / →"),
-            ],
-        ),
-        (
-            tr!("Explorer"),
-            &[
-                (tr!("Refresh the node"), "F5"),
-                (tr!("Open the node's menu"), "Shift F10"),
-                (tr!("Highlight or filter the quick search"), "Ctrl F"),
-                (tr!("Delete the connection"), "Delete"),
-            ],
-        ),
-    ];
-    column()
-        .flex_none()
-        .gap_4()
-        .child(label(tr!(
-            "Ctrl F works where the keyboard is: in a SQL editor it searches the SQL, in the explorer it marks or filters the quick search."
-        )))
-        .children(groups.into_iter().map(|(title, shortcuts)| {
-            setting_section(title).child(column().children(shortcuts.iter().map(
-                |&(action, keys)| {
-                    row()
-                        .flex_none()
-                        .justify_between()
-                        .py(px(5.))
-                        .border_b_1()
-                        .border_color(rgb(colors().border))
-                        .child(div().text_size(px(14.)).child(action))
-                        .child(shortcut(keys))
-                },
-            )))
-        }))
 }
 
 fn about_page(mono: SharedString) -> Div {

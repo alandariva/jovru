@@ -356,7 +356,8 @@ impl JobView {
             })
             .child(note(words::one_statement_note()))
             .child(note(tr!(
-                "Ctrl Enter and the other run shortcuts of a query tab never run a job: Run does, from the toolbar or the Inputs."
+                "{0} and the other run shortcuts of a query tab never run a job: Run does, from the toolbar or the Inputs.",
+                crate::app::shortcuts::label::<crate::app::ExecuteCurrentQuery>(cx)
             )))
     }
 

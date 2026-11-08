@@ -1759,6 +1759,26 @@ impl AppView {
         cx.notify();
     }
 
+    /// A key of the explorer's keymap on a node: during the quick search
+    /// Up and Down go through its matches; otherwise every key moves,
+    /// expands or collapses ([`AppView::tree_key`]).
+    fn explorer_key(
+        &mut self,
+        index: usize,
+        path: &ObjectPath,
+        key: jykre::explorer::TreeKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use jykre::explorer::TreeKey;
+        match key {
+            TreeKey::Up | TreeKey::Down if self.explorer_quick.is_some() => {
+                self.quick_step(key == TreeKey::Down, window, cx)
+            }
+            key => self.tree_key(index, path, key, window, cx),
+        }
+    }
+
     /// An arrow key on an explorer node: move, expand or collapse
     /// ([`jykre::explorer::step`]).
     fn tree_key(
@@ -2707,29 +2727,28 @@ impl AppView {
                             .when_some(connection.appearance.environment, |s, environment| {
                                 s.child(environment_badge(environment))
                             })
-                            .on_key_down(cx.listener(
-                                move |this, event: &KeyDownEvent, window, cx| {
-                                    let modified = event.keystroke.modifiers.modified();
-                                    match event.keystroke.key.as_str() {
-                                        "f5" => {
-                                            this.toggle_refresh(index, ObjectPath::default(), cx)
-                                        }
-                                        // Asks before deleting anything.
-                                        "delete" if !modified => {
-                                            this.delete_connection(index, window, cx)
-                                        }
-                                        "right" if !modified => {
-                                            this.connections[index].expanded = true;
-                                            cx.notify();
-                                        }
-                                        "left" if !modified => {
-                                            this.connections[index].expanded = false;
-                                            cx.notify();
-                                        }
-                                        _ => return,
-                                    }
-                                    window.prevent_default();
-                                    cx.stop_propagation();
+                            .on_action(cx.listener(
+                                move |this, _: &super::shortcuts::RefreshNode, _, cx| {
+                                    this.toggle_refresh(index, ObjectPath::default(), cx)
+                                },
+                            ))
+                            // Asks before deleting anything.
+                            .on_action(cx.listener(
+                                move |this, _: &super::shortcuts::DeleteConnection, window, cx| {
+                                    this.delete_connection(index, window, cx)
+                                },
+                            ))
+                            // Right and Left expand and collapse the connection.
+                            .on_action(cx.listener(
+                                move |this, _: &super::shortcuts::ExplorerRight, _, cx| {
+                                    this.connections[index].expanded = true;
+                                    cx.notify();
+                                },
+                            ))
+                            .on_action(cx.listener(
+                                move |this, _: &super::shortcuts::ExplorerLeft, _, cx| {
+                                    this.connections[index].expanded = false;
+                                    cx.notify();
                                 },
                             ))
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
@@ -3238,22 +3257,14 @@ impl AppView {
                                 .build(window, cx)
                         })
                     })
-                    // F5 refreshes the focused node, or cancels its refresh;
-                    // the arrows move through the tree.
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                        let keystroke = &event.keystroke;
-                        if keystroke.key == "f5" {
-                            this.toggle_refresh(index, f5_path.clone(), cx);
-                        } else if let Some(key) = jykre::explorer::TreeKey::from_key(&keystroke.key)
-                            .filter(|_| !keystroke.modifiers.modified())
-                        {
-                            this.tree_key(index, &key_path, key, window, cx);
-                        } else {
-                            return;
-                        }
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }))
+                    // F5 (`RefreshNode`) refreshes the focused node, or
+                    // cancels its refresh; the arrows move through the tree.
+                    .on_action(cx.listener(
+                        move |this, _: &super::shortcuts::RefreshNode, _, cx| {
+                            this.toggle_refresh(index, f5_path.clone(), cx)
+                        },
+                    ))
+                    .map(|node| tree_keys(node, index, &key_path, cx))
                     // One rule for every node: a click selects; a double
                     // click or Enter opens a table, or expands or collapses
                     // any other node (as its chevron and the arrows do), so a
@@ -4439,4 +4450,34 @@ fn connection_shade(
         DriverKind::Sqlite => C::Teal,
         _ => C::Mint,
     })
+}
+
+/// The explorer's keys on a node (`ExplorerUp`, ... in [`super::shortcuts`]):
+/// each is an action of the keymap, bound in the explorer's context.
+fn tree_keys(
+    node: Stateful<Div>,
+    index: usize,
+    path: &ObjectPath,
+    cx: &mut Context<AppView>,
+) -> Stateful<Div> {
+    use super::shortcuts::*;
+    use jykre::explorer::TreeKey;
+    fn on<A: Action>(
+        node: Stateful<Div>,
+        index: usize,
+        path: &ObjectPath,
+        key: TreeKey,
+        cx: &mut Context<AppView>,
+    ) -> Stateful<Div> {
+        let path = path.clone();
+        node.on_action(cx.listener(move |this, _: &A, window, cx| {
+            this.explorer_key(index, &path, key, window, cx)
+        }))
+    }
+    let node = on::<ExplorerUp>(node, index, path, TreeKey::Up, cx);
+    let node = on::<ExplorerDown>(node, index, path, TreeKey::Down, cx);
+    let node = on::<ExplorerLeft>(node, index, path, TreeKey::Left, cx);
+    let node = on::<ExplorerRight>(node, index, path, TreeKey::Right, cx);
+    let node = on::<ExplorerHome>(node, index, path, TreeKey::Home, cx);
+    on::<ExplorerEnd>(node, index, path, TreeKey::End, cx)
 }

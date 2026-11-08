@@ -666,12 +666,19 @@ impl SqlEditor {
         if partial {
             notice(
                 Tone::Warning,
-                tr!(
-                    "SQL formatted, except a part that does not parse in this connection's dialect, which was left as it was. Use Ctrl+Z to undo."
+                &tr!(
+                    "SQL formatted, except a part that does not parse in this connection's dialect, which was left as it was. Use {0} to undo.",
+                    super::shortcuts::label::<gpui_kit::base::input::Undo>(cx)
                 ),
             )
         } else {
-            notice(Tone::Success, tr!("SQL formatted. Use Ctrl+Z to undo."))
+            notice(
+                Tone::Success,
+                &tr!(
+                    "SQL formatted. Use {0} to undo.",
+                    super::shortcuts::label::<gpui_kit::base::input::Undo>(cx)
+                ),
+            )
         }
     }
 }

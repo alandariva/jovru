@@ -24,6 +24,8 @@ mod result_grid;
 mod saved_query_dialog;
 mod scope_picker;
 mod settings;
+mod shortcut_editor;
+mod shortcuts;
 mod sql_editor;
 mod state;
 mod telemetry_settings;
@@ -381,6 +383,8 @@ struct AppView {
     /// Preferences > Assistant (ADR-0028).
     assistant_settings: Entity<assistant_settings::AssistantSettingsView>,
     telemetry_settings: Entity<telemetry_settings::TelemetrySettingsView>,
+    /// Preferences › Shortcuts (0.3.0 A12).
+    shortcut_editor: Entity<shortcut_editor::ShortcutEditor>,
     /// Updates (ADR-0033): Preferences › About › Updates and the status
     /// bar's badge, which share the `updates::Updater`.
     update_settings: Entity<updates::UpdateSettingsView>,
@@ -734,6 +738,7 @@ impl AppView {
                 .new(|cx| assistant_settings::AssistantSettingsView::new(window, cx)),
             telemetry_settings: cx
                 .new(|cx| telemetry_settings::TelemetrySettingsView::new(window, cx)),
+            shortcut_editor: cx.new(shortcut_editor::ShortcutEditor::new),
             update_settings: cx.new(|cx| updates::UpdateSettingsView::new(updater.clone(), cx)),
             update_badge: cx.new(|cx| updates::UpdateBadge::new(updater, cx)),
             schema_open: true,
@@ -1052,6 +1057,7 @@ impl AppView {
         ));
         app.filter_library(cx);
         app.load_connections(window, cx);
+        app.load_shortcuts(cx);
         app.start_automation(window, cx);
         assistant_settings::load(cx);
         telemetry_settings::load(cx);
@@ -2209,7 +2215,11 @@ impl AppView {
                     .tab_index(0)
                     .focus_visible(|s| s.bg(rgb(colors().hover)))
                     .tooltip(|window, cx| {
-                        Tooltip::new(tr!("Preferences · Ctrl ,")).build(window, cx)
+                        Tooltip::new(tr!(
+                            "Preferences · {0}",
+                            shortcuts::label::<ShowPreferences>(cx)
+                        ))
+                        .build(window, cx)
                     })
                     .size(px(34.))
                     .flex_none()
@@ -2482,6 +2492,19 @@ impl AppView {
                                 .aria_label(tr!("Explorer"))
                                 .key_context(quick_search::EXPLORER_CONTEXT)
                                 .track_focus(&self.explorer_focus)
+                                // With the keyboard on the tree but no node,
+                                // Up and Down still step through the quick
+                                // search's matches.
+                                .on_action(cx.listener(
+                                    |this, _: &shortcuts::ExplorerUp, window, cx| {
+                                        this.quick_step_or_pass(false, window, cx)
+                                    },
+                                ))
+                                .on_action(cx.listener(
+                                    |this, _: &shortcuts::ExplorerDown, window, cx| {
+                                        this.quick_step_or_pass(true, window, cx)
+                                    },
+                                ))
                                 .flex()
                                 .flex_col()
                                 .flex_1()
@@ -2814,7 +2837,11 @@ impl AppView {
                             })
                             .when(saved, |s| {
                                 s.child(
-                                    icon_button("library-open", I::FolderOpen, tr!("Open a .sql file… · Ctrl+O"))
+                                    icon_button(
+                                        "library-open",
+                                        I::FolderOpen,
+                                        tr!("Open a .sql file… · {0}", shortcuts::label::<OpenFile>(cx)),
+                                    )
                                         .size(px(26.))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.open_files_dialog(window, cx)
@@ -2887,9 +2914,13 @@ impl AppView {
                                     .text_size(px(14.))
                                     .text_color(rgb(colors().muted))
                                     .child(if saved {
-                                        tr!("Save a query to a file with Ctrl+S, or open one with Ctrl+O.")
+                                        tr!(
+                                            "Save a query to a file with {0}, or open one with {1}.",
+                                            shortcuts::label::<SaveFile>(cx),
+                                            shortcuts::label::<OpenFile>(cx)
+                                        )
                                     } else {
-                                        tr!("Queries you run appear here.")
+                                        tr!("Queries you run appear here.").to_owned()
                                     }),
                             )
                         } else if self.library_shown.is_empty() {
@@ -3033,7 +3064,7 @@ impl AppView {
                     .child(icon(I::Search, colors().faint))
                     .child(label(tr!("Search the workspace…")))
                     .child(div().flex_1())
-                    .child(shortcut("Ctrl Shift P"))
+                    .child(shortcut(shortcuts::label::<shortcuts::SearchCache>(cx)))
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.command_open = true;
                         this.command.update(cx, |input, cx| input.focus(window, cx));
@@ -3047,7 +3078,10 @@ impl AppView {
                     icon_button(
                         "reopen-closed-tab",
                         I::Undo2,
-                        tr!("Reopen closed query tab · Ctrl+Shift+T"),
+                        tr!(
+                            "Reopen closed query tab · {0}",
+                            shortcuts::label::<ReopenClosedTab>(cx)
+                        ),
                     )
                     .flex_none()
                     .occlude()
@@ -3193,7 +3227,11 @@ impl AppView {
                             .child(label(tr!(
                                 "↑ ↓ choose · Enter opens the saved query or the table's data · #tag filters"
                             )))
-                            .child(row().child(shortcut("Esc")).child(label(tr!("close")))),
+                            .child(
+                                row()
+                                    .child(shortcut(shortcuts::label::<shortcuts::Dismiss>(cx)))
+                                    .child(label(tr!("close"))),
+                            ),
                     )
                     // Tab cycles through the palette while it is open.
                     .focus_trap("command-focus-trap", &self.command_focus),
@@ -3512,30 +3550,21 @@ impl Render for AppView {
                     panel.update(cx, Workspace::toggle_export);
                 }
             }))
+            .on_action(cx.listener(Self::dismiss))
+            .on_action(cx.listener(Self::search_cache_shortcut))
+            .on_action(cx.listener(Self::new_query_shortcut))
+            .on_action(cx.listener(Self::toggle_explorer))
+            .on_action(cx.listener(Self::toggle_assistant_shortcut))
+            .on_action(cx.listener(Self::larger_font))
+            .on_action(cx.listener(Self::smaller_font))
+            .on_action(cx.listener(Self::reset_font))
+            // The search's list: the arrows move the highlighted match and
+            // the text field keeps every other key.
             .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    if this.password_prompt.is_some() {
-                        this.cancel_password(window, cx);
-                    } else if this.details_open() {
-                        this.cancel_details(window, cx);
-                    } else if this.report_picker.is_some() {
-                        this.close_report_picker(window, cx);
-                    } else if this.settings_open {
-                        this.close_settings(window, cx);
-                    } else if this.inspection.take().is_some() {
-                        cx.notify();
-                    } else if this.command_open {
-                        this.command_open = false;
-                        cx.notify();
-                    } else {
-                        this.close_connection_dialog(cx);
-                    }
-                } else if this.command_open
+                if this.command_open
                     && matches!(event.keystroke.key.as_str(), "up" | "down")
                     && !event.keystroke.modifiers.modified()
                 {
-                    // The arrows move the highlighted match; the text field
-                    // keeps every other key.
                     let delta = if event.keystroke.key == "up" { -1 } else { 1 };
                     this.command_selected = jykre::palette::step(
                         this.command_selected,
@@ -3544,58 +3573,6 @@ impl Render for AppView {
                     );
                     this.command_scroll.scroll_to_item(this.command_selected);
                     cx.notify();
-                    window.prevent_default();
-                    cx.stop_propagation();
-                } else if this.connection_open
-                    || this.password_prompt.is_some()
-                    || this.dialog_open()
-                {
-                    // Workspace shortcuts would act behind the modal form.
-                } else if event.keystroke.modifiers.control
-                    && event.keystroke.modifiers.shift
-                    && event.keystroke.key.eq_ignore_ascii_case("p")
-                {
-                    this.command_open = !this.command_open;
-                    if this.command_open {
-                        this.command_selected = 0;
-                        this.command.update(cx, |input, cx| input.focus(window, cx));
-                        this.search_cache(true, cx);
-                    }
-                    cx.notify();
-                    window.prevent_default();
-                    cx.stop_propagation();
-                } else if event.keystroke.modifiers.control && event.keystroke.key == "n" {
-                    this.new_active_query(window, cx);
-                    window.prevent_default();
-                    cx.stop_propagation();
-                } else if event.keystroke.modifiers.control && event.keystroke.key == "b" {
-                    if event.keystroke.modifiers.shift {
-                        if let Some(panel) = this
-                            .tabs
-                            .read(cx)
-                            .active_tab()
-                            .and_then(|tab| this.panels.get(&tab))
-                            .cloned()
-                        {
-                            panel.update(cx, |panel, cx| panel.toggle_assistant(cx));
-                        }
-                    } else {
-                        this.sidebar_open = !this.sidebar_open;
-                        cx.notify();
-                    }
-                    window.prevent_default();
-                    cx.stop_propagation();
-                } else if event.keystroke.modifiers.control
-                    && matches!(event.keystroke.key.as_str(), "+" | "=" | "-" | "0")
-                {
-                    let current = f32::from(cx.theme().mono_font_size);
-                    let size = match event.keystroke.key.as_str() {
-                        "-" => (current - 1.).max(12.),
-                        "0" => 14.,
-                        _ => (current + 1.).min(24.),
-                    };
-                    Theme::update(cx, |theme| theme.mono_font_size = px(size));
-                    this.persist_font_size(size, cx);
                     window.prevent_default();
                     cx.stop_propagation();
                 }
@@ -3728,6 +3705,72 @@ impl Render for AppView {
     }
 }
 
+/// The application's default keys, bound at start. The editor binds
+/// Ctrl+Enter itself; a binding in its own, deeper context added later wins
+/// there, and the global ones apply anywhere else in the window.
+pub(crate) fn application_bindings() -> Vec<KeyBinding> {
+    let editor = format!("{} > Input", workspace::SQL_EDITOR_CONTEXT);
+    let editor = editor.as_str();
+    vec![
+        KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, None),
+        KeyBinding::new("ctrl-shift-enter", ExecuteCurrentQueryInNewResult, None),
+        KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, None),
+        KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, Some(editor)),
+        // Suggestions on demand, also with nothing typed yet.
+        KeyBinding::new("ctrl-space", ShowCompletions, Some(editor)),
+        KeyBinding::new(
+            "ctrl-shift-enter",
+            ExecuteCurrentQueryInNewResult,
+            Some(editor),
+        ),
+        KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, Some(editor)),
+        KeyBinding::new("ctrl-f2", CancelRun, None),
+        KeyBinding::new("ctrl-f2", CancelRun, Some(editor)),
+        KeyBinding::new("ctrl-shift-t", ReopenClosedTab, None),
+        KeyBinding::new("ctrl-shift-t", ReopenClosedTab, Some(editor)),
+        KeyBinding::new("ctrl-o", OpenFile, None),
+        KeyBinding::new("ctrl-o", OpenFile, Some(editor)),
+        KeyBinding::new("ctrl-s", SaveFile, None),
+        KeyBinding::new("ctrl-s", SaveFile, Some(editor)),
+        KeyBinding::new("ctrl-shift-s", SaveFileAs, None),
+        KeyBinding::new("ctrl-shift-s", SaveFileAs, Some(editor)),
+        KeyBinding::new("ctrl-w", CloseActiveTab, None),
+        KeyBinding::new("ctrl-f4", CloseActiveTab, None),
+        KeyBinding::new("ctrl-w", CloseActiveTab, Some(editor)),
+        KeyBinding::new("ctrl-f4", CloseActiveTab, Some(editor)),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-pagedown", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
+        KeyBinding::new("ctrl-pageup", PreviousTab, None),
+        KeyBinding::new("ctrl-tab", NextTab, Some(editor)),
+        KeyBinding::new("ctrl-pagedown", NextTab, Some(editor)),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(editor)),
+        KeyBinding::new("ctrl-pageup", PreviousTab, Some(editor)),
+        KeyBinding::new("ctrl-shift-e", ExportResult, None),
+        KeyBinding::new("ctrl-shift-e", ExportResult, Some(editor)),
+        KeyBinding::new("ctrl-/", ToggleComment, Some(editor)),
+        // Bound by none of the editor component's keys (gpui-base 0.9.0).
+        KeyBinding::new("ctrl-g", GoToLine, Some(editor)),
+        KeyBinding::new("ctrl-t", NewTab, None),
+        KeyBinding::new("ctrl-t", NewTab, Some(editor)),
+        KeyBinding::new("ctrl-,", ShowPreferences, None),
+        KeyBinding::new("ctrl-,", ShowPreferences, Some(editor)),
+        KeyBinding::new(
+            "shift-f10",
+            ExplorerContextMenu,
+            Some(quick_search::EXPLORER_CONTEXT),
+        ),
+        KeyBinding::new(
+            "ctrl-f",
+            ToggleExplorerFilter,
+            Some(quick_search::EXPLORER_CONTEXT),
+        ),
+        KeyBinding::new("shift-f10", ResultGridMenu, Some(result_grid::GRID_CONTEXT)),
+        KeyBinding::new("ctrl-shift-f", FindColumn, None),
+        KeyBinding::new("ctrl-shift-f", FindColumn, Some(editor)),
+    ]
+}
+
 /// The application's identity on Linux: the Wayland app ID and the X11
 /// `WM_CLASS`. The desktop finds the window's name and icon in
 /// `<APP_ID>.desktop`, which `assets/linux/install.sh` installs.
@@ -3739,68 +3782,11 @@ pub fn run() {
         fonts::resolve(cx);
         probe::start(cx);
         exit_writes::install(cx);
-        // The editor binds Ctrl+Enter itself; a binding in its own, deeper
-        // context added later wins there, and the global ones apply anywhere
-        // else in the window.
-        let editor = format!("{} > Input", workspace::SQL_EDITOR_CONTEXT);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, None),
-            KeyBinding::new("ctrl-shift-enter", ExecuteCurrentQueryInNewResult, None),
-            KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, None),
-            KeyBinding::new("ctrl-enter", ExecuteCurrentQuery, Some(&editor)),
-            // Suggestions on demand, also with nothing typed yet.
-            KeyBinding::new("ctrl-space", ShowCompletions, Some(&editor)),
-            KeyBinding::new(
-                "ctrl-shift-enter",
-                ExecuteCurrentQueryInNewResult,
-                Some(&editor),
-            ),
-            KeyBinding::new("ctrl-alt-enter", ExecuteAllQueries, Some(&editor)),
-            KeyBinding::new("ctrl-f2", CancelRun, None),
-            KeyBinding::new("ctrl-f2", CancelRun, Some(&editor)),
-            KeyBinding::new("ctrl-shift-t", ReopenClosedTab, None),
-            KeyBinding::new("ctrl-shift-t", ReopenClosedTab, Some(&editor)),
-            KeyBinding::new("ctrl-o", OpenFile, None),
-            KeyBinding::new("ctrl-o", OpenFile, Some(&editor)),
-            KeyBinding::new("ctrl-s", SaveFile, None),
-            KeyBinding::new("ctrl-s", SaveFile, Some(&editor)),
-            KeyBinding::new("ctrl-shift-s", SaveFileAs, None),
-            KeyBinding::new("ctrl-shift-s", SaveFileAs, Some(&editor)),
-            KeyBinding::new("ctrl-w", CloseActiveTab, None),
-            KeyBinding::new("ctrl-f4", CloseActiveTab, None),
-            KeyBinding::new("ctrl-w", CloseActiveTab, Some(&editor)),
-            KeyBinding::new("ctrl-f4", CloseActiveTab, Some(&editor)),
-            KeyBinding::new("ctrl-tab", NextTab, None),
-            KeyBinding::new("ctrl-pagedown", NextTab, None),
-            KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
-            KeyBinding::new("ctrl-pageup", PreviousTab, None),
-            KeyBinding::new("ctrl-tab", NextTab, Some(&editor)),
-            KeyBinding::new("ctrl-pagedown", NextTab, Some(&editor)),
-            KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(&editor)),
-            KeyBinding::new("ctrl-pageup", PreviousTab, Some(&editor)),
-            KeyBinding::new("ctrl-shift-e", ExportResult, None),
-            KeyBinding::new("ctrl-shift-e", ExportResult, Some(&editor)),
-            KeyBinding::new("ctrl-/", ToggleComment, Some(&editor)),
-            // Bound by none of the editor component's keys (gpui-base 0.9.0).
-            KeyBinding::new("ctrl-g", GoToLine, Some(&editor)),
-            KeyBinding::new("ctrl-t", NewTab, None),
-            KeyBinding::new("ctrl-t", NewTab, Some(&editor)),
-            KeyBinding::new("ctrl-,", ShowPreferences, None),
-            KeyBinding::new("ctrl-,", ShowPreferences, Some(&editor)),
-            KeyBinding::new(
-                "shift-f10",
-                ExplorerContextMenu,
-                Some(quick_search::EXPLORER_CONTEXT),
-            ),
-            KeyBinding::new(
-                "ctrl-f",
-                ToggleExplorerFilter,
-                Some(quick_search::EXPLORER_CONTEXT),
-            ),
-            KeyBinding::new("shift-f10", ResultGridMenu, Some(result_grid::GRID_CONTEXT)),
-            KeyBinding::new("ctrl-shift-f", FindColumn, None),
-            KeyBinding::new("ctrl-shift-f", FindColumn, Some(&editor)),
-        ]);
+        cx.bind_keys(application_bindings());
+        cx.bind_keys(shortcuts::default_bindings());
+        // Everything bound so far is the default keymap; the keys the user
+        // chose are applied over it once they are read.
+        shortcuts::install(cx);
         // The system's theme until the preference is read.
         theme::apply(jykre::theme::ThemeChoice::System, None, cx);
         let options = WindowOptions {

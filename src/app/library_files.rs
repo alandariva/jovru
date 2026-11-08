@@ -814,6 +814,7 @@ impl AppView {
             return;
         };
         let view = cx.entity().downgrade();
+        let undo = super::shortcuts::label::<gpui_kit::base::input::Undo>(cx);
         confirm(
             window,
             cx,
@@ -823,9 +824,9 @@ impl AppView {
                     file_label(&file.path)
                 ),
                 description: tr!(
-                    "The tab's SQL is replaced with the file's; Ctrl+Z brings it back."
-                )
-                .to_string(),
+                    "The tab's SQL is replaced with the file's; {0} brings it back.",
+                    undo
+                ),
                 ok: tr!("Reload"),
                 cancel: tr!("Cancel"),
                 focus: ConfirmFocus::Dialog,

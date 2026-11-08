@@ -1382,59 +1382,46 @@ impl ResultGrid {
         self.start_copy(request, super::copying::CopyWhat::Value, window, cx);
     }
 
+    /// `Esc` closes what is on top first: a copy, the panel, the records
+    /// view, then the selection. It stays a key of the grid, not an action:
+    /// the window's `Dismiss` sees it first and lets it through.
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        let shift = keystroke.modifiers.shift;
-        let handled = if keystroke.modifiers.control || keystroke.modifiers.platform {
-            match keystroke.key.as_str() {
-                "c" => {
-                    self.copy_selection(shift, window, cx);
-                    true
-                }
-                "a" => {
-                    self.select_all(cx);
-                    true
-                }
-                "home" => {
-                    self.jump_selection(Jump::First, shift, cx);
-                    true
-                }
-                "end" => {
-                    self.jump_selection(Jump::Last, shift, cx);
-                    true
-                }
-                _ => false,
-            }
+        if keystroke.key != "escape" || keystroke.modifiers.modified() {
+            return;
+        }
+        if self.copy_job.is_some() {
+            self.cancel_copy(cx);
+        } else if self.inspector.is_some() {
+            self.set_inspector(None, cx);
+        } else if self.records {
+            self.set_records(false, cx);
+        } else if self.selection.is_some() {
+            self.select(None, cx);
         } else {
-            match keystroke.key.as_str() {
-                "up" => self.move_selection(-1, 0, shift, cx),
-                "down" => self.move_selection(1, 0, shift, cx),
-                "left" => self.move_selection(0, -1, shift, cx),
-                "right" => self.move_selection(0, 1, shift, cx),
-                "home" => self.jump_selection(Jump::RowStart, shift, cx),
-                "end" => self.jump_selection(Jump::RowEnd, shift, cx),
-                "pageup" => {
-                    let rows = self.page_rows();
-                    self.jump_selection(Jump::Rows(-rows), shift, cx)
-                }
-                "pagedown" => {
-                    let rows = self.page_rows();
-                    self.jump_selection(Jump::Rows(rows), shift, cx)
-                }
-                "enter" if self.inspected.is_some() => self.open_inspector(Inspector::Value, cx),
-                "escape" if self.copy_job.is_some() => self.cancel_copy(cx),
-                // Esc closes what is on top first: the panel, the records
-                // view, then the selection.
-                "escape" if self.inspector.is_some() => self.set_inspector(None, cx),
-                "escape" if self.records => self.set_records(false, cx),
-                "escape" if self.selection.is_some() => self.select(None, cx),
-                _ => return,
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+
+    /// A key of the grid's keymap ([`super::shortcuts`]), on the table that
+    /// has the keyboard. `Enter` with no cell to show lets the key through.
+    fn grid_key(&mut self, key: KeyAction, window: &mut Window, cx: &mut Context<Self>) {
+        match key {
+            KeyAction::Copy { names } => self.copy_selection(names, window, cx),
+            KeyAction::SelectAll => self.select_all(cx),
+            KeyAction::Move { rows, cols, extend } => self.move_selection(rows, cols, extend, cx),
+            KeyAction::Jump { jump, extend } => self.jump_selection(jump, extend, cx),
+            KeyAction::Page { down, extend } => {
+                let rows = self.page_rows();
+                let rows = if down { rows } else { -rows };
+                self.jump_selection(Jump::Rows(rows), extend, cx)
             }
-            true
-        };
-        if handled {
-            window.prevent_default();
-            cx.stop_propagation();
+            KeyAction::Inspect if self.inspected.is_some() => {
+                self.open_inspector(Inspector::Value, cx)
+            }
+            KeyAction::Inspect => cx.propagate(),
         }
     }
 
@@ -3233,6 +3220,10 @@ impl ResultGrid {
             };
         let copy_as_weak = weak.clone();
         let format = super::copying::options(cx).format;
+        // The keys in use, named in the items.
+        let copy_key = super::shortcuts::label::<super::shortcuts::GridCopy>(cx);
+        let copy_names_key = super::shortcuts::label::<super::shortcuts::GridCopyWithNames>(cx);
+        let find_key = super::shortcuts::label::<super::FindColumn>(cx);
         // What the column items act on: the column right-clicked, else the
         // focused one.
         let columns = weak
@@ -3270,14 +3261,14 @@ impl ResultGrid {
             };
         let show_weak = weak.clone();
         menu.item(
-            PopupMenuItem::new(tr!("Copy as {0} (Ctrl+C)", format_name(format)))
+            PopupMenuItem::new(tr!("Copy as {0} ({1})", format_name(format), copy_key))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, window, cx| {
                     this.copy_selection(false, window, cx)
                 })),
         )
         .item(
-            PopupMenuItem::new(tr!("Copy with headers (Ctrl+Shift+C)"))
+            PopupMenuItem::new(tr!("Copy with headers ({0})", copy_names_key))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, window, cx| {
                     this.copy_selection(true, window, cx)
@@ -3418,8 +3409,9 @@ impl ResultGrid {
                 if more > 0 {
                     menu.item(
                         PopupMenuItem::new(tr!(
-                            "{0} more: find them by name (Ctrl+Shift+F)",
-                            cell_format::count(more)
+                            "{0} more: find them by name ({1})",
+                            cell_format::count(more),
+                            find_key
                         ))
                         .disabled(true),
                     )
@@ -3637,6 +3629,7 @@ impl Render for ResultGrid {
             .w_full()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            .map(|grid| grid_keys(grid, cx))
             .on_action(cx.listener(|this, _: &super::ResultGridMenu, window, cx| {
                 this.open_menu_from_keyboard(window, cx)
             }))
@@ -3745,4 +3738,93 @@ impl Render for ResultGrid {
             // Last, so it is drawn over the table.
             .children(match_list)
     }
+}
+
+/// What a key of the grid does ([`ResultGrid::grid_key`]).
+#[derive(Clone, Copy, Debug)]
+enum KeyAction {
+    Copy {
+        names: bool,
+    },
+    SelectAll,
+    Move {
+        rows: isize,
+        cols: isize,
+        extend: bool,
+    },
+    Jump {
+        jump: Jump,
+        extend: bool,
+    },
+    Page {
+        down: bool,
+        extend: bool,
+    },
+    Inspect,
+}
+
+/// The grid's actions on the table: each one is a key of the keymap.
+fn grid_keys(grid: Stateful<Div>, cx: &mut Context<ResultGrid>) -> Stateful<Div> {
+    use super::shortcuts::*;
+    fn on<A: Action>(
+        grid: Stateful<Div>,
+        key: KeyAction,
+        cx: &mut Context<ResultGrid>,
+    ) -> Stateful<Div> {
+        grid.on_action(cx.listener(move |this, _: &A, window, cx| this.grid_key(key, window, cx)))
+    }
+    let moved = |rows, cols, extend| KeyAction::Move { rows, cols, extend };
+    let jumped = |jump, extend| KeyAction::Jump { jump, extend };
+    let grid = on::<GridCopy>(grid, KeyAction::Copy { names: false }, cx);
+    let grid = on::<GridCopyWithNames>(grid, KeyAction::Copy { names: true }, cx);
+    let grid = on::<GridSelectAll>(grid, KeyAction::SelectAll, cx);
+    let grid = on::<GridUp>(grid, moved(-1, 0, false), cx);
+    let grid = on::<GridDown>(grid, moved(1, 0, false), cx);
+    let grid = on::<GridLeft>(grid, moved(0, -1, false), cx);
+    let grid = on::<GridRight>(grid, moved(0, 1, false), cx);
+    let grid = on::<GridExtendUp>(grid, moved(-1, 0, true), cx);
+    let grid = on::<GridExtendDown>(grid, moved(1, 0, true), cx);
+    let grid = on::<GridExtendLeft>(grid, moved(0, -1, true), cx);
+    let grid = on::<GridExtendRight>(grid, moved(0, 1, true), cx);
+    let grid = on::<GridRowStart>(grid, jumped(Jump::RowStart, false), cx);
+    let grid = on::<GridRowEnd>(grid, jumped(Jump::RowEnd, false), cx);
+    let grid = on::<GridExtendRowStart>(grid, jumped(Jump::RowStart, true), cx);
+    let grid = on::<GridExtendRowEnd>(grid, jumped(Jump::RowEnd, true), cx);
+    let grid = on::<GridFirstCell>(grid, jumped(Jump::First, false), cx);
+    let grid = on::<GridLastCell>(grid, jumped(Jump::Last, false), cx);
+    let grid = on::<GridExtendFirstCell>(grid, jumped(Jump::First, true), cx);
+    let grid = on::<GridExtendLastCell>(grid, jumped(Jump::Last, true), cx);
+    let grid = on::<GridPageUp>(
+        grid,
+        KeyAction::Page {
+            down: false,
+            extend: false,
+        },
+        cx,
+    );
+    let grid = on::<GridPageDown>(
+        grid,
+        KeyAction::Page {
+            down: true,
+            extend: false,
+        },
+        cx,
+    );
+    let grid = on::<GridExtendPageUp>(
+        grid,
+        KeyAction::Page {
+            down: false,
+            extend: true,
+        },
+        cx,
+    );
+    let grid = on::<GridExtendPageDown>(
+        grid,
+        KeyAction::Page {
+            down: true,
+            extend: true,
+        },
+        cx,
+    );
+    on::<GridInspect>(grid, KeyAction::Inspect, cx)
 }

@@ -81,10 +81,27 @@ See [Performance](performance.md) for budgets and how to measure.
   keymap at startup with `cx.bind_keys` and handled with `.on_action`.
   Component-scoped shortcuts use a `key_context`, so the same keys can mean
   different things in the editor, the grid and the explorer.
+- The keymap the user can change is built in `src/app/shortcuts.rs`: the
+  bindings in place at start (the application's `application_bindings`
+  and `shortcuts::default_bindings`, and the editor component's) are its
+  defaults, and each change rebuilds it from them. A new shortcut is an
+  action with a default binding there and an entry in `shortcuts::catalog`,
+  so **Preferences › Shortcuts** offers it; a test checks that every listed
+  action of the application has a key and that the defaults do not collide.
+  The rules (keys, scopes, collisions, the stored choices) are in
+  `jykre::keymap`, outside the views.
+- A view that names a key reads it from the keymap
+  (`shortcuts::label::<Action>(cx)`), never a fixed string, so it shows the
+  key in use.
 - Bindings are listed in [User experience](../reference/ux.md#keyboard-shortcuts). A new
   shortcut updates that table with the change.
 - Raw `on_key_down` handlers are only for text-like navigation inside a single
-  focused component when an action would not fit.
+  focused control when an action would not fit: typing and moving in a text
+  field or a list it drives (the explorer's search field and quick search,
+  the search's list, the column search), the tab bar and its picker
+  (`grouped_tabs`), a splitter's arrows, and `Esc` closing a layer of the
+  grid or a report panel after the window's `Dismiss` lets it through.
+  These keys are fixed; the user cannot change them.
 
 ## Text
 
@@ -152,6 +169,5 @@ See [Performance](performance.md) for budgets and how to measure.
 
 | Standard | Current code |
 | --- | --- |
-| Shortcuts are actions in one keymap | Only the run shortcuts, stopping a run, reopening a closed tab, opening and saving files, closing a tab, a new tab, moving between tabs, Preferences, the export bar, commenting lines, going to a line, the result grid's menu and finding a column are actions (`ExecuteCurrentQuery`, `ExecuteCurrentQueryInNewResult`, `ExecuteAllQueries`, `CancelRun`, `ReopenClosedTab`, `OpenFile`, `SaveFile`, `SaveFileAs`, `CloseActiveTab`, `NewTab`, `NextTab`, `PreviousTab`, `ShowPreferences`, `ExportResult`, `ToggleComment`, `GoToLine`, in the explorer `ExplorerContextMenu` and `ToggleExplorerFilter`, in a result grid `ResultGridMenu`, and `FindColumn`). Typing in the explorer's quick search is text-like navigation, read by a `capture_key_down` on the tree (`src/app/quick_search.rs`). The others are matched by hand in `on_key_down`/`capture_key_down` handlers in `src/app/mod.rs`, `workspace.rs`, `connections.rs`, `result_grid.rs` (the grid's navigation keys) and `grouped_tabs` |
 | Frequently changing regions are their own cached entities | The result grid is its own cached entity (`src/app/result_grid.rs`, [ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md)); so is the assistant panel (`src/app/assistant_panel.rs`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)). The editor still renders inside `Workspace` |
 | Long collections are virtualized | The result grid, the explorer tree and its favorites, Messages and the saved queries and history are. The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`) |

@@ -1818,7 +1818,8 @@ impl ReportView {
             .child(label(parts.join(" · ")))
             .when(self.mode == ReportMode::Edit, |s| {
                 s.child(div().flex_1()).child(label(tr!(
-                    "Ctrl Enter in a panel's SQL runs that panel; elsewhere, the whole report."
+                    "{0} in a panel's SQL runs that panel; elsewhere, the whole report.",
+                    super::shortcuts::label::<super::ExecuteCurrentQuery>(cx)
                 )))
             })
     }

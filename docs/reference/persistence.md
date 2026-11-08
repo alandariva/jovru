@@ -66,6 +66,18 @@ missing or out-of-range value reads as the default, 1,000), and
 environment this version does not know, reads as the driver's colour and no
 environment.
 
+`keymap.shortcuts` keeps the keys the user chose in **Preferences ›
+Shortcuts** (`jykre::keymap::UserKeys`, 0.3.0 A12), by action name as the
+keymap knows it: `{"jykre::GoToLine": ["ctrl-l"], "input::Search": []}`.
+Each key is one keystroke as GPUI writes it; an action that is not there
+keeps its default keys, and an empty list leaves it without one. It is read
+once at start and written at each change, the last write asked for winning
+(`connection_store::SHORTCUT_WRITES`). A value that is not an object, an
+action this version does not offer and keys that cannot be read are left
+out, said once in the window's notice, and the value is written again
+without them; nothing here stops the application from starting. The demo
+(`JYKRE_DEMO=1`) reads and writes none.
+
 `export.preferences` keeps the export bar's last choices
 (`jykre::export::ExportPreferences`): `{"format": "csv", "separator": ";",
 "quoting": "all", "header": true, "bom": false, "directory": "…"}`, the

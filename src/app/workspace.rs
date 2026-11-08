@@ -225,9 +225,7 @@ impl Workspace {
             EditorState::new(window, cx)
                 .language("sql")
                 .line_number(true)
-                .placeholder(tr!(
-                    "Write SQL here. Ctrl+Enter runs the statement at the cursor."
-                ))
+                .placeholder(editor_placeholder(cx))
                 .default_value(sql)
         });
         // Highlighting, completion, hover, go to definition and Format.
@@ -440,6 +438,16 @@ impl Workspace {
                 editor_edits,
                 sql_editor_subscription,
                 copy_observation,
+                // The placeholder names the run key in use.
+                cx.observe_global_in::<super::shortcuts::ShortcutState>(
+                    window,
+                    |this, window, cx| {
+                        let placeholder = editor_placeholder(cx);
+                        this.editor.update(cx, |editor, cx| {
+                            editor.set_placeholder(placeholder, window, cx)
+                        });
+                    },
+                ),
             ],
         };
         // Before the first layout, so a long script is never wrapped.
@@ -2012,11 +2020,16 @@ impl Workspace {
                         .tooltip({
                             let running = matches!(self.run.state(), RunState::Running { .. });
                             move |window, cx| {
+                                let stop = super::shortcuts::label::<super::CancelRun>(cx);
                                 Tooltip::new(if running {
-                                    tr!("Stop the run · Ctrl+F2")
+                                    tr!("Stop the run · {0}", stop)
                                 } else {
                                     tr!(
-                                        "Run the statement at the cursor or the selection, in place of the result on screen · Ctrl+Enter\nIn a new result · Ctrl+Shift+Enter\nRun all statements · Ctrl+Alt+Enter\nStop a run · Ctrl+F2"
+                                        "Run the statement at the cursor or the selection, in place of the result on screen · {0}\nIn a new result · {1}\nRun all statements · {2}\nStop a run · {3}",
+                                        super::shortcuts::label::<super::ExecuteCurrentQuery>(cx),
+                                        super::shortcuts::label::<super::ExecuteCurrentQueryInNewResult>(cx),
+                                        super::shortcuts::label::<super::ExecuteAllQueries>(cx),
+                                        stop
                                     )
                                 })
                                 .build(window, cx)
@@ -2055,16 +2068,25 @@ impl Workspace {
                                 (Some(_), false) => I::SaveCheck,
                                 _ => I::Save,
                             },
-                            match (&self.file, self.has_unsaved_changes()) {
-                                (Some(_), false) => tr!("Saved in its file · Ctrl+S"),
-                                (Some(_), true) => tr!("Save the changes to its file · Ctrl+S"),
-                                (None, _) => tr!("Save to a file · Ctrl+S"),
+                            {
+                                let save = super::shortcuts::label::<super::SaveFile>(cx);
+                                match (&self.file, self.has_unsaved_changes()) {
+                                    (Some(_), false) => tr!("Saved in its file · {0}", save),
+                                    (Some(_), true) => {
+                                        tr!("Save the changes to its file · {0}", save)
+                                    }
+                                    (None, _) => tr!("Save to a file · {0}", save),
+                                }
                             },
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.save_query(cx))),
                     )
                     .child(
-                        icon_button("save-query-as", I::SavePen, tr!("Save as… · Ctrl+Shift+S"))
+                        icon_button(
+                            "save-query-as",
+                            I::SavePen,
+                            tr!("Save as… · {0}", super::shortcuts::label::<super::SaveFileAs>(cx)),
+                        )
                             .on_click(cx.listener(|this, _, _, cx| this.save_query_as(cx))),
                     )
                     .child({
@@ -2516,23 +2538,25 @@ impl Workspace {
                                                 }
                                             },
                                         ))
-                                        .on_key_down(cx.listener(
-                                            move |this, event: &KeyDownEvent, window, cx| {
-                                                let modifiers = &event.keystroke.modifiers;
-                                                if !(modifiers.control && modifiers.shift) {
-                                                    return;
-                                                }
-                                                let to = match event.keystroke.key.as_str() {
-                                                    "left" => index.checked_sub(1),
-                                                    "right" => Some(index + 1),
-                                                    _ => None,
-                                                };
-                                                if let Some(to) = to {
+                                        .key_context(super::shortcuts::RESULT_TABS_CONTEXT)
+                                        .on_action(cx.listener(
+                                            move |this,
+                                                  _: &super::shortcuts::MoveResultTabLeft,
+                                                  _,
+                                                  cx| {
+                                                if let Some(to) = index.checked_sub(1) {
                                                     this.results.move_tab(index, to);
-                                                    window.prevent_default();
-                                                    cx.stop_propagation();
                                                     cx.notify();
                                                 }
+                                            },
+                                        ))
+                                        .on_action(cx.listener(
+                                            move |this,
+                                                  _: &super::shortcuts::MoveResultTabRight,
+                                                  _,
+                                                  cx| {
+                                                this.results.move_tab(index, index + 1);
+                                                cx.notify();
                                             },
                                         ))
                                         .map(|s| {
@@ -2636,7 +2660,10 @@ impl Workspace {
                                 icon_button(
                                     "find-column",
                                     I::TextSearch,
-                                    tr!("Find a column (Ctrl+Shift+F)"),
+                                    tr!(
+                                        "Find a column ({0})",
+                                        super::shortcuts::label::<super::FindColumn>(cx)
+                                    ),
                                 )
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.find_column(window, cx)),
@@ -2683,7 +2710,10 @@ impl Workspace {
                                 icon_button(
                                     "export-results",
                                     I::Download,
-                                    tr!("Export the result to a file (Ctrl+Shift+E)"),
+                                    tr!(
+                                        "Export the result to a file ({0})",
+                                        super::shortcuts::label::<super::ExportResult>(cx)
+                                    ),
                                 )
                                 .aria_selected(open)
                                 .when(open, |s| s.bg(rgb(colors().hover)))
@@ -3471,7 +3501,10 @@ impl Workspace {
                     });
                     self.notice = Some(Feedback::new(
                         Tone::Info,
-                        tr!("Statement replaced. Review it before running; Ctrl+Z undoes it."),
+                        tr!(
+                            "Statement replaced. Review it before running; {0} undoes it.",
+                            super::shortcuts::label::<gpui_kit::base::input::Undo>(cx)
+                        ),
                     ));
                 }
                 None => {
@@ -4658,6 +4691,14 @@ pub(super) fn risk_description(risks: &[(usize, jykre::guard::Risk)], total: usi
     tr!(
         "This connection is marked as production. {0} Run it anyway?",
         lines.join(" ")
+    )
+}
+
+/// The empty editor's hint, with the run key in use.
+fn editor_placeholder(cx: &App) -> String {
+    tr!(
+        "Write SQL here. {0} runs the statement at the cursor.",
+        super::shortcuts::label::<super::ExecuteCurrentQuery>(cx)
     )
 }
 

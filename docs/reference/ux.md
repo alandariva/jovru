@@ -462,26 +462,30 @@ Rules:
 
 ## Keyboard shortcuts
 
-| Action | Shortcut |
+The keys below are the defaults. **Preferences › Shortcuts** changes them
+([below](#shortcuts-the-user-chooses)), except the keys that type or move
+inside one focused control, marked *fixed*.
+
+| Action | Default shortcut |
 | --- | --- |
 | Run the selection, or the statement at the cursor, in place of the result tab on screen (asks before cancelling while a run is active) | `Ctrl Enter` |
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Stop the run of the tab on screen, as Stop does (a query tab's statements, a report's panels, or a job's or chain's run, which leaves the queue when it waits), without asking | `Ctrl F2` |
-| In a job's run form (**Inputs**): run the job with the values typed, as **Run** does. `Ctrl Enter` never runs a job | `Enter` |
-| Run the panel whose SQL has the keyboard; elsewhere in a report tab, every panel | `Ctrl Enter` (or `Enter` in a parameter field, which runs every panel) |
+| In a job's run form (**Inputs**): run the job with the values typed, as **Run** does. `Ctrl Enter` never runs a job | `Enter` (fixed) |
+| Run the panel whose SQL has the keyboard; elsewhere in a report tab, every panel | `Ctrl Enter` (or `Enter` in a parameter field, which runs every panel; fixed) |
 | Run every panel of the report on screen | `Ctrl Alt Enter` |
-| In a query tab's parameter field: run what `Ctrl Enter` runs (the selection or the statement at the cursor) | `Enter` |
+| In a query tab's parameter field: run what `Ctrl Enter` runs (the selection or the statement at the cursor) | `Enter` (fixed) |
 | Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
 | SQL editor (a query tab's, a report panel's or a SQL Job's): comment the selected lines, or the cursor's line, with `--`, or take the comment out when all of them are comments (one step for `Ctrl Z`) | `Ctrl /` |
 | SQL editor, while it has the keyboard: search the SQL in the editor's search bar, which starts from the selected text; the matches are marked in the text | `Ctrl F` |
 | SQL editor: the same search bar with its replace field (replace the current match or all of them; `Tab` moves between the two fields, `Ctrl H` in the bar shows or hides the replace field) | `Ctrl H` |
-| SQL editor's search bar: the next or previous match, close it and give the keyboard back to the editor | `Enter`, `Shift Enter`, `Esc` |
+| SQL editor's search bar: the next or previous match, close it and give the keyboard back to the editor | `Enter`, `Shift Enter`, `Esc` (fixed) |
 | SQL editor: go to a line, typed as `12` or with a column as `12:5` (or `12,5`) in a small field over the editor's top right corner (it closes the editor's search bar, which sits there); `Enter` puts the cursor there, scrolled into view, and gives the keyboard back to the editor; a column past the line's end stops at its end; a line past the text goes to the start of the last line and the notice bar says so; text that is not a line is named under the field. `Esc` closes the field and gives the keyboard back to the editor; a click elsewhere closes it | `Ctrl G` |
 | SQL editor: add a cursor on the line above or below; what is typed then goes to every cursor, and `Esc` leaves a single one | `Ctrl Alt ↑`, `Ctrl Alt ↓` on Windows; `Shift Alt ↑`, `Shift Alt ↓` on Linux |
 | Open or close the export bar of the result on screen | `Ctrl Shift E` |
 | Search tables in the local cache | `Ctrl Shift P` |
-| Search: choose a match, open it | `↑`, `↓`, `Enter` |
+| Search: choose a match, open it | `↑`, `↓`, `Enter` (fixed) |
 | New query on the active connection | `Ctrl N` |
 | New query tab on the connection of the query tab on screen; without one (no tab, a report or a tab without a connection), a tab without a connection whose results area offers the connections to choose from | `Ctrl T` |
 | Open or close Preferences | `Ctrl ,` |
@@ -494,42 +498,72 @@ Rules:
 | Show or hide the explorer | `Ctrl B` |
 | Show or hide the assistant | `Ctrl Shift B` |
 | SQL font size: larger, smaller, reset | `Ctrl +`, `Ctrl -`, `Ctrl 0` |
-| Close the search, the connection dialog or Preferences | `Esc` |
+| Close what is on top: the password prompt, a dialog, Preferences, the inspector, the search, the connection dialog. The key then goes on to what has the keyboard, so the grid and a report panel still close their own layers with `Esc` | `Esc` |
 | Refresh the focused explorer node | `F5` |
 | Delete the focused connection (asks first) | `Delete` |
 | Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
 | Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
 | Explorer: the selected node's context menu | `Shift F10` |
-| Explorer: quick search, typing a name while the tree has the keyboard: the next or previous match (wrapping; every node while nothing is typed), open the selected match as `Enter` does, take back a character, close | Letters, `↓`, `↑`, `Enter`, `Backspace`, `Esc` |
+| Explorer: quick search, typing a name while the tree has the keyboard: the next or previous match (wrapping; every node while nothing is typed; the explorer's next and previous node keys), open the selected match as `Enter` does, take back a character, close | Letters, `↓`, `↑`, `Enter`, `Backspace`, `Esc` (fixed, but the arrows) |
 | Explorer, while the tree has the keyboard: the quick search marks its matches or shows only them (opens it when closed) | `Ctrl F` |
-| Explorer search field: clear the text, then give the keyboard to the tree; go to the tree | `Esc`, `↓` |
-| Explorer: the table's Data view, which reads its rows at once (`SELECT * FROM` it, without a `LIMIT`, page by page); a Data view already open for the table is shown instead (**New query for table** in its menu opens another tab with `SELECT * … LIMIT` the row limit, not run). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` |
+| Explorer search field: clear the text, then give the keyboard to the tree; go to the tree | `Esc`, `↓` (fixed) |
+| Explorer: the table's Data view, which reads its rows at once (`SELECT * FROM` it, without a `LIMIT`, page by page); a Data view already open for the table is shown instead (**New query for table** in its menu opens another tab with `SELECT * … LIMIT` the row limit, not run). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` (fixed: it activates the node) |
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
 | Grid: first or last cell of the row, first or last cell of the page, a screen up or down (`Shift` extends) | `Home`, `End`, `Ctrl Home`, `Ctrl End`, `Page Up`, `Page Down` |
-| Grid: select all, clear | `Ctrl A`, `Esc` |
+| Grid: select all, clear | `Ctrl A`; `Esc` (fixed) |
 | Grid: copy in the format of the copy menu, the same with the column names | `Ctrl C`, `Ctrl Shift C` |
-| Grid or report panel: cancel a pending copy, before closing the inspector/records view or clearing the selection | `Esc` |
+| Grid or report panel: cancel a pending copy, before closing the inspector/records view or clearing the selection | `Esc` (fixed) |
 | Grid: show the focused cell's full value in the side panel | `Enter` (or a double click) |
-| Grid: close the side panel, then the records view, then clear the selection | `Esc` |
+| Grid: close the side panel, then the records view, then clear the selection | `Esc` (fixed) |
 | Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |
 | Grid (a query tab's, a report panel's or a job's): the menu on the focused header's column, or the focused cell's, to hide, freeze at the left or move the column, show hidden columns or reset the layout. With the mouse, a header dragged onto another takes its place | `Shift F10` |
 | Find a column by name, ignoring case and accents, in the grid that has the keyboard, else in the query tab's result on screen (also the result toolbar's button); while its text is there, the records view lists only the columns it finds | `Ctrl Shift F` |
-| Column search field: choose a match, go to it (showing it when hidden), close the field | `↑`, `↓`, `Enter`, `Esc` |
+| Column search field: choose a match, go to it (showing it when hidden), close the field | `↑`, `↓`, `Enter`, `Esc` (fixed) |
 | Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
-| Tab bar: move between tabs | Arrows, `Home`, `End` |
-| A job's tab: reach **Editor**, **Inputs** or **Runs**, open it (the keyboard goes to its first field, or the history) | `Tab`, then `Enter` or `Space` |
+| Tab bar: move between tabs | Arrows, `Home`, `End` (fixed) |
+| A job's tab: reach **Editor**, **Inputs** or **Runs**, open it (the keyboard goes to its first field, or the history) | `Tab`, then `Enter` or `Space` (fixed) |
 
 Shortcuts are GPUI actions in one keymap ([UI guidelines](../standards/ui-guidelines.md#actions-and-shortcuts)).
 A new shortcut updates this table, avoids keys the editor already uses, and
 works without the mouse.
 
-`Ctrl F` acts where the keyboard is: in a SQL editor it opens that editor's
-search, on the explorer's tree it marks or filters the quick search, and
-elsewhere (the result grid, a text field, a dialog) it does nothing. Search,
-replace and multiple cursors belong to the editor component (`EditorState`
-of `gpui-base`), which binds their keys itself, in every SQL editor alike:
-a query tab, a report panel and a SQL Job's editor. They are listed in
-**Preferences › Shortcuts** with the keys of the platform it runs on.
+By default `Ctrl F` acts where the keyboard is: in a SQL editor it opens
+that editor's search, on the explorer's tree it marks or filters the quick
+search, and elsewhere (the result grid, a text field, a dialog) it does
+nothing. Search, replace and multiple cursors belong to the editor component
+(`EditorState` of `gpui-base`), which binds their keys itself, in every SQL
+editor alike: a query tab, a report panel and a SQL Job's editor.
+
+### Shortcuts the user chooses
+
+**Preferences › Shortcuts** lists every action whose keys can be changed,
+by where it works (window, running SQL, SQL editor, moving and editing
+text, explorer, results, result grid), with the keys it has now:
+
+- **Change** listens for the next keys pressed, with the keyboard alone;
+  `Esc` cancels, so `Esc` itself is given back with **Reset**. One
+  keystroke, with any modifiers; sequences are not offered. The keys
+  chosen replace all the action's default keys (`Ctrl W` and `Ctrl F4`
+  become the one key chosen).
+- A key that another action already has where this one works (the window
+  reaches every place; a SQL editor is a text field) is named first:
+  **Take it** takes it from them, **Cancel** keeps everything. A typing key
+  of the text fields (Backspace, Delete, Enter, Esc, Tab) cannot be taken.
+  Nothing is bound twice without saying so.
+- **Reset** gives one action its default keys back, **Reset all shortcuts**
+  every action.
+- A change applies at once, without a restart, and is saved in
+  `config.db` ([Persistence](persistence.md#schema-configdb)). Tooltips,
+  menus, the editor's hint and the notices name the key in use.
+- The editor component's own keys (moving, selecting, undo, copy and
+  paste, indenting) work in every text field, so changing one changes it in
+  the fields too. The keys marked *fixed* in the table are not offered: they
+  type or move inside one focused control (a field's `Enter`, a list's
+  arrows, the tab bar, `Tab`) or close a layer of the grid or a report
+  panel with `Esc` after the window's own `Esc`.
+- A stored choice for an action this version does not offer, or one that
+  cannot be read, is set back to the default and said once, in the window's
+  notice, never a failure to start.
 
 ## Error messages
 
@@ -588,4 +622,3 @@ interactive elements expose a role, a label and their state. Details are in
 | Standard | Current code |
 | --- | --- |
 | Error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message, and their drivers read it from there (since 0.3.0 A9). MySQL quotes only syntax errors, so its other errors (an unknown column, a missing table) are not marked. Not marked either: a MySQL or Databricks cluster statement with `:name` parameters, whose text the driver changed. PostgreSQL's position with `:name` parameters is in the text sent, with each marker replaced, so it lands off by the difference in length when a parameter comes before the error |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines, going to a line (`Ctrl G`), the explorer's context menu and quick search mode, the result grid's menu (`Shift F10`) and finding a column (`Ctrl Shift F`) are actions ([UI guidelines](../standards/ui-guidelines.md#known-deviations)). Stopping a run (`Ctrl F2`), reopening a closed tab (`Ctrl Shift T`), opening and saving files (`Ctrl O`, `Ctrl S`, `Ctrl Shift S`) are actions too |

@@ -25,6 +25,7 @@ pub mod grid;
 pub mod grouped_tabs;
 pub mod guard;
 pub mod i18n;
+pub mod keymap;
 pub mod logging;
 pub mod metadata_scope;
 pub mod palette;

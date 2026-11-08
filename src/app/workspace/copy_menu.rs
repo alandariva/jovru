@@ -57,7 +57,8 @@ impl Workspace {
             .label(format_name(options.format))
             .dropdown_caret(true)
             .accessibility_label(tr!(
-                "Copy menu, Ctrl+C copies as {0}",
+                "Copy menu, {0} copies as {1}",
+                super::super::shortcuts::label::<super::super::shortcuts::GridCopy>(cx),
                 format_name(options.format)
             ))
             .tooltip(tr!("Copy the selection: format and settings"))
@@ -72,17 +73,28 @@ impl Workspace {
                 };
                 let menu = menu
                     .item(
-                        PopupMenuItem::new(tr!("Copy the selection (Ctrl+C)"))
-                            .disabled(!has_selection)
-                            .on_click(copy(false)),
+                        PopupMenuItem::new(tr!(
+                            "Copy the selection ({0})",
+                            super::super::shortcuts::label::<super::super::shortcuts::GridCopy>(cx)
+                        ))
+                        .disabled(!has_selection)
+                        .on_click(copy(false)),
                     )
                     .item(
-                        PopupMenuItem::new(tr!("Copy with column names (Ctrl+Shift+C)"))
-                            .disabled(!has_selection)
-                            .on_click(copy(true)),
+                        PopupMenuItem::new(tr!(
+                            "Copy with column names ({0})",
+                            super::super::shortcuts::label::<
+                                super::super::shortcuts::GridCopyWithNames,
+                            >(cx)
+                        ))
+                        .disabled(!has_selection)
+                        .on_click(copy(true)),
                     )
                     .separator()
-                    .label(tr!("Ctrl+C copies as"));
+                    .label(tr!(
+                        "{0} copies as",
+                        super::super::shortcuts::label::<super::super::shortcuts::GridCopy>(cx)
+                    ));
                 let menu = CopyFormat::ALL.into_iter().fold(menu, |menu, format| {
                     menu.item(option_item(
                         &workspace,
