@@ -19,7 +19,7 @@ use jykre_core::{
 use sha2::{Digest, Sha256};
 use sqlx::{
     ConnectOptions, Row, SqliteConnection, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqliteRow},
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow},
 };
 use std::{
     collections::HashMap,
@@ -947,6 +947,44 @@ impl AutomationRepository {
         } else {
             Opened::Ready(repository)
         })
+    }
+
+    /// Opens `dir/automation.db` for reading only, for an instance that does
+    /// not hold the [`AutomationLock`]: it never creates, migrates or sets
+    /// aside the file, which belongs to the lock holder (ADR-0034, decision
+    /// 4). `Ok(None)` when there is no file yet, or it is not yet at this
+    /// version's schema (the holder migrates it); `Newer` when a newer
+    /// version wrote it.
+    pub async fn open_read_only(dir: &Path) -> DriverResult<Option<Opened>> {
+        let path = dir.join(AUTOMATION_FILE);
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(None);
+        }
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .read_only(true)
+                    .create_if_missing(false)
+                    .busy_timeout(std::time::Duration::from_secs(5))
+                    .disable_statement_logging(),
+            )
+            .await
+            .map_err(sql_error)?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&pool)
+            .await
+            .map_err(sql_error)?;
+        if version > LATEST_VERSION {
+            pool.close().await;
+            return Ok(Some(Opened::Newer));
+        }
+        if version < LATEST_VERSION {
+            pool.close().await;
+            return Ok(None);
+        }
+        Ok(Some(Opened::Ready(Self { pool })))
     }
 
     /// A write transaction that takes the write lock at once, so a read

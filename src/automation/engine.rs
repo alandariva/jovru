@@ -504,6 +504,25 @@ impl Engine {
                 return;
             }
         };
+        if !lock_taken {
+            // The file belongs to the lock holder: read it as it is, never
+            // create, migrate or set it aside (ADR-0034, decision 4).
+            match AutomationRepository::open_read_only(&dir).await {
+                Ok(Some(Opened::Newer)) => {
+                    self.set_availability(Availability::Off(OffReason::Newer));
+                }
+                Ok(Some(Opened::Ready(repository) | Opened::Recreated(repository))) => {
+                    *lock(&self.inner.repository) = Some(repository);
+                    self.set_availability(Availability::ReadOnly);
+                }
+                Ok(None) | Err(_) => {
+                    *lock(&self.inner.repository) = None;
+                    self.set_availability(Availability::ReadOnly);
+                }
+            }
+            tracing::info!("automation is read-only: another instance holds its lock");
+            return;
+        }
         let opened = AutomationRepository::open(&dir).await;
         let (repository, recreated) = match opened {
             Ok(Opened::Ready(repository)) => (repository, false),
@@ -521,11 +540,6 @@ impl Engine {
             }
         };
         *lock(&self.inner.repository) = Some(repository.clone());
-        if !lock_taken {
-            tracing::info!("automation is read-only: another instance holds its lock");
-            self.set_availability(Availability::ReadOnly);
-            return;
-        }
         let mut recovery = Recovery {
             recreated,
             ..Recovery::default()

@@ -360,7 +360,10 @@ the only copy of the connection profiles
   disk carries no meaning, and there is no PID file, timestamp or lease. A
   second instance on the same folder cannot run or save anything: its
   automation is read-only until the first one ends and **Try again** takes the
-  lock over. A process that is alive but hung keeps the lock, which is
+  lock over. It opens `automation.db` read-only
+  (`AutomationRepository::open_read_only`) and never creates, migrates or
+  sets the file aside; a file it finds missing or not yet migrated shows no
+  history until the lock holder has prepared it. A process that is alive but hung keeps the lock, which is
   correct. **Network file systems may not honour the lock**, so keep the
   data folder on a local disk; when it is not, two instances could both
   believe they hold it.
@@ -472,5 +475,4 @@ The standard for schema changes:
 | Standard | Current code |
 | --- | --- |
 | Numbered forward-only migration steps | `config.db` has no step yet; the metadata files have their mechanism and step 2 |
-| An automation file is opened only by the instance that holds `automation.lock` | `Engine` opens, migrates and, if it is corrupt, sets aside `automation.db` even when another instance holds the lock; the second instance then stays read-only. A newer-version file is detected and left alone, but a missing migration or a corrupt file could be handled by the instance that does not own the lock |
 | `config.db` backup before migrating, restore offered on failure | The restore is offered, from the copies taken at each start (`backups/config-v<version>-<millis>.db`). The only migration so far (creating version 1) still copies to `backups/config-before-v1-<id>.db`, a name the restore does not list |
