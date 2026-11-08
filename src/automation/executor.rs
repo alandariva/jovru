@@ -109,6 +109,13 @@ pub(super) struct Execution {
     pub transaction_rolled_back: bool,
 }
 
+/// Where an execution reports while it runs: its progress, and the moment
+/// its statement is confirmed complete.
+pub(super) struct Report<'a> {
+    pub status: &'a watch::Sender<RunStatus>,
+    pub confirmed: &'a AtomicBool,
+}
+
 /// `confirmed` is set the moment the driver reports the end of the
 /// statement's result, before the transaction check and the close, so the
 /// run's owner knows a write finished even if Stop comes while the session
@@ -134,9 +141,9 @@ pub(super) async fn execute(
     memory_ceiling: usize,
     cancel: CancellationToken,
     deadline: Instant,
-    status: &watch::Sender<RunStatus>,
-    confirmed: &AtomicBool,
+    report: Report<'_>,
 ) -> Execution {
+    let Report { status, confirmed } = report;
     let mut execution = Execution::default();
     let request = &prepared.request;
     let input = match driver.session_connection(&input, &request.options.context) {

@@ -111,8 +111,10 @@ pub(super) async fn run(
         engine.inner.memory_ceiling,
         work.clone(),
         deadline,
-        status,
-        &confirmed,
+        executor::Report {
+            status,
+            confirmed: &confirmed,
+        },
     );
     tokio::pin!(execution);
     // The first event observed decides; the others are ignored. A completion
