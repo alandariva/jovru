@@ -759,6 +759,7 @@ fn shortcuts_page() -> Div {
                     tr!("The column's menu: hide, freeze or move it"),
                     "Shift F10",
                 ),
+                (tr!("Find a column by name"), "Ctrl Shift F"),
                 (tr!("Move a result tab"), "Ctrl Shift ← / →"),
             ],
         ),

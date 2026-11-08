@@ -9,6 +9,7 @@ pub mod backend;
 pub mod cell_format;
 pub mod closed_tabs;
 pub mod column_layout;
+pub mod column_search;
 pub mod connection_appearance;
 pub mod connection_store;
 pub mod copy_as;

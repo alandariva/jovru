@@ -206,6 +206,23 @@ alignment only; the value itself is never converted.
   or within the others), **Show a hidden column** (the first 20 by name;
   finding a column by name reaches the rest), **Show all columns** and
   **Reset the column layout**. The last column shown cannot be hidden.
+- **Finding a column.** `Ctrl Shift F`, or the toolbar's **Find a column**
+  button, opens a field above the grid that finds columns by name,
+  ignoring case and accents (`jykre::column_search`: `cao` finds `Ação`,
+  `strasse` finds `Straße`), with the matching part marked in the
+  `MATCH_TEXT` and `MATCH_BG` colours. It lists the shown columns in display
+  order, then the hidden ones, each saying it is hidden and that choosing it
+  shows it. `↑` and `↓` choose a match, `Enter` (or a click) goes to it:
+  the grid pans to the column and selects it over the displayed rows, after
+  showing it when it was hidden, and takes the keyboard; `Esc` closes the
+  field. The field says how many columns match. The matches are computed
+  when the text or the layout changes, never per frame, and only the lines
+  on screen are drawn, so thousands of columns cost a frame what eight do.
+  The shortcut works in the grid that has the keyboard (a query tab's, a
+  report panel's or a job's), the field included; elsewhere it opens the
+  field in the query tab's result on screen. While the field is open with
+  text, the records view lists only the shown columns it finds; closing
+  the field lists them all again.
   While any column is hidden, a line above the table (and the records)
   says how many, with **Show all columns**. The values, their types and
   NULLs are untouched; only where a column is drawn changes.

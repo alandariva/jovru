@@ -1009,6 +1009,15 @@ impl Workspace {
         }
     }
 
+    /// Opens the field that finds a column by name in the result on screen
+    /// (`Ctrl Shift F` or the toolbar's button), showing the table first.
+    pub fn find_column(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.result_view = ResultView::Table;
+        self.grid
+            .update(cx, |grid, cx| grid.open_column_search(window, cx));
+        cx.notify();
+    }
+
     /// The toolbar's Statistics button: shows the table with the statistics
     /// panel (`show`), or closes the panel.
     fn show_statistics(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -2623,6 +2632,16 @@ impl Workspace {
                                     },
                                 ))
                             })
+                            .child(
+                                icon_button(
+                                    "find-column",
+                                    I::TextSearch,
+                                    tr!("Find a column (Ctrl+Shift+F)"),
+                                )
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.find_column(window, cx)),
+                                ),
+                            )
                             .child(
                                 icon_button("filter-results", I::ListFilter, tr!("Filter results"))
                                     .aria_selected(self.filter_open)

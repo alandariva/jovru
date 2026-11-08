@@ -188,7 +188,11 @@ actions!(
         ShowPreferences,
         /// Shift+F10 in a result grid: its menu on the focused header's
         /// column, or the focused cell's, to hide, freeze or move it.
-        ResultGridMenu
+        ResultGridMenu,
+        /// Ctrl+Shift+F: the field that finds a column by name in the
+        /// result grid that has the keyboard, else in the query tab's result
+        /// on screen.
+        FindColumn
     ]
 );
 
@@ -3472,6 +3476,24 @@ impl Render for AppView {
                     this.open_settings(page, window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &FindColumn, window, cx| {
+                if this.connection_open
+                    || this.command_open
+                    || this.password_prompt.is_some()
+                    || this.dialog_open()
+                {
+                    return;
+                }
+                if let Some(panel) = this
+                    .tabs
+                    .read(cx)
+                    .active_tab()
+                    .and_then(|tab| this.panels.get(&tab))
+                    .cloned()
+                {
+                    panel.update(cx, |panel, cx| panel.find_column(window, cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &ExportResult, _, cx| {
                 if this.connection_open
                     || this.command_open
@@ -3776,6 +3798,8 @@ pub fn run() {
                 Some(quick_search::EXPLORER_CONTEXT),
             ),
             KeyBinding::new("shift-f10", ResultGridMenu, Some(result_grid::GRID_CONTEXT)),
+            KeyBinding::new("ctrl-shift-f", FindColumn, None),
+            KeyBinding::new("ctrl-shift-f", FindColumn, Some(&editor)),
         ]);
         // The system's theme until the preference is read.
         theme::apply(jykre::theme::ThemeChoice::System, None, cx);

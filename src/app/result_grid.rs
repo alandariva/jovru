@@ -9,13 +9,15 @@
 use super::copying::format_name;
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
 use jykre::column_layout::{self, ColumnLayout};
+use jykre::column_search::{self, ColumnMatch};
 use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
 use jykre::grid::{
     self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, selection_block,
@@ -127,6 +129,27 @@ impl Render for ColumnDragPreview {
             .child(self.name.clone())
     }
 }
+
+/// The field that finds a column by name, and what it found.
+struct ColumnFind {
+    input: Entity<InputState>,
+    /// The text the matches are for.
+    text: String,
+    /// Computed when the text or the layout changes, never per frame.
+    matches: Vec<ColumnMatch>,
+    /// The match `Enter` chooses.
+    highlighted: usize,
+    scroll: UniformListScrollHandle,
+    /// The matches show while the field has the keyboard.
+    focused: bool,
+    _events: Subscription,
+}
+
+/// Matches the list shows at once, and the height of each.
+const MATCH_ROWS: usize = 8;
+const MATCH_HEIGHT: f32 = 30.;
+/// Height of the bar holding the field.
+const FIND_BAR_HEIGHT: f32 = 40.;
 
 /// What the rows on screen share while they are built.
 struct RowsContext {
@@ -282,6 +305,9 @@ pub struct ResultGrid {
     /// The table's width at the last layout, which decides the columns in
     /// view.
     viewport: Rc<Cell<f32>>,
+    /// The field that finds a column by name, while it is open; its text
+    /// also filters the records view's lines.
+    column_find: Option<ColumnFind>,
     gesture: Option<Gesture>,
     /// Rows and columns a drag past an edge moves per step.
     edge: (isize, isize),
@@ -408,6 +434,7 @@ impl ResultGrid {
             layout_version: 0,
             menu_locked: false,
             viewport: Rc::default(),
+            column_find: None,
             gesture: None,
             edge: (0, 0),
             autoscrolling: false,
@@ -510,6 +537,8 @@ impl ResultGrid {
         };
         self.scroll.0.borrow().base_handle.set_offset(scroll);
         self.select(selection, cx);
+        // Another result has other columns to find.
+        self.search_columns(cx);
         cx.notify();
     }
 
@@ -599,6 +628,123 @@ impl ResultGrid {
         }
         self.layout_version += 1;
         self.select(self.selection, cx);
+        // Whether a match is hidden, and their order, follow the layout.
+        self.search_columns(cx);
+    }
+
+    /// Opens the field that finds a column by name (`Ctrl Shift F` or the
+    /// toolbar's button), or gives it the keyboard again with its text
+    /// selected.
+    pub fn open_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.column_find.is_none() {
+            let input =
+                cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Find a column by name…")));
+            let events =
+                cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::Change => this.search_columns(cx),
+                        InputEvent::PressEnter { .. } => this.choose_column_match(window, cx),
+                        InputEvent::Focus | InputEvent::Blur => {
+                            if let Some(find) = &mut this.column_find {
+                                find.focused = matches!(event, InputEvent::Focus);
+                            }
+                            cx.notify();
+                        }
+                    }
+                });
+            self.column_find = Some(ColumnFind {
+                input,
+                text: String::new(),
+                matches: Vec::new(),
+                highlighted: 0,
+                scroll: UniformListScrollHandle::new(),
+                focused: false,
+                _events: events,
+            });
+        }
+        if let Some(find) = &self.column_find {
+            find.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Closes the field, which stops filtering the records view, and gives
+    /// the grid the keyboard.
+    fn close_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.column_find = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Finds the columns the field's text names, once per change of the
+    /// text, the layout or the result; the highlighted match stays when it
+    /// still matches.
+    fn search_columns(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = &mut self.column_find else {
+            return;
+        };
+        let text = find.input.read(cx).value().to_string();
+        let previous = find.matches.get(find.highlighted).map(|found| found.column);
+        find.matches = column_search::find(self.result.columns(), &self.layout, &text);
+        find.text = text;
+        let columns: Vec<usize> = find.matches.iter().map(|found| found.column).collect();
+        find.highlighted = jykre::palette::keep(previous.as_ref(), &columns);
+        find.scroll
+            .scroll_to_item(find.highlighted, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// `↑` and `↓` in the field: the match `Enter` chooses, wrapping.
+    fn step_column_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(find) = &mut self.column_find {
+            find.highlighted = jykre::palette::step(find.highlighted, find.matches.len(), delta);
+            find.scroll
+                .scroll_to_item(find.highlighted, ScrollStrategy::Nearest);
+            cx.notify();
+        }
+    }
+
+    /// Goes to the highlighted match.
+    fn choose_column_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let column = self
+            .column_find
+            .as_ref()
+            .and_then(|find| find.matches.get(find.highlighted))
+            .map(|found| found.column);
+        if let Some(column) = column {
+            self.go_to_column(column, window, cx);
+        }
+    }
+
+    /// Shows `column` when the layout hides it, scrolls the grid to it and
+    /// selects it over the displayed rows (in the records view, scrolls to
+    /// its line), and gives the grid the keyboard. The field stays open with
+    /// its text, which keeps filtering the records view.
+    fn go_to_column(&mut self, column: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout.is_hidden(column) {
+            self.change_layout(|layout| layout.show(column), cx);
+        }
+        let Some(position) = self.layout.position(column) else {
+            return;
+        };
+        if self.records {
+            if let Some(line) = self.record_lines().iter().position(|each| *each == column) {
+                self.records_scroll
+                    .scroll_to_item(line, ScrollStrategy::Nearest);
+            }
+        } else {
+            let view = self.view();
+            let selection = CellSelection::click_column(None, &view.rows, column, false);
+            if selection.is_some() {
+                self.select(selection, cx);
+            }
+            self.reveal(None, position, &view);
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     /// The column widths in display order.
@@ -2115,9 +2261,194 @@ impl ResultGrid {
     }
 
     /// The columns the records view lists, one line each: the shown ones,
-    /// in display order.
+    /// in display order; while the field that finds a column has text, only
+    /// the shown ones it finds.
     fn record_lines(&self) -> Rc<[usize]> {
-        self.layout.visible().iter().copied().collect()
+        match self
+            .column_find
+            .as_ref()
+            .filter(|find| !find.text.trim().is_empty())
+        {
+            Some(find) => find
+                .matches
+                .iter()
+                .filter(|found| !found.hidden)
+                .map(|found| found.column)
+                .collect(),
+            None => self.layout.visible().iter().copied().collect(),
+        }
+    }
+
+    /// The field that finds a column by name, while it is open: the text,
+    /// how many columns it finds, and a button that closes it. `↑` and `↓`
+    /// choose a match, `Enter` goes to it and `Esc` closes the field.
+    fn find_bar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let find = self.column_find.as_ref()?;
+        let count = cell_format::count;
+        let status = if find.text.trim().is_empty() {
+            tr!("Type part of a column's name.").to_string()
+        } else if find.matches.is_empty() {
+            tr!("No column matches.").to_string()
+        } else {
+            tr!(
+                "{0} of {1} columns",
+                count(find.matches.len()),
+                count(self.result.column_count())
+            )
+        };
+        Some(
+            row()
+                .id("find-column-bar")
+                .flex_none()
+                .h(px(FIND_BAR_HEIGHT))
+                .px_3()
+                .gap_2()
+                .bg(rgb(colors().panel))
+                .border_b_1()
+                .border_color(rgb(colors().grid_line))
+                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.modifiers.modified() {
+                        return;
+                    }
+                    match event.keystroke.key.as_str() {
+                        "up" => this.step_column_match(-1, cx),
+                        "down" => this.step_column_match(1, cx),
+                        "escape" => this.close_column_search(window, cx),
+                        _ => return,
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }))
+                .child(
+                    div().w(px(320.)).flex_none().child(
+                        Input::new(&find.input)
+                            .small()
+                            .prefix(I::TextSearch)
+                            .w_full()
+                            .aria_label(tr!("Find a column by name")),
+                    ),
+                )
+                .child(
+                    div()
+                        .id("find-column-status")
+                        .role(Role::Status)
+                        .min_w_0()
+                        .truncate()
+                        .child(label(status)),
+                )
+                .child(div().flex_1())
+                .child(
+                    icon_button("close-column-search", I::X, tr!("Close the column search"))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.close_column_search(window, cx)),
+                        ),
+                ),
+        )
+    }
+
+    /// The matches under the field while it has the keyboard, drawn over
+    /// the table; only the lines on screen are built.
+    fn match_list(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let find = self
+            .column_find
+            .as_ref()
+            .filter(|find| find.focused && !find.matches.is_empty())?;
+        let height = find.matches.len().min(MATCH_ROWS) as f32 * MATCH_HEIGHT;
+        Some(
+            div()
+                .id("column-matches")
+                .role(Role::ListBox)
+                .aria_label(tr!("Columns found"))
+                .absolute()
+                .top(px(FIND_BAR_HEIGHT))
+                .left(px(12.))
+                .w(px(460.))
+                .h(px(height + 2.))
+                .bg(rgb(colors().panel))
+                .border_1()
+                .border_color(rgb(colors().border))
+                .rounded_md()
+                .overflow_hidden()
+                .block_mouse_except_scroll()
+                .child(
+                    uniform_list(
+                        "column-match-lines",
+                        find.matches.len(),
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            this.match_lines(range, cx)
+                        }),
+                    )
+                    .size_full()
+                    .track_scroll(&find.scroll),
+                ),
+        )
+    }
+
+    /// The matches at `range`: the name with what matched marked, its
+    /// type, and whether the layout hides it (choosing it shows it).
+    fn match_lines(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        let Some(find) = &self.column_find else {
+            return Vec::new();
+        };
+        range
+            .filter_map(|line| Some((line, find.matches.get(line)?)))
+            .map(|(line, found)| {
+                let info = self.result.columns().get(found.column);
+                let name = info.map(|info| info.name.clone()).unwrap_or_default();
+                let kind = info
+                    .map(|info| info.data_type.to_lowercase())
+                    .unwrap_or_default();
+                let chosen = line == find.highlighted;
+                row()
+                    .id(("column-match", found.column))
+                    .role(Role::ListBoxOption)
+                    .aria_selected(chosen)
+                    .aria_label(if found.hidden {
+                        tr!("{0}, hidden: choosing it shows it", name)
+                    } else {
+                        name.clone()
+                    })
+                    .h(px(MATCH_HEIGHT))
+                    .flex_none()
+                    .px_3()
+                    .gap_2()
+                    .cursor_pointer()
+                    .when(chosen, |s| s.bg(rgb(colors().hover)))
+                    .hover(|s| s.bg(rgb(colors().hover)))
+                    .child(
+                        div()
+                            .flex_shrink(1.)
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(rgb(colors().text))
+                            .child(marked(name, found.ranges.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors().grid_type_text))
+                            .child(format!(": {kind}")),
+                    )
+                    .when(found.hidden, |s| {
+                        s.child(badge(tr!("Hidden: choosing it shows it"), colors().amber))
+                    })
+                    // A press, not a click: the field keeps the keyboard
+                    // until the grid takes it.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            if let Some(find) = &mut this.column_find {
+                                find.highlighted = line;
+                            }
+                            this.choose_column_match(window, cx);
+                        }),
+                    )
+            })
+            .collect()
     }
 
     /// The lines of the records view at `range` of `lines`: one per column.
@@ -3087,7 +3418,7 @@ impl ResultGrid {
                 if more > 0 {
                     menu.item(
                         PopupMenuItem::new(tr!(
-                            "{0} more hidden columns",
+                            "{0} more: find them by name (Ctrl+Shift+F)",
                             cell_format::count(more)
                         ))
                         .disabled(true),
@@ -3295,6 +3626,8 @@ impl Render for ResultGrid {
         };
         let gesture = self.gesture.is_some();
         let hidden_bar = self.hidden_bar(cx);
+        let find_bar = self.find_bar(cx);
+        let match_list = self.match_list(cx);
         // The bars sit outside the grid's own keys, so typing in them or
         // pressing their buttons never moves the selection.
         let grid = div()
@@ -3397,10 +3730,19 @@ impl Render for ResultGrid {
         column()
             .id("result-grid-area")
             .key_context(GRID_CONTEXT)
+            .relative()
             .size_full()
             .gap_0()
             .bg(rgb(colors().grid_bg))
+            // From the table, the bars or the field itself, whose text it
+            // selects again.
+            .on_action(cx.listener(|this, _: &super::FindColumn, window, cx| {
+                this.open_column_search(window, cx)
+            }))
+            .children(find_bar)
             .children(hidden_bar)
             .child(grid)
+            // Last, so it is drawn over the table.
+            .children(match_list)
     }
 }
