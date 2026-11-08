@@ -523,7 +523,10 @@ interrupts the statement through SQLite's progress handler and waits up to 5
 seconds for the connection to be idle; a result cut short is first left to
 end on its own, since interrupting a write inside a transaction rolls the
 transaction back. If the connection is not idle in time, the session is
-closed. A page kept open holds its statement, and a read lock on the file,
+closed. The cancellation and the time limit are checked before each row, the
+time limit against the clock, since SQLx's row channel does not make the
+reading wait while the connection's thread is ahead. A page kept open holds
+its statement, and a read lock on the file,
 until the result ends or another statement runs. Errors keep SQLite's message
 and its extended result code as the vendor code; `SQLITE_READONLY`,
 `SQLITE_PERM` and `SQLITE_AUTH` are `PermissionDenied`, `SQLITE_CANTOPEN`

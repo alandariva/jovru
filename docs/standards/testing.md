@@ -332,6 +332,14 @@ and the evidence.
     rows read after them) and no 50 ms time limit landed before the fix, and
     all of both after it, the cancellations within one row; unloaded, 29
     and 10 landed before, all after.
+  - The SQLite driver's time limit was the same timer, and SQLx's row
+    channel does not make the reading wait while the connection's thread
+    is ahead. It reads the clock as MySQL does now, covered by its own
+    `a_passed_deadline_stops_the_statement_without_the_timer`. A scratch
+    test with 32 rows of 4 MiB, generated or stored: unloaded, on the
+    single-threaded runtime, no 50 ms time limit of 60 landed before the
+    fix and all after it; on the multi-threaded runtime all had landed
+    before too, since the reading waits for SQLite's thread often enough.
 - **Evidence:** a manual MySQL 8.4 fixture on 8 cores. The unchanged test
   and the fixed one ran alternately, so both saw the same load: a release
   build of the workspace, started again as it ended, alone or with 8 busy
