@@ -66,7 +66,22 @@ pub(crate) async fn schema(pool: &SqlitePool, sql: &'static str) -> DriverResult
         ));
     }
     if version == 0 {
-        let mut tx = pool.begin().await.map_err(sql_error)?;
+        // Several parts of the application open a new file at once on the
+        // first start. IMMEDIATE takes the write lock before reading, so
+        // only the first creates the schema; the others wait for it (the
+        // busy timeout) and find the version it wrote.
+        let mut tx = pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(sql_error)?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        if version != 0 {
+            tx.rollback().await.map_err(sql_error)?;
+            return Ok(());
+        }
         sqlx::raw_sql(sql)
             .execute(&mut *tx)
             .await

@@ -67,6 +67,10 @@ pub fn filter() -> EnvFilter {
 /// folder cannot be created or another subscriber is already installed; the
 /// application then runs without logs.
 pub fn init(data_dir: &Path) -> DriverResult<LogGuard> {
+    // The appender prunes old files before it creates the folder, and says
+    // so on stderr at the first start; create it first.
+    std::fs::create_dir_all(log_dir(data_dir))
+        .map_err(|_| DriverError::new(ErrorCode::Internal, "Could not open the log folder."))?;
     let appender = Builder::new()
         .rotation(Rotation::DAILY)
         .filename_prefix("jykre")
