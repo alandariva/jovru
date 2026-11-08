@@ -956,3 +956,183 @@ async fn live_named_parameters_are_bound_and_never_interpolated() {
     .await
     .expect("live named parameters took too long");
 }
+
+/// Every column name a statement delivered, and its rows.
+#[derive(Default)]
+struct Described {
+    columns: Vec<Vec<String>>,
+    rows: Vec<Row>,
+}
+impl RowSink for Described {
+    fn columns(&mut self, c: Vec<ColumnInfo>) -> SinkControl {
+        self.columns
+            .push(c.into_iter().map(|column| column.name).collect());
+        SinkControl::Continue
+    }
+    fn row(&mut self, r: Row) -> SinkControl {
+        self.rows.push(r);
+        SinkControl::Continue
+    }
+}
+
+/// Runs `sql` to the end of its first page, with at most `max_rows` rows.
+async fn page(
+    session: &mut Box<dyn Session>,
+    sql: &str,
+    max_rows: u32,
+) -> (Described, DriverOutcome) {
+    let mut sink = Described::default();
+    let outcome = session
+        .execute(
+            &QueryRequest {
+                parameters: Vec::new(),
+                sql: sql.into(),
+                options: ExecutionOptions {
+                    max_rows,
+                    ..ExecutionOptions::default()
+                },
+            },
+            &mut sink,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    (sink, outcome)
+}
+
+fn texts(values: &[&str]) -> Row {
+    values
+        .iter()
+        .map(|value| Cell::Text((*value).into()))
+        .collect()
+}
+
+/// A prepared `CALL` describes no columns: they come with the procedure's
+/// first row, which keeps its exact values and NULL. A run delivers the
+/// first result set that has rows; the procedure still runs to its end.
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_a_procedure_call_delivers_its_columns_and_values() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = MySqlDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        keep_state(&mut session).await;
+        for sql in [
+            "DROP PROCEDURE IF EXISTS jykre_call_rows",
+            "DROP PROCEDURE IF EXISTS jykre_call_sets",
+            "DROP PROCEDURE IF EXISTS jykre_call_write_read",
+            "DROP PROCEDURE IF EXISTS jykre_call_write",
+            "DROP TABLE IF EXISTS jykre_call_table",
+            "CREATE PROCEDURE jykre_call_rows() BEGIN \
+             SELECT 1 AS a, 'x' AS b, NULL AS c, CAST(123456789.12 AS DECIMAL(20,2)) AS d \
+             UNION ALL SELECT 2, 'NULL', 'z', CAST(-0.01 AS DECIMAL(20,2)); END",
+            "CREATE PROCEDURE jykre_call_sets() BEGIN \
+             SELECT 0 AS nothing FROM DUAL WHERE 1 = 0; \
+             SELECT 1 AS first UNION ALL SELECT 2; \
+             SELECT 'a' AS second, 'b' AS third; \
+             SET @jykre_call_last := 'reached'; END",
+            "CREATE TABLE jykre_call_table (id INT PRIMARY KEY, v INT NOT NULL)",
+            "INSERT INTO jykre_call_table WITH RECURSIVE s(n) AS \
+             (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 50) SELECT n, 0 FROM s",
+            "CREATE PROCEDURE jykre_call_write_read() BEGIN \
+             UPDATE jykre_call_table SET v = v + 1; \
+             SELECT id, v FROM jykre_call_table ORDER BY id; END",
+            "CREATE PROCEDURE jykre_call_write() BEGIN \
+             UPDATE jykre_call_table SET v = v + 1; END",
+        ] {
+            page(&mut session, sql, 1_000).await;
+        }
+
+        // The same columns and values as the SELECT run directly.
+        let (call, outcome) = page(&mut session, "CALL jykre_call_rows()", 1_000).await;
+        assert_eq!(call.columns, vec![vec!["a", "b", "c", "d"]]);
+        assert_eq!(
+            call.rows,
+            vec![
+                vec![
+                    Cell::Text("1".into()),
+                    Cell::Text("x".into()),
+                    Cell::Null,
+                    Cell::Text("123456789.12".into()),
+                ],
+                texts(&["2", "NULL", "z", "-0.01"]),
+            ]
+        );
+        assert_eq!(outcome.rows_affected, None, "rows came back");
+        assert!(!outcome.has_more && !outcome.truncated);
+
+        // Pages of a call's result come from the open result.
+        let (first, outcome) = page(&mut session, "CALL jykre_call_rows()", 1).await;
+        assert_eq!(first.columns.len(), 1);
+        assert_eq!(first.rows.len(), 1);
+        assert!(outcome.has_more);
+        let mut rest = Described::default();
+        let outcome = session
+            .fetch(
+                &ExecutionOptions::default(),
+                &mut rest,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(rest.columns.is_empty(), "columns are sent once");
+        assert_eq!(rest.rows, vec![texts(&["2", "NULL", "z", "-0.01"])]);
+        assert!(!outcome.has_more);
+
+        // An empty result set shows nothing; the first one with rows is
+        // delivered and later ones are dropped, the procedure ending.
+        let (sets, outcome) = page(&mut session, "CALL jykre_call_sets()", 1_000).await;
+        assert_eq!(sets.columns, vec![vec!["first"]]);
+        assert_eq!(sets.rows, vec![texts(&["1"]), texts(&["2"])]);
+        assert_eq!(outcome.rows_affected, None);
+        assert!(!outcome.has_more && !outcome.truncated);
+        // A full page reads one row ahead, which may belong to the next set.
+        let (sets, outcome) = page(&mut session, "CALL jykre_call_sets()", 2).await;
+        assert_eq!(sets.rows, vec![texts(&["1"]), texts(&["2"])]);
+        assert!(!outcome.has_more);
+        let (last, _) = page(&mut session, "SELECT @jykre_call_last", 1_000).await;
+        assert_eq!(last.rows, vec![texts(&["reached"])]);
+
+        // A procedure that writes and then returns rows is read to its end:
+        // every row, written once, also when a page cuts its result.
+        let (all, outcome) = page(&mut session, "CALL jykre_call_write_read()", 1_000).await;
+        assert_eq!(all.columns, vec![vec!["id", "v"]]);
+        assert_eq!(all.rows.len(), 50);
+        assert_eq!(all.rows[49], texts(&["50", "1"]));
+        assert_eq!(outcome.rows_affected, None);
+        let (cut, outcome) = page(&mut session, "CALL jykre_call_write_read()", 10).await;
+        assert_eq!(cut.rows.len(), 10);
+        assert_eq!(cut.rows[0], texts(&["1", "2"]));
+        assert!(outcome.has_more);
+        let (values, _) = page(
+            &mut session,
+            "SELECT GROUP_CONCAT(DISTINCT v) FROM jykre_call_table",
+            1_000,
+        )
+        .await;
+        assert_eq!(values.rows, vec![texts(&["2"])], "every row written twice");
+
+        // A procedure without rows still reports what its last statement
+        // changed.
+        let (write, outcome) = page(&mut session, "CALL jykre_call_write()", 1_000).await;
+        assert!(write.columns.is_empty() && write.rows.is_empty());
+        assert_eq!(outcome.rows_affected, Some(50));
+        assert_kept(&mut session).await;
+
+        for sql in [
+            "DROP PROCEDURE jykre_call_rows",
+            "DROP PROCEDURE jykre_call_sets",
+            "DROP PROCEDURE jykre_call_write_read",
+            "DROP PROCEDURE jykre_call_write",
+            "DROP TABLE jykre_call_table",
+        ] {
+            page(&mut session, sql, 1_000).await;
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live scenario exceeded its time budget");
+}

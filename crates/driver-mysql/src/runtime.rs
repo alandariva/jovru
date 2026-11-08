@@ -621,8 +621,9 @@ impl Server {
             })
             .await;
         // Some statements (USE, and others MySQL cannot prepare: error 1295)
-        // run as text only; their columns, if any, come with their rows.
-        let mut describe = Describe::Prepared;
+        // run as text only. A prepared `CALL` describes no columns, whatever
+        // its procedure returns. In both cases the columns, if any, come
+        // with the first row.
         let columns = match columns {
             Ok(columns) => columns,
             Err((error, _))
@@ -632,10 +633,14 @@ impl Server {
                     .and_then(|server| server.vendor_code.as_deref())
                     == Some("1295") =>
             {
-                describe = Describe::FromRows;
                 Vec::new()
             }
             Err(stopped) => return self.fail(connection, stopped, &events).await,
+        };
+        let describe = if columns.is_empty() {
+            Describe::FromRows
+        } else {
+            Describe::Prepared
         };
         let mut returns_rows = !columns.is_empty();
         if returns_rows && events.send(Event::Columns(columns)).await.is_err() {
@@ -647,6 +652,7 @@ impl Server {
             ahead: None,
             affected: None,
             describe,
+            ended: false,
         };
         loop {
             let page = self
@@ -846,7 +852,15 @@ impl Server {
             .await?
         {
             match item {
-                sqlx::Either::Left(result) => reading.affected = Some(result.rows_affected()),
+                sqlx::Either::Left(result) => {
+                    reading.affected = Some(result.rows_affected());
+                    // The end of a result set: once the delivered one ends,
+                    // what a procedure returns after it is read and dropped.
+                    if reading.describe == Describe::Sent {
+                        reading.ended = true;
+                    }
+                }
+                sqlx::Either::Right(_) if reading.ended => {}
                 sqlx::Either::Right(row) => {
                     if reading.describe == Describe::FromRows {
                         let columns = row
@@ -967,7 +981,8 @@ async fn deliver(
 enum Describe {
     /// Preparing the statement described them before it ran.
     Prepared,
-    /// The statement could not be prepared; columns come with the first row.
+    /// Preparing described none (the statement could not be prepared, or is
+    /// a `CALL`); columns come with the first row.
     FromRows,
     /// They came with the first row and were sent.
     Sent,
@@ -980,6 +995,10 @@ struct Reading {
     /// The rows affected, reported by a statement without rows.
     affected: Option<u64>,
     describe: Describe,
+    /// The result set whose columns were sent from its first row has ended.
+    /// A procedure may return more; their rows are read, so it runs to its
+    /// end, and dropped, since a run delivers one result.
+    ended: bool,
 }
 
 /// The cells of a row as the text protocol sent them.
