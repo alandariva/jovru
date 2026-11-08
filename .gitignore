@@ -17,6 +17,9 @@
 *.key
 .databrickscfg
 
+# Claude Code's local state and session worktrees
+/.claude/
+
 # Editors and OS
 .idea/
 .vscode/
