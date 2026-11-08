@@ -4,7 +4,7 @@
 **Date:** November 8, 2026 (1.1: November 7, 2026)
 **Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
 Q-01…Q-14 ([section 12](#12-decisions-required-from-the-maintainer)),
-ADR-0033, ADR-0034 and ADR-0035 accepted, `process-wrap` approved (Q-11),
+ADR-0033 to ADR-0036 accepted, `process-wrap` approved (Q-11),
 and the phase 5 revision (section 9.3) approved
 **Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
 **Audience:** product, UX, architecture, Rust engineering and testing

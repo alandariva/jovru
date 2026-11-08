@@ -1,6 +1,6 @@
 # ADR-0036: External programs' logs kept on disk for 7 days
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
 - **Date:** 2026-11-08
 - **Authors:** Alan de Oliveira (decision Q-15), Claude (draft)
 
