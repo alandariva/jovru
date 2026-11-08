@@ -2,9 +2,9 @@
 //! sections 6.3 and 9.3.4): canonical JSON, whose SHA-256 storage records as
 //! the run's fingerprint.
 use super::definition::{JobDefinition, canonical_json};
+use super::process::Launch;
 use jykre_core::ConnectionId;
 use serde_json::{Value, json};
-use std::path::Path;
 
 /// A SQL run: the definition (its parameter specifications, never the
 /// values typed for the run), the effective options, the connection and its
@@ -28,22 +28,17 @@ pub(super) fn sql(
 
 /// A program run: the definition, what was resolved to start it, and the
 /// entrypoint's fingerprint. Environment values are never part of it.
-pub(super) fn program(
-    definition: &JobDefinition,
-    program: &Path,
-    working_directory: &Path,
-    entrypoint: &Path,
-    fingerprint: &str,
-) -> String {
+pub(super) fn program(definition: &JobDefinition, launch: Option<&Launch>) -> String {
     canonical_json(&json!({
         "kind": "process",
         "definition": definition.to_value(),
-        "resolved": {
-            "program": program.to_string_lossy(),
-            "working_directory": working_directory.to_string_lossy(),
-            "entrypoint": entrypoint.to_string_lossy(),
-            "fingerprint": fingerprint,
-        },
+        "resolved": launch.map(|launch| json!({
+            "program": launch.program.to_string_lossy(),
+            "working_directory": launch.working_directory.to_string_lossy(),
+            "entrypoint": launch.entrypoint.to_string_lossy(),
+            "fingerprint": launch.fingerprint,
+            "environment_names": launch.environment.len(),
+        })),
     }))
 }
 

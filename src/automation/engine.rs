@@ -175,8 +175,9 @@ pub enum PublishError {
     Save(SaveError),
     /// A chain is not published; its steps are.
     Chain,
-    /// The program's file cannot be read to record its hash.
-    Program(process::Refused),
+    /// The program's file cannot be read to record its hash; `None` when
+    /// the check itself could not run.
+    Program(Option<process::Refused>),
 }
 
 /// A subscription to one run. Dropping it never stops the run; only
@@ -247,7 +248,7 @@ pub(super) struct Inner {
     pub runtime: Handle,
     pub data_dir: PathBuf,
     pub memory_ceiling: usize,
-    pub jjp: jjp::Host,
+    pub jjp: jjp::JjpHost,
     pub timings: process::Timings,
     availability: watch::Sender<Availability>,
     changes: watch::Sender<u64>,
@@ -386,7 +387,7 @@ impl Engine {
                 runtime,
                 data_dir,
                 memory_ceiling,
-                jjp: jjp::Host::new(),
+                jjp: jjp::JjpHost::new(),
                 timings,
                 availability: watch::Sender::new(Availability::Starting),
                 changes: watch::Sender::new(0),
@@ -567,11 +568,12 @@ impl Engine {
         drop(
             tokio::task::spawn_blocking(move || {
                 for orphan in orphans {
-                    let alive = orphan
-                        .process_started
-                        .as_deref()
-                        .is_some_and(|started| process::orphan_alive(orphan.process_group, started));
-                    if alive && process::end_group(orphan.process_group).is_err() {
+                    // Ended only while its leader still has the recorded
+                    // start time: a reused ID is never touched.
+                    let Some(started) = orphan.process_started.as_deref() else {
+                        continue;
+                    };
+                    if process::end_group(orphan.process_group, started).is_err() {
                         tracing::warn!(run = %orphan.run_id, "could not end a program left running");
                     }
                 }
@@ -610,8 +612,7 @@ impl Engine {
         if let Err(error) = repository.prune(now).await {
             tracing::warn!(error_code = ?error.code, "automation pruning failed");
         }
-        let dir = self.inner.data_dir.clone();
-        let present = tokio::task::spawn_blocking(move || logs::log_runs(&dir))
+        let present = logs::log_runs(&self.inner.data_dir)
             .await
             .unwrap_or_default();
         let active: Vec<RunId> = lock(&self.inner.registry)
@@ -638,9 +639,7 @@ impl Engine {
 
     /// **Delete logs**: removes a run's log folder now (ADR-0037).
     pub async fn delete_logs(&self, run: RunId) {
-        let dir = self.inner.data_dir.clone();
-        let deleted = tokio::task::spawn_blocking(move || logs::delete_logs(&dir, run)).await;
-        if !matches!(deleted, Ok(Ok(()))) {
+        if logs::delete_logs(&self.inner.data_dir, run).await.is_err() {
             tracing::warn!(run = %run, "could not delete a run's logs");
         }
         if let Some(repository) = self.repository()
@@ -768,17 +767,7 @@ impl Engine {
             return Err(PublishError::Save(SaveError::Problems(problems)));
         }
         if let JobBody::Process(body) = &mut definition.body {
-            let pinned = {
-                let body = body.clone();
-                tokio::task::spawn_blocking(move || process::pin(&body))
-                    .await
-                    .map_err(|_| PublishError::Program(process::Refused::Unreadable))?
-            }
-            .map_err(PublishError::Program)?;
-            body.pinned = Some(PinnedFile {
-                path: pinned.path,
-                sha256: pinned.sha256,
-            });
+            body.pinned = Some(pin(body.clone()).await?);
         } else if definition.kind() == JobKind::Chain {
             return Err(PublishError::Chain);
         }
@@ -1386,6 +1375,36 @@ impl Inner {
     }
 }
 
+/// The entrypoint a version of `body` pins: its resolved path and SHA-256
+/// now (Q-16).
+async fn pin(mut body: definition::ProcessBody) -> Result<PinnedFile, PublishError> {
+    body.pinned = None;
+    let prepared = tokio::task::spawn_blocking(move || {
+        let prepared = process::prepare(&body, std::env::vars_os());
+        (body, prepared)
+    })
+    .await;
+    let (body, prepared) = prepared.map_err(|_| PublishError::Program(None))?;
+    match prepared.map_err(|refused| PublishError::Program(Some(refused)))? {
+        process::Prepared::Ready(launch) => match launch.fingerprint {
+            Some(sha256) => Ok(PinnedFile {
+                path: launch.entrypoint.to_string_lossy().into_owned(),
+                sha256,
+            }),
+            None => Err(PublishError::Program(Some(
+                process::Refused::EntrypointUnreadable {
+                    path: launch.entrypoint,
+                },
+            ))),
+        },
+        process::Prepared::CannotStart { .. } => Err(PublishError::Program(Some(
+            process::Refused::EntrypointUnreadable {
+                path: PathBuf::from(body.entrypoint.unwrap_or(body.program)),
+            },
+        ))),
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -1398,9 +1417,9 @@ pub(super) fn chain_cause(refusal: &Refusal) -> Cause {
         Refusal::QueueTimeout => Cause::QueueTimeout,
         Refusal::QueueFull(_) => Cause::QueueFull,
         Refusal::Inputs(_) | Refusal::Invalid(_) => Cause::Input,
-        Refusal::Program(process::Refused::NotFound { .. }) => Cause::NotFound,
-        Refusal::Program(process::Refused::PermissionDenied { .. }) => Cause::PermissionDenied,
-        Refusal::Program(process::Refused::Changed { .. }) => Cause::PlanChanged,
+        // The version's file changed since the plan was confirmed.
+        Refusal::Program(process::Refused::ProgramChanged { .. }) => Cause::PlanChanged,
+        Refusal::Program(process::Refused::EntrypointUnreadable { .. }) => Cause::NotFound,
         Refusal::Program(_) => Cause::Validation,
         Refusal::NoConnection => Cause::Connection,
         _ => Cause::Internal,
