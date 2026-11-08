@@ -775,9 +775,18 @@ impl<'a> Limit<'a> {
     }
 
     /// Resolves, with the error to report, once the statement must stop.
+    ///
+    /// A deadline that has passed is read from the clock, not left to the
+    /// timer: while the connection's thread hands rows on faster than they
+    /// are read, SQLx's row channel never makes the reading wait, the
+    /// session's task keeps its thread and Tokio's timer is not turned, so a
+    /// timer set then does not fire before the reading waits. Every step and
+    /// every delivery asks first, so the statement still stops at its next
+    /// row.
     async fn reached(&self) -> DriverError {
         let expired = async {
             match self.deadline {
+                Some(deadline) if tokio::time::Instant::now() >= deadline => {}
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
@@ -1279,8 +1288,12 @@ pub async fn definition(
 
 #[cfg(test)]
 mod tests {
-    use super::parameter_reference;
-    use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+    use super::{Limit, parameter_reference};
+    use futures_util::FutureExt;
+    use jykre_core::{
+        CancellationToken, ErrorCode, ExecutionOptions, ParameterKind, QueryParameter, QueryRequest,
+    };
+    use std::time::Duration;
 
     fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
         QueryParameter {
@@ -1319,5 +1332,22 @@ mod tests {
             "SELECT ?1, CAST(?2 AS NUMERIC), ?3, ?4, CAST(?5 AS NUMERIC), ?1"
         );
         assert!(!bound.contains("DROP"));
+    }
+
+    /// While the connection's thread hands rows on faster than they are
+    /// read, the session's task keeps its thread and Tokio's timer is not
+    /// turned: a timer set after the deadline has passed does not fire.
+    /// Blocking the runtime's only thread does the same here.
+    #[tokio::test]
+    async fn a_passed_deadline_stops_the_statement_without_the_timer() {
+        let cancel = CancellationToken::new();
+        let limit = Limit::new(&cancel, Some(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(20));
+        let reached = limit.reached().now_or_never();
+        assert_eq!(reached.map(|error| error.code), Some(ErrorCode::Timeout));
+        // A cancellation still comes first.
+        cancel.cancel();
+        let reached = limit.reached().now_or_never();
+        assert_eq!(reached.map(|error| error.code), Some(ErrorCode::Cancelled));
     }
 }
