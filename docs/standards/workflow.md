@@ -99,8 +99,14 @@ What an agent hands back, kept short:
 ## Git
 
 - `main` is the default branch; `release/<version>` branches prepare a
-  release, and pushing a `v*` tag builds the binaries and drafts a GitHub
-  release for review.
+  release, and pushing a `v*` tag builds the binaries, signs them and drafts
+  a GitHub release for review. The `sign` job needs the
+  `ZIPSIGN_PRIVATE_KEY` secret and verifies the archives with
+  `assets/update/release-key.pub` before the draft
+  ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)); a
+  release without it fails rather than ship unsigned. Reviewing a draft
+  includes opening the Windows zip in Explorer and 7-Zip, since the
+  signature sits in front of the zip's data.
 - Group related changes as you see fit. Never commit with the gate failing.
 - Commit messages: a short imperative summary, a blank line, then a body in
   plain English describing the user-visible changes, usually as a bullet list

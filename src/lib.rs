@@ -39,6 +39,7 @@ pub mod stats;
 pub mod telemetry;
 pub mod theme;
 pub mod transaction;
+pub mod update;
 pub mod workspace_state;
 
 /// Tokens, statement splitting and position mapping by dialect

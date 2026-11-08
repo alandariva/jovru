@@ -45,9 +45,13 @@ touches that path.
 
 1. **Nothing remote on the interactive path.** The explorer and search read
    the local metadata cache. The network is used only for explicit actions:
-   test, run, refresh; and, only when the user turns it on, for telemetry,
+   test, run, refresh; only when the user turns it on, for telemetry,
    sent in batches by background threads, never by the UI thread
-   ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)). High-frequency
+   ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)); and, unless
+   the user turns it off, for the update check: one request to GitHub's
+   release list at most once a day, from the Tokio runtime, never sooner
+   than 30 s after the window opens
+   ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)). High-frequency
    UI events (mouse, selection, frames) are never exported.
 2. **Load on demand.** The explorer reads children page by page; results are
    bounded by the row limit while they are read.

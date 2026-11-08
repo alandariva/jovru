@@ -55,3 +55,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0030](0030-transaction-state-through-a-pinned-sqlx-fork.md) | Transaction state read from the protocol through a pinned SQLx fork (amends 0002 and 0027) | Accepted (implemented) |
 | [0031](0031-saved-queries-as-sql-files.md) | Saved queries as plain `.sql` files named by their title, with tags and associations kept locally | Accepted (implemented) |
 | [0032](0032-session-encryption-reported-by-drivers.md) | Session encryption reported by the drivers (amends the `Session` contract) | Accepted (implemented) |
+| [0033](0033-update-check-and-signed-self-install.md) | Daily update check, on by default, and signed self-install from GitHub releases (amends performance principle 1) | Accepted |

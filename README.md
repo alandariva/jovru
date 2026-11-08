@@ -65,6 +65,27 @@ desktop matches it to the entry by its app ID,
 and again after moving it; `./install.sh --uninstall` removes the entry.
 Started without the entry, the window keeps the desktop's generic icon.
 
+### Updates
+
+Once a day Jykre Studio asks GitHub whether a newer version exists,
+pre-releases included; a newer one shows in the status bar. **Preferences ›
+About › Updates** turns the check off, checks at once (**Check now**) and
+installs (**Download and install**, then **Restart now**). The request is
+anonymous: GitHub sees your address and the version, nothing else. Nothing
+is downloaded without your click, and only an archive signed with the
+release key (`assets/update/release-key.pub`) is installed, by replacing the
+files of the folder it ships in; your own files there and the data folder
+are left alone. A development build, a folder you cannot write to or
+another system is offered the release's page instead. The folder keeps its
+name; on Linux run `./install.sh` again only if you moved it.
+
+To check a downloaded archive by hand:
+
+```bash
+cargo install --locked zipsign --version 0.2.2
+zipsign verify tar jykre-studio-v0.2.1-linux-x86_64.tar.gz release-key.pub
+```
+
 ## Features
 
 - Add a connection with `+` in the explorer. **Test connection** reaches the

@@ -26,6 +26,7 @@ isolated folder for tests and manual checks).
 | `logs/jykre.<date>.log` | JSON log lines, one file per day; the last 7 are kept ([Reliability](../standards/reliability.md#logs)) | Rotated automatically; safe to delete |
 | `recovery/<name>.sql` | The text of a tab a crash must not lose: a draft, or a file tab's unsaved edits (plain UTF-8, `\n` line endings) | Written half a second after edits settle and on quit; removed once saved, discarded or closed; one no tab names reopens as a **Recovered** tab |
 | `backups/saved-queries-<millis>.json` | The saved queries `config.db` held, as they were before they moved to files | Kept until the user deletes it; outside the rotation of the `config.db` copies |
+| `<executable's folder>/.jykre-update/` | Not in the data folder: an update being installed (`staging-<id>/`: the downloaded archive and what it unpacks to), what it replaced (`trash-<id>/`, `done-<id>/`) ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Removed when the update ends; at the next start, `done-*` and anything older than an hour are removed (on Windows the replaced executable can only go then); safe to delete while no update runs |
 | `connections.json` (legacy) | Profiles from earlier builds | Imported once into `config.db` in a single transaction, deleted only after the import is verified |
 
 ## SQLite configuration
@@ -188,6 +189,15 @@ only the fields it knows, so an older version cannot erase reports. A missing
 value is an empty library; a value that cannot be read is reported and never
 written over. It is written half a second after changes settle and when the
 application quits, closing the window included; the demo writes nothing.
+
+`update.preferences` holds whether the application checks for updates by
+itself (`{"check": true}`; missing or unreadable means it checks), and
+`update.state` when the last check that reached GitHub ended
+(`{"last_checked_ms": 1762560000000}`, milliseconds since the Unix epoch;
+missing means never), so the daily check survives restarts
+(`jykre::update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)).
+Both are read once at start; the preference is written when the user
+changes it, the state after each check that got an answer.
 
 `explorer.favorites` keeps the explorer's favorites (`jykre::favorites`):
 `{"version": 1, "favorites": [{"connection": "<connection-id>", "path":

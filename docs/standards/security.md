@@ -233,6 +233,51 @@ commands.
   rows) live next to the chosen file and are removed when the export ends,
   fails or is cancelled.
 
+## Updates
+
+The application checks GitHub's release list for a newer version and, after
+the user's click, installs it
+([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)).
+
+- **Sent:** once a day by default (off in **Preferences › About ›
+  Updates**), or on **Check now**, one `GET` of
+  `https://api.github.com/repos/alandariva/jykre-studio/releases` with
+  `User-Agent: JykreStudio/<version>`. GitHub sees the computer's address,
+  the version and the time. **Never sent:** a token, a cookie, a
+  `Referer`, an identifier of the user or the computer, the operating
+  system. Downloads happen only after **Download and install**.
+- **Signature, required.** An archive is installed only when it verifies
+  against a public key compiled in (`assets/update/release-key.pub`,
+  `jykre::update::keys`), signed with zipsign (ed25519ph). The context of
+  the signature is the archive's file name, which the application builds
+  from the version, never from GitHub's answer, so an older signed archive
+  cannot pass for a newer one. A checksum next to the archive is not
+  trusted: whoever can replace a release can replace it.
+- **Key custody.** The private key exists only offline with the maintainer
+  and as the `ZIPSIGN_PRIVATE_KEY` secret of the release workflow's `sign`
+  job, which verifies what it signed with the committed public key before a
+  release is drafted. To rotate it, ship the new public key beside the old,
+  sign a release with both, then drop the old one. A leaked key is rotated
+  at once; a lost key means users update by hand once.
+- **Redirects, the one exception.** The release list follows none. A
+  download starts at the repository's API asset address
+  (`…/releases/assets/<number>`, checked) and follows at most 3 redirects,
+  only over HTTPS on port 443 to `objects.githubusercontent.com` or
+  `release-assets.githubusercontent.com`, without a user or a password.
+  Those addresses carry a signed token in their query, so no address is
+  logged or put in an error message.
+- **What is written.** The archive (at most 256 MiB) goes to
+  `.jykre-update/` next to the executable; it is unpacked only after its
+  signature verifies; the unpacked folder must hold one folder with the
+  executable and `catalog/`, and no symbolic link. The swap replaces only
+  the entries the archive holds, in the executable's folder, and undoes
+  every step on failure. The data folder and the user's own files are
+  never touched.
+- **Only where it ships.** A development build, another platform, a copy
+  not in the release's folder or a folder the user cannot write to is
+  offered the release page instead; the application never asks for
+  elevated rights.
+
 ## Dependencies
 
 `cargo deny --locked check` (in `cargo xtask check --full`, in CI and weekly)
@@ -247,7 +292,9 @@ and a review date in `deny.toml`.
 - [ ] No generated SQL builds values by concatenation; identifiers are quoted
       by the driver.
 - [ ] External processes run without a shell and with a timeout.
-- [ ] New network calls use HTTPS/TLS as configured, with an explicit timeout.
+- [ ] New network calls use HTTPS/TLS as configured, with an explicit timeout,
+      and follow no redirect (the update download's allowlist is the one
+      exception, [Updates](#updates)).
 - [ ] A new external call has a `client` span; a new span attribute that
       may leave is in the telemetry allowlist and holds no free text.
 - [ ] Database content is rendered as text.

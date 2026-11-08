@@ -28,6 +28,7 @@ mod state;
 mod telemetry_settings;
 mod theme;
 mod ui;
+mod updates;
 mod workspace;
 
 use connections::ExplorerEntry;
@@ -366,6 +367,10 @@ struct AppView {
     /// Preferences > Assistant (ADR-0028).
     assistant_settings: Entity<assistant_settings::AssistantSettingsView>,
     telemetry_settings: Entity<telemetry_settings::TelemetrySettingsView>,
+    /// Updates (ADR-0033): Preferences › About › Updates and the status
+    /// bar's badge, which share the `updates::Updater`.
+    update_settings: Entity<updates::UpdateSettingsView>,
+    update_badge: Entity<updates::UpdateBadge>,
     schema_open: bool,
     tables_open: bool,
     orders_open: bool,
@@ -496,6 +501,9 @@ struct AppView {
     /// The user confirmed closing the window although transactions were
     /// open; it closes without asking again.
     closing: bool,
+    /// **Restart now** of an installed update: when the window closes after
+    /// its questions, this executable starts. Any other close clears it.
+    restart_to: Option<std::path::PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -510,6 +518,19 @@ impl AppView {
         let explorer_split = cx.new(|_| ResizableState::default());
         let assistant_split = cx.new(|_| ResizableState::default());
         let explorer_resize = cx.observe(&explorer_split, |_, _, cx| cx.notify());
+        let updater = cx.new(updates::Updater::new);
+        let update_subscription =
+            cx.subscribe_in(&updater, window, |this, _, event, window, cx| match event {
+                updates::UpdaterEvent::OpenUpdates => {
+                    this.open_settings(settings::SettingsPage::About, window, cx);
+                }
+                updates::UpdaterEvent::RestartRequested(path) => {
+                    this.restart_to = Some(path.clone());
+                    this.files_settled = false;
+                    this.discard_file_edits = false;
+                    this.close_window(window, cx);
+                }
+            });
         let assistant_resize = cx.observe(&assistant_split, |_, _, cx| cx.notify());
         // The SQL catalogs are read off the UI thread; tabs use the built-in
         // words until they arrive.
@@ -691,6 +712,8 @@ impl AppView {
                 .new(|cx| assistant_settings::AssistantSettingsView::new(window, cx)),
             telemetry_settings: cx
                 .new(|cx| telemetry_settings::TelemetrySettingsView::new(window, cx)),
+            update_settings: cx.new(|cx| updates::UpdateSettingsView::new(updater.clone(), cx)),
+            update_badge: cx.new(|cx| updates::UpdateBadge::new(updater, cx)),
             schema_open: true,
             tables_open: true,
             orders_open: true,
@@ -785,6 +808,7 @@ impl AppView {
             selection_before_search: None,
             node_focus: std::cell::RefCell::new(HashMap::new()),
             closing: false,
+            restart_to: None,
             _subscriptions: vec![
                 // The last edits are written before the application exits.
                 // Closing the window releases this view before GPUI runs the
@@ -797,7 +821,15 @@ impl AppView {
                         state.await;
                         reports.await;
                     });
+                    // After the writes are queued: restarting quits, which
+                    // awaits them before the new version starts.
+                    if let Some(path) = this.restart_to.take() {
+                        tracing::info!("restarting into the installed update");
+                        cx.set_restart_path(path);
+                        cx.restart();
+                    }
                 }),
+                update_subscription,
                 tab_subscription,
                 search_subscription,
                 command_subscription,
@@ -812,6 +844,7 @@ impl AppView {
             view.update(cx, |this, cx| {
                 // Each close asks about unsaved files again: an answer to
                 // a close that was then cancelled does not carry over.
+                this.restart_to = None;
                 this.files_settled = false;
                 this.discard_file_edits = false;
                 this.may_close(window, cx)
@@ -3504,7 +3537,10 @@ impl Render for AppView {
                         let view = cx.entity().downgrade();
                         move |_, window, cx| {
                             let close = view
-                                .update(cx, |this, cx| this.may_close(window, cx))
+                                .update(cx, |this, cx| {
+                                    this.restart_to = None;
+                                    this.may_close(window, cx)
+                                })
                                 .unwrap_or(true);
                             if close {
                                 window.remove_window();
@@ -3570,10 +3606,16 @@ impl Render for AppView {
                         1 => tr!("1 connection").to_string(),
                         count => tr!("{0} connections", count),
                     }))
-                    .child(row().gap_3().child(label(format!(
-                        "Jykre Studio · v{}",
-                        env!("CARGO_PKG_VERSION")
-                    )))),
+                    .child(
+                        row()
+                            .gap_3()
+                            .items_center()
+                            .child(self.update_badge.clone())
+                            .child(label(format!(
+                                "Jykre Studio · v{}",
+                                env!("CARGO_PKG_VERSION")
+                            ))),
+                    ),
             )
             .when(self.command_open, |s| s.child(self.command_palette(cx)))
             .when(self.inspection.is_some(), |s| {

@@ -45,7 +45,7 @@ impl SettingsPage {
             Self::Assistant => tr!("The AI model that answers in the assistant panel."),
             Self::Diagnostics => tr!("The application's log and the export of logs and traces."),
             Self::Shortcuts => tr!("Keys that work across the window."),
-            Self::About => tr!("The version and where the preferences are kept."),
+            Self::About => tr!("The version, updates and where the preferences are kept."),
         }
     }
 
@@ -283,9 +283,9 @@ impl AppView {
                 )
                 .into_any_element(),
             SettingsPage::Shortcuts => shortcuts_page().into_any_element(),
-            SettingsPage::About => {
-                about_page(cx.theme().mono_font_family.clone()).into_any_element()
-            }
+            SettingsPage::About => about_page(cx.theme().mono_font_family.clone())
+                .child(setting_section(tr!("Updates")).child(self.update_settings.clone()))
+                .into_any_element(),
         }
     }
 
