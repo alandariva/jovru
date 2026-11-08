@@ -33,6 +33,15 @@ design IDs (`Dxx`) and question IDs (`Q-xx`) refer to the review.
 > [0.3.0 plan](releases/0.3.0.md) were accepted on 2026-11-08, and the
 > process-supervision dependency was approved the same day (Q-11).
 
+> **Proposed, not approved:** sections
+> [9.5.1–9.5.10](#951-schedules-while-the-application-is-open-proposed-revision)
+> specify the scheduling part of phase 7 for milestone A13 of
+> [0.3.0](releases/0.3.0.md) (2026-11-08). They come with
+> [ADR-0041](../adr/0041-schedules-and-grants.md) and the
+> [`jiff` proposal](schedule-time-zone-dependency.md). They are not normative
+> until the maintainer approves them. The approved text, section 9.5
+> included, is unchanged.
+
 ## Contents
 
 1. [Overview](#1-overview)
@@ -1060,6 +1069,330 @@ bound to origin, audience and authentication type with no redirects (P-16),
 HTTP, palette, SDK, other transports, sandboxing and an agent that runs
 while the application is closed. Each completes its semantics before a
 schema or protocol becomes stable.
+
+#### 9.5.1 Schedules while the application is open (proposed revision)
+
+**Revision of 2026-11-08: proposed, awaiting the maintainer's approval.**
+This revision specifies the scheduling part of phase 7 for milestone A13 of
+[0.3.0](releases/0.3.0.md), as sections 9.1–9.3 did for phases 3–5.
+[ADR-0041](../adr/0041-schedules-and-grants.md) holds its schema, and the
+[`jiff` proposal](schedule-time-zone-dependency.md) holds its dependency.
+The decisions it needs are in [section 9.5.9](#959-decisions-for-the-maintainer).
+Until it is approved, the paragraph above is the only normative text on
+schedules. The rest of phase 7 (cache, secret broker, HTTP, palette, SDK,
+transports) stays outside 0.3.0.
+
+Scope:
+
+- A **schedule** runs one target by a rule, in a time zone, **only while
+  Jykre Studio is open and only in the instance that holds the automation
+  lock** (section 6.6). Nothing runs while the application is closed, and
+  nothing is caught up when it opens (Q-14, section 9.5.5). The interface
+  and the documentation say this plainly.
+- The target is a **published version** of a SQL Job or an
+  external-program job, or a **chain**: its definition at a given revision,
+  with the versions its steps name. A draft never runs on a schedule.
+- A scheduled run is an ordinary run. It goes through the same admission
+  limits, queue, timeouts, completion rule, `effect_unknown` and history as
+  a manual one (sections 4.6, 5.3, 9.3.6). Only its origin differs:
+  `schedule`, with the schedule and the time it was due.
+- A job or chain has **at most one schedule** in 0.3.0.
+
+#### 9.5.2 The rule
+
+A rule is edited through a form, not typed: the form is the grammar
+(Q-33). It is stored as canonical JSON in the schedule (ADR-0041), and it is
+one of two kinds.
+
+**Interval:** every *N* minutes or hours, from an anchor instant.
+
+```json
+{ "schema_version": "1.0", "kind": "interval",
+  "every_minutes": 15, "anchor": "2026-11-09T09:00:00Z" }
+```
+
+- *N* is between **1 minute** and **24 hours** (Q-39). Longer periods are
+  calendar rules.
+- The due times are `anchor + k·N` in **absolute time** (UTC), unaffected by
+  daylight saving. "Every 2 hours" stays 2 hours apart in real time, so its
+  local clock times shift by an hour when DST changes. The form says so.
+- The anchor is the moment the user chose, by default the next whole
+  minute after saving, written in UTC.
+
+**Calendar:** at given times of day on given days, in the schedule's time
+zone.
+
+```json
+{ "schema_version": "1.0", "kind": "calendar",
+  "at": ["09:00", "17:30"],
+  "days": { "weekdays": ["mon", "tue", "wed", "thu", "fri"] },
+  "months": [] }
+```
+
+- `at`: 1 to 24 local times `HH:MM`, sorted, without repeats.
+- `days`: one of:
+  - `"every_day"`;
+  - `{ "weekdays": [...] }`;
+  - `{ "month_days": [1, 15, "last"] }`. Day 29, 30 or 31 in a shorter month
+    has **no** run that month. It is not moved. `"last"` is each month's
+    last day.
+- `months`: empty for every month, or the months it runs in.
+- Each local time is turned into an instant in the schedule's zone with
+  `jiff`'s `Disambiguation::Compatible`, the rule of RFC 5545:
+  - a time that falls **in a gap** (clocks jump forward) moves forward by
+    the gap's length. With clocks jumping from 02:00 to 03:00, 02:30 runs at
+    03:30, once;
+  - a time that falls **in a fold** (clocks go back) runs **once**, at the
+    earlier instant.
+
+The **next run** is the first due time strictly after now. It is computed
+when the schedule is saved or turned on, after each due time, when the
+lock is taken, and when the system's time zone database may have changed
+(at each start). It is never trusted from storage. Each rule has a
+sentence that describes it ("Weekdays at 09:00 and 17:30, Europe/Berlin"),
+and the form shows the next three times.
+
+#### 9.5.3 Time zones
+
+- A schedule stores its zone as an IANA name (`America/Sao_Paulo`). `UTC`
+  and fixed-offset zones (`Etc/GMT+3`) are allowed. The default is the
+  system's zone, from `jiff::tz::TimeZone::system()`. A system that reports
+  no IANA name defaults to `UTC` and says so.
+- The Automation section shows each schedule's next run **in its own
+  zone**, with the zone's abbreviation and offset ("Mon 09:00 CET,
+  UTC+01:00"). When the user's zone differs, it adds the local equivalent.
+- The zone database is the system's on Linux and macOS, and on Windows the
+  one bundled with `jiff` and the application (proposal, residual risks). A
+  change to a zone's rules changes future due times without new consent:
+  the user consented to a local time, not to an offset.
+- A zone name the database no longer knows **suspends** the schedule, with
+  that reason (section 9.5.6). It is never replaced by another zone.
+
+#### 9.5.4 Where and when schedules run
+
+- The **scheduler** is part of the engine (section 5.1:
+  `src/automation/schedule.rs`, GPUI-free). It runs only while the engine
+  holds the lock (`Availability` ready).
+- A second instance shows schedules read-only, says they run in the other
+  instance, and runs none. When **Try again** takes the lock over, its
+  scheduler starts. Times that passed meanwhile follow section 9.5.5.
+- The scheduler keeps the next due time of each enabled, unsuspended
+  schedule. It sleeps until the earliest one, and **at most 30 s**, because
+  a sleeping computer stops the monotonic clock. On waking it compares the
+  **wall clock** (UTC) to each due time.
+- A due time is **on time** while the wall clock is less than **60 s** past
+  it (Q-39). The scheduler then submits the run. Past that grace the time is
+  **missed** (section 9.5.5).
+- A wall clock that moves backwards (a manual change, a correction) never
+  repeats a time that was already handled: each schedule remembers its last
+  handled due time (ADR-0041) and only considers later ones.
+- Quitting with scheduled runs active asks as for manual runs (section 5.2).
+  The scheduler stops first, so nothing new starts while the application
+  closes.
+
+#### 9.5.5 Missed times and overlap
+
+**Missed times are never run** (Q-34). Times can be missed because:
+
+- the application was closed;
+- the computer slept;
+- another instance held the lock;
+- the scheduler was later than the grace.
+
+For each such time, the scheduler:
+
+- **does not start a run**, now or later;
+- records it on the schedule: how many times were missed and the last one
+  (ADR-0041);
+- computes the next due time from now.
+
+The Automation section says, for example, "Missed 3 times while Jykre
+Studio was closed (last: today 09:00 CET); next run tomorrow 09:00 CET". A
+run is never replayed, and a time is never caught up.
+
+**Overlap** (Q-35): a due time that finds the schedule's previous run or
+chain run still **queued or active** starts nothing. It is recorded on the
+schedule as **skipped, still running**, and the next due time is computed.
+A schedule never has two runs at once.
+
+#### 9.5.6 Consent
+
+Consent is the **grant** of section 7.2. It is explicit, revocable and
+bound to exactly what will run. A manual confirmation is never promoted to
+it (P-15): neither a manual run's production question, nor its password,
+nor its trusted-code warning counts.
+
+Saving a schedule, turning it on, or confirming it again after a
+suspension opens **one consent dialog**. Nothing is scheduled until it is
+confirmed. The dialog shows:
+
+- the target: the job and version, or the chain with each step's job and
+  version (as in section 9.3.4);
+- the rule's sentence, its zone and its next three times;
+- that it runs **only while Jykre Studio is open**, in this instance, and
+  that missed times are not run;
+- each connection with its environment label (**Development**,
+  **Staging**, **Production** or none) and its pinned context;
+- for each SQL step on a **Production** connection, its `guard::risk`
+  findings. **This is the production confirmation**: a scheduled run never
+  asks it again;
+- for each external program, the trusted-code warning (Q-10) and its
+  entrypoint's hash;
+- the inputs it will use: **the version's defaults only** (Q-36). A job
+  with a required input without a default cannot be scheduled. To run it
+  with other values, a chain step can bind them as constants (section
+  9.3.3).
+
+On confirmation the grant records (ADR-0041):
+
+- the target's **fingerprint**: the version's, or for a chain the plan's
+  (the chain at its revision and every step's version fingerprint);
+- the schedule's revision (rule and zone);
+- each connection's **ID, profile revision and environment label**;
+- whether a production confirmation was part of it.
+
+Contexts, inputs' defaults and a program's entrypoint hash are inside the
+versions' definitions, so the fingerprint covers them.
+
+Any change to what the grant binds **suspends** the schedule until it is
+confirmed again (Q-37):
+
+- a new revision of a connection's profile (any save of it, including
+  **Remember password**) or a change of its environment label;
+- a deleted connection;
+- an edit of a scheduled chain (a new revision);
+- a program's entrypoint whose hash no longer matches its version (Q-16);
+- an unknown time zone.
+
+A suspended schedule runs nothing. It shows **Suspended** with the reason
+and **Confirm again**, which opens the consent dialog with what changed. The
+engine checks the grant eagerly when it learns new connection revisions
+(`Engine::set_connection_revisions`) and again before each admission, so a
+change between two times is never run.
+
+Editing the rule or the zone is a new consent. **Turning a schedule off**
+revokes its grant. Turning it on again asks again (Q-38). **Deleting** a
+schedule deletes its grant. A version a schedule names cannot be deleted:
+the refusal names the schedule, as for chains (section 9.3.1). Deleting its
+job asks first and deletes the schedule with it.
+
+#### 9.5.7 Running without dialogs
+
+A scheduled run never opens a dialog (section 7.1):
+
+- The engine resolves each connection itself, through the application
+  root's connection store: the profile, its revision and the vault's
+  password. It never prompts.
+- A password the profile does not remember, or a vault that fails, admits
+  the run and ends it **`Failed` with cause `Authentication`**, its effect
+  known: nothing was sent. For a chain, the chain run fails with
+  `Authentication` before its first step.
+- The production confirmation and the trusted-code warning were given in
+  the consent (section 9.5.6). A program whose version has not run before
+  runs, because the consent acknowledged it.
+- A scheduled run never asks for inputs. It uses the defaults, checked as a
+  form's would be (`reports::params::value`). A default that no longer
+  passes fails the run with cause `Input`, before admission for a job and
+  before the step for a chain. Neither leaves a step row.
+
+#### 9.5.8 Queue, limits, history and interface
+
+- A due time submits the run as **Run** would: `Engine::submit` for a
+  version, `Engine::submit_chain` for a chain, with the plan built and
+  checked against the grant's fingerprint.
+- A run that finds the limits full waits in the **queue** (8 in all, 4 per
+  connection, 60 s), as a manual run does (section 9.3.6).
+- A job run refused because the queue is full, or past its 60 s wait,
+  leaves **no run row** (section 4.3). The schedule records **refused**,
+  with the reason (`queue_full`, `queue_timeout`), so the user still sees
+  it. A chain step past its wait fails the chain with `queue_timeout`, as
+  in section 9.3.6.
+- History: `runs` and `chain_runs` record `origin = 'schedule'`, the
+  schedule's ID and the time it was due (ADR-0041). The step runs of a
+  scheduled chain carry the same origin. The **Runs** lists show
+  "Scheduled", the due time in the schedule's zone and the outcome. Nothing
+  else about values changes (section 6.4, CA-13).
+- Each schedule keeps its **last outcome** (started, skipped while still
+  running, missed, refused, suspended), with the time it was due and the
+  run it started. The Automation section shows the outcome with the next
+  run. Revoking or suspending a schedule whose run is queued removes that
+  run from the queue, as **Stop** does. A run already active is not stopped
+  by a revocation.
+- Rules the interface states where they apply (proposed additions to
+  section 8.1.1):
+
+  | Rule | Where the user sees it |
+  | --- | --- |
+  | Schedules run only while the application is open, in the instance holding the lock (9.5.4) | The schedule editor, the consent dialog and the Automation section; a second instance says the schedule runs in the other one |
+  | Next run in the schedule's zone (9.5.3) | Each schedule, with its offset and the local equivalent |
+  | Missed times are not run (9.5.5) | The consent dialog; each schedule's missed count and last missed time |
+  | Overlap is skipped (9.5.5) | The consent dialog; the last outcome **Skipped: still running** |
+  | Consent is bound and suspends on change (9.5.6) | **Suspended** with the reason and **Confirm again** |
+  | Only defaults are used (9.5.6) | The consent dialog lists them; a job with a required input without a default cannot be scheduled, and the form says why |
+  | No password prompt (9.5.7) | The consent dialog warns when a connection does not remember its password; such runs end `Authentication` |
+  | DST (9.5.2) | The form's sentence for a time in a gap or a fold on the next three dates; the interval form's note about absolute time |
+
+- **Notification beyond the history** (open decision of A13, Q-40):
+  - (a) The history only, plus an indicator. The Automation entry of the
+    sidebar shows the count of scheduled runs that ended badly since the
+    user last looked, and the status bar names the latest. No dependency.
+  - (b) Option (a), plus an operating-system notification for every bad
+    end.
+  - (c) Option (a), plus an operating-system notification **opt-in per
+    schedule**.
+
+  The release plan assumed a notification needs a dependency of its own.
+  It does not: GPUI, already our UI, has
+  `App::show_system_notification(SystemNotification)` in `gpui-pre`
+  0.3.11. It is implemented for Windows (toasts) and for Linux through
+  `notify-rust` 4.18.2, which `gpui-pre-linux` already brings in
+  (`Cargo.lock`). Whether a toast shows for an unpackaged Windows build
+  (its AppUserModelID) is **not verified**. A notification says only the
+  schedule's name, the outcome and the cause, never a value or a server
+  message.
+
+#### 9.5.9 Decisions for the maintainer
+
+| ID | Question | Options | Recommendation |
+| --- | --- | --- | --- |
+| Q-33 | Grammar and time zones | (a) A structured rule from a form (9.5.2), evaluated with `jiff` ([proposal](schedule-time-zone-dependency.md)). (b) Cron strings through `croner` with its `jiff` feature. (c) `cron` or `jiff-cron`. (d) `rrule`. (e) `cronexpr` | **(a)**. `jiff` is already in `Cargo.lock`; the form shows every rule in words; no DST policy depends on a recently fixed cron crate |
+| Q-34 | Times missed while closed, asleep or without the lock | **(a) Never run; counted and shown.** (b) Run once at start or resume for the latest missed time, within a window. (c) Run every missed time | **(a)**. A run at an unexpected moment, perhaps on Production, is worse than a missed one, and (b) is a catch-up the user did not schedule |
+| Q-35 | Overlap | **(a) Skip and record.** (b) Queue one run for when the active one ends (coalescing). (c) Allow concurrent runs, limited anyway to 1 per connection | **(a)** |
+| Q-36 | Inputs of scheduled runs | **(a) The version's defaults only.** (b) Values stored with the schedule, as a chain step's constants are stored in its definition | **(a)**. Section 6.4 keeps input values out of `automation.db`, and a chain already offers constants when needed |
+| Q-37 | What "environment" in the consent binds | **(a) The connection's environment label** (Development, Staging, Production, none). (b) Also the external program's process environment. It changes between starts (`PATH`, variables), so it would suspend schedules at random | **(a)**. A program's environment stays as Q-27 decided |
+| Q-38 | Turning a schedule off and on | **(a) Off revokes; on asks again.** (b) The grant survives while off | **(a)**. Consent is given at the moment it is used |
+| Q-39 | Limits | Minimum interval **1 min**, maximum **24 h**; grace **60 s**; at most **24** times a day in a calendar rule; **one** schedule per job or chain | As listed. Revisit after measurement, as section 5.3 does |
+| Q-40 | Notification beyond the history (A13's open decision) | (a), (b) or (c) of section 9.5.8 | **(c)**, through GPUI's existing API, with no new dependency. Windows delivery is to be verified by the [checklist](releases/0.3.0-windows-checklist.md) |
+
+#### 9.5.10 Tests and acceptance
+
+The scheduler takes an injected **clock**: the current UTC instant and a
+sleep until an instant. The tests therefore move time without waiting. They
+use real zones from `jiff`'s database and synthetic SQLite files.
+
+| Area | Required tests |
+| --- | --- |
+| Rules | Interval due times across a DST change stay N apart in UTC. Calendar times in `Europe/Berlin` and `America/New_York` across both DST changes. A time in the gap runs once, shifted by the gap. A time in the fold runs once, at the earlier instant. `Australia/Lord_Howe` (a 30-minute DST shift). `month_days` 31 in a 30-day month (no run) and `last`. `months`. The next three times. An unknown zone suspends |
+| Clock | A wall clock moved backwards repeats nothing. A jump forward past the grace counts as missed. A sleep longer than 30 s is noticed on waking |
+| Missed times | A closed period of three due times: none runs, the count is three, the next run is in the future. Taking the lock over from another instance |
+| Overlap | A due time while the previous run is active or queued is skipped and recorded. It never starts a second run |
+| Queue and limits | A scheduled run behind a manual one at limit 1 waits. A full queue records **refused** without a run row. A chain step past 60 s fails the chain with `queue_timeout` |
+| Consent | Each binding suspends: connection revision, environment label, chain revision, program hash, deleted connection. **Confirm again** restores it. A manual confirmation creates no grant. Turning off revokes. A revoked or suspended schedule's queued run leaves the queue |
+| No dialogs | A connection without a remembered password: `Failed`/`Authentication`, effect known, nothing sent. A chain fails before its first step. A default that fails its kind: `Input` |
+| Instances | A second instance on the same folder runs no schedule. Quitting stops the scheduler before the runs |
+| History | `origin = 'schedule'`, the schedule's ID and the due time on runs, chain runs and their steps. No value in `automation.db`, logs or telemetry (CA-13) |
+| Storage | Migration 5 on an empty file and on a version-4 fixture with runs and chain runs keeps every row and passes `foreign_key_check` (ADR-0041) |
+
+Proposed acceptance criterion, replacing CA-10's "non-normative until
+phase 7 is specified":
+
+**CA-10 (phase 7, schedules).** A schedule runs a published version or a
+chain, by an interval or a calendar rule in its time zone, only while the
+application is open and in the instance holding the lock. It never opens a
+dialog, never replays a run and never runs a missed time. Overlap is
+skipped. Any change to what its consent binds suspends it until confirmed
+again. Its runs share the queue, limits and history of manual runs, with
+the origin `schedule`. The flow is checked in the application.
 
 ### 9.6 Excluded until an explicit decision
 
