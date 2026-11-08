@@ -9,7 +9,8 @@
 //! the local fixtures. `JYKRE_ROWS` sets the rows (default 100,000).
 // A command-line example: printing the measurement is its output.
 #![allow(clippy::print_stdout)]
-use jykre::automation::{Engine, RunRequest, SqlJob};
+use jykre::automation::definition::{JobBody, JobDefinition};
+use jykre::automation::{Availability, ConnectionInput, Engine, JobRequest, RunStatus};
 use jykre::drivers::*;
 use std::collections::HashMap;
 
@@ -72,43 +73,63 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
     }
 
-    let engine = Engine::new(tokio::runtime::Handle::current());
+    let data_dir = std::env::temp_dir().join(format!(
+        "jykre-automation-drain-data-{}",
+        ConnectionId::new()
+    ));
+    let engine = Engine::start(tokio::runtime::Handle::current(), data_dir.clone());
+    if engine.started().await != Availability::Ready {
+        return Err("automation is not available".into());
+    }
+    let connection = ConnectionId::new();
+    let mut job = JobDefinition::new_sql("drain", Some(connection));
+    if let JobBody::Sql(body) = &mut job.body {
+        body.sql = sql;
+    }
     let mut handle = engine
-        .submit(RunRequest {
-            job: SqlJob::new(ConnectionId::new(), sql),
-            driver: driver.clone(),
-            connection: input.clone(),
+        .submit(JobRequest {
+            definition: job,
+            stored: None,
             values: HashMap::new(),
+            connection: Some(ConnectionInput {
+                id: connection,
+                driver: driver.clone(),
+                resolved: input.clone(),
+                revision: 1,
+            }),
         })
         .map_err(|refusal| format!("refused: {refusal:?}"))?;
-    let outcome = handle
-        .finished()
-        .await
-        .ok_or("the run ended without an outcome")?;
-    let completion = outcome.completion.unwrap_or_default();
-    let read = outcome.data.row_count() as u64 + outcome.rows_discarded;
+    let RunStatus::Finished(outcome) = handle.finished().await else {
+        return Err("the run ended without an outcome".into());
+    };
+    let result = outcome.sql.as_ref().ok_or("not a SQL run")?;
+    let completion = result.completion.unwrap_or_default();
+    let read = result.data.row_count() as u64 + result.rows_discarded;
     println!("driver: {kind:?}, rows: {rows}");
     println!(
         "state: {:?}, cause: {:?}, effect unknown: {}, truncated: {}",
-        outcome.state, outcome.cause, outcome.effect_unknown, outcome.truncated
+        outcome.state, outcome.cause, outcome.effect_unknown, result.truncated
     );
     println!(
         "rows kept: {}, discarded: {}, run: {} ms",
-        outcome.data.row_count(),
-        outcome.rows_discarded,
+        result.data.row_count(),
+        result.rows_discarded,
         outcome.elapsed.as_millis()
     );
     println!(
         "first page to confirmed end: {} ms, {:.0} rows/s",
         completion.as_millis(),
-        outcome.rows_discarded as f64 / completion.as_secs_f64().max(f64::EPSILON)
+        result.rows_discarded as f64 / completion.as_secs_f64().max(f64::EPSILON)
     );
     println!(
         "result held: {} bytes; process peak: {}",
-        outcome.data.memory_bytes(),
+        result.data.memory_bytes(),
         peak_memory().unwrap_or_else(|| "unknown".into())
     );
     drop(outcome);
+    engine.shutdown().await;
+    drop(engine);
+    let _ = std::fs::remove_dir_all(&data_dir);
     for statement in &cleanup {
         let mut sink = Discard;
         session

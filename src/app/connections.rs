@@ -987,6 +987,11 @@ impl AppView {
                 .values()
                 .map(|report| (report.group, colors().neutral)),
         );
+        shades.extend(
+            self.automation
+                .tab_groups()
+                .map(|group| (group, colors().neutral)),
+        );
         self.tabs.update(cx, |tabs, cx| {
             for (group, shade) in shades {
                 // A group whose last tab closed is gone; it gets its shade

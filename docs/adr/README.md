@@ -56,8 +56,8 @@ something is the way it is, and so a decision is not undone by accident.
 | [0031](0031-saved-queries-as-sql-files.md) | Saved queries as plain `.sql` files named by their title, with tags and associations kept locally | Accepted (implemented) |
 | [0032](0032-session-encryption-reported-by-drivers.md) | Session encryption reported by the drivers (amends the `Session` contract) | Accepted (implemented) |
 | [0033](0033-update-check-and-signed-self-install.md) | Daily update check, on by default, and signed self-install from GitHub releases (amends performance principle 1) | Accepted |
-| [0034](0034-automation-database-service-and-lock.md) | Automation in `automation.db`, run by an application-root service under a data-folder lock | Accepted (not implemented) |
-| [0035](0035-persisted-declared-outputs.md) | Declared scalar outputs persisted for chains, small, opt-in and short-lived | Accepted (not implemented) |
-| [0036](0036-published-versions-and-chain-runs.md) | Published job versions and chain runs in `automation.db` | Accepted (not implemented) |
-| [0037](0037-program-logs-on-disk.md) | External programs' logs kept on disk for 7 days | Accepted (not implemented) |
-| [0038](0038-external-program-runs.md) | External program runs in `automation.db` | Accepted (not implemented) |
+| [0034](0034-automation-database-service-and-lock.md) | Automation in `automation.db`, run by an application-root service under a data-folder lock | Accepted (implemented) |
+| [0035](0035-persisted-declared-outputs.md) | Declared scalar outputs persisted for chains, small, opt-in and short-lived | Accepted (implemented) |
+| [0036](0036-published-versions-and-chain-runs.md) | Published job versions and chain runs in `automation.db` | Accepted (implemented) |
+| [0037](0037-program-logs-on-disk.md) | External programs' logs kept on disk for 7 days | Accepted (implemented) |
+| [0038](0038-external-program-runs.md) | External program runs in `automation.db` | Accepted (implemented) |

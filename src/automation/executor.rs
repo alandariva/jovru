@@ -1,7 +1,7 @@
 //! A SQL Job's statement on a session of its own: one statement, bound
 //! values, and success only once the statement is confirmed complete
 //! (specification, sections 4.2–4.6).
-use super::{Phase, RunStatus, SqlJob};
+use super::{Phase, Progress, RunStatus, SqlJob};
 use crate::backend;
 use crate::parameters::ParameterError;
 use crate::reports::params;
@@ -13,6 +13,7 @@ use jykre_core::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -38,7 +39,6 @@ pub struct Prepared {
     pub(super) request: QueryRequest,
     /// Read by the dialect's tokens: the completion rule's first case.
     pub(super) reads_only: bool,
-    pub(super) timeout: Duration,
 }
 
 impl Prepared {
@@ -88,7 +88,6 @@ pub fn prepare(
     Ok(Prepared {
         reads_only: sql::reads_only(&request.sql, Some(dialect)),
         request,
-        timeout: job.timeout,
     })
 }
 
@@ -110,6 +109,18 @@ pub(super) struct Execution {
     pub transaction_rolled_back: bool,
 }
 
+/// Where an execution reports while it runs: its progress, and the moment
+/// its statement is confirmed complete.
+pub(super) struct Report<'a> {
+    pub status: &'a watch::Sender<RunStatus>,
+    pub confirmed: &'a AtomicBool,
+}
+
+/// `confirmed` is set the moment the driver reports the end of the
+/// statement's result, before the transaction check and the close, so the
+/// run's owner knows a write finished even if Stop comes while the session
+/// closes.
+///
 /// Runs `prepared` on a new session opened in its context, the same way a
 /// report panel's session opens ([`Driver::session_connection`]), and
 /// always closes it. `cancel` stops the work (Stop or the deadline, as the
@@ -130,8 +141,9 @@ pub(super) async fn execute(
     memory_ceiling: usize,
     cancel: CancellationToken,
     deadline: Instant,
-    status: &watch::Sender<RunStatus>,
+    report: Report<'_>,
 ) -> Execution {
+    let Report { status, confirmed } = report;
     let mut execution = Execution::default();
     let request = &prepared.request;
     let input = match driver.session_connection(&input, &request.options.context) {
@@ -165,6 +177,7 @@ pub(super) async fn execute(
     match session.execute(&request, &mut sink, cancel.clone()).await {
         Ok(outcome) if prepared.reads_only => {
             execution.confirmed = true;
+            confirmed.store(true, Ordering::SeqCst);
             execution.rows_affected = outcome.rows_affected;
             // The rest stays unread; closing the session discards it.
             execution.truncated = outcome.has_more || outcome.truncated;
@@ -184,6 +197,8 @@ pub(super) async fn execute(
             match completed.last {
                 Ok(last) => {
                     execution.confirmed = true;
+                    confirmed.store(true, Ordering::SeqCst);
+                    confirmed.store(true, Ordering::SeqCst);
                     execution.rows_affected = completed.rows_affected;
                     execution.truncated = last.truncated;
                 }
@@ -278,7 +293,10 @@ fn remaining(deadline: Instant) -> Duration {
 }
 
 fn publish(status: &watch::Sender<RunStatus>, phase: Phase, rows: u64) {
-    status.send_replace(RunStatus::Active { phase, rows });
+    status.send_replace(RunStatus::Active(Progress {
+        rows,
+        ..Progress::new(phase)
+    }));
 }
 
 /// Keeps the rows a result may hold. For a write (`drains`), it never asks
@@ -304,7 +322,7 @@ impl JobSink {
     }
 
     /// Rows read so far, kept or not.
-    fn rows(&self) -> u64 {
+    pub(super) fn rows(&self) -> u64 {
         self.kept + self.discarded
     }
 

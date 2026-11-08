@@ -74,6 +74,15 @@ opentelemetry-otlp = { version = "0.33.1", default-features = false, features = 
 tracing-opentelemetry = { version = "0.34.0", default-features = false }
 opentelemetry-appender-tracing = { version = "0.33.1", default-features = false }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Process-tree supervision for automation's external programs (Q-11,
+# approved 2026-11-08, docs/plans/process-supervision-dependency.md): a Job
+# Object on Windows, a process group on Unix. Used only by
+# `jykre::automation`'s program executor; no `tracing` feature, whose spans
+# would carry fields outside the telemetry allowlist.
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop", "process-group", "creation-flags"] }
+# SHA-256 fingerprints of automation snapshots (ADR-0034, approved
+# 2026-11-08): a direct dependency of jykre-storage only.
+sha2 = "0.10"
 # SQL formatting by dialect (N010), behind jykre-sql-language's `sqruff`
 # feature; it has no default features to turn off.
 sqruff-lib = "0.44.0"
@@ -126,6 +135,8 @@ secrecy.workspace = true
 rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["constant_memory"] }
 # Update check and signed self-install (ADR-0033); only `jykre::update`.
 self_update.workspace = true
+# External programs of automation (Q-11); only `jykre::automation`.
+process-wrap.workspace = true
 
 [build-dependencies]
 winresource.workspace = true

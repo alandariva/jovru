@@ -1,6 +1,6 @@
 # ADR-0035: Declared scalar outputs persisted for chains, small, opt-in and short-lived
 
-- **Status:** Accepted (by the maintainer on 2026-11-08; not implemented)
+- **Status:** Accepted (by the maintainer on 2026-11-08; implemented in 0.3.0)
 - **Date:** 2026-11-08
 - **Authors:** Alan de Oliveira (decision Q-03), Claude (draft)
 

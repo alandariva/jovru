@@ -32,8 +32,8 @@ A connection's tab group appears with its first tab and goes away with its
 last: the tab strip never shows a group without tabs, at start or later. A
 report's tab has a group of its own (below).
 
-The rail holds, from the top: Explorer, Saved queries, Reports, History and,
-at the bottom, Preferences.
+The rail holds, from the top: Explorer, Saved queries, Reports, Automation,
+History and, at the bottom, Preferences.
 
 **Preferences** is a dialog over the window (the rail's gear or `Ctrl ,`),
 with its categories listed on the left: **Appearance** (the theme and
@@ -96,6 +96,83 @@ the cursor or the whole script, and **Add to a report…** adds it as a new
 panel of any saved report, chosen in a dialog with a search; both keep the
 tab's connection and database. Nothing is stored until **Save report**.
 Report tabs are not reopened after a restart.
+
+**Automation** ([specification](../plans/automation-engine-specification.md),
+section 8.1; [ADR-0034](../adr/0034-automation-database-service-and-lock.md) to
+[ADR-0038](../adr/0038-external-program-runs.md)) is a section of the rail.
+It lists the jobs and chains (kind icon, name and kind, virtualized), with a
+**+** menu (**New SQL Job**, **New program**, **New chain**) and a **Runs**
+entry, with the number of runs active, that opens the global runs list. A
+job opens in a tab of its own, in a grey tab group of its own named after
+the job, as a report's does; the tab's title ends with `●` while the job is
+not saved. Its toolbar holds the kind, save, **Publish** (not for a chain),
+**Duplicate**, **Delete** and **Run**, which turns into **Stop** while the
+job's run is active; under it, three inner tabs:
+
+- **Editor**, a form. A SQL Job: name, description, the connection and where
+  unqualified names resolve (a menu of the connections, each with
+  **Session default** and its namespaces, as report panels offer), the SQL
+  editor with the same completion as a query tab (statements beyond the
+  first are outlined in amber and named by their line before saving), one
+  row per `:name` parameter (label, type, default, **Required**, **List of
+  choices**), the timeout in seconds and the row limit with the effective
+  timeout, the declared outputs (name, type, result column by position),
+  which row the outputs take with what each rule does with zero, one and
+  several rows, **Store outputs**, and the published versions (number and
+  date, each with a delete button). A program: the program, its arguments
+  one per row, the entrypoint, the working folder, the environment
+  (variables removed, those set, and which of Studio's variables are
+  removed now), the protocol (**No protocol** or `jjp/1`; inputs and
+  outputs only with `jjp/1`), the timeout, outputs, and the versions, each
+  with the path and SHA-256 it expects. A chain: its inputs, its timeout
+  (3,600 s by default) and 2 to 16 steps, each a job (SQL Jobs and
+  programs; a chain is never offered) and one of its published versions,
+  marked when the job changed since that version, with moves up and down;
+  each input of the version takes its source from a list (its default or
+  NULL, a chain input, a declared output of an earlier step, or a constant
+  typed beside it). What `chain_problems` finds is said under its step and
+  input, read again after each change and once typing pauses.
+- **Inputs**: the run form, as a report's (a list input shows a menu),
+  **Run** or **Stop**, then the run's state and, for a SQL Job, the latest
+  result in a grid while the tab is open. A job that differs from what is
+  saved runs as a draft, and the form says so.
+- **Runs**: the job's history (below).
+
+The rules the engine follows are stated where they apply (section 8.1.1):
+the limits and the queue beside the timeout, one statement per job, the
+4 KiB, 7-day and 90-day limits of stored outputs, the 7-day and 1 MiB
+limits of program logs and not to print secrets, that stdin is reserved
+for `jjp/1`'s token, what the environment loses (`ENV_DENYLIST`, the job's
+own names) and that anything else in it reaches the program, that
+external code runs with the user's privileges and is not sandboxed, that
+only the entrypoint is checked by hash, how Stop ends a program (and that
+on Windows a program without `jjp/1` is killed after the 5 s), and that a
+chain runs published versions, never nests and stops at the first step
+that fails. Shortcuts that run SQL in a query tab never run a job.
+
+The history (a job's **Runs**, and the global **Runs** list) lists runs and
+chain runs newest first, virtualized and read 50 at a time
+(**Load older runs**), each with its state icon, job, kind, how long ago and
+how long it took (a run without a job reads as a draft or a deleted job).
+Choosing one shows what ran and how it ended: its state and cause in words,
+**Timed out after …** apart from **Stopped**, `effect_unknown`
+("The change may or may not have been applied; it was not run again"), the
+rows kept and the rows read and discarded or left unread, the rows
+affected, SQLite's one writer per file, the server's code, a program's
+exit code or signal and `fail` code, whether its outputs were stored and
+why not (their names, sizes and whether a value expired; never the
+values), and a program run's logs: **stdout**, **stderr** and **jjp** with
+their sizes, read from disk only when opened, with the 7-day and 1 MiB
+note and **Delete logs**. A chain run lists each step with its version and
+its run, which opens under it, and **Not run** for the steps after the one
+that stopped it, naming that step and the cause; **Run this step again…**
+opens the step's job with its form filled from what earlier steps stored
+(constants, and outputs whose values were stored and have not expired)
+and says which inputs are left to fill in; it never runs by itself. The
+history says that refused runs are not recorded and how long runs, values
+and logs are kept. The global list has a **State** filter and, above the
+history, the runs and chain runs active or queued now, each with its state
+and **Stop**.
 
 Dividers are adjustable with the mouse and the arrow keys. The assistant panel opens to the
 right of the query area ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
@@ -254,6 +331,9 @@ Each state has one consistent representation.
 | Export of a result | The export bar, under the result toolbar | Its options and where the rows come from (the rows held, the rest from the server, or a statement run again); while writing, a spinner, the rows and bytes written (of the total when known), the elapsed time after 2 s and **Cancel export**; at the end, how many rows went to which file, its size and time, with **Show in folder**, or why nothing was written. The toolbar's export button stays highlighted while the bar is open ([Results](results.md#export)) |
 | Copy of a grid selection, a query page, the inspector's value or a report panel's result | Status over the grid after 100 ms; for a report panel, in its notice line | **Preparing copy…** while estimating; **Copying…** with rows completed and total while encoding, elapsed time after 2 s, and **Cancel copy** (also `Esc`). Above 50 MiB, a confirmation comes before encoding. The clipboard changes only after a successful, still-current copy |
 | Data of a table | A query tab opened for the table (a double click or `Enter` in the explorer, **View data** in its menu, `Enter` in the search) | The editor holds `SELECT * FROM` the table, without a `LIMIT`, and the tab reads it at once into a result tab called **Data**: the first page has the connection's row limit and the footer's arrows read the next ones from the session, never running the statement again. Opening the table again shows that tab, and reads the rows again only when none of its result tabs holds them: in place of a read that failed or was cancelled, otherwise in a new result tab, never over another result (a restored tab offers **View data**). Running something else in the tab closes the open result, as for any query; `↻` reads the table again |
+| Automation available | The Automation section | Nothing while it works. **Starting automation…** while the engine opens its file; **Read-only** when another Jykre Studio holds the data folder's automation lock (its jobs and history can be read, nothing runs or is saved), with **Try again**, also tried each time the section opens; **Automation is off** when `automation.db` comes from a newer version or the file or the lock cannot be opened, the rest of the application working. At start, what recovery found is said once: runs marked interrupted, and a damaged file set aside (job definitions lost, also in the explorer's notice) |
+| A job's run | The job's Inputs, toolbar and tab | **Queued, place N**: which limit it waits for (2 runs at once, 1 per connection), the runs that hold it and the time left before it leaves the queue (redrawn each second); then its phase (opening a session, running the statement, reading the rest of a write's result, the program running with its percent and stage), rows read, **Stopping…**, and how it ended: state and cause, `effect_unknown`, the database's message, a transaction rolled back, rows kept and discarded or left unread, whether the program ended on its own after Stop or was killed, outputs stored or why not. A run that did not start says why in place, with that refused runs are not recorded; a program refused because its file changed names it and offers **Publish**. A chain shows the step running ("step 2 of 3") with that step's state. The tab shows a spinner, then a check, a cross or a ban sign, as a query tab's |
+| Active runs | The Automation section's **Runs** entry | "N active" while runs or chains are active or queued |
 | Plan of a statement | **Explain** in the editor toolbar | The dialect's `EXPLAIN` of the statement at the cursor (or of the one selected) runs into a new result tab; the statement itself does not run. Only queries and data changes are explained |
 
 Rules:
@@ -353,6 +433,32 @@ Rules:
   drops data (`DROP`, `TRUNCATE`, an `ALTER` that drops something) asks
   first, naming each such statement of the run (`jykre::guard`). Nothing
   runs until the user confirms.
+- Running a SQL Job goes: the form's values (a missing or malformed value
+  is outlined in red and nothing runs), the password of its connection when
+  it is not remembered, then, on a production connection, one question
+  naming its risky statement and, when the job stores its outputs, that
+  every run stores them for 7 days. A program's first run at its revision
+  warns that external code runs with the user's privileges, is not
+  sandboxed, and that its logs stay on disk for 7 days.
+- Running a chain goes: the chain's form, the password of every connection
+  its SQL steps use, one after another, then **one** dialog for the whole
+  plan: every step with its job, version and kind, where each SQL step runs
+  (and whether on production, with its risky statement), whether the job
+  changed since that version, and the trusted-code warning for each program
+  version that has not run before. Exactly that plan runs.
+- Turning **Store outputs** on for a job whose connection is marked
+  **Production** asks first, stating the limits. Deleting a job or a
+  published version asks first; the engine refuses it while a chain uses it,
+  and the editor names the chains. Closing a job's tab with unsaved changes
+  asks first; a run it started keeps going, since runs belong to the engine.
+- Closing the application while runs or chains are active or queued asks
+  last, after the questions about files and transactions: it names them and
+  says they will be stopped and the queue emptied (**Stop the runs and
+  close** or **Keep open**). Confirming stops them and waits for the engine
+  (up to about 11 s; the status bar says so) before the window closes.
+- At start, when the previous session left programs running (Unix), a
+  dialog lists them and offers **End them** (each process group whose
+  leader still has its recorded start time is killed) or **Leave them**.
 
 ## Keyboard shortcuts
 
@@ -361,7 +467,8 @@ Rules:
 | Run the selection, or the statement at the cursor, in place of the result tab on screen (asks before cancelling while a run is active) | `Ctrl Enter` |
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
-| Stop the run of the tab on screen, as Stop does (a query tab's statements or a report's panels), without asking | `Ctrl F2` |
+| Stop the run of the tab on screen, as Stop does (a query tab's statements, a report's panels, or a job's or chain's run, which leaves the queue when it waits), without asking | `Ctrl F2` |
+| In a job's run form (**Inputs**): run the job with the values typed, as **Run** does. `Ctrl Enter` never runs a job | `Enter` |
 | Run the panel whose SQL has the keyboard; elsewhere in a report tab, every panel | `Ctrl Enter` (or `Enter` in a parameter field, which runs every panel) |
 | Run every panel of the report on screen | `Ctrl Alt Enter` |
 | In a query tab's parameter field: run what `Ctrl Enter` runs (the selection or the statement at the cursor) | `Enter` |
@@ -402,6 +509,7 @@ Rules:
 | Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |
 | Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
 | Tab bar: move between tabs | Arrows, `Home`, `End` |
+| A job's tab: reach **Editor**, **Inputs** or **Runs**, open it (the keyboard goes to its first field, or the history) | `Tab`, then `Enter` or `Space` |
 
 Shortcuts are GPUI actions in one keymap ([UI guidelines](../standards/ui-guidelines.md#actions-and-shortcuts)).
 A new shortcut updates this table, avoids keys the editor already uses, and

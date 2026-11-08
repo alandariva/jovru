@@ -77,7 +77,7 @@ impl AppView {
 
     /// The connections a report's panels may run on, with what their
     /// editors need: the databases of each and the cache's names.
-    fn report_sources(&self) -> Sources {
+    pub(super) fn report_sources(&self) -> Sources {
         Rc::new(
             self.connections
                 .iter()
@@ -116,8 +116,10 @@ impl AppView {
 
     /// Hands every report tab the connections its panels may run on, as
     /// they are now: after a connection is added, edited or removed, given
-    /// its password, or its namespaces and names are read.
+    /// its password, or its namespaces and names are read. Automation's
+    /// tabs and engine follow the same changes.
     pub(super) fn sync_reports(&self, cx: &mut Context<Self>) {
+        self.sync_automation(cx);
         if self.report_tabs.is_empty() {
             return;
         }
