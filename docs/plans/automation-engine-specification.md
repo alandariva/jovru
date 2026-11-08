@@ -594,9 +594,14 @@ never blocks admission. Nothing else is stored to retain in phase 1.
 
 ### 8.1 Phase 2 interface
 
-- An **Automation** list of jobs with a detail view with three tabs:
-  **Editor**, **Inputs** and **Runs** (P-26). Schedules, permissions and
-  versions arrive with their phases.
+- An **Automation** section in the sidebar, beside the explorer, lists jobs
+  and chains; each opens as a tab of the main area, as reports do, with
+  three inner tabs: **Editor**, **Inputs** and **Runs** (P-26, Q-20). A
+  global **Runs** list shows every run and chain run, filterable by state
+  (Q-22). Schedules and permissions arrive with their phases.
+- The chain editor is a form, not a canvas: a list of steps, each with a
+  table of its job version's inputs and, for each, its source chosen from a
+  list (a chain input, an earlier step's output, or a constant) (Q-21).
 - The editor is the dialect-aware component from `src/app/sql_editor`, not
   another Workspace. Shortcuts that run SQL in a tab never run a job.
 - **Run** opens the parameter form from reports, then the production and
@@ -632,7 +637,10 @@ outcome. The maintainer set this requirement on 2026-11-08.
 | One confirmation for the whole plan (9.3.4) | The dialog lists every step, connection, production risk and new external program; `PlanChanged` says which connection changed |
 | Steps after a failure do not run (9.3.5) | The chain run marks them **Not run**, with the step and cause that stopped the chain |
 | Persisted outputs (ADR-0034) | Turning it on states the 4 KiB, 7-day and 90-day limits; a run whose outputs were not stored says why |
-| External code is trusted, not sandboxed (Q-10) | The warning on import and first run of each version |
+| External code is trusted, not sandboxed (Q-10) | The warning on the first run of each version (there is no import, Q-19) |
+| Program logs are kept on disk for 7 days (Q-15) | The program editor and every run's log view say so, with the 1 MiB limit per stream and a reminder not to print secrets or personal data |
+| The program runs from its own file, checked by hash (Q-16) | A run refused because the file changed names the file and offers **Publish**; the version shows the path and hash it expects |
+| Stop on a program waits up to 5 s (Q-17) | **Stop** shows **Stopping…** and then whether the tree ended on its own or was killed |
 | The `jjp/1` token uses stdin (9.2) | The external-program editor says that stdin is reserved |
 
 A rule without a place in this table is not ready to ship (CA-15).
@@ -665,14 +673,26 @@ honour, not as finished designs.
   `TEMP` on Windows; `HOME`, `LANG` on Unix) plus explicit passthrough. No
   default `NODE_OPTIONS`, `PYTHONPATH` or `JYKRE_CONFIG_DIR` (P-19). The
   `jjp/1` token never travels in the environment (section 9.2).
-- Execute a snapshot of the entrypoint, not the original path, and say
-  clearly that local imports, `node_modules` and runtimes found on `PATH`
-  are not frozen (P-24).
-- stdout and stderr are drained into bounded files; excess is discarded with a
-  marker. A full pipe never blocks the child or Studio (P-13).
-- Success is exit code 0; anything else, a timeout or Stop fails. Importing or
-  first running external code warns that it runs with the user's privileges,
-  and explains that grants protect Studio's APIs, not the machine (Q-10).
+- **No snapshot is copied** (Q-16). The program runs from its original
+  path; a published version records the path of its entrypoint file and its
+  SHA-256. Before each run the engine hashes the file again: a missing file
+  or a different hash refuses the run, naming the file, until the user
+  publishes a new version. Local imports, `node_modules` and runtimes found
+  on `PATH` are neither copied nor checked, and the interface says so (P-24).
+- stdout and stderr, and the messages of `jjp/1`'s `log`, are drained into
+  **files on disk**, at most **1 MiB per stream per run**; excess is
+  discarded with a marker. They are deleted **7 days** after the run
+  finished, and with the run's row if that goes first. A full pipe never
+  blocks the child or Studio (P-13). Programs may print values, so this is an
+  exception to section 6.4, recorded in
+  [ADR-0036](../adr/0036-program-logs-on-disk.md) (Q-15).
+- **Stop and the deadline** first ask the program to end (`cancel` under
+  `jjp/1`; `SIGTERM` to the group on Unix, `CTRL_BREAK_EVENT` to the group on
+  Windows, without it), then kill the whole tree after **5 s** (Q-17).
+- Success is exit code 0; anything else, a timeout or Stop fails. The first
+  run of each version warns that it runs with the user's privileges, and
+  explains that grants protect Studio's APIs, not the machine (Q-10). There
+  is no import or export of jobs in 0.3.0 (Q-19).
 
 ### 9.2 Phase 4 — Minimal `jjp/1`
 
@@ -702,6 +722,9 @@ honour, not as finished designs.
 | `fail` | job → host | request | Terminal intent with a code and message |
 | `cancel` | host → job | notification | Cooperative cancellation before forced termination |
 
+- A program declared as `jjp/1` must send `hello` within **30 s** of its
+  start; otherwise the run fails with cause `Protocol` and its tree is
+  killed (Q-18).
 - The host always drains the socket. Logs over quota are dropped and counted;
   control and terminal messages are outside the quota. Persistent abuse ends
   the run. Cancellation never waits for the job to read anything.
@@ -924,7 +947,7 @@ alternative transports and execution while the application is closed.
 
 | ID | Phase | Criterion |
 | --- | --- | --- |
-| CA-01 | 1 | A SQL Job on PostgreSQL, MySQL, SQLite and Databricks binds its inputs, respects the dialect, shows rows and records the run without an external process. |
+| CA-01 | 1 | A SQL Job on PostgreSQL, MySQL, SQLite and Databricks binds its inputs, respects the dialect, shows rows and records the run without an external process. For 0.3.0, Databricks is covered by local HTTP tests only and documented as **not validated** against a workspace (Q-23). |
 | CA-02 | 1 | A run never commits, rolls back or changes the context of a transaction open in a tab of the same connection. |
 | CA-05 | 1 | *Rewritten.* The engine does not claim to block writes. A job on a database user without write privileges cannot write, and a production connection asks for confirmation as a tab does. |
 | CA-11 | 1 | After a forced exit, runs left `Running` become `Interrupted`, with `effect_unknown` when they may have written; none is replayed or reported as successful. |
@@ -974,8 +997,19 @@ and the measured budgets.
 | Q-12 | Accept per-run IPC tokens in the environment, visible to same-user processes during the run? | Accept, with `hello` consumption and documented risk | Phase 4 | **Token through stdin**, not the environment (section 9.2) |
 | Q-13 | Keep the SDK out of the repository until `jjp/1` stabilizes? | Yes (D24) | Phase 4 | **Yes** |
 | Q-14 | Durable scheduling consent and execution while the application is closed? | Design with scheduling | Phase 7 | **Only while the application is open**; execution while it is closed is excluded |
+| Q-15 | Where do program logs (stdout, stderr, `jjp/1` `log`) live? | Memory, disk opt-in per job | Phase 3 | **Always on disk**, 1 MiB per stream, deleted after 7 days, with a warning; [ADR-0036](../adr/0036-program-logs-on-disk.md) |
+| Q-16 | What of the program is frozen? | The entrypoint file, by hash | Phase 3 | **Nothing is copied**: it runs from its path; the version keeps its hash and a changed file blocks the run until published again |
+| Q-17 | How does Stop end a program? | Ask, then kill the tree after 5 s | Phase 3 | **As proposed** |
+| Q-18 | How long may a `jjp/1` program take to send `hello`? | 10 s | Phase 4 | **30 s**, then `Protocol` and the tree is killed |
+| Q-19 | Import and export of jobs? | Out of 0.3.0 | Phase 3 | **Out of 0.3.0**; the trusted-code warning is on first run |
+| Q-20 | Where does Automation live in the application? | Sidebar section, tabs in the main area | Phase 2 | **As proposed** |
+| Q-21 | Chain editor? | A form of steps and input sources | Phase 2 | **As proposed** |
+| Q-22 | History views? | Per job and a global list | Phase 2 | **As proposed** |
+| Q-23 | Databricks validation of SQL Jobs? | A test workspace | Phase 1 | **Not validated in 0.3.0**, documented as such |
+| Q-24 | Windows validation (Job Objects, visual checks)? | A checklist the maintainer runs | Phases 3 and 2 | **As proposed**: a checklist the maintainer runs on Windows; results recorded from the report |
 
-Answers given by the maintainer on 2026-11-08, together with the release
+Answers to Q-15…Q-24 given by the maintainer on 2026-11-08, after the
+phase 5 revision. Answers to Q-01…Q-14 given the same day, together with the release
 decision R: automation is the thesis of [0.3.0](releases/0.3.0.md), which
 ships SQL → script.
 
