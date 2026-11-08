@@ -4,6 +4,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod assistant;
+pub mod automation;
 pub mod backend;
 pub mod cell_format;
 pub mod closed_tabs;

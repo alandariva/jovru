@@ -81,7 +81,12 @@ It starts dedicated fixtures, waits for the health checks and runs
 then in `jykre` (`tests/live.rs`, with `JYKRE_TEST_DRIVER` set to `postgres`
 or `mysql`), which exports 250,000 generated rows through the application's
 backend: the rest of an open result to CSV, a statement run again to XLSX,
-and a cancellation that must leave the chosen file as it was:
+and a cancellation that must leave the chosen file as it was. The same file
+runs the SQL Job proof of concept's experiments
+([plan](../plans/automation-sql-job-poc.md)) on tables it creates and drops:
+a write returning more rows than the limit, the same write past its
+deadline, a job beside a tab's open transaction, and exact values in the
+job's result:
 
 | Database | Image | Compose service |
 | --- | --- | --- |

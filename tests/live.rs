@@ -304,3 +304,265 @@ async fn a_cancelled_export_leaves_the_file_as_it_was_and_the_session_answers() 
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Automation SQL Job proof of concept (docs/plans/automation-sql-job-poc.md):
+// experiments E2, E3, E5 and E9 against the gate's databases.
+
+mod automation {
+    use super::{Fixture, fixture, options};
+    use jykre::automation::{Cause, Engine, RunOutcome, RunRequest, RunState, SqlJob};
+    use jykre::drivers::*;
+    use jykre::result::{DEFAULT_MEMORY_CEILING, ResultBuilder, ResultData};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    const DIGITS: &str = "(SELECT 0 AS d UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 \
+         UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 \
+         UNION ALL SELECT 8 UNION ALL SELECT 9)";
+
+    fn mysql(fixture: &Fixture) -> bool {
+        fixture.input.config.driver == DriverKind::MySql
+    }
+
+    fn name(prefix: &str) -> String {
+        format!(
+            "{prefix}_{}",
+            ConnectionId::new().to_string().replace('-', "")
+        )
+    }
+
+    async fn on(session: &mut Box<dyn Session>, sql: &str) -> ResultData {
+        let mut builder = ResultBuilder::new(1_000, DEFAULT_MEMORY_CEILING);
+        session
+            .execute(
+                &QueryRequest::new(sql, options(1_000)),
+                &mut builder,
+                CancellationToken::new(),
+            )
+            .await
+            .map_err(|error| format!("{sql}: {error}"))
+            .unwrap();
+        builder.finish().0
+    }
+
+    /// Runs `statements` in order on a session of their own, as setup.
+    async fn setup(fixture: &Fixture, statements: &[String]) {
+        let mut session = fixture
+            .driver
+            .open_session(&fixture.input, CancellationToken::new())
+            .await
+            .unwrap();
+        for sql in statements {
+            on(&mut session, sql).await;
+        }
+        session.close().await.unwrap();
+    }
+
+    /// A table `t` of 10,000 rows, `v` all zero.
+    fn numbers(fixture: &Fixture, table: &str) -> Vec<String> {
+        let fill = if mysql(fixture) {
+            format!(
+                "INSERT INTO {table} (id, v) SELECT a.d + 10 * b.d + 100 * c.d + 1000 * e.d + 1, 0 \
+                 FROM {DIGITS} a CROSS JOIN {DIGITS} b CROSS JOIN {DIGITS} c CROSS JOIN {DIGITS} e"
+            )
+        } else {
+            format!("INSERT INTO {table} (id, v) SELECT n, 0 FROM generate_series(1, 10000) AS n")
+        };
+        vec![
+            format!("CREATE TABLE {table} (id INTEGER PRIMARY KEY, v INTEGER NOT NULL)"),
+            fill,
+        ]
+    }
+
+    async fn run(engine: &Engine, fixture: &Fixture, job: SqlJob) -> Arc<RunOutcome> {
+        let mut handle = engine
+            .submit(RunRequest {
+                job,
+                driver: fixture.driver.clone(),
+                connection: fixture.input.clone(),
+                values: HashMap::new(),
+            })
+            .unwrap();
+        handle.finished().await.unwrap()
+    }
+
+    async fn scalar(engine: &Engine, fixture: &Fixture, sql: String) -> Option<String> {
+        let outcome = run(engine, fixture, SqlJob::new(ConnectionId::new(), sql)).await;
+        assert_eq!(outcome.state, RunState::Succeeded, "{:?}", outcome.error);
+        outcome.data.value(0, 0).map(str::to_owned)
+    }
+
+    /// The distinct values of `v`, comma-separated.
+    fn distinct_v(fixture: &Fixture, table: &str) -> String {
+        if mysql(fixture) {
+            format!("SELECT GROUP_CONCAT(DISTINCT v) FROM {table}")
+        } else {
+            format!("SELECT string_agg(DISTINCT v::text, ',') FROM {table}")
+        }
+    }
+
+    /// E2: a write that returns more rows than the limit is read to its end
+    /// and succeeds. MySQL has no `RETURNING`: a procedure writes, then
+    /// returns the rows.
+    #[tokio::test]
+    #[ignore = "live: needs JYKRE_TEST_DRIVER and JYKRE_TEST_PORT from cargo xtask check --full"]
+    async fn a_job_write_beyond_the_limit_completes() {
+        let fixture = fixture();
+        let engine = Engine::new(tokio::runtime::Handle::current());
+        let table = name("job_e2");
+        let procedure = name("job_e2_p");
+        let mut statements = numbers(&fixture, &table);
+        let sql = if mysql(&fixture) {
+            statements.push(format!(
+                "CREATE PROCEDURE {procedure}() BEGIN UPDATE {table} SET v = v + 1; \
+                 SELECT id FROM {table} ORDER BY id; END"
+            ));
+            format!("CALL {procedure}()")
+        } else {
+            format!("UPDATE {table} SET v = v + 1 RETURNING id")
+        };
+        setup(&fixture, &statements).await;
+        let outcome = run(&engine, &fixture, SqlJob::new(ConnectionId::new(), sql)).await;
+        assert_eq!(outcome.state, RunState::Succeeded, "{:?}", outcome.error);
+        assert!(!outcome.effect_unknown);
+        assert!(outcome.truncated);
+        assert_eq!(outcome.data.row_count(), 1_000);
+        assert_eq!(outcome.rows_discarded, 9_000);
+        assert!(outcome.completion.is_some());
+        assert_eq!(
+            scalar(&engine, &fixture, distinct_v(&fixture, &table))
+                .await
+                .as_deref(),
+            Some("1"),
+            "every row updated, once"
+        );
+        let mut cleanup = vec![format!("DROP TABLE {table}")];
+        if mysql(&fixture) {
+            cleanup.push(format!("DROP PROCEDURE {procedure}"));
+        }
+        setup(&fixture, &cleanup).await;
+    }
+
+    /// E3: the same kind of write with a deadline shorter than its result
+    /// fails with `Timeout` and its effect unknown, and nothing runs it
+    /// again.
+    #[tokio::test]
+    #[ignore = "live: needs JYKRE_TEST_DRIVER and JYKRE_TEST_PORT from cargo xtask check --full"]
+    async fn a_job_write_past_its_deadline_is_never_run_again() {
+        let fixture = fixture();
+        let engine = Engine::new(tokio::runtime::Handle::current());
+        let table = name("job_e3");
+        let procedure = name("job_e3_p");
+        let mut statements = numbers(&fixture, &table);
+        let sql = if mysql(&fixture) {
+            statements.push(format!(
+                "CREATE PROCEDURE {procedure}() BEGIN UPDATE {table} SET v = v + 1; \
+                 SELECT id, SLEEP(0.001) FROM {table} ORDER BY id; END"
+            ));
+            format!("CALL {procedure}()")
+        } else {
+            format!("UPDATE {table} SET v = v + 1 RETURNING id, pg_sleep(0.001)")
+        };
+        setup(&fixture, &statements).await;
+        let mut job = SqlJob::new(ConnectionId::new(), sql);
+        job.timeout = Duration::from_millis(500);
+        let outcome = run(&engine, &fixture, job).await;
+        assert_eq!(outcome.state, RunState::Failed);
+        assert_eq!(outcome.cause, Some(Cause::Timeout));
+        assert!(outcome.effect_unknown);
+        let values = scalar(&engine, &fixture, distinct_v(&fixture, &table)).await;
+        assert!(matches!(values.as_deref(), Some("0" | "1")), "{values:?}");
+        let mut cleanup = vec![format!("DROP TABLE {table}")];
+        if mysql(&fixture) {
+            cleanup.push(format!("DROP PROCEDURE {procedure}"));
+        }
+        setup(&fixture, &cleanup).await;
+    }
+
+    /// E5: a job on the connection of a tab holding an open transaction
+    /// commits its own write and leaves the tab's transaction as it was.
+    #[tokio::test]
+    #[ignore = "live: needs JYKRE_TEST_DRIVER and JYKRE_TEST_PORT from cargo xtask check --full"]
+    async fn a_job_leaves_a_tab_transaction_alone() {
+        let fixture = fixture();
+        let engine = Engine::new(tokio::runtime::Handle::current());
+        let (a, b) = (name("job_e5_a"), name("job_e5_b"));
+        setup(
+            &fixture,
+            &[
+                format!("CREATE TABLE {a} (id INTEGER)"),
+                format!("CREATE TABLE {b} (id INTEGER)"),
+            ],
+        )
+        .await;
+        let mut tab = fixture
+            .driver
+            .open_session(&fixture.input, CancellationToken::new())
+            .await
+            .unwrap();
+        on(&mut tab, "BEGIN").await;
+        on(&mut tab, &format!("INSERT INTO {a} VALUES (1)")).await;
+        let write = run(
+            &engine,
+            &fixture,
+            SqlJob::new(ConnectionId::new(), format!("INSERT INTO {b} VALUES (1)")),
+        )
+        .await;
+        assert_eq!(write.state, RunState::Succeeded, "{:?}", write.error);
+        assert!(!write.effect_unknown);
+        let count_a = format!("SELECT count(*) FROM {a}");
+        assert_eq!(
+            scalar(&engine, &fixture, count_a.clone()).await.as_deref(),
+            Some("0")
+        );
+        assert!(matches!(
+            tab.transaction(CancellationToken::new()).await.unwrap(),
+            Some(TransactionStatus::Open { .. })
+        ));
+        assert_eq!(on(&mut tab, &count_a).await.value(0, 0), Some("1"));
+        on(&mut tab, "ROLLBACK").await;
+        tab.close().await.unwrap();
+        assert_eq!(
+            scalar(&engine, &fixture, count_a).await.as_deref(),
+            Some("0")
+        );
+        assert_eq!(
+            scalar(&engine, &fixture, format!("SELECT count(*) FROM {b}"))
+                .await
+                .as_deref(),
+            Some("1")
+        );
+        setup(
+            &fixture,
+            &[format!("DROP TABLE {a}"), format!("DROP TABLE {b}")],
+        )
+        .await;
+    }
+
+    /// E9: duplicate column names in order, an exact decimal, NULL and the
+    /// text `NULL`.
+    #[tokio::test]
+    #[ignore = "live: needs JYKRE_TEST_DRIVER and JYKRE_TEST_PORT from cargo xtask check --full"]
+    async fn a_job_result_keeps_names_decimals_and_null() {
+        let fixture = fixture();
+        let engine = Engine::new(tokio::runtime::Handle::current());
+        let sql = "SELECT x.n AS id, y.n AS id, \
+                   CAST('12345678901234567890.123456789012345678' AS DECIMAL(38, 18)) AS d, \
+                   NULL AS nul, 'NULL' AS txt FROM (SELECT 1 AS n) AS x, (SELECT 2 AS n) AS y";
+        let outcome = run(&engine, &fixture, SqlJob::new(ConnectionId::new(), sql)).await;
+        assert_eq!(outcome.state, RunState::Succeeded, "{:?}", outcome.error);
+        let data = &outcome.data;
+        let names: Vec<&str> = data.columns().iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "id", "d", "nul", "txt"]);
+        assert_eq!((data.value(0, 0), data.value(0, 1)), (Some("1"), Some("2")));
+        assert_eq!(
+            data.value(0, 2),
+            Some("12345678901234567890.123456789012345678")
+        );
+        assert!(data.is_null(0, 3));
+        assert_eq!(data.value(0, 4), Some("NULL"));
+        assert!(!data.is_null(0, 4));
+    }
+}

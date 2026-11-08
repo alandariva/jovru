@@ -2,7 +2,7 @@
 
 **Date:** November 7, 2026
 **Approval:** Proposed
-**Implementation:** Not started
+**Implementation:** Partial — code and basic-gate experiments complete; PostgreSQL and MySQL live experiments written, not yet run ([Findings](#8-findings))
 **Specification:** [Automation engine specification](automation-engine-specification.md), version 1.1
 
 ## 1. Purpose
@@ -99,3 +99,122 @@ maintainer.
 The proof of concept ends when every hypothesis is confirmed or refuted with
 evidence. A refuted hypothesis updates the specification before phase 0
 closes; it is not worked around in phase 1.
+
+## 8. Findings
+
+**Date:** November 8, 2026. **Branch:** `claude/automation-sql-job`, cut from
+`release/0.2.0` and not merged into it.
+
+### 8.1 What was built
+
+- `src/automation/` in the `jykre` library: `SqlJob`, `prepare`, the
+  executor and `Engine`, with no new dependency, schema, ADR, change to
+  `jykre-core` or the drivers, and nothing wired into the application.
+- 17 unit tests in `src/automation/tests.rs` (a scripted driver for
+  admission and races, synthetic SQLite files for statements), run by the
+  basic gate.
+- Four live tests in `tests/live.rs` (`automation::*`, E2, E3, E5, E9) for
+  PostgreSQL and MySQL, run by `cargo xtask check --full`.
+- `examples/automation_drain.rs`, the measurement of section 5, on a new
+  SQLite file or on a fixture named by `JYKRE_CONNECTION`.
+
+### 8.2 Checks
+
+| Check | Result |
+| --- | --- |
+| `cargo xtask check` | Passed (Linux) |
+| `cargo xtask check --full` | **Not run**: no Docker on the machine used, and `cargo-deny` is not installed. The four live tests are compiled and ignored |
+| Databricks | Not run, as planned (no profile in the gate) |
+| E7 repeated | The 200-iteration race passed in three further runs |
+
+### 8.3 Results by hypothesis
+
+| Hypothesis | Result | Evidence |
+| --- | --- | --- |
+| H1 | **Confirmed** (SQLite; PostgreSQL dialect checked offline) | `reports::params::requests` binds `ParameterSpec` values; markers in strings, comments, quoted names and dollar quotes and the `::` cast are left alone, and the SQL is sent as written. Two statements, or none, are refused before a session opens (the scripted driver opened none). A hostile value reached SQLite as a value |
+| H2 | **Confirmed on SQLite**; PostgreSQL and MySQL pending `--full` | `UPDATE … RETURNING` over 10,000 rows with a 1,000-row limit: `Succeeded`, `truncated`, 1,000 rows kept, 9,000 read and discarded, every row updated once. The same write past a 300 ms deadline: `Failed`/`Timeout`, `effect_unknown`, rows changed together or not at all. A `SELECT` above the limit: truncated, nothing drained, `effect_unknown` clear. No `DriverOutcome` change was needed |
+| H3 | **Confirmed on SQLite**, with a limitation; PostgreSQL and MySQL pending `--full` | The job's session does not see the tab's uncommitted row, and the tab's transaction is still open with its row afterwards. SQLite has one writer, so a job that writes while a tab holds a write transaction waits for the lock (4 s) and fails with `Database` and its effect known; it never commits or rolls back the tab's work |
+| H4 | **Confirmed** | Third run refused at once with the global limit, second run on a connection refused with the connection; Stop ends a run within a second and closes its session; 200 runs with Stop and the deadline fired together each produced exactly one outcome, the same in the history, with every session closed; dropping every handle leaves the run to finish; `shutdown` stops every run, waits, and refuses new ones |
+| H5 | **Confirmed** on SQLite and through a scripted exact decimal; PostgreSQL and MySQL `DECIMAL(38, 18)` pending `--full` | `ResultData` already keeps ordered columns with duplicate names, rows by position, the database's text and NULL apart from the text `NULL`. Phase 1 needs no new output type |
+
+### 8.4 Measurements (section 5)
+
+SQLite only, release build, `examples/automation_drain.rs`, each row an
+`INTEGER` and 200 bytes of text:
+
+| Rows returned | First page to confirmed end | Rows/s drained | Result held | Process peak |
+| --- | --- | --- | --- | --- |
+| 10,000 | 35 ms | 257,000 | 211 KB | 10.8 MB |
+| 100,000 | 389 ms | 254,000 | 211 KB | 13.7 MB |
+| 1,000,000 | 3,941 ms | 253,000 | 211 KB | 17.9 MB |
+
+The result held stays at the row limit whatever the size: the drain keeps
+nothing. SQLite applies every change of an `UPDATE … RETURNING` in its first
+step and buffers what it returns, so on SQLite the drain only reads. The
+PostgreSQL and MySQL numbers come from running the same example against the
+gate's fixtures, which is still to do.
+
+### 8.5 What phase 1 inherits
+
+- `SqlJob`, `prepare` and the completion rule as written: one statement by
+  the dialect's splitter, `reports::params::requests` for binding,
+  `sql::reads_only` to choose the rule.
+- A write's sink never asks the driver to stop. Returning `Stop` would drop
+  the result early: MySQL then treats it as cut, drains for up to 5 s and may
+  `KILL QUERY`, and PostgreSQL cancels the backend at the next command. Rows
+  past the limits are counted and dropped instead.
+- Every driver call gets the time left before the deadline as its timeout,
+  and the owner also cancels at the deadline, so either side ends the run
+  with `Timeout` and the driver's own recovery runs.
+- One owner task per run; the outcome is recorded before it is published, and
+  a confirmed completion ready in the same instant as Stop or the deadline
+  wins. Progress and the outcome travel through one `watch` channel per run:
+  bounded, the latest value replaces earlier progress, and the outcome, as
+  the last value, is never lost (section 5.6).
+- `ResultData` as the in-memory output.
+
+### 8.6 What phase 1 must change or decide
+
+- **A backend function of its own.** `backend::query_in_context` cannot run a
+  job: it settles the session after the run, which discards a write's
+  result still open for paging. The executor calls `session_connection`,
+  `open_session`, `execute`, `fetch` and `backend::close_session` directly;
+  phase 1 moves that into `backend` (spec section 5.1 already allows a new
+  function) with its telemetry spans.
+- **The runtime handle.** `Engine` needs a handle to the application's only
+  runtime, which `backend` keeps private; phase 1 exposes it or builds the
+  engine inside `backend`.
+- **`rows_affected` is `None` for a statement that returns rows**, as the
+  drivers report it. The history's count for `UPDATE … RETURNING` is the rows
+  read (kept and discarded); the persisted fields of section 6.4 should say
+  so.
+- **Refusals are not runs.** A job that fails `prepare` is refused before
+  admission and leaves no history, like a tab that stops before sending.
+  `Failed`/`Validation` remains for what a driver refuses after admission.
+  Section 5.4 should state this.
+- **Effect after Stop.** Once Stop or the deadline is observed, a sent write
+  is marked `effect_unknown` even if the driver then confirms completion
+  while recovering. This is conservative and follows the arbitration rule;
+  phase 1 may report the late confirmation without changing the state.
+- **SQLite writers.** Section 4.4's "new session per run" means a write job
+  on a SQLite file that a tab is writing waits up to 4 s and fails. Document
+  it beside the per-connection limit (section 5.3).
+- `Interrupted` is not implemented: it needs durable history and recovery.
+
+### 8.7 Recommendations
+
+- **Q-07:** confirm 2 global runs, 1 per connection, immediate refusal and a
+  300 s timeout. The limits behaved as specified; a run costs one connection,
+  opened and closed with it.
+- **Q-08:** keep the conservative rule in phase 1, with no change to
+  `DriverOutcome`. On SQLite the drain confirmed a million returned rows in
+  under 4 s. Revisit only if the PostgreSQL or MySQL measurements show a
+  realistic result that cannot be confirmed within the 5 s recovery window.
+
+### 8.8 Left to finish the proof of concept
+
+1. Run `cargo xtask check --full` on a machine with Docker and `cargo-deny`,
+   and record the four live tests' results.
+2. Run `examples/automation_drain.rs` against PostgreSQL 14/18 and MySQL
+   8.4/9.7 and add the numbers to 8.4. On MySQL, E2 and E3 also show whether
+   a `CALL` that writes and then returns rows reaches the sink as expected.
