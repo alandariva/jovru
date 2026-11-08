@@ -2,8 +2,12 @@
 
 **Subject:** [Automation engine specification](../plans/automation-engine-specification.md), version 1.0
 **Date:** November 7, 2026
-**Status:** Proposed changes; maintainer approval is required before implementation
+**Status:** Proposed changes, incorporated into [version 1.1](../plans/automation-engine-specification.md) of the specification; the maintainer decisions in section 5 are still open
 **Codebase baseline:** `release/0.2.0`, commit `fa97819`
+
+> This review is dated evidence. Section references (`§`) point to version
+> 1.0 of the specification, which remains in the Git history; Appendix B of
+> version 1.1 maps them to where each change landed.
 
 ## 1. Overall assessment
 

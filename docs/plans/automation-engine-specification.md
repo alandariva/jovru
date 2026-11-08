@@ -1,1530 +1,801 @@
-# Jykre Studio — Automation Engine, Jobs and Workflows
+# Jykre Studio — Automation engine specification
 
-**Functional and technical specification · version 1.0 (proposal)**
+**Version:** 1.1, consolidated proposal
 **Date:** November 7, 2026
 **Approval:** Proposed
-**Implementation:** Not started; proposed architecture, not implemented features
+**Implementation:** Not started
 **Audience:** product, UX, architecture, Rust engineering and testing
+**Codebase baseline:** `release/0.2.0`
 
-> This is the original v1.0 proposal. The [architecture review](../research/automation-engine-architecture-review.md) recommends substantial changes that still require maintainer approval. Translation and organization do not resolve those decisions.
+Version 1.1 consolidates the original 1.0 proposal with the
+[architecture review](../research/automation-engine-architecture-review.md)
+of the same date. It keeps the direction of 1.0, applies the review's
+proposed changes and narrows the first delivery to a **manual SQL Job**. The
+1.0 text remains in the Git history; [Appendix B](#appendix-b--traceability-from-version-10)
+maps each of its sections to what happened to it here. Finding IDs (`P-xx`),
+design IDs (`Dxx`) and question IDs (`Q-xx`) refer to the review.
 
-> **Core principle:** a job is a reusable unit of work receiving typed inputs, performing a task and producing events, outputs and optional artifacts. Jobs can be native (SQL or declarative flow) or external (any executable), sharing one execution and observability model.
+> **This document authorizes nothing.** Every recommendation the review made
+> is written here as the proposal, but the decisions in
+> [section 12](#12-decisions-required-from-the-maintainer) are still open.
+> Text marked *pending Q-xx* depends on that decision, and implementation of
+> a phase starts only after the questions blocking it are answered. A
+> [proof of concept](automation-sql-job-poc.md) may run before them because
+> it needs no approval.
 
 ## Contents
 
-1. [Overview and decisions](#1-overview-and-decisions)
-2. [Scope, requirements and principles](#2-scope-requirements-and-principles)
+1. [Overview](#1-overview)
+2. [Scope by phase](#2-scope-by-phase)
 3. [Conceptual model](#3-conceptual-model)
-4. [User experience](#4-user-experience)
-5. [Job definitions and versioning](#5-job-definitions-and-versioning)
-6. [Native SQL jobs](#6-native-sql-jobs)
-7. [External jobs and runtimes](#7-external-jobs-and-runtimes)
-8. [JJP — Jykre Job Protocol](#8-jjp--jykre-job-protocol)
-9. [Capabilities available to jobs](#9-capabilities-available-to-jobs)
-10. [Inputs, outputs and human interaction](#10-inputs-outputs-and-human-interaction)
-11. [Workflows and job chaining](#11-workflows-and-job-chaining)
-12. [Caching, credentials and reuse](#12-caching-credentials-and-reuse)
-13. [Artifacts and files](#13-artifacts-and-files)
-14. [Persistence and directory layout](#14-persistence-and-directory-layout)
-15. [Execution states and rules](#15-execution-states-and-rules)
-16. [Security and trust boundaries](#16-security-and-trust-boundaries)
-17. [Rust implementation architecture](#17-rust-implementation-architecture)
-18. [APIs and end-to-end examples](#18-apis-and-end-to-end-examples)
-19. [Operation, retention and recovery](#19-operation-retention-and-recovery)
-20. [Roadmap, acceptance and testing](#20-roadmap-acceptance-and-testing)
-21. [Open decisions](#21-open-decisions)
-22. [Glossary](#22-glossary)
+4. [SQL Job](#4-sql-job)
+5. [Automation engine](#5-automation-engine)
+6. [Persistence and recovery](#6-persistence-and-recovery)
+7. [Security](#7-security)
+8. [User experience and performance](#8-user-experience-and-performance)
+9. [Later phases](#9-later-phases)
+10. [Acceptance criteria](#10-acceptance-criteria)
+11. [Test matrix](#11-test-matrix)
+12. [Decisions required from the maintainer](#12-decisions-required-from-the-maintainer)
+13. [Glossary](#13-glossary)
+- [Appendix A — Future scenarios (non-normative)](#appendix-a--future-scenarios-non-normative)
+- [Appendix B — Traceability from version 1.0](#appendix-b--traceability-from-version-10)
 
-## 1. Overview and decisions
+## 1. Overview
 
 ### 1.1 Goal
 
-Add local automation to Jykre Studio to execute, schedule, combine and observe tasks. Users can create jobs without code, reuse SQL against existing connections and execute external-language scripts, with standardized inputs, results and history.
+Let users save a unit of database work, run it again with typed inputs and
+see what each run did, without keeping a tab open for it. Later phases extend
+the same engine to external programs and to chains of jobs.
 
-### 1.2 Consolidated decisions
+A **job** is a reusable definition with typed inputs. A **run** is one
+execution of a job, with a state, a cause when it does not succeed, and
+operational counters. The first job kind is SQL; external processes and
+chains come later, through the same engine, states and history.
 
-| Topic | Architectural decision |
-| --- | --- |
-| Host application | Jykre Studio, Rust with GPUI |
-| Async engine | Tokio, reusing existing services and drivers |
-| Job classes | `native_sql`, `native_flow`, `external_process` |
-| SQL job | Runs directly against a registered connection without a helper process |
-| External languages | Any installed runtime/executable |
-| External job communication | TCP loopback (`127.0.0.1`), JSON-RPC 2.0 |
-| MVP framing | One UTF-8 JSON message per line, NDJSON |
-| Output separation | Unrestricted stdout/stderr; JJP uses a separate socket |
-| IPC authentication | A short random token unique to each run |
-| MVP TLS | Not required for strictly local use; transport prepared for future TLS |
-| Input/output schemas | A JSON Schema subset defined by the Jykre version |
-| Metadata, history, states | SQLite |
-| Code, stdout/stderr, artifacts | Filesystem |
-| Persistent credentials | OS vault, with an explicit secure fallback where applicable |
-| Ephemeral tokens | Protected temporary storage, preferably memory |
-| Orchestration | DAG workflows, directed acyclic graphs |
-| Scheduled execution with Jykre closed | Outside MVP; requires an independent agent |
+### 1.2 Principles kept from version 1.0
 
-### 1.3 Overall architecture
+- **SQL runs natively.** A SQL Job runs through the existing drivers, without
+  a helper process, TCP connection or protocol.
+- **Jobs never use a tab's session.** A run opens its own session; an open
+  transaction in a tab is never committed, rolled back or changed by a job.
+- **The protocol is for external programs only**, and their stdout/stderr
+  stay outside it.
+- **Integration permissions are not a sandbox.** A permission restricts what
+  a job may ask Jykre Studio to do; it never restricts what an operating
+  system process can do on its own.
+- **Bind, never concatenate.** Input values reach the database as bound
+  parameters.
+
+### 1.3 Non-goals
+
+- A remote service, a multi-user server or execution while the application is
+  closed.
+- Sandboxing scripts.
+- A new language: no `${}` expressions and no declarative flow executor
+  (`native_flow` from 1.0 is removed, P-03).
+- Durable storage of query results, input values or server messages
+  (section 6.4).
+- A second connection stack, SQL editor, vault or tab system.
+- Promises the code cannot enforce: the engine has no read-only mode
+  (section 4.5).
+
+### 1.4 Release placement
+
+Automation does **not** belong in 0.2.0, whose thesis is daily-use hardening
+without new capabilities (D02, [release plan](releases/0.2.0.md)). Work on
+this specification, including the proof of concept, lands after 0.2.0.
+
+### 1.5 Architecture
 
 ```mermaid
 flowchart TB
-  UI[GPUI: Jobs / Workflows / Runs] --> ENGINE[Automation Engine: Tokio]
-  ENGINE --> STORE[(SQLite: catalog, runs, events)]
-  ENGINE --> ART[(Filesystem: versions and artifacts)]
-  ENGINE --> VAULT[Vault and secret cache]
-  ENGINE --> SQL[Native SQL Executor]
-  ENGINE --> FLOW[Native Flow Executor]
-  ENGINE --> PROC[External Process Executor]
-  SQL --> DBS[Existing Jykre connections and drivers]
-  FLOW --> DBS
-  PROC --> JOB[Job: Node / Python / any executable]
-  PROC <-->|TCP 127.0.0.1 + JSON-RPC 2.0| JOB
-  PROC --> LOGS[stdout / stderr captured separately]
-  ENGINE --> DAG[Workflow Orchestrator: DAG]
-  DAG --> SQL
-  DAG --> FLOW
-  DAG --> PROC
+  VIEWS["src/app/automation: list, editor, runs (GPUI)"] -->|intent / subscribe| ENGINE
+  subgraph ENGINE["src/automation: engine service (application root)"]
+    ADMIT[Admission and limits] --> OWNER[Run owner: state, deadline, cancellation]
+    OWNER --> SQLX[SQL executor]
+  end
+  SQLX -->|backend::run, own session| DRIVERS[Existing drivers]
+  OWNER --> REPO["jykre-storage: AutomationRepository"]
+  REPO --> DB[("automation.db")]
+  ENGINE -.later phases.-> PROC[External process executor]
+  PROC -.-> JOB[Node / Python / any executable]
 ```
 
-Native jobs run internally without opening TCP connections to themselves. Only external jobs use JJP for events and capability calls.
+Views present runs and capture intent; the engine decides (golden rule 1).
+Section 5.1 places each part in the existing crates.
 
-### 1.4 MVP non-goals
+## 2. Scope by phase
 
-- Hosting a remote service or multi-user server.
-- Strong sandboxing of arbitrary scripts; JJP permissions do not isolate an OS process.
-- Creating a new programming language.
-- Guaranteed execution while the app is closed.
-- A token database exposed as a plaintext credential catalog.
-- Replacing the existing SQL editor or connection manager.
+Each phase is accepted on its own: criteria from later phases can never block
+an earlier one (D03).
 
-## 2. Scope, requirements and principles
+| Phase | Priority | Delivery | Blocked by |
+| --- | --- | --- | --- |
+| PoC | Optional | Headless SQL executor and engine without persistence or UI, to measure the open risks ([plan](automation-sql-job-poc.md)) | Nothing |
+| 0 — Decisions | P0 | Answers to Q-01…Q-07, the automation ADR (persistence, service, lock), the phase 1 DDL | — |
+| 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Q-01, Q-02, Q-04…Q-07 |
+| 2 — Minimal UI | P0 | Section 8; usable SQL Job | Phase 1 |
+| 3 — External process without protocol | P1 | Section 9.1 | Q-10, Q-11 |
+| 4 — Minimal protocol `jjp/1` | P1 | Section 9.2 | Q-12, Q-13, phase 3 |
+| 5 — Linear chain | P1 | Section 9.3 | Q-03, Q-09 |
+| 6 — On-demand capabilities | P2 | Section 9.4 | One ADR per capability |
+| 7 — Evolution | P3 | Section 9.5 | Q-14 and per-capability decisions |
 
 ### 2.1 Functional requirements
 
-| ID | Requirement | Priority |
+| ID | Requirement | Phase |
 | --- | --- | --- |
-| RF-001 | Create, edit, duplicate, disable, delete and version jobs | MVP |
-| RF-002 | Run jobs manually with an input form | MVP |
-| RF-003 | Native SQL jobs linked to existing connections | MVP |
-| RF-004 | External scripts and configurable runtimes | MVP |
-| RF-005 | Record logs, progress, state, results and failures | MVP |
-| RF-006 | External jobs call JJP APIs through RPC | MVP |
-| RF-007 | Request user input with a timeout | MVP |
-| RF-008 | Produce and register artifacts | MVP |
-| RF-009 | Chain jobs and map outputs to inputs | MVP |
-| RF-010 | Run workflows manually | MVP |
-| RF-011 | Schedule jobs/workflows by interval or cron | Evolution 1 |
-| RF-012 | Result caching with TTL and concurrent deduplication | Evolution 1 |
-| RF-013 | Reuse ephemeral tokens by secure reference | Evolution 1 |
-| RF-014 | Parallel/conditional jobs and failure recovery | Evolution 1 |
-| RF-015 | Jobs in command palette/result context | Evolution 2 |
-| RF-016 | Advanced visual workflow editor | Evolution 2 |
-| RF-017 | Agent running jobs while Jykre is closed | Evolution 2 |
-| RF-018 | Remote plugins/runtimes with TLS | Future |
+| RF-001 | Create, edit, duplicate and delete SQL Jobs | 1–2 |
+| RF-002 | Run a job manually with an input form, and stop it | 1–2 |
+| RF-003 | SQL Jobs bound to an existing connection and a pinned context | 1 |
+| RF-005 | Record each run's state, cause, timing and operational counters | 1 |
+| RF-004 | External programs, started without a shell | 3 |
+| RF-006 | External programs report logs, progress and their outcome through `jjp/1` | 4 |
+| RF-009 | Chain jobs linearly, mapping outputs to inputs | 5 |
+| RF-010 | Run a chain manually after confirming the whole plan | 5 |
+| RF-008 | Produce and register artifacts | 6 |
+| RF-007 | Ask the user for input, with a timeout | 6 |
+| RF-011 | Schedules (interval or cron) | 7 |
+| RF-012 | Result cache with TTL and concurrent deduplication | 7 |
+| RF-013 | Reuse ephemeral tokens through destination-bound references | 7 |
+| RF-015 | Jobs in the command palette and result context | 7 |
+| RF-017 | Execution while the application is closed | 7 |
 
-**Interpretation:** MVP is the desired minimum contract for a first usable version. Incremental deliveries may divide the roadmap without changing the data model.
+RF-014 (parallel and conditional steps, failure recovery), RF-016 (visual
+workflow editor) and RF-018 (remote plugins with TLS) are excluded until a
+decision brings them back (section 9.6). Version 1.0's "disable" and
+"version" in RF-001 are replaced by per-run snapshots (section 6.3).
 
 ### 2.2 Non-functional requirements
 
-- **RNF-001 — failure isolation:** external process errors cannot bring down the main application.
-- **RNF-002 — responsiveness:** execution must not block GPUI's rendering thread.
-- **RNF-003 — language independence:** no SDK requirement; any TCP/JSON client can implement JJP.
-- **RNF-004 — traceability:** every run references its definition/version, initiating user, sanitized inputs, time and final state.
-- **RNF-005 — predictability:** configurable timeouts, memory/message limits, concurrency and results, with defaults.
-- **RNF-006 — security:** validate capabilities server-side, rather than trusting job declarations.
-- **RNF-007 — integrity:** artifact copying, state commits and cleanup must reasonably withstand failures.
-- **RNF-008 — portability:** core support for Windows, Linux and macOS; runtimes must be installed.
-- **RNF-009 — extensibility:** versioned JJP methods tolerate optional features.
+- **RNF-001 — failure isolation:** a failing job or external process never
+  brings down the application.
+- **RNF-002 — responsiveness:** nothing in the engine runs on the UI thread;
+  existing [performance budgets](../standards/performance.md) apply from the
+  first UI phase.
+- **RNF-003 — no false success:** a run succeeds only after its statement or
+  process is confirmed complete. Uncertainty is recorded (`effect_unknown`),
+  never resolved by replaying.
+- **RNF-004 — traceability without values:** each run records what ran, where,
+  when and how it ended, never what it returned or which values it received.
+- **RNF-005 — bounded resources:** every queue, channel, buffer, pipe and log
+  has a limit and a defined behaviour when full (P-13).
+- **RNF-006 — server-side checks:** the engine checks what a job may do; it
+  never trusts a job's declaration.
+- **RNF-007 — portability:** Windows, Linux and macOS, each validated on its
+  own; Linux or macOS behaviour is never inferred from Windows.
+- **RNF-008 — language independence (phase 4):** an external program needs no
+  SDK; any client that speaks `jjp/1` works.
 
 ## 3. Conceptual model
 
-### 3.1 Entities
+### 3.1 Phase 1 entities
 
 | Entity | Meaning |
 | --- | --- |
-| `JobDefinition` | Identity, type, description, inputs/outputs, permissions, defaults and settings |
-| `JobVersion` | Immutable code/manifest/SQL/flow snapshot with hash |
-| `JobRun` | One execution: inputs, logs, outputs, state, timestamps |
-| `WorkflowDefinition` | Steps, dependencies and mappings |
-| `WorkflowVersion` | Immutable DAG and step-contract snapshot |
-| `WorkflowRun` | One complete workflow execution |
-| `WorkflowStepRun` | Step instance linked to a `JobRun` |
-| `Artifact` | Managed run-linked file identified by ID |
-| `JobCacheEntry` | Reusable result by key, version, scope and TTL |
-| `SecretRef` | Opaque, authorized, temporary secret reference |
-| `InteractionRequest` | User question with deadline and outcome |
-| `RuntimeDefinition` | External executable startup and JJP establishment |
-| `ScheduleDefinition` | Recurring trigger, overlap policy and execution window |
+| `JobDefinition` | Identity, name, kind and the kind's definition, stored as canonical JSON (section 6.2). Phase 1 has one kind, `sql`. |
+| `RunSnapshot` | What a run executes, frozen at admission: exact SQL, parameter specifications without values, context, effective options, fingerprint, connection and its revision (section 6.3). |
+| `Run` | One execution: origin, state, cause, `effect_unknown`, timing and operational counters. |
 
-### 3.2 Relationships
+There are no published versions in phase 1: editing a job changes its
+definition, and each run keeps its own snapshot (P-21). A run of unsaved
+editor content is a **draft run** and is labelled as one in the history.
 
-```text
-JobDefinition 1 ── N JobVersion
-JobVersion    1 ── N JobRun
-JobRun        1 ── N Event
-JobRun        1 ── N Artifact
-WorkflowDefinition 1 ── N WorkflowVersion
-WorkflowVersion    1 ── N WorkflowRun
-WorkflowRun  1 ── N WorkflowStepRun ── 1 JobRun
-JobVersion   1 ── N JobCacheEntry (by key and scope)
-JobRun       1 ── N InteractionRequest
-```
+### 3.2 Entities of later phases
 
-Pin every job's version when the workflow runs, even if jobs are edited later.
+| Entity | Phase | Notes |
+| --- | --- | --- |
+| `ExternalProcess` definition | 3 | Executable, argument vector, working directory, environment passthrough |
+| Published version | 5 | Needed once a chain pins the jobs it runs |
+| `Chain` and its step runs | 5 | Linear plan; each step is a `Run` linked to its chain run |
+| `Artifact` | 6 | Needs its own ADR (P-17) |
+| `InteractionRequest` | 6 | `ask` and `confirm`, with deadlines |
+| `Schedule`, `Grant` | 7 | Durable, revocable consent (section 7.2) |
+| Cache entry, secret reference | 7 | Separate stores (section 9.5) |
 
-## 4. User experience
+`RuntimeDefinition` and the 1.0 workflow DAG are dropped: a runtime is an
+executable and its arguments (section 9.1), and chains are linear
+(section 9.3).
 
-### 4.1 Suggested navigation
+## 4. SQL Job
 
-**Automation** sidebar with **Jobs**, **Workflows**, **Runs**, **Schedules** and **Settings**.
+This section is normative for phases 1 and 2. A SQL Job reuses the contracts
+of reports and tabs; wherever it does not say otherwise, behaviour matches a
+SQL tab.
 
-**Job list:** name, type (SQL/Flow/Script), connection/runtime, enabled state, last run, next scheduled run and quick actions. Search name, description, language, tags, connection and status.
+### 4.1 Definition
 
-**Create job:** choose:
+| Field | Meaning |
+| --- | --- |
+| `schema_version` | Major and minor version of the definition format. An unsupported major is refused; unknown keys are preserved, as reports do. |
+| `id` | Stable identifier generated by Jykre Studio |
+| `name`, `description` | Shown in the list and history |
+| `connection` | The `ConnectionId` of an existing profile, never its name |
+| `context` | The `SessionContext` (database, catalog, schema) the run's session uses, pinned in the definition (P-04) |
+| `sql` | One statement, with `:name` markers |
+| `parameters` | A list of `ParameterSpec` (section 4.2) |
+| `timeout` | Default 300 s, from `ExecutionOptions::default` (P-29) |
+| `max_rows` | Default 1,000 rows, from `ExecutionOptions::default` |
 
-1. **Native SQL:** select an existing connection and open the SQL editor.
-2. **Native Flow:** assemble integrated HTTP, SQL, condition, question, notification and other actions.
-3. **External script:** select a runtime, command, working directory and entrypoint.
-
-**Job detail:** `Editor`, `Inputs/Outputs`, `Permissions`, `Runs`, `Schedule`, `Versions`, `Settings`.
-
-**Run:** a JSON Schema-generated form shows the database connection, sensitive permissions and **Run**. Results present logs, progress, outputs, artifacts and terminal state.
-
-**User question:** a non-modal panel with timeout and explicit answer/decline actions, leaving other navigation available.
-
-### 4.2 SQL Job in the interface
-
-Minimum fields:
-
-- **Name** and description.
-- **Connection:** existing connections with availability indicators.
-- **SQL:** the existing full editor, with dialect, highlighting, autocomplete, formatting and shortcuts.
-- **Inputs:** name, type, required flag, default, description, presentation.
-- **Outputs:** result-derived or explicitly declared schema.
-- **Execution:** session mode, timeout, row limit, multi-statement policy.
-- **Permissions:** read/write and sensitive-operation confirmation.
-
-**Preview parameters** fills inputs and tests the job. Saved versions remain distinct from tests of unsaved content.
-
-### 4.3 Runs and history
-
-Each row shows `run_id`, job/version, initiator, origin (`manual`, `schedule`, `workflow`, `job`), start/end, duration, state, result summary, artifact count and rerun. Mask sensitive inputs/answers. Filter by time range, state, connection and workflow.
-
-## 5. Job definitions and versioning
-
-### 5.1 Common contract
-
-Every definition has `id`, `name`, `kind`, `version`, `inputs_schema`, `outputs_schema`, `permissions`, `execution`, `tags`, `enabled`. Validate parameters before startup and outputs before completion.
-
-Simplified conceptual manifest:
+Illustrative canonical JSON:
 
 ```json
 {
   "schema_version": "1.0",
-  "id": "sfmc.lookup-de",
-  "name": "Look up Data Extension",
-  "kind": "native_sql",
-  "version": 1,
-  "inputs_schema": {
-    "type": "object",
-    "properties": {
-      "external_key": {
-        "type": "string",
-        "title": "External Key",
-        "minLength": 1
-      }
-    },
-    "required": ["external_key"],
-    "additionalProperties": false
-  },
-  "outputs_schema": {
-    "type": "object",
-    "properties": {
-      "address": { "type": ["string", "null"] }
-    }
-  },
-  "execution": {
-    "timeout_ms": 30000,
-    "max_concurrency": 1
-  }
-}
-```
-
-Store SQL, connection and execution parameters in the `native_sql` definition. Later connection/query values are illustrative.
-
-### 5.2 Versioning rules
-
-- Saving creates an immutable `JobVersion` or a draft until publication, depending on UX.
-- Each run uses exactly one version; record its SHA-256 hash and connection reference.
-- Never include secrets in versions.
-- Workflows reference their pinned version, not a subsequently latest version.
-- Snapshot/hash external code before execution to prevent changes during a job.
-- Deletion allows archiving/disabling while preserving history subject to retention.
-
-### 5.3 Portability
-
-Import/export definitions and sources as a directory or package. Remap connection IDs and credential references at the destination; never export secret values in a package.
-
-## 6. Native SQL jobs
-
-A **first-class** job type, rather than merely an optional workflow step. Its internal Rust executor **uses no TCP/JJP or external process**.
-
-### 6.1 SQL Job definition
-
-A SQL Job contains:
-
-- `connection_ref`: stable existing-connection ID; avoid name-only identity.
-- `sql`: SQL text editable in the native editor.
-- `parameters`: typed query inputs, without string interpolation.
-- `result_mode`: `rows`, `scalar`, `affected_rows`, `none`.
-- `session_mode`: default `isolated`; possibly `shared_session` as an explicit restricted operation.
-- `timeout_ms`, `max_rows`, `max_result_bytes`.
-- `multi_statement`: default `false`.
-- `transaction_mode`: `none`, `auto` or an explicitly approved policy.
-
-Example:
-
-```yaml
-id: data.hlg.lookup-de
-kind: native_sql
-connection_ref: conn-databricks-hlg
-session_mode: isolated
-sql_file: query.sql
-result_mode: rows
-multi_statement: false
-limits:
-  timeout_ms: 30000
-  max_rows: 1000
-  max_result_bytes: 2097152
-inputs:
-  external_key: { type: string, required: true }
-```
-
-`query.sql`:
-
-```sql
-SELECT external_key, address
-FROM integration.data_extensions
-WHERE external_key = :external_key
-LIMIT 1;
-```
-
-**Note:** table/fields are examples. Resolve dialect and placeholders through the actual connection driver.
-
-### 6.2 Safe parameter binding
-
-- Use driver **bind parameters**, never `.replace()` or value-concatenated SQL.
-- An internal layer may normalize conceptual `:name` markers, respecting dialect-specific literals, comments, identifiers, operators, PostgreSQL `::` and dollar quotes.
-- Most drivers **cannot bind** table/column names. Use catalog/allowlist selection and separate identifier validation.
-- Arrays/lists require dialect-aware parameterized expansion or a native driver strategy, never unsafe concatenation.
-- JSON Schema validation supplements driver type validation.
-
-### 6.3 Structured result
-
-`result_mode: rows` produces a stable envelope:
-
-```json
-{
-  "columns": [
-    { "name": "external_key", "type": "string" },
-    { "name": "address", "type": "string" }
+  "id": "4f7c1e0a-…",
+  "name": "Data Extension address",
+  "kind": "sql",
+  "connection": "b2d3…",
+  "context": { "catalog": "integration", "schema": "catalog" },
+  "sql": "SELECT external_key, address FROM data_extensions WHERE external_key = :external_key",
+  "parameters": [
+    { "name": "external_key", "label": "External key", "kind": "text", "required": true }
   ],
-  "rows": [
-    { "external_key": "DE_MEMBERS", "address": "..." }
-  ],
-  "row_count": 1,
-  "truncated": false,
-  "execution_ms": 48
+  "timeout_ms": 300000,
+  "max_rows": 1000
 }
 ```
 
-`scalar` maps one value to an output such as `outputs.address`. `row_count` counts returned rows, not total query cardinality. Truncation sets `truncated: true` and offers full-result artifact export when the driver streams.
+Version 1.0's `result_mode`, `session_mode`, `transaction_mode`,
+`multi_statement` and `max_result_bytes` are gone: the behaviour they selected
+is fixed in sections 4.3–4.7, and the memory ceiling is the one results
+already use.
 
-Document special-type serialization (`DECIMAL`, `TIMESTAMP`, `BINARY`, `JSON`, `ARRAY`, `STRUCT`, `VARIANT`, etc.) to prevent silent precision loss. Prefer artifacts/references for binaries and large results.
+### 4.2 Parameters and binding
 
-### 6.4 Sessions and transactions
+- Inputs are `ParameterSpec` values with a `ParameterKind`, as in reports
+  (ADR-0023, ADR-0024). The run form is the reports' parameter form. There is
+  no JSON Schema in the SQL Job (P-20).
+- Markers are found and bound by `parameters::bind`, which already respects
+  dialect literals, comments, quoted identifiers, PostgreSQL `::` and dollar
+  quotes. Values reach the driver as bind parameters, including the classic
+  Databricks exceptions of ADR-0026.
+- Identifiers (table and column names) cannot be bound; a job that needs a
+  variable identifier is out of scope.
 
-- **Default `isolated`:** obtain a connection separate from the interactive editor session, using existing credentials/settings; never interfere with open user transactions.
-- **`shared_session`:** future opt-in only with serialized access, accurate transaction state and informed approval. Scheduled jobs cannot silently use editor sessions.
-- Query success does not prove commit. Commit/rollback policy must be explicit and consistent with driver state.
-- Enforce `db.write` and appropriate confirmation/policy for writes. Textual SQL classification warns; **it is not a security boundary**. Prefer genuinely read-only database users for restricted reads.
-- For long queries, timeout/cancellation attempts driver interruption and handles connection state before returning it to the pool.
+### 4.3 One statement
 
-### 6.5 Multiple statements and large results
+The dialect splitter must find exactly one statement. Anything else fails with
+a validation error before a session opens. Multi-statement jobs need their own
+error, transaction and result policy and are not planned.
 
-- MVP: **one logical statement per SQL Job**, using the existing dialect splitter and rejecting multiples when `multi_statement=false`.
-- Later multi-statement scripts require explicit error, transaction and multiple-result policies.
-- Limit serialized rows/bytes; large extracts produce CSV/JSON/Parquet artifacts where supported, rather than giant SQLite JSON.
-- Stream instead of loading whole result sets when supported.
+### 4.4 Session
 
-### 6.6 Workflow uses
+- Each run opens a **new session** through `Driver::session_connection`, the
+  same path as `backend::query_in_context`, in the definition's pinned
+  context. It never borrows a tab or report session and is closed when the
+  run ends (D08).
+- The statement runs in **autocommit**. There is no pool, shared session or
+  managed transaction mode. A statement that leaves a transaction open (for
+  example `BEGIN` alone) is rolled back when the session closes, as in
+  `SessionRun::transaction_closed`.
+- Because the session is new, settings made by one run (TD-002
+  `set_config` values, `USE`) never reach the next.
+- Each run costs a real connection; the admission limits in section 5.3 keep
+  that number small (P-22).
 
-`external_key` can come from a form or another job; outputs can feed Python, HTTP, a flow condition or another SQL Job.
+### 4.5 Confirmation, credentials and permissions
 
-## 7. External jobs and runtimes
+- A manual run asks for the same production confirmation a tab asks
+  (`guard::risk`) and the same password when the profile does not remember
+  it. The engine never opens a dialog itself: the view resolves both before
+  submitting the run (P-15).
+- The engine has **no read-only mode**. `reads_only` and `guard::risk`
+  classify text; they are warnings, not a security boundary, and SQL can
+  change session settings such as `default_transaction_read_only`. To protect
+  data, use a database user without write privileges (P-02, rewritten
+  CA-05).
 
-### 7.1 Concept
+### 4.6 Completion rule
 
-`external_process` starts user-defined Node.js, Python, PowerShell, Bash, compiled Rust, third-party CLIs or other executables. Jykre starts/monitors them, supplies inputs and interprets outputs without implementing their language.
+A delivered page does not prove that the statement finished (P-05). The
+executor applies one rule (D11):
 
-### 7.2 Runtime registration
+1. **The statement only reads** (`reads_only` accepts it): when the row limit
+   or the memory ceiling is reached, the result is truncated, the session is
+   asked to close it and the run is marked `truncated`. Side effects of
+   functions inside a `SELECT` behave as in a tab.
+2. **Any other statement:** after the first page, the executor keeps reading
+   with `Session::fetch` into a sink that discards and counts rows, without
+   stopping the collector early, until the driver reports the end of the
+   result or the deadline arrives.
+3. If completion cannot be confirmed (deadline, cancellation, lost
+   connection), the run ends with `effect_unknown` and is **never replayed**.
 
-A runtime can declare:
+| Driver | Current behaviour | Executor responsibility |
+| --- | --- | --- |
+| PostgreSQL | A full page keeps the stream open; the next command recovers with `pg_cancel_backend` | Fetch until the stream ends |
+| MySQL | At the limit, drains for up to 5 s, then may `KILL QUERY` | Consume the result and observe late errors before success |
+| SQLite | At the limit, waits for idle and interrupts only at the deadline, rolling back writes | Consume until completion |
+| Databricks | Warehouse and classic return rows only after a terminal state; `has_more` is a local remainder | Discarding the remainder cannot change the commit; `effect_unknown` only without terminal confirmation |
 
-```json
-{
-  "id": "nodejs",
-  "display_name": "Node.js",
-  "executable": "node",
-  "argument_template": ["${entrypoint}"],
-  "supported_extensions": [".js", ".mjs", ".cjs"],
-  "supports_jjp": true
-}
-```
+Whether drivers should report confirmed remote completion as typed metadata
+in `DriverOutcome` is Q-08. Until it is answered, the executor treats
+uncertainty conservatively. The proof of concept measures whether the drain
+in step 2 is enough.
 
-Resolve *argument_template* variables structurally **without a shell**, unless the user knowingly configures a shell job. Discover or let the user pin the executable path.
+### 4.7 Results
 
-### 7.3 Preparation and startup
+- Results are shown in the existing grid, bounded by the row limit and the
+  memory ceiling, and kept **in memory only**. Closing the run's view or the
+  application discards them.
+- When outputs later feed other jobs (phase 5), their structured form has
+  ordered columns, rows as arrays, exact values as text and NULL distinct
+  from the text `NULL`, and is never keyed by column name (P-06,
+  golden rule 9). Mapping a result to a scalar is explicit and defines zero,
+  one and several rows.
 
-1. Load definition/version and validate inputs.
-2. Create an isolated temporary run directory.
-3. Reserve IPC session and ephemeral token.
-4. Spawn via `tokio::process::Command` with `cwd`, arguments, variables and limits.
-5. Capture stdout/stderr separately; never parse them as JJP.
-6. If supported, connect via TCP loopback and perform `job.hello`.
-7. Send `job.execute` with validated inputs; await events/completion.
-8. Finish collection, record exit code/final state and clean temporary files under policy.
+### 4.8 Timeout and cancellation
 
-**Without JJP:** jobs still run; stdout/stderr, exit code and explicitly collected files provide observability. Exit 0 succeeds; nonzero, timeout or cancellation fails.
+- **Stop** cancels the run's `CancellationToken` immediately; drivers use
+  their existing recovery window (5 s) to bring the session to a known state.
+  There is no grace period for SQL (P-08).
+- The deadline is the definition's timeout. Reaching it ends the run as
+  `Failed` with cause `Timeout`, like a tab's `ErrorCode::Timeout`. Stop ends
+  it as `Cancelled`. Either may add `effect_unknown` (section 4.6).
+- Dropping the future that awaits `backend::run` does not cancel the task;
+  cancellation always goes through the token.
 
-### 7.4 Execution contract
+## 5. Automation engine
 
-JJP parameters arrive through `job.execute`, avoiding business data in command arguments. Prefer sensitive references/capabilities over environment values. Minimal bootstrap variables follow section 16's security caveats.
+### 5.1 Code placement
 
-## 8. JJP — Jykre Job Protocol
+| Part | Location | Notes |
+| --- | --- | --- |
+| IDs, states, causes, run record DTOs | `jykre-core` | Minimal and pure; pending Q-04 |
+| `AutomationRepository`, migrations | `jykre-storage` | SQLite stays in storage (persistence rules) |
+| Engine: admission, run owner, deadlines, executors | `src/automation/` | GPUI-free, testable without a window, like `src/reports` |
+| Views | `src/app/automation/` | Thin; render state and capture intent |
 
-### 8.1 Transport and framing
+There is no new crate and no `SqlJobConnectionService` trait: a backend
+function following `query_in_context` is enough. Executors and events are
+enums, not trait objects, and the engine uses bounded Tokio channels (D04).
+The dependency graph that `cargo xtask check` enforces does not change.
 
-- MVP: persistent TCP to Jykre's server bound to `127.0.0.1`.
-- OS-selected dynamic port; bind **before starting** jobs.
-- Random single-use per-`run_id` token authenticates the session and binds run permissions.
-- JSON-RPC 2.0: `jsonrpc`, `id`, `method`, `params`, `result`, `error`.
-- One UTF-8 JSON message per line; escape newlines inside JSON strings.
-- With `id`: calls require responses and may await/block through SDK APIs. Without `id`: notifications have no responses.
-- JSON-RPC does not determine blocking; SDKs do. Distinct IDs allow concurrent pending calls.
-- Reject unknown/unauthorized methods and enforce a configurable frame maximum, initially **1 MiB**, for example.
-- Large tables/files use pagination, streaming or artifacts instead of huge frames.
+### 5.2 Service lifetime
 
-### 8.2 Bootstrap and handshake
+The engine is an **application-root service**. Views subscribe to it; closing
+a view does not cancel its runs. Quitting the application with runs active
+asks the user, then cancels them and waits for the shutdown to finish before
+exiting. This deviates from the rule that dropping a view cancels its
+operations, and the automation ADR records the deviation (D07, P-27,
+pending Q-05).
 
-Startup variable example:
+### 5.3 Admission and concurrency
+
+- At most **2 active runs** in the application and **1 per `ConnectionId`**.
+  A run beyond either limit is refused immediately with a visible reason;
+  there is no queue until phase 5 (D13, pending Q-07).
+- The per-connection limit counts profiles, not physical resources: two
+  SQLite profiles that open the same file are not serialized, and recovery
+  connections are not counted (P-31). This is a documented limitation.
+- Limits are revisited after measurement, not raised by default.
+
+### 5.4 States
 
 ```text
-JYKRE_IPC_HOST=127.0.0.1
-JYKRE_IPC_PORT=49321
-JYKRE_RUN_ID=run-01
-JYKRE_IPC_TOKEN=<ephemeral-secret>
-JYKRE_PROTOCOL=jjp/1
+          admission (durable)
+                 │
+                 ▼
+              Running ──► Succeeded
+                 │
+                 ├──────► Failed      (cause: Database, Timeout, Authentication, Validation, …)
+                 ├──────► Cancelled
+                 └──────► Interrupted (set by recovery only)
+
+  effect_unknown: independent flag on Failed, Cancelled or Interrupted
 ```
 
-**Required** first message, before business methods:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "job.hello",
-  "params": {
-    "protocol": "jjp/1",
-    "run_id": "run-01",
-    "token": "<ephemeral-secret>",
-    "capabilities": ["job.events", "job.rpc"]
-  }
-}
-```
-
-Response:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "result": {
-    "session_id": "session-01",
-    "protocol": "jjp/1",
-    "capabilities": ["job.events", "jykre.db.query", "jykre.ask"],
-    "max_message_bytes": 1048576
-  }
-}
-```
-
-Never return the token. Reject other methods before hello; close on authentication failure and limit attempts.
-
-### 8.3 Parameterized execution
-
-After handshake, **Jykre → job**:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": "exec-01",
-  "method": "job.execute",
-  "params": {
-    "run_id": "run-01",
-    "inputs": { "external_key": "DE_MEMBERS" },
-    "deadline_at": "2026-11-07T13:05:00Z"
-  }
-}
-```
-
-An SDK could answer on completion **or** acknowledge immediately and later send `job.complete`/`job.fail`. **Normative v1 decision:** immediately return `{"accepted": true}` to `job.execute`, with a separate terminal `job.complete`/`job.fail`, avoiding duplicate outcomes and simplifying async control.
-
-### 8.4 Job-to-Jykre events
-
-| Method | Type | Essential fields |
-| --- | --- | --- |
-| `job.log` | Notification | `level`, `message`, `fields?` |
-| `job.progress` | Notification | `value` 0–100, `stage?`, `message?` |
-| `job.status` | Notification | `key`, `value`, `label?`; business indicator, not engine state |
-| `job.metric` | Notification | `name`, `value`, `unit?`, `tags?` |
-| `job.artifact.add` | Request | `path`, `name`, `mime_type?`, `retention?` |
-| `job.complete` | Request | `outputs` |
-| `job.fail` | Request | `code`, `message`, `details?` |
-| `job.heartbeat` | Notification | `at?` |
-
-Example:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "job.progress",
-  "params": { "value": 65, "stage": "fetch", "message": "Fetching records" }
-}
-```
-
-### 8.5 Job-to-Jykre calls
-
-| Method | Expected result |
-| --- | --- |
-| `jykre.db.query` | Bounded/paginated authorized query result |
-| `jykre.ask` | User input or timeout/cancellation error |
-| `jykre.confirm` | `confirmed: true/false` or timeout |
-| `jykre.notify` | Receipt acknowledgement |
-| `jykre.secrets.get_ref` | Authorized reference, not its contents |
-| `jykre.secrets.create_ephemeral` | Secure reference with effective TTL |
-| `jykre.http.request` | Size-limited authorized HTTP result |
-| `jykre.storage.get`/`set` | Value in approved storage scope |
-| `jykre.jobs.run` | `run_id` and outputs after completion, or error, according to mode |
-| `jykre.artifacts.resolve` | Authorized read reference/path for a managed artifact |
-| `jykre.context.get` | Non-sensitive run metadata |
-
-### 8.6 Jykre-to-job commands
-
-- `job.cancel` notification: cooperative cancellation with `reason`, `grace_ms`.
-- `job.ping` request: SDK responsiveness check where implemented.
-- `job.execute` request: start under the execution contract.
-
-After grace expiry, Jykre may terminate uncooperative jobs. Child cleanup may require Windows/Unix-specific mechanisms and process-tree policies.
-
-### 8.7 Errors and terminal states
-
-JSON-RPC error example:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 18,
-  "error": {
-    "code": -32041,
-    "message": "User input timeout",
-    "data": {
-      "domain_code": "USER_INPUT_TIMEOUT",
-      "retryable": false
-    }
-  }
-}
-```
-
-Publish stable `domain_code` values: `INVALID_INPUT`, `PERMISSION_DENIED`, `USER_INPUT_TIMEOUT`, `JOB_TIMEOUT`, `JOB_CANCELLED`, `DB_ERROR`, `JOB_NOT_FOUND`, `CACHE_UNAVAILABLE`, `ARTIFACT_TOO_LARGE`, `PROTOCOL_ERROR`, `PROCESS_EXIT_NONZERO`, `INTERNAL_ERROR`, etc. Assign compatible JSON-RPC numeric ranges.
-
-**Termination rules:**
-
-1. `job.complete`/`job.fail` are idempotent per-run terminal operations answered by the server.
-2. Accepted `complete` records `COMPLETING`; `SUCCEEDED` requires coherent process exit 0 or controlled session closure under runtime policy.
-3. Nonzero exit after `complete` yields `FAILED`; retain partial outputs for diagnosis, not as valid final results.
-4. Accepted `fail` records failure intent; terminate/await within grace and finalize `FAILED`.
-5. JJP exit without an explicit terminal message fails unless the definition opts into `implicit_success_on_zero_exit=true`. Non-JJP jobs follow exit code.
-6. Reject result-changing calls after terminal state.
-
-### 8.8 Transport evolution
-
-Abstract `AsyncRead + AsyncWrite` and framing. Future `rustls`/`tokio-rustls` TLS need not change methods; UDS/Named Pipes are alternatives. Persistent loopback TLS has little traffic cost but needs certificates and identity validation; MVP operational cost likely exceeds benefit.
-
-## 9. Capabilities available to jobs
-
-### 9.1 Minimal SDK API
-
-The optional SDK may expose a high-level API such as:
-
-```typescript
-interface JykreClient {
-  readonly inputs: Record<string, unknown>;
-  log: {
-    debug(message: string, fields?: object): void;
-    info(message: string, fields?: object): void;
-    warn(message: string, fields?: object): void;
-    error(message: string, fields?: object): void;
-  };
-  progress(value: number, message?: string, stage?: string): void;
-  status(key: string, value: unknown, label?: string): void;
-  metric(name: string, value: number, unit?: string): void;
-  db: { query(request: DbQueryRequest): Promise<DbQueryResult> };
-  ask(request: AskRequest): Promise<unknown>;
-  confirm(request: ConfirmRequest): Promise<boolean>;
-  notify(request: NotificationRequest): Promise<void>;
-  artifact(request: ArtifactRequest): Promise<ArtifactRef>;
-  jobs: { run(request: RunJobRequest): Promise<JobRunResult> };
-  storage: { get(key: string): Promise<unknown>; set(key: string, value: unknown): Promise<void> };
-  secrets: {
-    getRef(name: string): Promise<SecretRef>;
-    createEphemeral(request: EphemeralSecretRequest): Promise<SecretRef>;
-  };
-  complete(outputs: Record<string, unknown>): Promise<void>;
-  fail(error: JobError): Promise<void>;
-  onCancel(callback: (reason: string) => void): void;
-}
-```
-
-This describes a desired interface, **not an already published package**.
-
-### 9.2 Operation semantics
-
-| Capability | Semantics |
-| --- | --- |
-| `log` | Append-only level/structured-field event; mask sensitive data |
-| `progress` | Nonterminal indicator in 0–100; regression allowed for explicitly identified rework |
-| `status` | Domain indicator such as `api_enabled: false`; never changes run state |
-| `metric` | Numeric sample for display/aggregation |
-| `db.query` | Existing connection/security policy; conservative time/row/byte defaults |
-| `ask` | Request an answer, enter `WAITING_INPUT`, receive answer/timeout |
-| `confirm` | Boolean `ask`; does not replace dangerous-operation authorization |
-| `notify` | Nonblocking local notification with priority and optional deduplication |
-| `artifact` | Register/copy a file to managed storage and return its ID |
-| `jobs.run` | Start a child job with explicit inputs, authorization and parent/child tracing |
-| `storage.get/set` | Small job-namespaced values; unsuitable for secrets |
-| `secrets` | Authorized references or controlled-use ephemeral secrets |
-| `complete` | Declare/validate final outputs and signal completion |
-| `fail` | Finish with stable code, message, sanitized details and error status |
-| `onCancel` | Cooperatively abort before forced termination |
-
-### 9.3 Permissions
-
-Separate **integration capabilities** from **OS permissions**. Check connections, SQL actions, HTTP destinations, child jobs and secrets server-side. Restricted JJP scripts **remain local processes able to access OS-permitted resources**; the protocol is not a sandbox.
-
-Illustrative manifest:
-
-```json
-{
-  "permissions": {
-    "db": {
-      "connections": ["conn-databricks-hlg"],
-      "allow_read": true,
-      "allow_write": false
-    },
-    "user_interaction": true,
-    "notifications": true,
-    "http": {
-      "hosts": ["*.rest.marketingcloudapis.com"],
-      "https_only": true
-    },
-    "secrets": ["sfmc-prd"],
-    "jobs": ["sfmc.auth"]
-  }
-}
-```
-
-Host allowlists authorize `jykre.http.request`, but cannot prevent a process's own network calls. Real network blocking needs OS isolation.
-
-## 10. Inputs, outputs and human interaction
-
-### 10.1 Inputs
-
-- `inputs_schema` uses an explicit JSON Schema subset: types, `required`, `enum`, `default`, limits, patterns, descriptions.
-- Generate text, numeric, boolean, selection, date, JSON and secret/reference fields.
-- Validate in the form, again in the engine and before every workflow step.
-- Apply defaults server-side; invalid names/extra properties follow the schema.
-- Store a **sanitized input snapshot**; never persist sensitive values as ordinary JSON.
-- Child invocations meet the same input contract as manual runs.
-
-### 10.2 Outputs
-
-- Every job type returns a JSON key/value object governed by `outputs_schema`.
-- Small outputs stay in SQLite by `run_id`.
-- Large/binary outputs become artifacts; never truncate silently.
-- Outputs feed `jobs.run`, workflow mappings and manual inspection.
-- Sensitive values use `SecretRef`; tokens never become ordinary output strings.
-
-### 10.3 Human interactions
-
-Example call:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 42,
-  "method": "jykre.ask",
-  "params": {
-    "title": "DE found",
-    "message": "Continue with the export?",
-    "type": "select",
-    "options": [
-      { "value": "yes", "label": "Yes" },
-      { "value": "no", "label": "No" }
-    ],
-    "timeout_ms": 60000,
-    "required": true
-  }
-}
-```
-
-Rules:
-
-1. Create `InteractionRequest` with `request_id`, `run_id`, type, schema, deadline, `PENDING`.
-2. Enter `WAITING_INPUT`, suspending only dependent steps; independent branches may continue.
-3. Present a non-modal run-panel question; notify the user if necessary.
-4. Send the validated answer in the same JSON-RPC request's `result`.
-5. On expiry return `USER_INPUT_TIMEOUT`; fail by default, or let the job catch the error and decide.
-6. Decline returns an explicit answer such as `false` or `USER_INPUT_CANCELLED`, per contract; “No” is not a technical failure.
-7. Automatic jobs without active UI need `fail_immediately`, `wait_until_timeout` or `default_answer` policy; never implicitly default destructive actions.
-8. Persist interaction status/metadata, mask sensitive answers and restrict retention.
-
-### 10.4 Notifications versus questions
-
-Notifications never suspend jobs. Questions request correlated answers and may enter `WAITING_INPUT`. `confirm()` never replaces `db.write` security approval required by organizational policy.
-
-## 11. Workflows and job chaining
-
-### 11.1 Principle
-
-A **workflow** is a DAG of reusable-job steps mapping outputs to inputs. Jobs remain independently executable. Workflows have their own inputs/outputs and history separate from component job runs.
-
-### 11.2 Example: discover and export a Data Extension
-
-```yaml
-id: sfmc.export-de
-name: Export Data Extension
-inputs:
-  external_key: { type: string, required: true }
-steps:
-  - id: auth
-    job: sfmc.auth
-    with:
-      connection: sfmc-prd
-    cache: reuse
-
-  - id: lookup
-    job: sfmc.lookup-de
-    needs: [auth]
-    with:
-      external_key: ${inputs.external_key}
-      auth_ref: ${steps.auth.outputs.token_ref}
-
-  - id: export
-    job: sfmc.export-csv
-    needs: [lookup]
-    with:
-      de_address: ${steps.lookup.outputs.address}
-      auth_ref: ${steps.auth.outputs.token_ref}
-outputs:
-  de_address: ${steps.lookup.outputs.address}
-  export_file: ${steps.export.artifacts.csv}
-```
-
-Identifiers/expressions are **proposed syntax**. Resolve references structurally without `eval` or arbitrary executable interpolation. `needs` must cover every dependency, including `auth` referenced by `export`. A validator may infer output dependencies or require declarations; v1.0 specifies **inference and validation of expression-derived dependencies**.
-
-### 11.3 Link types
-
-| Mechanism | Example |
-| --- | --- |
-| Sequence | B starts when A succeeds |
-| Parallelism | Independent B and C start after A |
-| Condition | C runs only if `steps.B.outputs.valid == true` |
-| Data chaining | `steps.A.outputs.id → steps.B.inputs.id` |
-| Artifact | `steps.A.artifacts.csv → steps.B.inputs.file_ref` |
-| Error recovery | `on_failure` starts diagnosis/compensation |
-| Subworkflow | Invoke another workflow with a depth limit |
-| Dynamic call | `jykre.jobs.run` with parent/child hierarchy |
-
-### 11.4 Orchestration rules
-
-- Detect cycles on DAG publication; reject future-step references without valid dependencies.
-- Bound global, per-workflow, per-job and per-connection parallelism.
-- Each step owns state and a `JobRun` referencing `WorkflowRun`/`parent_run_id`.
-- Failures stop by default (`fail_fast`) or recover with `continue_on_error`/`on_failure`.
-- Retry only eligible failures with maximum attempts, backoff and jitter. **No automatic retry of side effects** without explicit idempotency configuration.
-- Cancel active children; preserve completed-step results.
-- `WAITING_INPUT` cannot block independent branches.
-- Pin job versions at workflow startup; no runtime/SQL changes mid-run.
-- Validate output/artifact types, existence, authorization and retention.
-
-### 11.5 Jobs calling jobs
-
-`jykre.jobs.run({job, inputs, cache})` is the programmatic alternative to the workflow editor. Validate permissions, prevent infinite recursion, bound depth, inherit cancellation and audit parent/child relationships.
-
-## 12. Caching, credentials and reuse
-
-### 12.1 Job cache
-
-A `cacheable` job's key derives from:
-
-- Job ID and immutable version;
-- Relevant canonical inputs and context/scope;
-- Environment/credential/tenant identity, without plaintext secret values;
-- Applicable `run`, `workflow`, `user`, `workspace` scope policies.
-
-Store TTL/effective expiry. Invalidate on relevant version, credential, connection or parameter changes. Respect retention/permissions: **cache cannot expose another identity's data without authorization**.
-
-**Singleflight:** identical concurrent requests await one in-progress result, avoiding repeated external calls. Do not cache failures by default; error caching needs an explicit short TTL.
-
-### 12.2 Example: Salesforce Marketing Cloud authentication
-
-`sfmc.auth` requests OAuth tokens using authorized credentials. Inputs: `connection`, `mid?`, `scopes?`. Outputs: `token_ref`, `rest_instance_url`, `expires_at`. **Never return `access_token` as ordinary output.**
-
-Flow:
-
-```text
-Look up DE ────────┐
-Export DE ──────────┼──> cache(sfmc.auth, credential + MID + scopes)
-Look up journeys ──┘                      │
-                                          ├─ valid: reuse token_ref
-                                          └─ missing/expiring: run sfmc.auth
-```
-
-The generator sees the provider token; its SDK may send it once to Jykre's ephemeral vault over an authorized channel. Consumers receive only `SecretRef` and use authorized, destination-restricted `jykre.http.request`. An explicitly trusted job may request disclosure with elevated permission and an audit record.
-
-Respect actual provider `expires_in`, minus an early-expiry margin. On 401, invalidate the reference and optionally allow one controlled refresh before retrying a safe operation.
-
-### 12.3 Credential vault
-
-- Persistent credentials stay outside ordinary SQLite in the OS secure facility.
-- SQLite holds only `credential_id`, aliases and non-secret metadata.
-- Without a usable vault, prefer blocking persistent storage or requiring an explicit security choice; never silently save plaintext.
-- Temporary secrets may live in memory with TTL and per-job/run/workflow ACLs.
-- No tokens in stdout/stderr, structured logs, history, diagnostic dumps or artifacts.
-- Avoid tokens in process arguments; environment bootstrap uses only short session tokens and accounts for same-user process exposure.
-
-### 12.4 Shareable non-secret data
-
-Metadata, addresses and small lists can use ordinary SQLite cache; large data uses managed artifacts. Cache invalidation never erases execution history.
-
-## 13. Artifacts and files
-
-### 13.1 Concept
-
-An artifact is a produced file **promoted** into Jykre-managed storage: Data Extension CSV, JSON report, PDF, exported log, SQL dump, result capture or diagnostic file.
-
-| Output | Storage | Use |
-| --- | --- | --- |
-| `log` | SQLite event and/or stdout/stderr file | Diagnosis |
-| `output` | Bounded structured SQLite JSON | Passing values between jobs |
-| `artifact` | File referenced by ID | Export/open/consume files |
-| `secret_ref` | Temporary vault plus minimal metadata | Controlled credential sharing |
-
-### 13.2 Registration API
-
-```javascript
-const artifact = await jykre.artifact({
-  path: "./output/members.csv",
-  name: "members.csv",
-  mimeType: "text/csv",
-  retention: "default"
-});
-
-await jykre.complete({
-  row_count: 1250,
-  export_artifact_id: artifact.id
-});
-```
-
-Return `artifact_id` **only after consistently copying and registering** the file.
-
-### 13.3 Ingestion flow
-
-1. Job writes in its temporary directory or another authorized location.
-2. Send `job.artifact.add` with path/metadata.
-3. Normalize/validate path, authorization, limits, extension/type; prevent `..`, unauthorized symlinks and conflicting names.
-4. Copy into managed staging, calculate size/SHA-256, sync under the required guarantee.
-5. Atomically promote via same-volume rename where supported, and register SQLite metadata.
-6. Return artifact ID/metadata.
-7. Remove orphaned staging/temporary files after run closure.
-
-Artifact names are not arbitrary write paths. Generated IDs determine final directories, not job-supplied names.
-
-### 13.4 Consumption by another job
-
-Consumers receive `{ "artifact_id": "art-456" }`. Validate permission, retention and physical existence. External processes get temporary read-only copies or a read API. Native SQL jobs can generate artifacts through engine-managed export.
-
-### 13.5 Retention and pinning
-
-- `temporary`, `default` or `pinned` artifacts.
-- Never automatically delete active-workflow references.
-- Recoverable metadata/file deletion uses `DELETING` and reconciliation scans.
-- Explicitly pinned artifacts from deleted runs may survive in a separate collection.
-- Enforce global and per-run/job storage limits, with warnings.
-
-## 14. Persistence and directory layout
-
-### 14.1 Base directory
-
-Use OS-standard directories and allow chosen destinations for artifacts/large files:
-
-| OS | Suggested location |
-| --- | --- |
-| Windows | `%LOCALAPPDATA%\Jykre Studio\` |
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/jykre-studio/` |
-| macOS | `~/Library/Application Support/Jykre Studio/` |
-
-**Note:** configuration/data paths may differ; consult platform directory APIs. Never use `/tmp` for persistent artifacts.
-
-### 14.2 Illustrative tree
-
-```text
-jykre-studio/
-├── jykre.db
-├── jobs/
-│   ├── job-123/
-│   │   ├── versions/
-│   │   │   └── 0001/
-│   │   │       ├── job.json
-│   │   │       └── query.sql
-│   │   └── drafts/
-│   └── job-456/
-│       └── versions/0001/
-│           ├── job.json
-│           └── script.mjs
-├── workflows/
-│   └── workflow-123/versions/0001/workflow.json
-├── runs/
-│   └── 2026/11/
-│       └── run-abc123/
-│           ├── stdout.log
-│           ├── stderr.log
-│           └── artifacts/
-│               └── art-def456-members.csv
-├── cache/
-│   └── blobs/
-└── tmp/
-    └── run-abc123/
-```
-
-External/Git-linked jobs may retain source code outside this tree. Jykre retains metadata and executed-version snapshots according to configuration.
-
-### 14.3 Storage responsibilities
-
-| Information | Destination | Notes |
-| --- | --- | --- |
-| Registered jobs/workflows | SQLite | IDs, names, permissions, indexes |
-| Versioned SQL/code/definitions | Files plus SQLite index | Immutable snapshot/hash |
-| Run history | SQLite | State, times, errors, compact outputs |
-| Structured events | SQLite | Pagination, limits, retention |
-| stdout/stderr | Per-run files | Rotation, size limits |
-| Artifacts | Per-run directories | SQLite ID references |
-| Small-value cache | SQLite | TTL/scope validation |
-| Large-blob cache | `cache/blobs/` | SQLite index |
-| Persistent credentials | OS vault | No secret value in SQLite |
-| Ephemeral tokens | Protected process memory | Opaque reference/TTL |
-
-### 14.4 Minimal relational model
-
-The following tables form the core; names/columns evolve through migrations.
+- **Persisted:** `Running`, `Succeeded`, `Failed`, `Cancelled`, `Interrupted`
+  (D14).
+- **Cause codes** are stable and stored with `Failed`; `Timeout` is a cause,
+  not a state.
+- `Cancelling` and `Completing` exist only in memory, to show progress.
+- `Queued` arrives with queues (phase 5) and `WaitingInput` with `ask`
+  (phase 6).
+
+### 5.5 Arbitration
+
+Each run has exactly one **owner**, the engine task that executes it. Only
+the owner writes the terminal state. Completion, failure, Stop, the deadline
+and (later) process exit are events delivered to the owner; the first it
+observes decides the outcome and later ones are ignored (P-09). A terminal
+state is written only after the statement's completion is confirmed or ruled
+unknowable (section 4.6).
+
+### 5.6 Events to the UI
+
+The engine publishes state, progress and counters through bounded channels
+and coalesces them per frame. A full channel drops intermediate progress,
+never a terminal state. Run lists are virtualized.
+
+## 6. Persistence and recovery
+
+All of this section is pending Q-02 and the automation ADR.
+
+### 6.1 `automation.db`
+
+- A new SQLite file in the current data directory (which respects
+  `JYKRE_CONFIG_DIR`), opened with `open_pool`, with its own forward-only
+  migrations (D05).
+- Separate from `config.db` because history grows and is pruned, while
+  `config.db` holds the only copy of the connection profiles and runs with
+  `synchronous=FULL`.
+- No second data root: version 1.0's `Jykre Studio\jykre.db` and
+  per-OS directories are dropped (P-10).
+
+### 6.2 Definitions
+
+Canonical JSON in SQLite is the single source of a job definition. There is
+no file tree of jobs and versions and no YAML (P-28); the YAML in version 1.0
+was illustrative.
+
+### 6.3 Run snapshot and durable admission
+
+- At admission, before any network I/O, the engine writes the run as
+  `Running` together with its snapshot: exact SQL, parameter specifications
+  without values, context, effective options, a fingerprint with a defined
+  representation, and the connection's ID and profile revision (D15).
+- `Succeeded` is written only after the completion rule confirms the
+  statement and the local commit of that record succeeds. A failure to write
+  history is reported; it never turns a completed statement into a replay.
+
+### 6.4 What is never persisted
+
+Input values, server messages, cells and scalar results are **never**
+written to `automation.db`, logs or telemetry (P-01, D16). Scalars such as
+`COUNT(*)` are results too.
+
+Persisted operational data: delivered row count, `rows_affected`,
+`truncated`, `effect_unknown`, SQLSTATE or driver error code, cause, timing.
+The history shows *what ran, when and how it ended*, not what it returned.
+
+Persisting declared outputs for chains (phase 5) needs its own ADR. The
+review's proposed defaults, if approved, are at most 4 KiB per run, values
+kept 7 days, metadata 90 days, opt-in per job and an extra confirmation for
+production jobs (D29, pending Q-03).
+
+### 6.5 Phase 1 schema (illustrative)
 
 ```sql
 CREATE TABLE jobs (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN
-    ('native_sql', 'native_flow', 'external_process')),
-  enabled INTEGER NOT NULL DEFAULT 1,
-  current_version INTEGER NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  id              TEXT PRIMARY KEY,
+  definition_json TEXT NOT NULL,          -- canonical JSON, section 4.1
+  created_at      TEXT NOT NULL,          -- UTC
+  updated_at      TEXT NOT NULL
 );
 
-CREATE TABLE job_versions (
-  job_id TEXT NOT NULL REFERENCES jobs(id),
-  version INTEGER NOT NULL,
-  manifest_json TEXT NOT NULL,
-  source_path TEXT,
-  source_sha256 TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (job_id, version)
+CREATE TABLE runs (
+  id                 TEXT PRIMARY KEY,
+  job_id             TEXT REFERENCES jobs(id) ON DELETE SET NULL, -- NULL for draft runs
+  origin             TEXT NOT NULL,       -- 'manual' in phase 1
+  state              TEXT NOT NULL,       -- section 5.4
+  cause              TEXT,
+  effect_unknown     INTEGER NOT NULL DEFAULT 0,
+  snapshot_json      TEXT NOT NULL,       -- section 6.3, no values
+  fingerprint        TEXT NOT NULL,
+  connection_id      TEXT NOT NULL,
+  connection_revision INTEGER NOT NULL,
+  rows_delivered     INTEGER,
+  rows_affected      INTEGER,
+  truncated          INTEGER NOT NULL DEFAULT 0,
+  sqlstate           TEXT,
+  started_at         TEXT NOT NULL,
+  finished_at        TEXT
 );
 
-CREATE TABLE job_runs (
-  id TEXT PRIMARY KEY,
-  job_id TEXT NOT NULL,
-  job_version INTEGER NOT NULL,
-  parent_run_id TEXT,
-  workflow_run_id TEXT,
-  state TEXT NOT NULL,
-  origin TEXT NOT NULL,
-  inputs_redacted_json TEXT NOT NULL,
-  outputs_json TEXT,
-  error_code TEXT,
-  error_message TEXT,
-  exit_code INTEGER,
-  started_at TEXT,
-  finished_at TEXT,
-  created_at TEXT NOT NULL,
-  FOREIGN KEY (job_id, job_version)
-    REFERENCES job_versions(job_id, version)
-);
-
-CREATE TABLE job_artifacts (
-  id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES job_runs(id),
-  display_name TEXT NOT NULL,
-  relative_path TEXT NOT NULL,
-  mime_type TEXT,
-  size_bytes INTEGER NOT NULL,
-  sha256 TEXT NOT NULL,
-  retention TEXT NOT NULL,
-  state TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-
-CREATE INDEX idx_job_runs_job_created
-  ON job_runs(job_id, created_at DESC);
-CREATE INDEX idx_job_runs_state ON job_runs(state);
-CREATE INDEX idx_artifacts_run ON job_artifacts(run_id);
+CREATE INDEX runs_by_job ON runs(job_id, started_at DESC);
+CREATE INDEX runs_open ON runs(state) WHERE state = 'Running';
 ```
 
-Additional required tables, indexed by `run_id`/`created_at`/`expires_at`:
-
-- `job_run_events`: `id`, `run_id`, `sequence`, `timestamp`, `kind`, `payload_redacted_json`.
-- `job_interactions`: `id`, `run_id`, `request_id`, `state`, `deadline_at`, `request_redacted_json`, `response_redacted_json`.
-- `workflows`, `workflow_versions`: immutable definition, hash, manifest JSON.
-- `workflow_runs`, `workflow_step_runs`: workflow, step, job_run, state, attempts, dependencies.
-- `job_cache`: key, scope, result references, expiry, version, state.
-- `job_schedules`: cron/interval, timezone, next trigger, overlap policy, enabled.
-- `runtime_definitions`: command/arguments, capabilities, platform.
-- `job_permission_grants`: job scope, authorized connection/secret/resource, audit.
-- `credential_references`: alias, vault provider identifier, non-sensitive metadata.
-
-Enable foreign keys, suitable journaling such as WAL under Jykre's global strategy, versioned migrations, transactional state writes and frequent-access indexes. Store UTC timestamps and display local UI time.
-
-### 14.5 Reliability across SQLite and files
-
-SQLite and the filesystem share no ACID transaction. Use staging, intermediate state, rename and confirmation, with startup reconciliation for missing/orphaned files. Complete code snapshots before creating executable references.
-
-## 15. Execution states and rules
-
-### 15.1 Default states
-
-```text
-CREATED → QUEUED → STARTING → RUNNING ⇄ WAITING_INPUT
-                                  │
-                                  ├→ COMPLETING → SUCCEEDED
-                                  ├→ FAILING    → FAILED
-                                  ├→ CANCELLING → CANCELLED
-                                  └→ TIMING_OUT → TIMED_OUT
-```
-
-Valid answers return `WAITING_INPUT` to `RUNNING`. `SUCCEEDED`, `FAILED`, `CANCELLED`, `TIMED_OUT` are terminal. Condition-skipped workflow steps may use `SKIPPED`.
-
-### 15.2 State rules
-
-- State belongs to the engine, not `job.status` text.
-- The authoritative engine validates transitions and ignores late terminal events.
-- `complete`/`fail` are verified terminal intents; process/exit also matter.
-- Execution/question timeouts differ; questions consume the overall deadline unless approved policy explicitly pauses it.
-- Repeated terminals cannot duplicate effects; idempotent calls return the existing result.
-- Every transition emits a structured audit event.
-
-### 15.3 Scheduler and concurrency
-
-- Triggers: manual, application context, child job, workflow, interval, cron.
-- `overlap_policy`: `skip`, `queue`, `parallel`; suggested scheduled default `skip`.
-- Bound global, per-job, per-workflow, per-connection concurrency and queue size/wait.
-- Missed triggers while closed: default `skip`, optional `catch_up_once`.
-- Independent remote I/O may run concurrently; shared connections require synchronization and transaction-state respect.
-- Coalesce frequent UI events without losing retained logs/audit.
-
-### 15.4 Cancellation
-
-1. Mark `CANCELLING`, reject relevant new requests and notify active children.
-2. Send external JJP `job.cancel` or trigger native SQL/Flow cancellation tokens.
-3. Wait `grace_ms`; request driver SQL cancellation if available.
-4. Terminate external processes if necessary and clean their trees under OS policy.
-5. Finish `CANCELLED`, preserving history, logs and published artifacts.
-
-Timeout is not manual cancellation; retain the explicit terminal cause.
-
-## 16. Security and trust boundaries
-
-### 16.1 Threat model
-
-At least:
-
-1. Unauthorized local processes contacting the listener.
-2. Legitimate jobs invoking ungranted capabilities.
-3. Malicious/compromised jobs exfiltrating data/tokens/files.
-4. Destructive SQL or incorrectly bound parameters.
-5. Secrets unintentionally entering logs/history/artifacts.
-6. Traversal, symlinks, file replacement during collection.
-7. Misconfigured ports accessible beyond the machine.
-8. Incorrect cache reuse across environments/credentials.
-9. Local denial of service through large frames, many connections, log spam or endless jobs.
-
-### 16.2 TCP session protection
-
-- Bind random ports on `127.0.0.1` only, never `0.0.0.0`.
-- Listen before spawn to reduce endpoint races.
-- Use cryptographically random tokens of sufficient length, e.g. 256 bits, unique per run and invalidated at termination.
-- No operation before hello; bound connection rate, frame size, auth failures and handshake time.
-- Bind session to run ID, permissions and feasible spawned-process identity/tree. A stolen valid token permits impersonation; run ID alone authenticates nobody.
-- Prefer minimally exposed bootstrap channels. Environment variables suit MVP convenience but are not secure vaults against same-user/privileged processes.
-- Future TLS 1.3 helps remote/high-risk local communication **when server identity is validated**; it replaces neither authorization nor sandboxing.
-- Strong same-user app isolation may need UDS/Named Pipes OS ACLs, peer identity and/or isolated services, plus TLS where applicable.
-
-### 16.3 External execution security
-
-JJP controls **only its APIs**. User-privileged external jobs can call HTTP, read allowed files and spawn processes despite contrary manifest `permissions.http`/`permissions.files` declarations.
-
-Consequences:
-
-- Clearly warn about untrusted scripts.
-- Confirm third-party import/first run and permission changes.
-- Future OS/container/restricted-process sandbox profiles govern file/network access.
-- Never claim an internal allowlist “blocks Internet access” without real network isolation.
-- Prefer least-privilege subprocesses and never automatically copy sensitive Jykre environment variables.
-
-### 16.4 SQL security
-
-- `connection_ref` names an existing connection; plaintext credentials need not reach the job.
-- Mandatory binding where supported; native execution forbids SQL concatenation with untrusted inputs.
-- Respect real database permissions; textual read-only analysis is no guarantee.
-- Classify DDL/DML for warnings/write authorization and configured extra confirmation.
-- Production policies are separate from staging/local.
-- Do not reuse open editor-transaction sessions by default.
-
-### 16.5 Secrets and audit policy
-
-- By default no raw tokens, passwords, keys or `Authorization` in logs/history.
-- Redacting `password`, `access_token`, `client_secret`, `authorization`, etc. is defense in depth, not a secrets API/explicit sensitive-field substitute.
-- No secrets in `job_cache.outputs_json`, `job_runs.outputs_json`, artifact directories.
-- Audit grants, secret access, SQL writes, child jobs and artifact exports.
-- Future shared use needs user/organization authorization; local permissions are not multi-user access control.
-
-## 17. Rust implementation architecture
-
-### 17.1 Suggested modules
-
-```text
-automation/
-├── domain/
-│   ├── job.rs
-│   ├── run.rs
-│   ├── workflow.rs
-│   ├── artifact.rs
-│   └── permissions.rs
-├── catalog/
-│   ├── repository.rs
-│   ├── versions.rs
-│   └── migrations.rs
-├── engine/
-│   ├── scheduler.rs
-│   ├── dispatcher.rs
-│   ├── state_machine.rs
-│   ├── run_context.rs
-│   ├── cancellation.rs
-│   └── limits.rs
-├── executors/
-│   ├── mod.rs
-│   ├── native_sql.rs
-│   ├── native_flow.rs
-│   └── external_process.rs
-├── protocol/
-│   ├── jsonrpc.rs
-│   ├── framing.rs
-│   ├── tcp_server.rs
-│   ├── handshake.rs
-│   └── method_router.rs
-├── services/
-│   ├── artifact_store.rs
-│   ├── secret_store.rs
-│   ├── cache.rs
-│   ├── interactions.rs
-│   ├── notifications.rs
-│   └── http_client.rs
-├── workflow/
-│   ├── dag.rs
-│   ├── expressions.rs
-│   └── orchestrator.rs
-└── ui/
-    ├── jobs.rs
-    ├── editor.rs
-    ├── run_details.rs
-    └── workflow_editor.rs
-```
-
-Illustrative organization: adapt to Jykre's actual modules/crates. Never duplicate existing SQL clients, parsers/editors, secret managers or tab systems.
-
-### 17.2 Executor interface
-
-Conceptual pseudocode:
-
-```rust
-#[async_trait::async_trait]
-pub trait JobExecutor: Send + Sync {
-    async fn execute(
-        &self,
-        definition: &JobVersion,
-        context: RunContext,
-    ) -> Result<ExecutionOutcome, JobError>;
-
-    async fn cancel(&self, run_id: &str) -> Result<(), JobError>;
-}
-```
-
-`RunContext` contains `run_id`, `inputs`, deadline, permissions, cancellation token, event sender, artifact/secret interfaces, initiator identity and parent workflow reference. Executors publish events/intents to the engine, which coordinates persistence/state; they never arbitrarily update SQLite or UI.
-
-### 17.3 Executors
-
-**`NativeSqlExecutor`:** resolve connection, select driver, acquire isolated session, validate permissions, prepare bound SQL, execute, serialize rows/metadata, produce outputs/artifacts and release resources. Integrates directly with Jykre's SQL layer.
-
-**`NativeFlowExecutor`:** run declarative `http.request`, `db.query`, `if`, `ask`, `notify`, `set_variable`, `delay`, `run_job` under the same `RunContext`, without a shell/process. SQL steps do not eliminate standalone `native_sql` jobs.
-
-**`ExternalProcessExecutor`:** prepare runtime, collect stdout/stderr, bind JJP, monitor process/signals/deadlines/artifacts/exit code; operate in simple mode without JJP.
-
-### 17.4 Internal event bus
-
-Typed Rust events: `Log`, `Progress`, `Status`, `Metric`, `ArtifactRegistered`, `StateTransition`, `OutputUpdated`, `InteractionRequested`, `InteractionAnswered`. Native executors publish **without TCP**; externals use JJP adapters. One bus feeds SQLite, history, observability and async GPUI updates.
-
-### 17.5 Transport and protocol separation
-
-- Transport supplies frames to JSON-RPC parsing; handlers never know `TcpStream`.
-- MVP `TcpTransport`; later `TlsTransport`, `UnixTransport`, `NamedPipeTransport`.
-- JavaScript/Python/Rust SDKs can use identical methods over different transports.
-- Separate stdout/stderr from JJP to preserve `console.log` and ordinary language output.
-
-### 17.6 Integration with the existing SQL layer
-
-Depend on a stable Jykre SQL manager interface with operations such as:
-
-```rust
-pub trait SqlJobConnectionService {
-    // Conceptual signatures; not compilable as written.
-    // resolve_connection(ref) -> driver + authorized config
-    // acquire_isolated_session(ref) -> independent session
-    // execute_prepared(session, sql, bindings, limits) -> result/stream
-    // cancel(session_or_query_id) -> cancellation attempt
-}
-```
-
-Avoid a second connection stack. Reuse existing pools, metadata, dialects, parser, typing and diagnostics. Never implicitly take over editor-session transactions.
-
-## 18. APIs and end-to-end examples
-
-### 18.1 Example A — Manual SQL Job lookup by External Key
-
-**Definition:** `sfmc.de-address-sql`, demonstrating a Jykre-accessible database without assuming the SFMC API is directly SQL-queryable.
-
-```yaml
-id: sfmc.de-address-sql
-kind: native_sql
-name: Look up DE address in the data catalog
-connection_ref: conn-databricks-hlg
-result_mode: scalar
-scalar_mapping:
-  address: address
-inputs:
-  external_key: { type: string, required: true }
-```
-
-```sql
-SELECT address
-FROM catalog.data_extensions
-WHERE external_key = :external_key
-LIMIT 1;
-```
-
-**Operation:** `Ctrl+Shift+P → Look up DE address`, enter `external_key`; Jykre validates, directly queries the connection and shows `outputs.address`. No external process, TCP token or other-language programming.
-
-### 18.2 Example B — JavaScript job querying an API by External Key
-
-Illustrative user code using the proposed SDK:
-
-```javascript
-import { Jykre } from "@jykre/sdk";
-
-const jykre = await Jykre.connect();
-
-jykre.onExecute(async ({ inputs }) => {
-  const externalKey = inputs.external_key;
-
-  try {
-    jykre.log.info("Looking up Data Extension", {
-      external_key: externalKey
-    });
-    jykre.progress(20, "Authenticating");
-
-    const auth = await jykre.jobs.run({
-      job: "sfmc.auth",
-      inputs: { connection: "sfmc-prd" },
-      cache: "reuse"
-    });
-
-    jykre.progress(60, "Fetching metadata");
-    const data = await jykre.http.request({
-      method: "GET",
-      url: "https://EXAMPLE.rest.marketingcloudapis.com/endpoint",
-      auth: { tokenRef: auth.outputs.token_ref },
-      query: { externalKey }
-    });
-
-    await jykre.complete({
-      external_key: externalKey,
-      address: data.address
-    });
-  } catch (err) {
-    await jykre.fail({
-      code: "SFMC_LOOKUP_FAILED",
-      message: String(err?.message ?? err)
-    });
-  }
-});
-```
-
-The URL and `onExecute` are **illustrative**; integrate/validate the actual Marketing Cloud endpoint under its applicable API. SDK guarantees at-most-once `complete/fail` and coherent RPC closure.
-
-### 18.3 Example C — Job asking a question with a timeout
-
-```javascript
-const answer = await jykre.ask({
-  title: "Confirm export",
-  message: "Export 12,000 records to CSV?",
-  type: "boolean",
-  timeoutMs: 60000
-});
-
-if (!answer) {
-  await jykre.fail({
-    code: "USER_DECLINED",
-    message: "Export declined by the user"
-  });
-  return;
-}
-```
-
-Expiry returns `USER_INPUT_TIMEOUT`, explicitly catchable by the job. `USER_DECLINED` may be a business outcome under job policy rather than an infrastructure failure.
-
-### 18.4 Example D — Producing an artifact
-
-```javascript
-const csvPath = "./out/members.csv";
-// The job writes the file in its temporary directory.
-
-const artifact = await jykre.artifact({
-  path: csvPath,
-  name: "members.csv",
-  mimeType: "text/csv"
-});
-
-await jykre.complete({
-  exported: 1250,
-  csv_artifact_id: artifact.id
-});
-```
-
-The run screen offers supported previews, open/copy-path actions and export to a chosen directory. Jykre copies into managed storage; user files never move without an explicit operation.
-
-### 18.5 Example E — Native flow with SQL and HTTP
-
-```yaml
-id: monitor.hlq-check
-kind: native_flow
-trigger: manual
-inputs:
-  external_key: { type: string, required: true }
-steps:
-  - id: sql
-    uses: db.query
-    with:
-      connection_ref: conn-postgres-hlg
-      sql: "SELECT enabled FROM services WHERE external_key = :key"
-      params:
-        key: ${inputs.external_key}
-  - id: warn
-    if: ${steps.sql.outputs.rows[0].enabled == false}
-    uses: notification.show
-    with:
-      title: Service disabled
-      message: Check the staging configuration
-```
-
-Expressions must safely compare/access properties without arbitrary execution. Both **Flow SQL Step** and **standalone SQL Job** use a shared SQL executor.
-
-## 19. Operation, retention and recovery
-
-### 19.1 Suggested configurable retention
-
-| Data | Suggested initial retention |
-| --- | --- |
-| Summary run history | 90 days |
-| Detailed events | 30 days |
-| stdout/stderr | 30 days |
-| Ordinary artifacts | 30 days |
-| Pinned artifacts | Until manual deletion, within quota |
-| Ordinary cache | Job TTL and periodic cleanup |
-| Ephemeral tokens | Until expiry or authorized scope end |
-| Temporary files | Remove after completion; post-crash recovery |
-
-These are **initial configuration proposals**, not universal requirements. Respect active-workflow references and pinned artifacts during cleanup.
-
-### 19.2 Failure recovery
-
-At startup:
-
-1. Identify previous-process runs in `STARTING`, `RUNNING`, `WAITING_INPUT`, `COMPLETING`, `CANCELLING`.
-2. Check for a supervisor/agent still owning them. Without an MVP agent, mark `INTERRUPTED`/`FAILED` after unplanned restart, retaining collected logs/artifacts.
-3. Reconcile temporary files/pending artifacts.
-4. Remove invalid session credentials/ephemeral references.
-5. Recalculate future schedules under missed-trigger policy.
-
-`INTERRUPTED` may be a cause within `FAILED` or a separate terminal state; keep the choice consistent in UI, database and API.
-
-### 19.3 Engine observability
-
-Useful metrics: runs/minute, queue time, RPC p50/p95/p99, JJP session count, handshake failures, log size, SQL duration, connection failures, interaction timeouts, cache hit rate, disk use. Configure instrumentation to avoid material rendering-thread cost and input/secret leakage.
-
-### 19.4 Backup and migration
-
-- Safely back up SQLite plus job/version/workflow/persistent-artifact directories.
-- Coordinate metadata/file snapshots; `jykre.db` alone is incomplete.
-- OS-vault credentials need reconfiguration or specific migration; never export without explicit protection.
-- Restore validates hashes, relative paths and missing connection references.
-- Include custom data paths in backup configuration.
-
-## 20. Roadmap, acceptance and testing
-
-### 20.1 Incremental deliveries
-
-| Phase | Delivery | Main criterion |
+Phase 0 replaces this sketch with the approved DDL. Tables for later phases
+(events, artifacts, chains, schedules, grants, cache) are **not** created
+until their phase (D01).
+
+### 6.6 Lock and recovery
+
+- The engine takes an **exclusive lock per data directory**, following the
+  metadata writer lock, before migrating, recovering or admitting runs. A
+  second instance on the same directory stays usable but cannot run
+  automation, and says so (D17, pending Q-06).
+- At startup, the lock holder marks every run still `Running` as
+  `Interrupted`, adding `effect_unknown` unless the snapshot only reads. It
+  never replays a run and uses no leases.
+
+### 6.7 Retention
+
+Run metadata is kept 90 days by default and pruned in the background; pruning
+never blocks admission. Nothing else is stored to retain in phase 1.
+
+## 7. Security
+
+### 7.1 Credentials
+
+- Credentials stay in the operating system vault through `jykre-secrets`
+  (ADR-0004). Version 1.0's "explicit secure fallback" is removed (P-11):
+  without a vault there are no persistent job secrets, and the UI explains
+  why.
+- New secrets in later phases are new accounts in `jykre-secrets`, never a
+  second vault.
+- A run that needs a password the profile does not remember asks for it in a
+  manual run; an unattended run (phase 7) fails with `Authentication` and
+  never opens a dialog.
+
+### 7.2 Confirmation and grants
+
+- Phase 1–2 manual runs confirm exactly as tabs do (section 4.5).
+- A manual chain (phase 5) confirms the whole plan once, like a report; only
+  the confirmed plan runs.
+- Durable grants (schedules, `jjp` capabilities) require explicit, revocable
+  consent bound to the snapshot, connection and revision, context and
+  environment. A manual confirmation is never silently promoted to a grant
+  (P-15).
+- Dynamic SQL sent through a future `db.query` is never authorized by a
+  script hash; it needs real enforcement first (D26).
+
+### 7.3 Logs and telemetry
+
+- Job logs are not `tracing` events and never reach OTLP. Engine spans carry
+  only allowlisted attributes (IDs, state, cause, counters). There are no
+  engine metrics in the first phases (P-18, D18).
+- No input value, token or server message appears in a log, span, history row
+  or error report.
+
+### 7.4 Threat model
+
+| Threat | Mitigation | Phase |
 | --- | --- | --- |
-| 0 — Foundation | Models, migrations, states, limits, store, event bus | Simple native run with reliable history |
-| 1 — Native SQL | Editor, connection choice, binds, outputs, cancellation | Parameterized SQL Job in isolated session |
-| 2 — External + JJP | Runtime Registry, process, TCP, handshake, events, minimal JS SDK | `console.log` does not corrupt protocol |
-| 3 — Interaction/artifacts | `ask/confirm`, timeout, notification, safe ingestion | Questions and managed artifacts |
-| 4 — Workflows | DAG, output mapping, sequential/parallel execution, errors | Traceable SQL + JS + Flow chain |
-| 5 — Cache/credentials | TTL/singleflight, ephemeral secrets | Shared SFMC auth for authorized jobs |
-| 6 — Scheduling/UX | Cron, queues, run conflicts, palette, dashboards | Recurring routines, browsable history |
-| 7 — Evolution | TLS/transports, agent, sandbox, advanced visual panel | Added capabilities without breaking JJP v1 |
+| Destructive SQL or badly bound input | Bind parameters, one statement, production confirmation, database privileges | 1 |
+| Values leaking into history or telemetry | Section 6.4 and 7.3 | 1 |
+| A job disturbing a tab's transaction | New session per run (section 4.4) | 1 |
+| Two instances recovering each other's runs | Data-directory lock (section 6.6) | 1 |
+| Runaway process trees, blocked pipes | Tree supervision and bounded pipes (section 9.1) | 3 |
+| Local processes contacting the listener | Loopback only, per-run 256-bit token consumed atomically (section 9.2) | 4 |
+| Large frames, log spam, many connections | Frame and log quotas, always draining (section 9.2) | 4 |
+| Path tricks when collecting files | Verified handles (section 9.4) | 6 |
+| Credential reuse across identities or hosts | Destination-bound references (section 9.5) | 7 |
 
-### 20.2 Functional acceptance criteria
+## 8. User experience and performance
 
-**CA-01 — Parameterized SQL Job:** given `native_sql`, an existing PostgreSQL/MySQL/Databricks connection and `external_key`, use bind parameters, respect dialect, display rows/metadata and record the run without an external process.
+### 8.1 Phase 2 interface
 
-**CA-02 — Isolated session:** running a SQL Job never commits/rolls back or changes context in an open interactive editor transaction.
+- An **Automation** list of jobs with a detail view with three tabs:
+  **Editor**, **Inputs** and **Runs** (P-26). Schedules, permissions and
+  versions arrive with their phases.
+- The editor is the dialect-aware component from `src/app/sql_editor`, not
+  another Workspace. Shortcuts that run SQL in a tab never run a job.
+- **Run** opens the parameter form from reports, then the production and
+  password prompts when they apply. A running job shows progress and **Stop**.
+- The **Runs** tab lists state, cause, `effect_unknown`, timing and counters,
+  and labels draft runs. The latest result appears in the in-memory grid
+  while it exists.
+- All text lives in `locales/`. Keyboard and focus follow the
+  [UI guidelines](../standards/ui-guidelines.md); error messages follow
+  [UX](../reference/ux.md).
 
-**CA-03 — Universal external script:** capture `console.log`/`console.error` without corrupting JJP; non-JJP processes run in simple mode.
+### 8.2 Performance
 
-**CA-04 — Concurrent RPC:** distinct simultaneous IDs get correct, possibly out-of-order responses; notifications need no response.
+The existing [budgets](../standards/performance.md) apply from phase 2:
+frame time at most 8 ms at p95, no stall over 16 ms and state publication at
+most 2 ms. Engine events are coalesced (section 5.6) and lists are
+virtualized. Phase 2 reports these numbers for the run and history paths.
 
-**CA-05 — Permissions:** no `db.write` means no writes through Jykre's SQL service; read-only database credentials protect data even with incorrect classification.
+## 9. Later phases
 
-**CA-06 — Timed question:** `jykre.ask` enters `WAITING_INPUT`; expiry returns `USER_INPUT_TIMEOUT` and applies failure policy.
+These phases are specified as **constraints** that a future revision must
+honour, not as finished designs.
 
-**CA-07 — Success/error:** validate outputs; `complete` plus exit 0 succeeds; `fail`, nonzero exit, timeout/cancellation produce coherent states/codes.
+### 9.1 Phase 3 — External process without protocol
 
-**CA-08 — Artifact:** managed copy, size/hash index, history display, authorized-only `artifact_id` access.
+- **Prerequisite:** process-tree supervision through an approved dependency:
+  a kill-on-close Job Object on Windows and process groups on Unix. `unsafe`
+  is forbidden and `kill_on_drop` kills only the direct child (P-07).
+  `process-wrap` is the candidate to evaluate for license, weight, advisories
+  and features (pending Q-11). **No approval, no external phase.**
+- Unix residual risk is documented: if Studio crashes, the group survives.
+  Recovery records group ID and start time, warns, and never kills a PID or
+  PGID that may have been reused.
+- Spawn with an argument vector and no shell. The environment is an
+  operating-system and runtime allowlist (for example `SystemRoot`, `PATH`,
+  `TEMP` on Windows; `HOME`, `LANG` on Unix) plus explicit passthrough. No
+  default `NODE_OPTIONS`, `PYTHONPATH` or `JYKRE_CONFIG_DIR` (P-19).
+- Execute a snapshot of the entrypoint, not the original path, and say
+  clearly that local imports, `node_modules` and runtimes found on `PATH`
+  are not frozen (P-24).
+- stdout and stderr are drained into bounded files; excess is discarded with a
+  marker. A full pipe never blocks the child or Studio (P-13).
+- Success is exit code 0; anything else, a timeout or Stop fails. Importing or
+  first running external code warns that it runs with the user's privileges
+  (pending Q-10).
 
-**CA-09 — Workflow:** SQL output feeds JavaScript; track each run and propagate cancellation/failure under policy.
+### 9.2 Phase 4 — Minimal `jjp/1`
 
-**CA-10 — Authenticated cache:** authorized identical `sfmc.auth` requests share a valid TTL reference and one concurrent generator. Different MIDs/credentials never incorrectly share.
+- One `127.0.0.1` listener, created on the first external run, never at
+  startup. One session per run, no reconnection, no batches.
+- NDJSON framing with a 1 MiB limit enforced before allocating. JSON-RPC 2.0
+  messages.
+- Authentication: a 256-bit per-run token, passed in the environment and
+  consumed atomically by `hello`; reuse fails. The token and inputs travel
+  only in the `hello` request and response (pending Q-12).
+- Jobs are **pure clients** (P-12): there is no `execute`, `accepted` or
+  `ping`. The host sends only a `cancel` notification.
 
-**CA-11 — Recovery:** reconcile incomplete runs/orphans after forced closure without false success.
+| Method | Direction | Kind | Purpose |
+| --- | --- | --- | --- |
+| `hello` | job → host | request | Authenticate; receive inputs, deadline and `max_message_bytes` |
+| `log` | job → host | notification | Append a log line (job log, not telemetry) |
+| `progress` | job → host | notification | 0–100 and an optional stage |
+| `complete` | job → host | request | Terminal intent with outputs |
+| `fail` | job → host | request | Terminal intent with a code and message |
+| `cancel` | host → job | notification | Cooperative cancellation before forced termination |
 
-**CA-12 — Portability:** MVP works on Windows/Linux/macOS with corresponding installed runtimes/drivers.
+- The host always drains the socket. Logs over quota are dropped and counted;
+  control and terminal messages are outside the quota. Persistent abuse ends
+  the run. Cancellation never waits for the job to read anything.
+- A terminal intent is decided by the run owner together with process exit
+  (section 5.5): `complete` followed by a nonzero exit fails.
+- A testable JavaScript example lives in `examples/`; there is no published
+  SDK until `jjp/1` is stable (D24, pending Q-13).
 
-### 20.3 Technical test matrix
+### 9.3 Phase 5 — Linear chain
 
-| Category | Required tests |
-| --- | --- |
-| Parser/framing | Partial/multiple chunks/frames, UTF-8, invalid JSON, newline, size limit |
-| RPC | Out-of-order IDs, unanswered calls, timeout, unknown methods, domain errors |
-| Authentication | Invalid/expired/reused tokens, pre-hello messages, concurrent connections |
-| Process | Spawn failure, exit code, hang, cancellation, large stdout/stderr, descendants |
-| SQL | Binds/types, dialects, `::`, strings/comments, multiple statements, limits, cancellation |
-| Transaction | Open console transaction, isolated session, transaction timeout, unusable connection after failure |
-| Workflow | Valid DAG, invalid cycle, parallel/conditional steps, retries, cascading failure/cancellation |
-| Security | Per-connection permission, unauthorized secrets/artifacts, forbidden HTTP hosts, symlinks/traversal |
-| Persistence | Migrations, crash between copy/index, restore, retention, expired cache |
-| UX | JSON Schema forms, non-modal questions, per-step outcomes, keyboard/accessibility |
-| Performance | RPC p95, concurrent throughput, CPU/RSS, event caps, GPUI impact |
+- Steps reference each other structurally (`from_step`, `from_output`,
+  `to_input`); no `${}` and no dependencies inferred from text (P-03, D25).
+- Published versions arrive here, so a chain pins what it runs. The whole
+  plan is confirmed once at start.
+- A step releases its session before the next step starts, so a chain never
+  waits on itself (P-14). Dynamic `jobs.run` stays excluded.
+- Queues arrive here, with limits the review proposed as 8/4/60 s, defined
+  precisely in this phase's revision.
+- Outputs are in memory unless Q-03 approves persistence (section 6.4).
+- Cancelling or failing a step cancels the rest of the chain.
 
-### 20.4 Performance goals
+### 9.4 Phase 6 — On-demand capabilities
 
-No absolute timings before real-hardware benchmarks. Establish MVP baselines:
+Each needs its own ADR before implementation.
 
-- Persistent TCP versus per-call connections; persistent is expected to win.
-- RPC without payload, with small payloads and at the maximum size.
-- 1, 10, 100 concurrent jobs within configured/environment capacity.
-- Native SQL versus the same console query, measuring engine overhead only.
-- Separate Node/Python startup time from RPC latency.
-- High-frequency GPUI updates without unnecessary ancestor redraws.
+- **Artifacts (D27, P-17):** sources are regular files inside the run
+  directory, copied through a verified handle without reopening the path;
+  quotas count while copying; staging, rename, commit and reconciliation; the
+  ID is returned only after confirmation.
+- **`ask` and `confirm`:** introduce `WaitingInput`; a question never blocks
+  readers or cancellation, and a late answer never changes a finished run.
+- **`db.query` from external jobs:** only with real enforcement of what it may
+  run (D26).
 
-Publish controlled-environment measurements; define numeric goals only after initial tests.
+### 9.5 Phase 7 — Evolution
 
-## 21. Open decisions
+Scheduling (consent, time zone, overlap and missed triggers; pending Q-14),
+cache and secret broker as separate stores with generations, TTL,
+consumer-ACL reevaluation and waiter cancellation (P-23, D28), references
+bound to origin, audience and authentication type with no redirects (P-16),
+HTTP, palette, SDK, other transports, sandboxing and an agent that runs
+while the application is closed. Each completes its semantics before a
+schema or protocol becomes stable.
 
-These **do not block** the domain-model structure, but must close before implementing the corresponding areas:
+### 9.6 Excluded until an explicit decision
 
-| ID | Question | Initial proposal |
+`native_flow`, dynamic `jobs.run`, subworkflows, parallel or conditional
+steps, retry and compensation, JSON Schema (only through a mature library
+when an external contract needs objects or arrays, P-20/P-25), loopback TLS,
+alternative transports and execution while the application is closed.
+
+## 10. Acceptance criteria
+
+| ID | Phase | Criterion |
 | --- | --- | --- |
-| DA-01 | Application-wide TCP listener or per-run listener? | One dynamic listener, per-run token |
-| DA-02 | Environment bootstrap token or inherited channel? | Temporary MVP variable; document risk/hardening |
-| DA-03 | Default JJP frame limit? | Configurable 1 MiB |
-| DA-04 | Default JSON output limit? | 2 MiB, excess as artifact |
-| DA-05 | Ship `shared_session`? | Not in MVP, `isolated` only |
-| DA-06 | Multiple SQL statements? | Reject in MVP; later explicit contract |
-| DA-07 | SDK `onExecute` or main callback? | `onExecute` following `job.execute` |
-| DA-08 | Exit without explicit terminal JJP? | Fail by default, opt-in implicit success |
-| DA-09 | Sensitive `ask` answers in history? | Metadata only, always masked content |
-| DA-10 | Token cache after close? | No; ephemeral cache only in memory |
-| DA-11 | Scheduling with app closed? | Future separate agent/supervisor |
-| DA-12 | Trusted versus untrusted runtimes? | MVP warning/permissions, later real sandbox |
-| DA-13 | Initial SDK languages? | JavaScript then Python; open JJP |
-| DA-14 | Visual workflows in MVP? | Declarative editor/execution first, advanced visual later |
-| DA-15 | Default retention/quotas? | Logs/artifacts 30 days, runs 90, configurable |
+| CA-01 | 1 | A SQL Job on PostgreSQL, MySQL, SQLite and Databricks binds its inputs, respects the dialect, shows rows and records the run without an external process. |
+| CA-02 | 1 | A run never commits, rolls back or changes the context of a transaction open in a tab of the same connection. |
+| CA-05 | 1 | *Rewritten.* The engine does not claim to block writes. A job on a database user without write privileges cannot write, and a production connection asks for confirmation as a tab does. |
+| CA-11 | 1 | After a forced exit, runs left `Running` become `Interrupted`, with `effect_unknown` when they may have written; none is replayed or reported as successful. |
+| CA-13 | 1 | No input value, cell, scalar or server message is stored in `automation.db`, logs or telemetry. |
+| CA-14 | 1 | A write whose result exceeds the row limit either completes and succeeds or ends with `effect_unknown`; it never succeeds on a partial page. |
+| CA-15 | 2 | Create, run, stop, fail and navigate with keyboard and focus; budgets in section 8.2 hold. |
+| CA-03 | 3 | stdout and stderr are captured without blocking; cancelling or timing out kills grandchildren. |
+| CA-07 | 3–4 | Exit 0 (or `complete` plus exit 0) succeeds; `fail`, nonzero exit, timeout or Stop produce one consistent state and cause. |
+| CA-04 | 4 | *Replaced.* Framing survives partial and joined chunks, invalid UTF-8 and oversized frames; invalid or reused tokens and duplicate terminals are rejected. |
+| CA-09 | 5 | A SQL output feeds a later step; cancellation and failure cascade; a global limit of 1 still progresses. |
+| CA-06 | 6 | `ask` enters `WaitingInput` and its timeout applies the job's policy. |
+| CA-08 | 6 | Artifacts are copied through verified handles, within quotas, and survive a crash between copy and index. |
+| CA-10 | 7 | Non-normative until phase 7 is specified (Appendix A). |
+| CA-12 | All | Each phase is validated on Windows, Linux and macOS separately. |
 
-## 22. Glossary
+## 11. Test matrix
 
-- **Job:** independent task with input/execution/output contract.
-- **SQL Job:** native execution by Jykre's SQL manager on a registered connection.
-- **Flow Job:** declarative actions executed in Rust.
-- **External Job:** external process in any language.
-- **Workflow:** DAG of chained jobs/data mappings.
-- **Run:** job/workflow execution instance.
-- **Artifact:** managed physical file with ID/metadata.
-- **Output:** structured JSON validated against schema.
-- **Input:** typed parameter validated before execution.
-- **JJP:** open external-job/Jykre protocol.
-- **JSON-RPC:** JSON calls/responses/notifications contract.
-- **TCP Loopback:** local-host TCP, usually `127.0.0.1`.
-- **SecretRef:** opaque authorized-secret reference hiding values from ordinary consumers.
-- **Singleflight:** identical concurrent requests merged into one generator.
-- **DAG:** directed acyclic dependency graph.
-- **TTL:** cache/temporary-credential validity period.
-- **Isolated session:** job SQL session independent of interactive console/editor.
+Every phase ends with `cargo xtask check`, plus `--full` when it changes
+drivers, execution contracts or dependencies. Tests use synthetic fixtures
+only. UI phases record a separate visual check of flow, keyboard and focus,
+and the measured budgets.
 
-## Implementation executive summary
+| Phase | Required tests |
+| --- | --- |
+| 1 | Binding with `::`, comments, strings and dollar quotes; multi-statement refusal; untouched tab transaction (CA-02); duplicate column names; exact decimals; `UPDATE … RETURNING` above the limit on each driver; no replay after timeout or Stop; disk failure before and after the terminal commit; second-instance lock; no values in SQLite (CA-13); admission limits and refusal |
+| 2 | Create, run, cancel, error and navigation flows; keyboard and focus; stall and publication budgets |
+| 3 | Grandchildren killed on Stop and timeout; ignored signals and inherited pipes cannot trap Studio; a sentinel variable is not inherited; newline-free output spam cannot exhaust memory or disk |
+| 4 | Framing across chunks and UTF-8 boundaries; preallocation cap; invalid and reused tokens; duplicate `hello`; conflicting terminals; disconnect; cancellation with a saturated queue; method allowlist; tokens absent from logs and OTLP |
+| 5 | SQL → SQL and SQL → process; cycles and missing inputs refused; cascading cancellation and failure; no deadlock at limit 1 |
+| 6 | Artifact TOCTOU, quotas and crash between copy and index; questions never block cancellation; late answers ignored |
 
-1. **Unified domain:** `JobDefinition`, `JobRun`, `WorkflowRun`, `Artifact`, states, SQLite.
-2. **Native SQL first:** reuse connections, editor, binds, drivers, results, cancellation without external processes.
-3. **External + JJP:** loopback TCP, auth handshake, JSON-RPC, JavaScript SDK, separate stdout/stderr.
-4. **Controlled capabilities:** logs, progress, SQL, timed questions, notifications, success/error, artifacts.
-5. **Workflows:** SQL/Flow/Script chaining, output/artifact references, failure/concurrency control.
-6. **Secure caching/tokens:** SFMC auth, `SecretRef`, TTL, singleflight, per-consumer authorization.
-7. **Operation:** UI, scheduling, history, retention, recovery, security tests, benchmarks.
+## 12. Decisions required from the maintainer
 
-**Expected outcome:** reusable SQL queries, external scripts or native flows with declared inputs/permissions, manual/on-demand execution and results/files visible in Jykre. Definitions can become workflow steps, child calls or application commands, with consistent traceability and security.
+| ID | Question | Proposal | Blocks | Status |
+| --- | --- | --- | --- | --- |
+| Q-01 | First indispensable flow: reusable manual SQL, SQL → script, or an SFMC/HTTP connector? | Manual SQL Job (D01) | Phase 0 | Pending |
+| Q-02 | Approve the automation ADR: `automation.db`, minimal schema, recorded run data (D05, D14–D16)? | Approve as in section 6 | Phase 1 | Pending |
+| Q-03 | Allow persisting declared scalar outputs by ADR, with which defaults? | D29; no values without an ADR | Phase 5 | Pending |
+| Q-04 | Approve minimal pure automation DTOs in `jykre-core`? | Approve | Phase 1 | Pending |
+| Q-05 | Application-root service and coordinated quit, deviating from view-owned cancellation? | Accept D07 | Phase 1 | Pending |
+| Q-06 | A second instance on the same data directory cannot run automation? | Accept D17 | Phase 1 | Pending |
+| Q-07 | 2 global runs, 1 per connection, immediate refusal and a 300 s timeout? | Confirm, measure, revisit | Phase 1 | Pending |
+| Q-08 | Typed remote-completion metadata in `DriverOutcome`, or conservative uncertainty? | Conservative in phase 1; the PoC measures the need | Phase 1 (optional) | Pending |
+| Q-09 | Keep `native_flow`, or replace it with linear chaining? | Replace; if revived, compile it to the same plan | Roadmap | Pending |
+| Q-10 | Treat external code as explicitly trusted, with the UI explaining that grants protect Studio APIs, not the machine? | Yes; warn on import and first run | Phase 3 | Pending |
+| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | Pending |
+| Q-12 | Accept per-run IPC tokens in the environment, visible to same-user processes during the run? | Accept, with `hello` consumption and documented risk | Phase 4 | Pending |
+| Q-13 | Keep the SDK out of the repository until `jjp/1` stabilizes? | Yes (D24) | Phase 4 | Pending |
+| Q-14 | Durable scheduling consent and execution while the application is closed? | Design with scheduling | Phase 7 | Pending |
+
+The review's design register (D01–D29) and its trade-offs remain in
+[its section 4](../research/automation-engine-architecture-review.md#4-recommended-design-and-trade-offs);
+each D-ID cited here applies that row.
+
+## 13. Glossary
+
+- **Job:** a saved definition of work with typed inputs.
+- **SQL Job:** a job that runs one statement through the existing drivers.
+- **Run:** one execution of a job, with a state, a cause and counters.
+- **Draft run:** a run of unsaved editor content.
+- **Run snapshot:** what a run executes, frozen at admission, without values.
+- **Run owner:** the engine task that alone decides a run's terminal state.
+- **`effect_unknown`:** the engine could not confirm whether the statement or
+  process finished its side effects.
+- **Pinned context:** the database, catalog and schema stored in the definition
+  and applied to every run's new session.
+- **`jjp/1`:** the minimal protocol for external programs (phase 4).
+- **Chain:** a linear sequence of jobs whose outputs feed later inputs
+  (phase 5).
+
+## Appendix A — Future scenarios (non-normative)
+
+Version 1.0 used Salesforce Marketing Cloud (SFMC) to illustrate the later
+phases. The scenarios remain useful as targets, not as contracts:
+
+| Scenario | Needs | Constraints that still apply |
+| --- | --- | --- |
+| Look up a Data Extension address with SQL against a catalog table | Phase 1–2 only | This is the first delivery's natural example; no palette until phase 7 |
+| Authenticate once and reuse the token in several jobs | Phase 7 cache and secret broker | The token is never an ordinary output; references are bound to origin, audience and authentication type; no redirects |
+| Look up and export a Data Extension from a script | Phases 3–6 | The script must not log input values; HTTP from the script is the process's own and is not restricted by grants |
+| Ask before exporting many rows | Phase 6 `ask` | A declined answer is a business outcome, not an infrastructure failure |
+
+## Appendix B — Traceability from version 1.0
+
+| 1.0 section | Disposition in 1.1 | Finding |
+| --- | --- | --- |
+| §1.2 Consolidated decisions | Kept: native SQL, loopback, NDJSON, per-run token. Removed: JSON Schema subset, credential fallback, DAG workflows, separate data root | P-03, P-10, P-11, P-20 |
+| §1.4 Non-goals | Kept and extended (section 1.3) | P-03 |
+| §2.1 RF-001…RF-018 | Phased (section 2.1); RF-014, RF-016, RF-018 excluded | P-03 |
+| §3 Conceptual model | Reduced to phase 1 entities; versions move to phase 5 | P-21 |
+| §4 User experience | Three tabs, editor reuse, budgets (section 8) | P-26 |
+| §5 Definitions and versioning | Canonical JSON, run snapshots, version grammar | P-21, P-25, P-28 |
+| §6.1 SQL Job definition | Fixed behaviour; pinned context; 300 s | P-04, P-29 |
+| §6.2 Binding | `parameters::bind`, no JSON Schema | P-20 |
+| §6.3 Structured result | In memory; ordered, exact representation | P-01, P-06 |
+| §6.4 Sessions and transactions | New session per run, autocommit, no `shared_session` | P-02, P-04 |
+| §6.5 Multiple statements and large results | One statement; completion rule | P-05 |
+| §7 External jobs | Phase 3, supervision prerequisite, environment allowlist | P-07, P-19, P-24 |
+| §8 JJP | Minimal `jjp/1`, jobs as pure clients | P-12, P-13, P-30 |
+| §9 Capabilities and SDK | Phase 4–6; JS example only | P-12, P-30 |
+| §10 Inputs, outputs, interaction | `ParameterSpec`; no persisted values; `ask` in phase 6 | P-01, P-20 |
+| §11 Workflows | Linear chain in phase 5; no `${}`, no `native_flow` | P-03, P-14 |
+| §12 Cache and credentials | Phase 7; separate stores; destination-bound references; no fallback | P-11, P-16, P-23 |
+| §13 Artifacts | Phase 6 with ADR and verified handles | P-17 |
+| §14 Persistence and layout | `automation.db` in the existing data directory; no file tree | P-01, P-10 |
+| §15 States and rules | Five persisted states, causes, `effect_unknown`, run owner | P-08, P-09, P-22 |
+| §16 Security | Section 7; CA-05 rewritten | P-02, P-15, P-18 |
+| §17 Rust architecture | Existing crates, enums, no new trait or crate | P-10 |
+| §18 Examples | Appendix A, non-normative; 18.2 must not log inputs | P-03, P-18 |
+| §19 Operation and recovery | Lock, `Interrupted`, no replay; no v1 metrics | P-09, P-13 |
+| §20 Roadmap and acceptance | Sections 2, 10 and 11 | P-03 |
+| §21 Open decisions DA-01…DA-15 | Answered by sections 4–9 or folded into Q-01…Q-14 | — |

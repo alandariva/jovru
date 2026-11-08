@@ -71,7 +71,8 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | --- | --- |
 | [Technical debt](plans/technical-debt.md) | Accepted debts, severity, status and completion criteria |
 | [Version 0.2.0](plans/releases/0.2.0.md) | Daily-use hardening, application icon, Linux validation and release acceptance |
-| [Automation engine specification](plans/automation-engine-specification.md) | Version 1.0 proposal; not implemented or approved by this reorganization |
+| [Automation engine specification](plans/automation-engine-specification.md) | Version 1.1 proposal consolidating the architecture review; manual SQL Job first, decisions still open |
+| [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes |
 | [SQL catalog proposal](plans/sql-catalog-proposal.md) | Original format proposal and future standalone catalog repository; see the reference for current behavior |
 
 ### Research and decisions
