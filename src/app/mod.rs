@@ -173,6 +173,9 @@ actions!(
         /// Ctrl+/ in the SQL editor: comments the selected lines (or the
         /// caret's line) with `--`, or uncomments them.
         ToggleComment,
+        /// Ctrl+G in the SQL editor: asks for a line, and optionally a
+        /// column, and moves the cursor there.
+        GoToLine,
         /// Shift+F10 in the explorer: the selected node's context menu.
         ExplorerContextMenu,
         /// Ctrl+F in the explorer: the quick search marks its matches or
@@ -3753,6 +3756,8 @@ pub fn run() {
             KeyBinding::new("ctrl-shift-e", ExportResult, None),
             KeyBinding::new("ctrl-shift-e", ExportResult, Some(&editor)),
             KeyBinding::new("ctrl-/", ToggleComment, Some(&editor)),
+            // Bound by none of the editor component's keys (gpui-base 0.9.0).
+            KeyBinding::new("ctrl-g", GoToLine, Some(&editor)),
             KeyBinding::new("ctrl-t", NewTab, None),
             KeyBinding::new("ctrl-t", NewTab, Some(&editor)),
             KeyBinding::new("ctrl-,", ShowPreferences, None),

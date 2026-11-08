@@ -473,7 +473,12 @@ Rules:
 | Run every panel of the report on screen | `Ctrl Alt Enter` |
 | In a query tab's parameter field: run what `Ctrl Enter` runs (the selection or the statement at the cursor) | `Enter` |
 | Show the editor's suggestions at the cursor, also with nothing typed | `Ctrl Space` |
-| SQL editor (a query's or a report's): comment the selected lines, or the cursor's line, with `--`, or take the comment out when all of them are comments (one step for `Ctrl Z`) | `Ctrl /` |
+| SQL editor (a query tab's, a report panel's or a SQL Job's): comment the selected lines, or the cursor's line, with `--`, or take the comment out when all of them are comments (one step for `Ctrl Z`) | `Ctrl /` |
+| SQL editor, while it has the keyboard: search the SQL in the editor's search bar, which starts from the selected text; the matches are marked in the text | `Ctrl F` |
+| SQL editor: the same search bar with its replace field (replace the current match or all of them; `Tab` moves between the two fields, `Ctrl H` in the bar shows or hides the replace field) | `Ctrl H` |
+| SQL editor's search bar: the next or previous match, close it and give the keyboard back to the editor | `Enter`, `Shift Enter`, `Esc` |
+| SQL editor: go to a line, typed as `12` or with a column as `12:5` (or `12,5`) in a small field over the editor's top right corner (it closes the editor's search bar, which sits there); `Enter` puts the cursor there, scrolled into view, and gives the keyboard back to the editor; a column past the line's end stops at its end; a line past the text goes to the start of the last line and the notice bar says so; text that is not a line is named under the field. `Esc` closes the field and gives the keyboard back to the editor; a click elsewhere closes it | `Ctrl G` |
+| SQL editor: add a cursor on the line above or below; what is typed then goes to every cursor, and `Esc` leaves a single one | `Ctrl Alt ↑`, `Ctrl Alt ↓` on Windows; `Shift Alt ↑`, `Shift Alt ↓` on Linux |
 | Open or close the export bar of the result on screen | `Ctrl Shift E` |
 | Search tables in the local cache | `Ctrl Shift P` |
 | Search: choose a match, open it | `↑`, `↓`, `Enter` |
@@ -496,7 +501,7 @@ Rules:
 | Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
 | Explorer: the selected node's context menu | `Shift F10` |
 | Explorer: quick search, typing a name while the tree has the keyboard: the next or previous match (wrapping; every node while nothing is typed), open the selected match as `Enter` does, take back a character, close | Letters, `↓`, `↑`, `Enter`, `Backspace`, `Esc` |
-| Explorer: the quick search marks its matches or shows only them (opens it when closed) | `Ctrl F` |
+| Explorer, while the tree has the keyboard: the quick search marks its matches or shows only them (opens it when closed) | `Ctrl F` |
 | Explorer search field: clear the text, then give the keyboard to the tree; go to the tree | `Esc`, `↓` |
 | Explorer: the table's Data view, which reads its rows at once (`SELECT * FROM` it, without a `LIMIT`, page by page); a Data view already open for the table is shown instead (**New query for table** in its menu opens another tab with `SELECT * … LIMIT` the row limit, not run). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` |
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
@@ -515,6 +520,14 @@ Shortcuts are GPUI actions in one keymap ([UI guidelines](../standards/ui-guidel
 A new shortcut updates this table, avoids keys the editor already uses, and
 works without the mouse.
 
+`Ctrl F` acts where the keyboard is: in a SQL editor it opens that editor's
+search, on the explorer's tree it marks or filters the quick search, and
+elsewhere (the result grid, a text field, a dialog) it does nothing. Search,
+replace and multiple cursors belong to the editor component (`EditorState`
+of `gpui-base`), which binds their keys itself, in every SQL editor alike:
+a query tab, a report panel and a SQL Job's editor. They are listed in
+**Preferences › Shortcuts** with the keys of the platform it runs on.
+
 ## Error messages
 
 Every error follows the same shape:
@@ -528,8 +541,17 @@ Every error follows the same shape:
    connection").
 4. **Copy details** ([Reliability](../standards/reliability.md#diagnostics-for-users)).
 
-When the database reports the position of a syntax error, the editor marks
-it and moves the cursor there. Avoid generic messages ("Unknown error"),
+When the database reports the position of an error, the editor marks it
+and moves the cursor there, and the error names its line and column in the
+statement. PostgreSQL sends the position itself. MySQL and Databricks write
+it only into the message, so their drivers read it from there: MySQL's
+syntax errors quote the statement from the token they stopped at (`near
+'…' at line n`), found in the statement on that line; Databricks gives a
+line and a character (`line 1, pos 9`, `line 1 pos 14`, or a query context
+`== SQL(line 1, position 15) ==`, but not a view's). A statement whose
+`:name` parameters the driver wrote into its text before sending it (MySQL,
+a Databricks cluster) is not marked, since the position would be in a text
+the user did not write. Avoid generic messages ("Unknown error"),
 stack traces and modal dialogs for query errors.
 
 ## Text and terminology
@@ -562,5 +584,5 @@ interactive elements expose a role, a label and their state. Details are in
 
 | Standard | Current code |
 | --- | --- |
-| Syntax error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message |
-| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines and the explorer's context menu and quick search mode are actions ([UI guidelines](../standards/ui-guidelines.md#known-deviations)). Stopping a run (`Ctrl F2`), reopening a closed tab (`Ctrl Shift T`), opening and saving files (`Ctrl O`, `Ctrl S`, `Ctrl Shift S`) are actions too |
+| Error position marked in the editor | PostgreSQL reports a position; MySQL and Databricks give it only inside the message, and their drivers read it from there (since 0.3.0 A9). MySQL quotes only syntax errors, so its other errors (an unknown column, a missing table) are not marked. Not marked either: a MySQL or Databricks cluster statement with `:name` parameters, whose text the driver changed. PostgreSQL's position with `:name` parameters is in the text sent, with each marker replaced, so it lands off by the difference in length when a parameter comes before the error |
+| Shortcuts as actions in one keymap | Only the three run shortcuts, closing a tab, a new tab (`Ctrl T`), moving to the next or previous tab, Preferences (`Ctrl ,`), the export bar, commenting lines, going to a line (`Ctrl G`) and the explorer's context menu and quick search mode are actions ([UI guidelines](../standards/ui-guidelines.md#known-deviations)). Stopping a run (`Ctrl F2`), reopening a closed tab (`Ctrl Shift T`), opening and saving files (`Ctrl O`, `Ctrl S`, `Ctrl Shift S`) are actions too |

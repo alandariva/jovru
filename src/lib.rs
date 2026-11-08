@@ -18,6 +18,7 @@ pub mod error_report;
 pub mod explorer;
 pub mod export;
 pub mod favorites;
+pub mod go_to_line;
 pub mod grid;
 pub mod grouped_tabs;
 pub mod guard;

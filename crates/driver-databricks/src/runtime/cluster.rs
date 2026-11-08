@@ -665,7 +665,15 @@ impl Session for ClusterSession {
             .await?;
             self.requested = context;
         }
-        let value = self.run(&sql, &cancel, deadline).await?;
+        // A failed command's position is found in the statement only where
+        // that is the text the user wrote: markers become literals here.
+        let value = self.run(&sql, &cancel, deadline).await.map_err(|error| {
+            if sql == request.sql {
+                crate::position::locate(error, &sql)
+            } else {
+                error
+            }
+        })?;
         if let Some(change) = use_statement(&request.sql) {
             self.apply(change);
         }

@@ -297,6 +297,14 @@ which a GPU does not have.
   reading the outline of a 4 MiB script takes 145 ms (off the UI thread);
   relexing a 10 MB script after a keystroke takes 3.8 ms in place, against
   52.7 ms for building a new list of its tokens as the highlighter did.
+- **Go to line** (`Ctrl G`, 0.3.0 A9) computes nothing per frame: its
+  prompt is an entity drawn only while open, and going reads the rope's
+  line count and the target line's start (`lines_len`,
+  `position_to_offset`, logarithmic in the text) once, then moves the
+  cursor with the editor's own `set_cursor_position`, which scrolls it into
+  view. The text is never copied. Not yet measured in a file above
+  256 KiB; the move may meet the editor component's click cost noted in
+  *Known deviations* below.
 
 #### On the reference machine, 2026-11-08
 

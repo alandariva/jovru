@@ -7,8 +7,11 @@
 //! connection, the names of its cache and the tab's context), so the
 //! features can be removed or replaced here without touching what runs
 //! queries ([ADR-0020](../../../docs/adr/0020-editor-language-features-in-their-own-crates.md)).
+mod go_to_line;
 mod highlighter;
 mod providers;
+
+pub use go_to_line::GoToLine;
 
 use super::ui::{Feedback, Tone};
 use gpui_kit::component::input::EditorState;
@@ -509,6 +512,63 @@ impl SqlEditor {
             }
         })
         .detach();
+    }
+
+    /// The number of lines of the editor's text, as its gutter numbers
+    /// them; the rope knows it without reading the text.
+    pub fn line_count(&self, cx: &App) -> usize {
+        use gpui_kit::component::RopeExt as _;
+        self.editor
+            .upgrade()
+            .map_or(1, |editor| editor.read(cx).text().lines_len())
+    }
+
+    /// Closes the editor's search bar, keeping its text for the next one.
+    pub fn close_search(&self, cx: &mut App) {
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| editor.close_search(cx));
+        }
+    }
+
+    /// Gives the keyboard to the editor.
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
+        }
+    }
+
+    /// Go to line: puts the cursor on `target`'s line and column (the end
+    /// of the line when it is shorter), scrolled into view, with the
+    /// keyboard in the editor. A line past the text goes to the last one,
+    /// and the notice says so. Only the rope's line index is read, so the
+    /// cost does not grow with the text.
+    pub fn go_to(
+        &mut self,
+        target: jykre::go_to_line::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.editor.upgrade() else {
+            return;
+        };
+        let lines = self.line_count(cx);
+        let place = jykre::go_to_line::place(target, lines);
+        editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(
+                gpui_kit::component::input::Position::new(
+                    u32::try_from(place.line).unwrap_or(u32::MAX),
+                    u32::try_from(place.column).unwrap_or(u32::MAX),
+                ),
+                window,
+                cx,
+            );
+        });
+        if place.past_end {
+            cx.emit(SqlEditorEvent::Notice(Feedback::new(
+                Tone::Info,
+                jykre::go_to_line::past_end_notice(target, lines),
+            )));
+        }
     }
 
     /// Ctrl+/: comments the lines the selection touches (or the caret's

@@ -9,6 +9,7 @@ pub use runtime::{ComputeResource, list_compute};
 
 use jykre_core::*;
 mod auth;
+mod position;
 mod runtime;
 
 #[derive(Debug, Default)]

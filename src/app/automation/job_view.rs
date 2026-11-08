@@ -16,7 +16,7 @@ use super::history::{HistoryEvent, HistoryList};
 use super::words::{self, Level, Line};
 use super::{FRAME, JobSources, Jobs, logic, source_of, whole};
 use crate::app::result_grid::ResultGrid;
-use crate::app::sql_editor::{SqlCatalogs, SqlEditor, SqlEditorEvent};
+use crate::app::sql_editor::{GoToLine, SqlCatalogs, SqlEditor, SqlEditorEvent};
 use crate::app::ui::*;
 use gpui_kit::component::input::{EditorState, InputEvent, InputState};
 use gpui_kit::{prelude::FluentBuilder as _, *};
@@ -120,6 +120,8 @@ struct ValueField {
 struct SqlFields {
     editor: Entity<EditorState>,
     sql_editor: Entity<SqlEditor>,
+    /// The editor's **Go to line** prompt (`Ctrl G`).
+    go_to_line: Entity<GoToLine>,
     max_rows: Entity<InputState>,
     /// The lines where statements beyond the first start.
     extra: Vec<usize>,
@@ -522,9 +524,11 @@ impl JobView {
                         }
                     },
                 ));
+                let go_to_line = cx.new(|_| GoToLine::new(&sql_editor));
                 self.sql = Some(SqlFields {
                     editor,
                     sql_editor,
+                    go_to_line,
                     max_rows,
                     extra: Vec::new(),
                     revision: 0,

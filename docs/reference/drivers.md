@@ -267,6 +267,18 @@ fresh token.
   says the driver stopped before the end and the rest cannot be read.
   PostgreSQL and MySQL keep the connection in a task of its own that holds
   the row stream between pages.
+- A database error keeps the server's own message and its codes in
+  `ServerDiagnostic`, with the error's `position` (one-based, in characters,
+  in the statement as sent) when the driver knows it. PostgreSQL sends it.
+  MySQL and Databricks write it only into the message, and their drivers
+  read it from there (`position.rs` in each crate, unit-tested on the
+  servers' message shapes): MySQL from a syntax error's `near '<the rest of
+  the statement>' at line <n>`, found in the statement on that line;
+  Databricks from `(line <n>, pos <c>)`, `; line <n> pos <c>` (a zero-based
+  character) or a query context `== SQL(line <n>, position <c>) ==`
+  (one-based), but not from a view's context. Neither sets it when it wrote
+  `:name` parameters into the statement's text, since the position would
+  then be in a text the user did not write. SQLite gives none.
 - A session lives as long as its tab and runs many statements. A failed
   statement does not end it: the driver restores the protocol (cancelling the
   statement on the server when it may still run) or closes the session.

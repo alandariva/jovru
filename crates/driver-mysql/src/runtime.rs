@@ -581,6 +581,16 @@ impl Server {
             self.database = apply;
         }
         let sql = request.with_references(parameter_reference);
+        // A syntax error's position is read from its message and found in
+        // the statement; only where that is the text the user wrote, since
+        // the position is in the statement as sent.
+        let locate = |(error, unfinished): Stop| -> Stop {
+            if sql == request.sql {
+                (crate::position::locate(error, &sql), unfinished)
+            } else {
+                (error, unfinished)
+            }
+        };
         if let Some(set) = bind_statement(&request.parameters) {
             let bound = self
                 .step(&Limit::new(&cancel, options.timeout), async {
@@ -635,7 +645,7 @@ impl Server {
             {
                 Vec::new()
             }
-            Err(stopped) => return self.fail(connection, stopped, &events).await,
+            Err(stopped) => return self.fail(connection, locate(stopped), &events).await,
         };
         let describe = if columns.is_empty() {
             Describe::FromRows
@@ -715,7 +725,7 @@ impl Server {
                 }
                 Err(stopped) => {
                     drop(stream);
-                    return self.fail(connection, stopped, &events).await;
+                    return self.fail(connection, locate(stopped), &events).await;
                 }
             }
         }

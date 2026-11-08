@@ -12,7 +12,7 @@
 use super::copying::{self, CopyJob, CopyWhat};
 use super::report_chart::ReportChart;
 use super::result_grid::ResultGrid;
-use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
+use super::sql_editor::{GoToLine, NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
 use super::ui::*;
 use super::workspace::SQL_EDITOR_CONTEXT;
 use gpui_kit::assets::IconName as I;
@@ -243,6 +243,8 @@ impl copying::CopyHost for ReportPanel {
 struct PanelEditor {
     editor: Entity<EditorState>,
     sql_editor: Entity<SqlEditor>,
+    /// The editor's **Go to line** prompt (`Ctrl G`).
+    go_to_line: Entity<GoToLine>,
     /// The catalogs and names last handed to the editor, so they are not
     /// installed again for nothing.
     catalogs: Option<Arc<SqlCatalogs>>,
@@ -511,9 +513,11 @@ impl ReportPanel {
                 }
             }),
         ];
+        let go_to_line = cx.new(|_| GoToLine::new(&sql_editor));
         self.editor = Some(PanelEditor {
             editor,
             sql_editor,
+            go_to_line,
             catalogs: None,
             names: None,
             _subscriptions: subscriptions,
@@ -1188,19 +1192,33 @@ impl ReportPanel {
             )
             .child(
                 div()
-                    .h(px(EDITOR_HEIGHT))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgb(colors().border))
-                    .key_context(SQL_EDITOR_CONTEXT)
-                    .on_action(cx.listener(|this, _: &super::ToggleComment, window, cx| {
-                        if let Some(editor) = &this.editor {
-                            editor
-                                .sql_editor
-                                .update(cx, |editor, cx| editor.toggle_comment(window, cx));
-                        }
-                    }))
-                    .child(Editor::new(&editor.editor).h_full()),
+                    .relative()
+                    .child(
+                        div()
+                            .h(px(EDITOR_HEIGHT))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(rgb(colors().border))
+                            .key_context(SQL_EDITOR_CONTEXT)
+                            .on_action(cx.listener(|this, _: &super::ToggleComment, window, cx| {
+                                if let Some(editor) = &this.editor {
+                                    editor
+                                        .sql_editor
+                                        .update(cx, |editor, cx| editor.toggle_comment(window, cx));
+                                }
+                            }))
+                            .on_action(cx.listener(|this, _: &super::GoToLine, window, cx| {
+                                if let Some(editor) = &this.editor {
+                                    editor
+                                        .go_to_line
+                                        .update(cx, |prompt, cx| prompt.open(window, cx));
+                                }
+                            }))
+                            .child(Editor::new(&editor.editor).h_full()),
+                    )
+                    // Outside the editor's key context: the run shortcuts do
+                    // not apply in the prompt's field.
+                    .child(editor.go_to_line.clone()),
             )
             .child(self.visual_controls(cx))
             .when_some(

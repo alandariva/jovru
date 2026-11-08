@@ -310,23 +310,41 @@ impl JobView {
             ))
             .child(
                 div()
-                    .h(px(220.))
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgb(if fields.extra.is_empty() {
-                        colors().border
-                    } else {
-                        colors().amber
-                    }))
-                    .key_context(SQL_EDITOR_CONTEXT)
-                    .on_action(cx.listener(|this, _: &crate::app::ToggleComment, window, cx| {
-                        if let Some(fields) = &this.sql {
-                            fields
-                                .sql_editor
-                                .update(cx, |editor, cx| editor.toggle_comment(window, cx));
-                        }
-                    }))
-                    .child(Editor::new(&editor).h_full()),
+                    .relative()
+                    .child(
+                        div()
+                            .h(px(220.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(rgb(if fields.extra.is_empty() {
+                                colors().border
+                            } else {
+                                colors().amber
+                            }))
+                            .key_context(SQL_EDITOR_CONTEXT)
+                            .on_action(cx.listener(
+                                |this, _: &crate::app::ToggleComment, window, cx| {
+                                    if let Some(fields) = &this.sql {
+                                        fields.sql_editor.update(cx, |editor, cx| {
+                                            editor.toggle_comment(window, cx)
+                                        });
+                                    }
+                                },
+                            ))
+                            .on_action(cx.listener(
+                                |this, _: &crate::app::GoToLine, window, cx| {
+                                    if let Some(fields) = &this.sql {
+                                        fields
+                                            .go_to_line
+                                            .update(cx, |prompt, cx| prompt.open(window, cx));
+                                    }
+                                },
+                            ))
+                            .child(Editor::new(&editor).h_full()),
+                    )
+                    // Outside the editor's key context, like the editor's
+                    // own shortcuts.
+                    .child(fields.go_to_line.clone()),
             )
             .when_some(logic::statements_note(&fields.extra), |s, text| {
                 s.child(

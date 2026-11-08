@@ -1348,7 +1348,14 @@ impl Session for DatabricksSession {
                         response = self.client.request(Method::GET, &path, &[], None).await?;
                     }
                     Some("CANCELED") => return Err(DriverError::cancelled()),
-                    _ => return Err(statement_error(&response["status"]["error"])),
+                    // Parameters travel apart from the statement, so the
+                    // text sent is the request's.
+                    _ => {
+                        return Err(crate::position::locate(
+                            statement_error(&response["status"]["error"]),
+                            &request.sql,
+                        ));
+                    }
                 }
             }
             // Statements without a result (USE, DDL) may leave the column
@@ -2096,6 +2103,39 @@ mod tests {
         let bare = statement_error(&json!(null));
         assert_eq!(bare.message, "Databricks SQL statement failed");
         assert_eq!(bare.server, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_statement_is_marked_where_the_message_says() {
+        let failed = json!({"statement_id":"abd","status":{"state":"FAILED","error":{
+            "error_code":"BAD_REQUEST",
+            "message":"[PARSE_SYNTAX_ERROR] Syntax error at or near 'FORM'. SQLSTATE: 42601 (line 2, pos 2)\n\n== SQL ==\nSELECT *\n  FORM orders\n--^^^\n"
+        }}});
+        let (client, task) = fixture(vec![(200, failed), (200, json!({}))]).await;
+        struct Ignore;
+        impl RowSink for Ignore {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                SinkControl::Continue
+            }
+            fn row(&mut self, _: Row) -> SinkControl {
+                SinkControl::Continue
+            }
+        }
+        let mut session = DatabricksSession::new(client);
+        let request = QueryRequest {
+            parameters: Vec::new(),
+            sql: "SELECT *\n  FORM orders".into(),
+            options: ExecutionOptions::default(),
+        };
+        let error = session
+            .execute(&request, &mut Ignore, CancellationToken::new())
+            .await
+            .unwrap_err();
+        let server = error.server.unwrap();
+        assert_eq!(server.sqlstate.as_deref(), Some("42601"));
+        // `FORM`: the third character of the second line.
+        assert_eq!(server.position, Some(12));
+        task.await.unwrap();
     }
 
     #[tokio::test]

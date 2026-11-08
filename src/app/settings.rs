@@ -696,6 +696,16 @@ fn sql_preview() -> StyledText {
     StyledText::new(PREVIEW_SQL).with_highlights(highlights)
 }
 
+/// The editor component's keys for adding a cursor on the line above or
+/// below (`gpui-base`'s `AddCursorAbove` and `AddCursorBelow`), which differ
+/// by platform: Linux desktops may reserve `Ctrl Alt` with the arrows.
+#[cfg(target_os = "windows")]
+const ADD_CURSOR_KEYS: &str = "Ctrl Alt ↑ / ↓";
+#[cfg(target_os = "macos")]
+const ADD_CURSOR_KEYS: &str = "Cmd Alt ↑ / ↓";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const ADD_CURSOR_KEYS: &str = "Shift Alt ↑ / ↓";
+
 /// Every shortcut of the window, by where it works
 /// ([User experience](../../docs/reference/ux.md#keyboard-shortcuts)).
 fn shortcuts_page() -> Div {
@@ -728,6 +738,14 @@ fn shortcuts_page() -> Div {
                 (tr!("Run every statement"), "Ctrl Alt ↵"),
                 (tr!("Show suggestions"), "Ctrl Space"),
                 (tr!("Comment or uncomment lines"), "Ctrl /"),
+                (tr!("Search in the SQL"), "Ctrl F"),
+                (tr!("Search and replace in the SQL"), "Ctrl H"),
+                (
+                    tr!("In the search: next or previous match, close"),
+                    "Enter / Shift Enter / Esc",
+                ),
+                (tr!("Add a cursor above or below"), ADD_CURSOR_KEYS),
+                (tr!("Go to a line, or a line and a column"), "Ctrl G"),
             ],
         ),
         (
@@ -753,6 +771,9 @@ fn shortcuts_page() -> Div {
     column()
         .flex_none()
         .gap_4()
+        .child(label(tr!(
+            "Ctrl F works where the keyboard is: in a SQL editor it searches the SQL, in the explorer it marks or filters the quick search."
+        )))
         .children(groups.into_iter().map(|(title, shortcuts)| {
             setting_section(title).child(column().children(shortcuts.iter().map(
                 |&(action, keys)| {

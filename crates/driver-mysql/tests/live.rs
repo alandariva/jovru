@@ -370,6 +370,26 @@ async fn live_connection_queries_metadata_and_timeout() {
     let server = failed.server.clone().unwrap();
     assert_eq!(server.vendor_code.as_deref(), Some("1146"));
     assert_eq!(server.sqlstate.as_deref(), Some("42S02"));
+    assert_eq!(server.position, None);
+    assert_kept(&mut session).await;
+    // A syntax error gives no position of its own; the driver finds the
+    // token MySQL quotes in the message: the second `FROM`, on the second
+    // line.
+    let failed = session
+        .execute(
+            &QueryRequest {
+                parameters: Vec::new(),
+                sql: "SELECT 1 AS n,\n  2 FROM FROM dual".into(),
+                options: ExecutionOptions::default(),
+            },
+            &mut Sink::default(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    let server = failed.server.clone().unwrap();
+    assert_eq!(server.vendor_code.as_deref(), Some("1064"), "{failed:?}");
+    assert_eq!(server.position, Some(25), "{failed:?}");
     assert_kept(&mut session).await;
     // A long result cut by the row limit, then one cancelled while its rows
     // stream: the rest is drained or stopped, and the session is kept.

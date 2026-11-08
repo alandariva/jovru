@@ -4,7 +4,7 @@ use super::assistant_panel::{
 use super::demo::{self, SALES_SQL, sample_result};
 use super::layout::{ASSISTANT_WIDTH, EDITOR_MIN_WIDTH, splitter};
 use super::result_grid::{GridSql, ResultGrid, ResultGridEvent, Summary};
-use super::sql_editor::{NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
+use super::sql_editor::{GoToLine, NameIndex, SqlCatalogs, SqlEditor, SqlEditorEvent};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{
@@ -146,6 +146,8 @@ pub struct Workspace {
     /// Highlighting, completion, hover, go to definition and Format: the
     /// editor's language features, told what they need by the tab.
     sql_editor: Entity<SqlEditor>,
+    /// The editor's **Go to line** prompt (`Ctrl G`), closed until asked.
+    go_to_line: Entity<GoToLine>,
     /// The result grid, its own entity ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
     grid: Entity<ResultGrid>,
     /// Visible cells selected in the grid, as it last reported.
@@ -230,6 +232,7 @@ impl Workspace {
         });
         // Highlighting, completion, hover, go to definition and Format.
         let sql_editor = cx.new(|cx| SqlEditor::new(&editor, cx));
+        let go_to_line = cx.new(|_| GoToLine::new(&sql_editor));
         let sql_editor_subscription = cx.subscribe(
             &sql_editor,
             |this, _, event: &SqlEditorEvent, cx| match event {
@@ -394,6 +397,7 @@ impl Workspace {
             context: SessionContext::default(),
             context_choices: Vec::new(),
             sql_editor,
+            go_to_line,
             grid,
             selected_cells: 0,
             selection_summary: Summary::default(),
@@ -2350,6 +2354,10 @@ impl Workspace {
                                 this.sql_editor
                                     .update(cx, |editor, cx| editor.toggle_comment(window, cx));
                             }))
+                            .on_action(cx.listener(|this, _: &super::GoToLine, window, cx| {
+                                this.go_to_line
+                                    .update(cx, |prompt, cx| prompt.open(window, cx));
+                            }))
                             .flex_1()
                             .min_w_0()
                             .h_full()
@@ -2374,7 +2382,10 @@ impl Workspace {
                             .top_0()
                             .h_full()
                             .child(self.query_gutter(cx)),
-                    ),
+                    )
+                    // Over the editor, outside its key context, so the run
+                    // shortcuts do not apply in the prompt's field.
+                    .child(self.go_to_line.clone()),
             )
             .child(
                 row()
