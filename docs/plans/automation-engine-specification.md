@@ -4,8 +4,8 @@
 **Date:** November 8, 2026 (1.1: November 7, 2026)
 **Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
 Q-01…Q-14 ([section 12](#12-decisions-required-from-the-maintainer)),
-ADR-0033 and ADR-0034 accepted. Phase 3 still waits for the supervision
-dependency (Q-11) and phase 5 for its revision of this document
+ADR-0033 and ADR-0034 accepted, `process-wrap` approved (Q-11). Phase 5
+still waits for its revision of this document
 **Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
@@ -26,8 +26,8 @@ design IDs (`Dxx`) and question IDs (`Q-xx`) refer to the review.
 > *pending Q-xx* now states the answer.
 > [ADR-0033](../adr/0033-automation-database-service-and-lock.md),
 > [ADR-0034](../adr/0034-persisted-declared-outputs.md) and the
-> [0.3.0 plan](releases/0.3.0.md) were accepted on 2026-11-08. Phase 3 starts
-> only once the process-supervision dependency is approved (Q-11).
+> [0.3.0 plan](releases/0.3.0.md) were accepted on 2026-11-08, and the
+> process-supervision dependency was approved the same day (Q-11).
 
 ## Contents
 
@@ -126,7 +126,7 @@ ships when all of them are accepted. Phases 6 and 7 stay later.
 | PoC | Optional | Headless SQL executor and engine without persistence or UI, to measure the open risks ([plan](automation-sql-job-poc.md)) | Nothing |
 | 0 — Decisions | P0 | Answers to Q-01…Q-14, ADR-0033 and ADR-0034 with the DDL (all done 2026-11-08) | — |
 | 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Phase 0 |
-| 3 — External process without protocol | P0 | Section 9.1 | Approval of the supervision dependency (Q-11) |
+| 3 — External process without protocol | P0 | Section 9.1 | Phase 1 |
 | 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3 |
 | 5 — Linear chain | P0 | Section 9.3; SQL → script | Phases 1 and 4; the phase 5 revision of this document |
 | 2 — Interface | P0 | Section 8, for SQL Jobs, processes and chains | Phase 5 |
@@ -626,8 +626,8 @@ honour, not as finished designs.
   a kill-on-close Job Object on Windows and process groups on Unix. `unsafe`
   is forbidden and `kill_on_drop` kills only the direct child (P-07).
   `process-wrap` is the candidate to evaluate for license, weight, advisories
-  and features through a formal proposal (Q-11). **No approval, no external
-  phase.**
+  and features through a formal proposal (Q-11), approved on 2026-11-08
+  ([proposal](process-supervision-dependency.md)).
 - Unix residual risk is documented: if Studio crashes, the group survives.
   Recovery records group ID and start time, warns, and never kills a PID or
   PGID that may have been reused.
@@ -778,7 +778,7 @@ and the measured budgets.
 | Q-08 | Typed remote-completion metadata in `DriverOutcome`, or conservative uncertainty? | Conservative in phase 1; the PoC measures the need | Phase 1 (optional) | **Conservative**; no contract change |
 | Q-09 | Keep `native_flow`, or replace it with linear chaining? | Replace; if revived, compile it to the same plan | Roadmap | **Replace** |
 | Q-10 | Treat external code as explicitly trusted, with the UI explaining that grants protect Studio APIs, not the machine? | Yes; warn on import and first run | Phase 3 | **Yes** |
-| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | **Evaluate formally**; [proposal](process-supervision-dependency.md) written 2026-11-08, awaiting approval |
+| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | **`process-wrap` 10.0.1 approved** on 2026-11-08 after a formal [proposal](process-supervision-dependency.md) |
 | Q-12 | Accept per-run IPC tokens in the environment, visible to same-user processes during the run? | Accept, with `hello` consumption and documented risk | Phase 4 | **Token through stdin**, not the environment (section 9.2) |
 | Q-13 | Keep the SDK out of the repository until `jjp/1` stabilizes? | Yes (D24) | Phase 4 | **Yes** |
 | Q-14 | Durable scheduling consent and execution while the application is closed? | Design with scheduling | Phase 7 | **Only while the application is open**; execution while it is closed is excluded |

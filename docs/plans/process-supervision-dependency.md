@@ -1,7 +1,7 @@
 # Proposal: `process-wrap` for process-tree supervision
 
 **Date:** November 8, 2026
-**Approval:** Proposed (Q-11 of the [automation specification](automation-engine-specification.md#12-decisions-required-from-the-maintainer))
+**Approval:** Approved by the maintainer on 2026-11-08, as requested below (Q-11 of the [automation specification](automation-engine-specification.md#12-decisions-required-from-the-maintainer))
 **Implementation:** Not started
 **For:** [0.3.0](releases/0.3.0.md), milestone A3 (phase 3 — external program)
 
