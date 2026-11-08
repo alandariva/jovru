@@ -818,7 +818,6 @@ impl JobView {
     fn rebuild(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.typed_values(cx);
         self.field_subscriptions.clear();
-        let typed_names = self.kind != JobKind::Sql;
         let specs: Vec<ParameterSpec> = match &self.definition.body {
             JobBody::Sql(body) => body.parameters.clone(),
             JobBody::Process(body) => body.inputs.clone(),
@@ -845,7 +844,6 @@ impl JobView {
                 choices_open: open.contains(&spec.name),
             })
             .collect();
-        let _ = typed_names;
         let outputs: Vec<(String, u32)> = match &self.definition.body {
             JobBody::Sql(body) => body
                 .outputs
@@ -946,9 +944,9 @@ impl JobView {
                 },
             ));
         }
+        // Enter in a list's new choice adds it.
         for row in &self.specs {
             let choice = row.choice.clone();
-            let index = self.specs.len();
             let name_field = row.name.clone();
             self.field_subscriptions.push(cx.subscribe_in(
                 &choice,
@@ -958,7 +956,6 @@ impl JobView {
                         let name = name_field.read(cx).value().to_string();
                         this.add_choice(&name, window, cx);
                     }
-                    let _ = index;
                 },
             ));
         }
@@ -1907,11 +1904,11 @@ impl JobView {
             }
         }
         self.prefill_note = Some(if missing.is_empty() {
-            tr!("Filled in from what the chain's earlier step stored. Check the values, then Run.")
+            tr!("Filled in from the chain run: its constants and what earlier steps stored. Check the values, then Run.")
                 .to_owned()
         } else {
             tr!(
-                "Filled in from what the chain's earlier step stored; fill in {0}, which were not stored or have expired. Then Run.",
+                "Filled in from the chain run: its constants and what earlier steps stored. Fill in {0}, which were not stored or have expired, then Run.",
                 missing.join(", ")
             )
         });
