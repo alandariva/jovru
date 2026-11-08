@@ -16,6 +16,9 @@
 pub mod definition;
 mod engine;
 mod executor;
+pub mod jjp;
+pub mod logs;
+pub mod process;
 #[cfg(test)]
 mod tests;
 
