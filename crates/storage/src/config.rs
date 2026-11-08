@@ -26,6 +26,12 @@ pub struct ConfigRepository {
 
 impl ConfigRepository {
     pub async fn open(dir: &Path) -> DriverResult<Self> {
+        // At the first start several parts of the application open the new
+        // file at once. Creating it, turning on WAL and the first schema
+        // can answer SQLITE_BUSY at once instead of waiting for the busy
+        // timeout, so opens within this process take turns.
+        static OPENING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _opening = OPENING.lock().await;
         tokio::fs::create_dir_all(dir)
             .await
             .map_err(|_| error("Could not create the data folder."))?;
@@ -36,7 +42,14 @@ impl ConfigRepository {
             .fetch_one(&pool)
             .await
             .map_err(sql_error)?;
-        if existed && version == 0 {
+        // A file without tables is new, possibly created a moment ago by
+        // another part of the application opening it at the same time:
+        // only a file written before versioning has something to back up.
+        let tables: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master")
+            .fetch_one(&pool)
+            .await
+            .map_err(sql_error)?;
+        if existed && version == 0 && tables > 0 {
             let backup_dir = dir.join("backups");
             tokio::fs::create_dir_all(&backup_dir)
                 .await

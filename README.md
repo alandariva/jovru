@@ -27,7 +27,9 @@ and run real SQL.
   libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev
   libdbus-1-dev libssl-dev` on Debian and Ubuntu (as the CI workflow does),
   plus a Vulkan driver; the file dialogs need `xdg-desktop-portal` with a
-  backend such as `xdg-desktop-portal-gtk`, which desktops ship.
+  backend such as `xdg-desktop-portal-gtk`, which desktops ship. The
+  published Linux binary is built on Ubuntu 24.04 and needs glibc 2.39 or
+  newer.
 - Optional: Docker with Compose v2 and `cargo-deny` for the full test gate.
 - Optional: the [Databricks CLI](https://docs.databricks.com/dev-tools/cli/)
   with an authenticated profile for Databricks connections.

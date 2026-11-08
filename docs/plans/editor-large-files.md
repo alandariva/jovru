@@ -3,8 +3,12 @@
 - **Approval:** Approved by the maintainer on 2026-11-08: option A with C,
   the limit stays 4 MiB ([ADR-0031](../adr/0031-saved-queries-as-sql-files.md) D7)
 - **Implementation:** Partial. A is done (`jykre::script_outline::soft_wrap`,
-  measured below); C, the upstream issue, is drafted and not filed; the
-  measurement on the reference machine is not done. The editor work it
+  measured below); C, the upstream issue, is drafted and not filed. On the
+  reference machine (2026-11-08) a 4 MiB file opens in one frame of 54 ms,
+  one just under 256 KiB, still wrapped, in 185 ms, and a click into a
+  4 MiB text stalls 97–131 ms inside the editor component
+  ([measurements](../standards/performance.md#on-the-reference-machine-2026-11-08));
+  confirming the limit in ADR-0031 is the maintainer's. The editor work it
   builds on is in [Performance](../standards/performance.md#the-editor-with-a-large-sql-file)
 - **Date:** 2026-11-08
 
