@@ -1591,3 +1591,31 @@ async fn a_read_only_open_never_creates_migrates_or_writes() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn a_version_number_that_runs_still_name_is_never_given_again() {
+    let dir = dir();
+    let repo = ready(&dir).await;
+    let id = JobId::new();
+    repo.insert_job(id, JobKind::Sql, &sql_def("job"), T0)
+        .await
+        .unwrap();
+    repo.publish(id, &sql_def("v1"), T0).await.unwrap();
+    repo.publish(id, &sql_def("v2"), T0).await.unwrap();
+    // A chain ran version 2, which is then deleted.
+    let chain = chain_run(None, T0);
+    repo.admit_chain_run(&chain).await.unwrap();
+    repo.admit_run(&step_of(process_run(Some(id), T0), chain.id, 0, 2))
+        .await
+        .unwrap();
+    repo.delete_version(id, 2).await.unwrap().unwrap();
+    let next = repo.publish(id, &sql_def("v3"), T0).await.unwrap();
+    assert_eq!(next.version, 3);
+    // Debug never shows a stored value.
+    let value = OutputValue {
+        name: "n".into(),
+        kind: jykre_core::ParameterKind::Text,
+        value: Some("secret-value-1".into()),
+    };
+    assert!(!format!("{value:?}").contains("secret-value-1"));
+}

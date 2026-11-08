@@ -1807,3 +1807,156 @@ async fn a_changed_program_file_stops_its_chain_step_until_published_again() {
     assert_eq!(finished(&mut handle).await.state, RunState::Succeeded);
     let _ = std::fs::remove_file(entrypoint);
 }
+
+#[tokio::test]
+async fn stop_before_a_program_starts_leaves_nothing_running() {
+    let engine = program_engine().await;
+    let mut handle = engine
+        .submit(program_run(program_job("sleep", Protocol::None, &[]), &[]))
+        .unwrap();
+    // Stop at once: the run never starts its program, whichever step it
+    // reached, and claims nothing about its effect.
+    assert!(engine.stop_run(handle.id));
+    match handle.finished().await {
+        RunStatus::Refused(Refusal::Withdrawn) => {}
+        RunStatus::Finished(outcome) => {
+            assert_eq!(outcome.state, RunState::Cancelled);
+            assert!(!outcome.effect_unknown, "{outcome:?}");
+            assert!(outcome.program.as_ref().unwrap().exit_code.is_none());
+        }
+        other => unreachable!("unexpected {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn quitting_while_a_chain_step_waits_cancels_the_chain() {
+    let file = SqliteFile::new(&chain_file_setup()).await;
+    let limits = Limits {
+        global: 1,
+        ..Limits::default()
+    };
+    let engine = engine_in(data_dir(), limits).await;
+    engine.set_connection_revisions(HashMap::from([(file.id, 1)]));
+    let chain = lookup_then_insert(&engine, &file).await;
+    let driver = Scripted::new(Script::Blocks);
+    let _blocker = engine
+        .submit(scripted_run(
+            &driver,
+            sql_job(ConnectionId::new(), "SELECT 1"),
+        ))
+        .unwrap();
+    let plan = engine.plan(chain, None).await.unwrap();
+    let mut handle = engine
+        .submit_chain(ChainRequest {
+            plan,
+            values: HashMap::from([("key".to_owned(), "a".to_owned())]),
+            connections: HashMap::from([(file.id, file.connection())]),
+        })
+        .unwrap();
+    eventually(Duration::from_secs(5), || {
+        engine.overview().iter().any(|entry| {
+            entry.step == Some(0) && matches!(entry.status, Some(RunStatus::Queued { .. }))
+        })
+    })
+    .await;
+    engine.shutdown().await;
+    let ChainStatus::Finished(outcome) = handle.finished().await else {
+        unreachable!("the chain ends");
+    };
+    assert_eq!((outcome.state, outcome.cause), (RunState::Cancelled, None));
+    let recorded = engine
+        .repository()
+        .unwrap()
+        .chain_run(outcome.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recorded.state, RunState::Cancelled);
+    // Nothing can be saved once the engine shut down.
+    assert_eq!(
+        engine
+            .save_job(&sql_job(ConnectionId::new(), "SELECT 1"), None)
+            .await
+            .unwrap_err(),
+        SaveError::Unavailable
+    );
+}
+
+#[tokio::test]
+async fn try_again_twice_at_once_takes_the_lock_once_and_starts_pruning() {
+    let dir = data_dir();
+    let first = engine_in(dir.clone(), Limits::default()).await;
+    let second = Engine::start(Handle::current(), dir);
+    assert_eq!(second.started().await, Availability::ReadOnly);
+    first.shutdown().await;
+    drop(first);
+    let (a, b) = tokio::join!(second.retry(), second.retry());
+    assert!(
+        a == Availability::Ready || b == Availability::Ready,
+        "{a:?} {b:?}"
+    );
+    assert_eq!(second.availability(), Availability::Ready);
+    let driver = Scripted::new(Script::Rows(Vec::new(), Vec::new()));
+    let mut handle = second
+        .submit(scripted_run(
+            &driver,
+            sql_job(ConnectionId::new(), "SELECT 1"),
+        ))
+        .unwrap();
+    assert_eq!(finished(&mut handle).await.state, RunState::Succeeded);
+}
+
+#[tokio::test]
+async fn a_run_outcome_never_shows_cells_in_debug() {
+    let file = SqliteFile::new(&[]).await;
+    let engine = engine().await;
+    let mut handle = engine
+        .submit(file.run(file.job("SELECT 'cell-77aa' AS v"), &[]))
+        .unwrap();
+    let outcome = finished(&mut handle).await;
+    assert!(!format!("{outcome:?}").contains("cell-77aa"));
+    assert!(!format!("{:?}", handle.status()).contains("cell-77aa"));
+}
+
+#[tokio::test]
+async fn a_connection_changed_while_its_step_waits_stops_the_chain() {
+    let file = SqliteFile::new(&chain_file_setup()).await;
+    let limits = Limits {
+        global: 1,
+        ..Limits::default()
+    };
+    let engine = engine_in(data_dir(), limits).await;
+    engine.set_connection_revisions(HashMap::from([(file.id, 1)]));
+    let chain = lookup_then_insert(&engine, &file).await;
+    let driver = Scripted::new(Script::Blocks);
+    let blocker = engine
+        .submit(scripted_run(
+            &driver,
+            sql_job(ConnectionId::new(), "SELECT 1"),
+        ))
+        .unwrap();
+    let plan = engine.plan(chain, None).await.unwrap();
+    let mut handle = engine
+        .submit_chain(ChainRequest {
+            plan,
+            values: HashMap::from([("key".to_owned(), "a".to_owned())]),
+            connections: HashMap::from([(file.id, file.connection())]),
+        })
+        .unwrap();
+    eventually(Duration::from_secs(5), || {
+        engine.overview().iter().any(|entry| {
+            entry.step == Some(0) && matches!(entry.status, Some(RunStatus::Queued { .. }))
+        })
+    })
+    .await;
+    engine.set_connection_revisions(HashMap::from([(file.id, 2)]));
+    engine.stop_run(blocker.id);
+    let ChainStatus::Finished(outcome) = handle.finished().await else {
+        unreachable!("the chain ends");
+    };
+    assert_eq!(
+        (outcome.state, outcome.cause, outcome.failed_step.as_deref()),
+        (RunState::Failed, Some(Cause::PlanChanged), Some("lookup"))
+    );
+    assert!(outcome.steps.is_empty(), "the step never started");
+}

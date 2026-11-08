@@ -140,7 +140,9 @@ pub(super) async fn run(
                 steps.push(outcome.clone());
                 if outcome.state != RunState::Succeeded {
                     stopped = Some(if outcome.state == RunState::Cancelled {
-                        if Instant::now() >= deadline {
+                        // Stop came first unless the chain's own deadline
+                        // stopped the step.
+                        if Instant::now() >= deadline && !stop.is_cancelled() {
                             Stopped::failed(Cause::Timeout, &step.id)
                         } else {
                             Stopped::cancelled(Some(&step.id))
@@ -292,7 +294,7 @@ async fn run_step(
             stop: step_stop.clone(),
             sender: sender.clone(),
         })
-        .map_err(|refusal| Stopped::failed(chain_cause(&refusal), &step.id))?;
+        .map_err(|refusal| halted(&refusal, false, stop, &step.id))?;
     status.send_replace(ChainStatus::Running {
         step: index,
         run: Some(run),
@@ -303,7 +305,7 @@ async fn run_step(
     let slot = tokio::select! { biased;
         slot = &mut waiting => slot,
         () = tokio::time::sleep_until(deadline.into()) => {
-            timed_out = true;
+            timed_out = !stop.is_cancelled();
             step_stop.cancel();
             waiting.await
         }
@@ -313,15 +315,19 @@ async fn run_step(
         Err(refusal) => {
             sender.send_replace(RunStatus::Refused(refusal.clone()));
             engine.forget_step(run);
-            return Err(if timed_out {
-                Stopped::failed(Cause::Timeout, &step.id)
-            } else if refusal == Refusal::Withdrawn {
-                Stopped::cancelled(Some(&step.id))
-            } else {
-                Stopped::failed(chain_cause(&refusal), &step.id)
-            });
+            return Err(halted(&refusal, timed_out, stop, &step.id));
         }
     };
+    // Exactly the confirmed plan runs: a connection changed while the step
+    // waited does not start it (section 9.3.4).
+    if let (Some(connection), Work::Sql(work)) = (connection_id, &work)
+        && engine.connection_revision(connection) != Some(work.connection.revision)
+    {
+        drop(slot);
+        sender.send_replace(RunStatus::Refused(Refusal::Missing));
+        engine.forget_step(run);
+        return Err(Stopped::failed(Cause::PlanChanged, &step.id));
+    }
     let spec = RunSpec {
         id: run,
         definition: definition.clone(),
@@ -336,7 +342,7 @@ async fn run_step(
     let ended = tokio::select! { biased;
         ended = &mut execution => ended,
         () = tokio::time::sleep_until(deadline.into()), if !timed_out => {
-            timed_out = true;
+            timed_out = !stop.is_cancelled();
             step_stop.cancel();
             execution.await
         }
@@ -355,7 +361,20 @@ async fn run_step(
         }
         Ended::Refused(refusal) => {
             sender.send_replace(RunStatus::Refused(refusal.clone()));
-            Err(Stopped::failed(chain_cause(&refusal), &step.id))
+            Err(halted(&refusal, timed_out, stop, &step.id))
         }
+    }
+}
+
+/// How a step that never ran stops its chain: Stop or quitting cancel it,
+/// the chain's deadline fails it with `Timeout`, anything else with the
+/// refusal's cause.
+fn halted(refusal: &Refusal, timed_out: bool, stop: &CancellationToken, step: &str) -> Stopped {
+    if timed_out {
+        Stopped::failed(Cause::Timeout, step)
+    } else if stop.is_cancelled() || matches!(refusal, Refusal::Withdrawn | Refusal::ShuttingDown) {
+        Stopped::cancelled(Some(step))
+    } else {
+        Stopped::failed(chain_cause(refusal), step)
     }
 }

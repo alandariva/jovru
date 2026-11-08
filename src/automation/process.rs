@@ -300,12 +300,21 @@ pub fn verdict(
         effect_unknown: true,
     };
     match decided_by {
+        // Stopped before it was started: nothing ran, so nothing is unknown.
+        Decider::NotStarted(StartError::Stopped) => Verdict {
+            state: RunState::Cancelled,
+            cause: None,
+            effect_unknown: false,
+        },
         Decider::NotStarted(error) => Verdict {
             state: RunState::Failed,
             cause: Some(match error {
                 StartError::NotFound => Cause::NotFound,
                 StartError::PermissionDenied => Cause::PermissionDenied,
-                StartError::Logs | StartError::Listener | StartError::Other => Cause::Internal,
+                StartError::Logs
+                | StartError::Listener
+                | StartError::Other
+                | StartError::Stopped => Cause::Internal,
             }),
             effect_unknown: false,
         },

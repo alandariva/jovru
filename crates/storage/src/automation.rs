@@ -532,11 +532,23 @@ pub struct NewRun {
 }
 
 /// One declared output to store (ADR-0035). `value` is `None` for NULL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Debug` never shows the value.
+#[derive(Clone, PartialEq, Eq)]
 pub struct OutputValue {
     pub name: String,
     pub kind: ParameterKind,
     pub value: Option<String>,
+}
+
+impl std::fmt::Debug for OutputValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutputValue")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("null", &self.value.is_none())
+            .field("bytes", &self.value.as_deref().map_or(0, str::len))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1151,8 +1163,12 @@ impl AutomationRepository {
             }
             Some(_) => {}
         }
+        // A number is never given twice while anything still names it: past
+        // the versions kept and the step runs that ran a deleted one, so its
+        // history and the first-run warning (Q-10) never mix two definitions.
         let version: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM job_versions WHERE job_id=?",
+            "SELECT MAX(COALESCE((SELECT MAX(version) FROM job_versions WHERE job_id=?1), 0), \
+             COALESCE((SELECT MAX(job_version) FROM runs WHERE job_id=?1), 0)) + 1",
         )
         .bind(job.to_string())
         .fetch_one(&mut *tx)

@@ -188,8 +188,8 @@ pub enum Refusal {
     Missing,
 }
 
-/// The SQL side of a run's end.
-#[derive(Debug, Default)]
+/// The SQL side of a run's end. `Debug` shows counts, never cells.
+#[derive(Default)]
 pub struct SqlOutcome {
     /// What the dialect's tokens said at admission: a warning, not a
     /// boundary (section 4.5).
@@ -235,8 +235,8 @@ pub struct ProgramOutcome {
 }
 
 /// How a run ended. Held in memory only: closing every handle to the run
-/// drops its result.
-#[derive(Debug)]
+/// drops its result. `Debug` never shows a cell, a value or a server
+/// message.
 pub struct RunOutcome {
     pub id: RunId,
     pub kind: JobKind,
@@ -312,5 +312,46 @@ impl ChainOutcome {
             .then(|| self.steps.last())
             .flatten()
             .and_then(|step| step.output_values())
+    }
+}
+
+impl std::fmt::Debug for SqlOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlOutcome")
+            .field("reads_only", &self.reads_only)
+            .field("truncated", &self.truncated)
+            .field("rows_kept", &self.data.row_count())
+            .field("columns", &self.data.column_count())
+            .field("rows_discarded", &self.rows_discarded)
+            .field("rows_affected", &self.rows_affected)
+            .field("transaction_rolled_back", &self.transaction_rolled_back)
+            .field("completion", &self.completion)
+            .field("server_code", &self.server_code)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for RunOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunOutcome")
+            .field("id", &self.id)
+            .field("kind", &self.kind)
+            .field("state", &self.state)
+            .field("cause", &self.cause)
+            .field("error_code", &self.error.as_ref().map(|error| error.code))
+            .field("effect_unknown", &self.effect_unknown)
+            .field("sql", &self.sql)
+            .field("program", &self.program)
+            .field(
+                "outputs",
+                &self
+                    .outputs
+                    .as_ref()
+                    .map(|outputs| outputs.as_ref().map(Vec::len)),
+            )
+            .field("outputs_stored", &self.outputs_stored)
+            .field("history_failed", &self.history_failed)
+            .field("elapsed", &self.elapsed)
+            .finish_non_exhaustive()
     }
 }

@@ -14,6 +14,7 @@ use jykre_core::CancellationToken;
 use jykre_core::automation::{JobKind, RunOrigin};
 use jykre_storage::{AutomationRepository, NewRun, OutputValue, RunFinish};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
 use tokio::sync::watch;
 
@@ -102,6 +103,7 @@ pub(super) async fn run(
     let started = Instant::now();
     let deadline = started + job.timeout;
     let work = CancellationToken::new();
+    let confirmed = AtomicBool::new(false);
     let execution = executor::execute(
         connection.driver.clone(),
         connection.resolved.clone(),
@@ -110,6 +112,7 @@ pub(super) async fn run(
         work.clone(),
         deadline,
         status,
+        &confirmed,
     );
     tokio::pin!(execution);
     // The first event observed decides; the others are ignored. A completion
@@ -121,21 +124,33 @@ pub(super) async fn run(
         () = tokio::time::sleep_until(deadline.into()) => Ok(Decision::Deadline),
     };
     let reads_only = prepared.reads_only();
-    let (outcome, done) = match decided {
-        Err(done) => {
-            let cause = done.error.as_ref().map(|error| Cause::of(error.code));
-            let state = if done.confirmed {
-                RunState::Succeeded
-            } else {
-                RunState::Failed
-            };
-            let effect_unknown = state == RunState::Failed
-                && done.sent
-                && !reads_only
-                && cause.is_none_or(Cause::leaves_effect_unknown);
-            let cause = (state == RunState::Failed).then(|| cause.unwrap_or(Cause::Internal));
-            (Outcome::new(state, cause, effect_unknown), done)
+    let completed = |done: Execution| {
+        let cause = done.error.as_ref().map(|error| Cause::of(error.code));
+        let state = if done.confirmed {
+            RunState::Succeeded
+        } else {
+            RunState::Failed
+        };
+        let effect_unknown = state == RunState::Failed
+            && done.sent
+            && !reads_only
+            && cause.is_none_or(Cause::leaves_effect_unknown);
+        let cause = (state == RunState::Failed).then(|| cause.unwrap_or(Cause::Internal));
+        (Outcome::new(state, cause, effect_unknown), done)
+    };
+    // The statement's end was confirmed before Stop or the deadline was
+    // observed, while the session was closing: completion came first.
+    let decided = match decided {
+        Ok(_) if confirmed.load(Ordering::SeqCst) => {
+            match tokio::time::timeout(SETTLE, &mut execution).await {
+                Ok(done) => Err(done),
+                Err(_) => decided,
+            }
         }
+        other => other,
+    };
+    let (outcome, done) = match decided {
+        Err(done) => completed(done),
         Ok(decision) => {
             let sent_before = matches!(
                 &*status.borrow(),

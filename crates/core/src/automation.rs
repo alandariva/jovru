@@ -312,8 +312,9 @@ pub struct ChainRunRecord {
 }
 
 /// One declared output of a run, as stored under ADR-0035. `value` is
-/// `None` when the output is NULL or its value expired.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `None` when the output is NULL or its value expired. `Debug` never shows
+/// the value.
+#[derive(Clone, PartialEq, Eq)]
 pub struct RunOutput {
     /// Declaration order, from 0.
     pub position: i64,
@@ -325,6 +326,20 @@ pub struct RunOutput {
     pub bytes: i64,
     pub value_expires_at: UtcMillis,
     pub expired: bool,
+}
+
+impl std::fmt::Debug for RunOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunOutput")
+            .field("position", &self.position)
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("is_null", &self.is_null)
+            .field("bytes", &self.bytes)
+            .field("value_expires_at", &self.value_expires_at)
+            .field("expired", &self.expired)
+            .finish()
+    }
 }
 
 /// The stored text of a [`ParameterKind`].
