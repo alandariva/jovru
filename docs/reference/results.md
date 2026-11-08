@@ -503,6 +503,45 @@ system's save dialog (`jykre::export`, `backend::export`).
   the UI thread; the held pages are shared with the export, not copied
   ([ADR-0022](../adr/0022-result-pages-shared-across-threads.md)).
 
+## Import
+
+**Import from file…** reads a CSV or an `.xlsx` sheet for a table
+([ADR-0040](../adr/0040-importing-files-into-a-table.md), `jykre::import`).
+Reading, the preview and the mapping are implemented; writing the rows waits
+for ADR-0039's write path, so **Import** is not available yet.
+
+- **CSV:** the delimiter (`,`, `;`, tab or `|`; the first line suggests
+  one), the encoding (UTF-8 by default, any of `encoding_rs`'s; a
+  byte-order mark overrides it), the header row (records above it are
+  skipped; empty for none) and what an empty field means: NULL (the
+  default, as an export writes NULL) or empty text. `""` reads as an empty
+  field too. Every field is text exactly as decoded, the text `NULL`
+  included. Bytes not valid in the encoding stop the read at their offset
+  and nothing is replaced; a row with another number of fields stops it at
+  its line; a record over 64 MiB (an unclosed quote) stops it rather than
+  grow. Blank lines are skipped.
+- **XLSX** (`.xlsx` only; `.xls`, `.xlsb`, `.xlsm` and `.ods` are refused
+  with a reason): the sheet and the header row. A string is text, a number
+  the shortest decimal that reads back as the stored double, a boolean a
+  boolean, a date `YYYY-MM-DD HH:MM:SS[.mmm]` and a time or duration
+  `HH:MM:SS[.mmm]` without a time zone (1900 and 1904 epochs), an ISO cell
+  its own text, an empty cell NULL and a formula its cached value. An error
+  cell, a date outside 1900–9999, a value right of the header's columns and
+  cells out of order stop the read at their address. A row without values
+  is skipped. Where the file has numbers, the dialog says that Excel stores
+  them as floating point. A workbook whose shared strings table is over
+  256 MiB uncompressed is refused before it is opened, suggesting CSV.
+- **The mapping** fills each table column from one file column, or leaves it
+  out so it takes its default: by header name ignoring case, or by position
+  without a header; the user changes either. A required column (not null,
+  no default, not a key the cache cannot tell) left out, a generated
+  column given a value or no column at all is said before anything runs.
+- **The preview** shows the first 50 rows as they would be bound, for the
+  mapped columns, NULL in its own style. **New table from this file…** opens
+  a `CREATE TABLE` drafted from the header (every column the dialect's text
+  type, names quoted by the driver) in a new query tab, not run.
+- File values are never logged or stored.
+
 ## Reports
 
 A report ([ADR-0024](../adr/0024-reports.md),

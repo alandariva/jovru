@@ -9,6 +9,7 @@ mod demo;
 mod exit_writes;
 mod favorites;
 mod fonts;
+mod import;
 mod layout;
 mod library_files;
 mod password;
@@ -484,6 +485,8 @@ struct AppView {
     details_needs_focus: bool,
     /// The dialog that adds a query tab's SQL to a saved report, while open.
     report_picker: Option<report_picker::ReportPicker>,
+    /// **Import from file…**, while open ([`import`]).
+    import_dialog: Option<import::ImportHost>,
     /// The tag chosen under the library search; only saved queries with it
     /// are listed.
     library_tag: Option<String>,
@@ -822,6 +825,7 @@ impl AppView {
             details_focus: cx.focus_handle(),
             details_needs_focus: false,
             report_picker: None,
+            import_dialog: None,
             library_tag: None,
             persist_state: false,
             state_revision: 0,
@@ -3770,6 +3774,7 @@ impl Render for AppView {
             .when(self.report_picker.is_some(), |s| {
                 s.child(self.report_picker_dialog(cx))
             })
+            .when_some(self.import_view(), |s, dialog| s.child(dialog))
             .when(self.settings_open, |s| {
                 s.child(self.settings_dialog(window, cx))
             })

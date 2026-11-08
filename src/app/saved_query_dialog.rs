@@ -40,10 +40,13 @@ impl AppView {
         self.query_details.is_some()
     }
 
-    /// A modal dialog is open: the query details, the report picker or
-    /// Preferences.
+    /// A modal dialog is open: the query details, the report picker, the
+    /// import dialog or Preferences.
     pub(super) fn dialog_open(&self) -> bool {
-        self.details_open() || self.report_picker.is_some() || self.settings_open
+        self.details_open()
+            || self.report_picker.is_some()
+            || self.import_dialog.is_some()
+            || self.settings_open
     }
 
     /// Opens the dialog for the saved query `id`, to rename it or change its

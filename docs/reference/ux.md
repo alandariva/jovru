@@ -66,6 +66,20 @@ application runs. **Light** or **Dark** stay chosen across restarts, and
 choosing **System** again follows the system once more. The choice applies
 at once to every part of the window.
 
+**Import from file…**, in the explorer's menu of a table or of the namespace
+that holds tables (a schema, or a MySQL database), on connections whose driver has transactions,
+opens a dialog over the window ([Results](results.md#import)): **Choose
+file…**, then the file's options (CSV: delimiter, encoding, header row,
+empty fields; XLSX: sheet, header row), the table (a searchable list of the
+connection's cached tables, the one the menu was opened on chosen) with
+**New table from this file…**, one row per table column with the file
+column that fills it (**Match by name** or **Match by position**,
+**Required** marked) and the preview. Reading shows its progress after
+300 ms, then its elapsed time and **Cancel** past 2 s. What stops the
+mapping is listed above the footer, which holds the time limit (15 min,
+1 h by default, 4 h, no limit), **Cancel** and **Import**, not available
+yet. `Esc` (or the key chosen to close a dialog) closes it; Tab stays inside while it is open.
+
 A **report** ([ADR-0024](../adr/0024-reports.md),
 [ADR-0025](../adr/0025-report-panels.md)) opens in a tab of its own, in a tab
 group of its own named after the report and drawn without a colour (grey),

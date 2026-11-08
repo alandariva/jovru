@@ -710,6 +710,8 @@ impl AppView {
             self.cancel_details(window, cx);
         } else if self.report_picker.is_some() {
             self.close_report_picker(window, cx);
+        } else if self.import_dialog.is_some() {
+            self.close_import(window, cx);
         } else if self.settings_open {
             self.close_settings(window, cx);
         } else if self.inspection.take().is_some() {

@@ -75,7 +75,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread, draws the **Go to line** prompt (`GoToLine`) and reports through events ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), a result's pending edits and the write request they become (`grid_edit`, [ADR-0039](../adr/0039-editing-result-data-through-the-driver.md)), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), what **Go to line** reads and where it leads (`go_to_line`), the keys the user chooses for the keymap's actions: how a key reads, where it collides and how the choices are stored (`keymap`, applied to GPUI's keymap by `src/app/shortcuts.rs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine: SQL Jobs, external programs, `jjp/1`, linear chains and schedules while the application is open, run by an application-root service that records what ran in `automation.db` (`automation`, with its scheduler and rules in `automation::schedule` over `jiff`, [specification](../plans/automation-engine-specification.md), [ADR-0034](../adr/0034-automation-database-service-and-lock.md) to [ADR-0038](../adr/0038-external-program-runs.md) and [ADR-0041](../adr/0041-schedules-and-grants.md); its interface is `src/app/automation/`, see [User experience](ux.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Depend on a specific view; use the editor's language features |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), a result's pending edits and the write request they become (`grid_edit`, [ADR-0039](../adr/0039-editing-result-data-through-the-driver.md)), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), reading a CSV or `.xlsx` for an import into a table, its column mapping, the draft `CREATE TABLE` and the batches joined to a writer all or nothing (`import`, [ADR-0040](../adr/0040-importing-files-into-a-table.md); its dialog is `src/app/import/`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), what **Go to line** reads and where it leads (`go_to_line`), the keys the user chooses for the keymap's actions: how a key reads, where it collides and how the choices are stored (`keymap`, applied to GPUI's keymap by `src/app/shortcuts.rs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine: SQL Jobs, external programs, `jjp/1`, linear chains and schedules while the application is open, run by an application-root service that records what ran in `automation.db` (`automation`, with its scheduler and rules in `automation::schedule` over `jiff`, [specification](../plans/automation-engine-specification.md), [ADR-0034](../adr/0034-automation-database-service-and-lock.md) to [ADR-0038](../adr/0038-external-program-runs.md) and [ADR-0041](../adr/0041-schedules-and-grants.md); its interface is `src/app/automation/`, see [User experience](ux.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry, and automation's pure types (`automation`: IDs, `RunState`, `Cause`, run records, the schedule policies and outcomes) | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences, per-connection metadata and automation (`AutomationRepository` and `AutomationLock` own `automation.db` and `automation.lock`, [Persistence](persistence.md#automation-automationdb)) | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
@@ -137,9 +137,11 @@ checked in review.
 │   │                       # parameters, charts, runs, print), sql (jykre-sql)
 │   ├── automation/         # the automation engine (GPUI-free): engine, queue, SQL and
 │   │                       # chain runs, external programs (process/), jjp/1 (jjp/), logs
+│   ├── import/             # reading CSV and XLSX for an import (GPUI-free): readers,
+│   │                       # mapping, draft CREATE TABLE, batches and the pipeline
 │   └── app/                # the application's GPUI views; demo/ holds the demo data,
 │                           # sql_editor/ the editor's language features adapter,
-│                           # automation/ the automation interface
+│                           # automation/ the automation interface, import/ the import dialog
 ├── crates/
 │   ├── core/               # jykre-core
 │   ├── driver-postgres/    # jykre-driver-postgres
@@ -354,6 +356,34 @@ A query tab's result is written back to its table through the driver
    state is asked. Databricks results generate their statements instead
    (`Session::write_script`), which open in a new tab with their values in
    its parameter fields.
+
+### Import a file into a table
+
+[ADR-0040](../adr/0040-importing-files-into-a-table.md). Implemented up to
+the preview; writing waits for ADR-0039's write path.
+
+1. **Import from file…** in the explorer's menu of a table (or of a
+   last-level namespace) opens `src/app/import/`'s dialog on that
+   connection, offered only when its driver has transactions. The tables
+   it lists and their columns come from the metadata cache
+   (`backend::cached_relations`, `backend::relation_columns`).
+2. The chosen file is inspected (`import::inspect`: its kind, a workbook's
+   sheets, a CSV's byte-order mark and suggested delimiter) and its first
+   50 rows read (`import::preview`), both on the runtime's blocking pool
+   (`import::off_thread`), with a generation counter so a late answer is
+   dropped. CSV goes through `import::delimited` (our decoder over
+   `encoding_rs`, then `csv`), XLSX through `import::workbook` (the shared
+   strings check with `zip`, then `calamine`'s cells reader).
+3. `import::mapping::Mapping` matches the file's columns to the table's
+   (by name, ignoring case, or by position) and says what stops it; the
+   dialog shows the mapped values as they would be bound.
+4. **New table from this file…** opens `import::draft::create_table`, quoted
+   by the driver, in a new query tab, not run.
+5. The write part will implement `import::pipeline::BatchWriter` over the
+   import's own session and call `import::pipeline::run`: the reader
+   (`read_batches`, on the blocking pool) sends batches of 1,000 rows or
+   8 MiB through a channel of 2, the writer writes them in one
+   transaction, and a failure, **Cancel** or the time limit rolls it back.
 
 ### Run a report
 

@@ -4,8 +4,17 @@
 **Approval:** Approved by the maintainer on 2026-11-08, together with
 [ADR-0040](../adr/0040-importing-files-into-a-table.md), with every
 recommendation of the open decisions [below](#open-decisions-of-a11)
-(I-1 (a), I-2 (c), I-3 (a), I-4 (b), I-5 `.xlsx` only).
-**Implementation:** Not started.
+(I-1 (a), I-2 (c), I-3 (a), I-4 (b), I-5 `.xlsx` only). Also on
+2026-11-08, the maintainer approved `zip` as a normal dependency of the
+`jykre` crate, and kept `calamine` with debug assertions on for
+`debug_unsafe` in release builds
+([residual risks](#residual-risks)) after `umya-spreadsheet` was evaluated
+as its replacement and set aside ([alternatives](#alternatives-considered)).
+**Implementation:** In progress: the three crates are declared and
+`jykre::import` reads with them; `zip` became a direct dependency of the
+`jykre` crate for the shared strings check (it was only a development
+dependency, not direct as section 4 assumed), and `atoi_simd` brings
+`debug_unsafe` as well, compiled with debug assertions in release.
 **For:** [0.3.0](releases/0.3.0.md), milestone A11 (importing a CSV or Excel
 file into a table)
 
@@ -194,7 +203,7 @@ What each format gives, and how it reaches the table, is set by
 
 | Alternative | Licence, health | Why not |
 | --- | --- | --- |
-| `umya-spreadsheet` 3.1.1 | MIT, 1.49 M downloads, 4.0.0-beta.1 on 2026-10-26 [cio] | A read-and-write workbook model. `read` loads the workbook. It has a `read_sheet_by_name_stream` added recently, whose memory use and dependencies were **not verified**. Heavier than a reader |
+| `umya-spreadsheet` 3.1.1 | MIT, 1.49 M downloads, 4.0.0-beta.1 on 2026-10-26 [cio] | Evaluated on 2026-11-08 to replace `calamine` [reg `umya-spreadsheet-3.1.1`, lock]: `read_sheet_by_name_stream` takes a callback that returns nothing, so a read can neither stop early (the preview would parse the whole sheet), nor be cancelled, nor stop at an error cell; its XML loop `panic!`s on malformed XML and truncated parts (`reader/driver.rs`, `Event::Eof => panic!`); it loads the shared strings as rich items with a hash map, and `vbaProject.bin` whole; the 1904 flag is not reachable through the stream. It has no features to turn off and adds 18 crates, 11 of them second or third versions (`zip` 8 beside 9, `aes`, `cbc`, `cipher`, `inout`, `block-padding`, `fancy-regex`, `typed-path`, `phf` ×4). 4.0.0-beta.1 has the same stream signature and loop |
 | Our own XLSX reader on `zip` and `quick-xml` | `quick-xml` MIT, 532 M downloads [cio] | `quick-xml` is a new dependency on Windows anyway. We would re-implement shared strings, styles, date formats, epochs, inline strings and the relationship mapping that `calamine` maintains. A11 forbids narrowing it to avoid asking |
 | `xlsx_reader` 3.1.1, `xlsx_batch_reader` 0.4.21 | Last release 2019; 59 recent downloads, hosted on gitee [cio] | Unmaintained or too small |
 | `spreadsheet-ods` 1.0.4 | MIT/Apache-2.0, 121 k downloads [cio] | ODS only |
@@ -210,6 +219,34 @@ What each format gives, and how it reaches the table, is set by
   with an unbalanced quote fails at the 64 MiB record limit, not at the
   quote.
 - `calamine` is 0.x. A minor upgrade may change the cells reader's API.
+- **`debug_unsafe`** (through `calamine` → `atoi_simd` 0.18.1) indexes
+  without bounds checks unless debug assertions are on: its
+  `get_safe_unchecked`, `unwrap_safe_unchecked` and
+  `from_chars_safe_unchecked` branch on `cfg!(debug_assertions)`, which is
+  expanded when `debug_unsafe` itself is compiled. `atoi_simd` parses cell
+  references, shared string indexes, style ids and the declared string
+  count of files the user chose. The root `Cargo.toml` sets
+  `[profile.release.package.debug_unsafe] debug-assertions = true`
+  (approved 2026-11-08), so in release those paths index with checks and a
+  malformed file panics on the blocking pool, which the import reports as a
+  failed read. Not covered: `atoi_simd`'s own `cfg!(debug_assertions)`
+  branches to `unreachable_unchecked` after its internal length matches
+  (`fallback.rs:191`, `simd/sse_avx.rs:602`, `simd/neon.rs:252` and `:579`)
+  and its unchecked `_ => unreachable_unchecked()` arms after matches that
+  are exhaustive since Rust 1.75 (`fallback.rs:44`, `simd/sse_avx.rs:190`,
+  `:501`, `simd/neon.rs:70`, `:175`), plus a `get_unchecked` in a NEON
+  macro (`simd/neon.rs:18`). Turning debug assertions on for `atoi_simd`
+  too would cover the first group.
+- `calamine` 0.38 adds up a cell reference's row and column in `u32`
+  without checks (`xlsx/mod.rs:3096` and `:3112`): an absurd reference
+  (`A99999999999999999999`, `ZZZZZZZZ1`) panics in debug builds, where the
+  import reports a failed read, and wraps in release builds. The import
+  refuses any position past 1,048,576 rows or 16,384 columns, which catches
+  a wrapped value that lands there but not one that lands inside the sheet.
+- `calamine` reads a shared string index it cannot parse (`-1`, `x`) as
+  index 0 (`cells_reader.rs:790`, `unwrap_or(0)`), so such a damaged cell
+  becomes the table's first shared string. Only a damaged or hand-made file
+  holds one; nothing in the import can tell.
 - Linux builds two `quick-xml` versions until `wayland-scanner` and `xcb`
   move to 0.42.
 

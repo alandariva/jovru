@@ -3355,6 +3355,18 @@ impl AppView {
                 let relation_path = path.clone();
                 let favorite_path = path.clone();
                 let favorite_stored = preview.clone();
+                // A table imports into itself; a last-level namespace
+                // offers its tables, or a new one (ADR-0040).
+                let import_target = match object.kind {
+                    // As the cache lists it, which the dialog's list does.
+                    ObjectKind::Table => Some((Some(path.clone()), path.parent())),
+                    kind if Some(kind) == last_level => Some((None, Some(path.clone()))),
+                    _ => None,
+                }
+                .filter(|_| {
+                    weak.upgrade()
+                        .is_some_and(|view| view.read(cx).can_import(index))
+                });
                 let favorite = opens
                     && weak
                         .upgrade()
@@ -3399,6 +3411,21 @@ impl AppView {
                                     &query_path,
                                     &query_preview,
                                     OpenTable::Query,
+                                    window,
+                                    cx,
+                                )
+                            }))),
+                    )
+                })
+                .when_some(import_target, |menu, (table, namespace)| {
+                    menu.item(
+                        PopupMenuItem::new(tr!("Import from file…"))
+                            .icon(I::Upload)
+                            .on_click(run(Box::new(move |this, window, cx| {
+                                this.open_import(
+                                    index,
+                                    table.clone(),
+                                    namespace.clone(),
                                     window,
                                     cx,
                                 )
