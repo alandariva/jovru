@@ -491,7 +491,11 @@ cancellation, a timeout, an interruption by a limit or the sink, or a value
 that cannot be decoded, the driver makes one attempt to cancel the statement
 on the server and then reads up to the end of the response, each limited to 5
 seconds; if that fails the session is closed, so an incomplete protocol is
-never reused. MySQL first reads and drops the rest of a result interrupted by
+never reused. Both drivers check the cancellation and the time limit before
+reading each row, the time limit against the clock, so a result that arrives
+faster than it is read still stops at its next row: SQLx's reads do not wait
+while data is ready, and Tokio's timer may not fire meanwhile. MySQL first
+reads and drops the rest of a result interrupted by
 a limit, and kills the statement only when that takes too long, because the
 statement may already be done. MySQL never abandons a read on a session's
 connection halfway: SQLx reads a packet's header and its payload in separate
@@ -519,7 +523,10 @@ interrupts the statement through SQLite's progress handler and waits up to 5
 seconds for the connection to be idle; a result cut short is first left to
 end on its own, since interrupting a write inside a transaction rolls the
 transaction back. If the connection is not idle in time, the session is
-closed. A page kept open holds its statement, and a read lock on the file,
+closed. The cancellation and the time limit are checked before each row, the
+time limit against the clock, since SQLx's row channel does not make the
+reading wait while the connection's thread is ahead. A page kept open holds
+its statement, and a read lock on the file,
 until the result ends or another statement runs. Errors keep SQLite's message
 and its extended result code as the vendor code; `SQLITE_READONLY`,
 `SQLITE_PERM` and `SQLITE_AUTH` are `PermissionDenied`, `SQLITE_CANTOPEN`

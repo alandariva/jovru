@@ -129,7 +129,8 @@ empty results, metadata, timeout, cancellation, row limits and stops requested
 by the receiver. A session must keep its state after a database error, a
 timeout, a cancellation and an interruption by a limit or the receiver, also
 when the interruption lands halfway through reading a row (MySQL, with rows of
-several megabytes); a new session must run normally. TLS with certificates and effective server-side interruption need
+several megabytes handed on slowly, see [Flaky tests](#flaky-tests)); a new
+session must run normally. TLS with certificates and effective server-side interruption need
 additional scenarios before the guarantees are extended.
 
 ## SQL catalogs
@@ -221,8 +222,8 @@ own, for example `JYKRE_CONFIG_DIR=target/dev-config cargo run`.
   must have a bounded duration. They never call
   `connection_store::data_dir()` or touch the application data folder: open
   repositories in a temporary folder with a unique name, and bind servers to
-  port 0. Flakiness requires a record, an owner and a fix;
-  retrying until it passes does not replace investigation.
+  port 0. Flakiness requires a record (in [Flaky tests](#flaky-tests)), an
+  owner and a fix; retrying until it passes does not replace investigation.
 - Updates are tested without reaching GitHub (`jykre::update::tests`): a
   server on `127.0.0.1` serves the release list, the redirect and the
   archive, and archives are signed in the test with a key made from a fixed
@@ -287,6 +288,81 @@ Performance has budgets in [performance](performance.md). Algorithms whose
 cost grows with the data get a unit test with a generous time budget (ten
 times the measured time or more), so complexity regressions fail the gate; a
 change on a measured path reports before and after numbers.
+
+## Flaky tests
+
+A test that fails without a change to what it covers is recorded here when
+it is seen, with an owner, and keeps its record after the fix, with the cause
+and the evidence.
+
+### `live_interrupting_a_half_read_row_keeps_the_session` (MySQL)
+
+- **Seen:** 2026-11-08, while gating a MySQL driver fix: 5 failures in 12
+  runs against MySQL 8.4 on the unchanged driver, on a loaded machine.
+- **Owner:** the maintainer.
+- **Status:** Fixed on 2026-11-08.
+- **Cause:** every failure was `unwrap_err()` on an `Ok`: the statement read
+  its whole 128 MiB result, neither the cancellation nor the 50 ms time limit
+  landed, and recovery was never reached. SQLx reads with `try_read`, which
+  skips Tokio's cooperative budget, so while the socket holds more of the
+  result the session's task never gives its thread up. Unloaded, the client
+  outruns the server and its reads wait inside a row, where the interruption
+  lands; under load the server, behind Docker's port forwarding, stays ahead.
+  Two things then went wrong:
+  - In the test: on its single-threaded runtime, the sink that cancels runs
+    only when the session's task waits, so the cancellation never landed.
+  - In the driver: the time limit was a Tokio timer, which fires only when a
+    worker turns Tokio's time driver, and with the session's task holding
+    its thread none did, on the application's multi-threaded runtime too.
+    The same test on that runtime read all 32 rows after its 50 ms limit had
+    passed and returned `Ok`, after up to 1.06 s.
+- **Fix:**
+  - The MySQL driver reads a passed deadline from the clock before every
+    read and every row it hands on (`Limit::reached`), as it already did for
+    the cancellation, so a time limit stops the statement at its next row.
+    `a_passed_deadline_stops_the_statement_without_the_timer` covers it
+    without a database.
+  - The test reaches the fixture through a relay on `127.0.0.1` (`SlowLink`)
+    that hands the server's bytes on at 32 MiB/s, so the client's reads wait
+    inside a row and both interruptions land there whatever the load. The
+    test still proves what it did, a session kept after an interruption
+    halfway through a row, now under load too; it takes 5 to 9 s instead of
+    1 to 3 s.
+  - The PostgreSQL driver had a wider form of the same gap: it saw the
+    cancellation and the time limit only when a page's reads waited. It now
+    checks both before every read (`Limit::passed`), and
+    `a_page_that_never_waits_still_stops_at_its_limit` covers it. A scratch
+    test with the same 32 rows on the multi-threaded runtime, 30 statements
+    of each kind: under the heaviest load, 8 cancellations (a median of 31
+    rows read after them) and no 50 ms time limit landed before the fix, and
+    all of both after it, the cancellations within one row; unloaded, 29
+    and 10 landed before, all after.
+  - The SQLite driver's time limit was the same timer, and SQLx's row
+    channel does not make the reading wait while the connection's thread
+    is ahead. It reads the clock as MySQL does now, covered by its own
+    `a_passed_deadline_stops_the_statement_without_the_timer`. A scratch
+    test with 32 rows of 4 MiB, generated or stored: unloaded, on the
+    single-threaded runtime, no 50 ms time limit of 60 landed before the
+    fix and all after it; on the multi-threaded runtime all had landed
+    before too, since the reading waits for SQLite's thread often enough.
+- **Evidence:** a manual MySQL 8.4 fixture on 8 cores. The unchanged test
+  and the fixed one ran alternately, so both saw the same load: a release
+  build of the workspace, started again as it ended, alone or with 8 busy
+  loops.
+
+  | Load | Unchanged | Fixed |
+  | --- | --- | --- |
+  | None | 24 of 24 passed | 12 of 12 passed |
+  | Build (load average 6 to 14) | 51 of 60 passed | 30 of 30 passed |
+  | Build and busy loops (load average 16 to 18) | 1 of 60 passed | 30 of 30 passed |
+
+  Under the heaviest load, with the driver temporarily instrumented, the
+  read was waiting in all 50 interruptions of the fixed test, and recovery
+  ended with at least 4.3 s of its 5 s left. The unchanged test with only
+  the driver fix still failed 10 of 10 times, at the cancellation. Run on
+  the multi-threaded runtime, it passed 10 of 10 times with the driver fix
+  and 0 of 15 without it; the time-limited statement then ended in 140 to
+  373 ms.
 
 ## Lightweight hook
 
