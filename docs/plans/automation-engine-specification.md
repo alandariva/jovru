@@ -4,8 +4,8 @@
 **Date:** November 8, 2026 (1.1: November 7, 2026)
 **Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
 Q-01…Q-14 ([section 12](#12-decisions-required-from-the-maintainer)),
-ADR-0033 and ADR-0034 accepted, `process-wrap` approved (Q-11). Phase 5
-still waits for its revision of this document
+ADR-0033 and ADR-0034 accepted, `process-wrap` approved (Q-11). The phase 5
+revision (section 9.3) and ADR-0035 are proposed, awaiting approval
 **Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is complete)
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
@@ -128,7 +128,7 @@ ships when all of them are accepted. Phases 6 and 7 stay later.
 | 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Phase 0 |
 | 3 — External process without protocol | P0 | Section 9.1 | Phase 1 |
 | 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3 |
-| 5 — Linear chain | P0 | Section 9.3; SQL → script | Phases 1 and 4; the phase 5 revision of this document |
+| 5 — Linear chain | P0 | Section 9.3; SQL → script | Phases 1 and 4; approval of the section 9.3 revision and ADR-0035 |
 | 2 — Interface | P0 | Section 8, for SQL Jobs, processes and chains | Phase 5 |
 | 6 — On-demand capabilities | P2 | Section 9.4 | One ADR per capability |
 | 7 — Evolution | P3 | Section 9.5 | Q-14 and per-capability decisions |
@@ -415,8 +415,8 @@ records the deviation (D07, P-27, Q-05).
 - **Cause codes** are stable and stored with `Failed`; `Timeout` is a cause,
   not a state.
 - `Cancelling` and `Completing` exist only in memory, to show progress.
-- `Queued` arrives with queues (phase 5) and `WaitingInput` with `ask`
-  (phase 6).
+- `Queued` arrives with queues (phase 5, section 9.3.6), held in memory
+  only, and `WaitingInput` with `ask` (phase 6).
 
 ### 5.5 Arbitration
 
@@ -683,19 +683,182 @@ honour, not as finished designs.
 
 ### 9.3 Phase 5 — Linear chain
 
-- Steps reference each other structurally (`from_step`, `from_output`,
-  `to_input`); no `${}` and no dependencies inferred from text (P-03, D25).
-- Published versions arrive here, so a chain pins what it runs. The whole
-  plan is confirmed once at start.
-- A step releases its session before the next step starts, so a chain never
-  waits on itself (P-14). Dynamic `jobs.run` stays excluded.
-- Queues arrive here, with limits the review proposed as 8/4/60 s, defined
-  precisely in this phase's revision.
-- Outputs are in memory, and persisted only for jobs that opt in, under
-  [ADR-0034](../adr/0034-persisted-declared-outputs.md) (Q-03).
-- `native_flow` stays removed; if it ever returns, it compiles to this same
-  linear plan (Q-09).
-- Cancelling or failing a step cancels the rest of the chain.
+**Revision of 2026-11-08: Proposed**, awaiting the maintainer's approval
+together with [ADR-0035](../adr/0035-published-versions-and-chain-runs.md),
+which holds its schema. This section is normative for phase 5 once
+approved; it replaces the constraints version 1.1 listed here.
+
+#### 9.3.1 Published versions
+
+- **Publishing** a SQL Job or an external-program job freezes its current
+  definition as version *n* (1, 2, …). A version is immutable: it is never
+  edited, and editing the job changes only its draft definition.
+- A chain step names a job **and a version**, so a chain runs exactly what
+  was published, whatever happened to the job since (P-21).
+- A version a chain names cannot be deleted; deleting a job that a chain
+  uses is refused, naming the chains. A run of a job on its own, outside a
+  chain, keeps using its current definition, as in phase 1.
+
+#### 9.3.2 Declared outputs
+
+A job declares the outputs a chain may read, by name and `ParameterKind`
+([ADR-0034](../adr/0034-persisted-declared-outputs.md), decision 1):
+
+- **SQL Job:** each output names a result column **by position** (1-based;
+  names may repeat, P-06), and the job states one row rule for all of them:
+
+  | `row` | Zero rows | One row | Several rows |
+  | --- | --- | --- | --- |
+  | `exactly_one` (default) | Fails | Its values | Fails |
+  | `at_most_one` | Every output NULL | Its values | Fails |
+  | `first` | Every output NULL | Its values | The first row, in the result's order |
+
+  A failure here is cause `Output`. The row comes from what the result
+  kept (the row limit is at least 1), so a write's completion rule is
+  unchanged.
+- **External program:** the `outputs` object of its `complete` message
+  (`jjp/1`). Every declared output must be present (a JSON `null` is NULL)
+  and nothing undeclared may be; otherwise cause `Output`.
+- Each value keeps its exact text, NULL apart from the text `NULL`, and is
+  checked against its kind (`jykre_core::is_parameter_value`; `Text` takes
+  any text). In memory one value takes at most **64 KiB** and one step's
+  outputs at most **256 KiB**; beyond either, cause `Output`. Persistence
+  has its own, smaller limit (ADR-0034: 4 KiB per run, opt-in).
+
+#### 9.3.3 Chain definition
+
+A chain is a job of kind `chain`, stored as canonical JSON like any job:
+
+```json
+{
+  "schema_version": "1.0",
+  "id": "9a1e…",
+  "name": "Export a Data Extension",
+  "kind": "chain",
+  "inputs": [
+    { "name": "external_key", "label": "External key", "kind": "text", "required": true }
+  ],
+  "steps": [
+    {
+      "id": "lookup",
+      "job": "4f7c…", "version": 3,
+      "inputs": { "external_key": { "from_input": "external_key" } }
+    },
+    {
+      "id": "export",
+      "job": "b81d…", "version": 1,
+      "inputs": {
+        "address": { "from_step": "lookup", "from_output": "address" },
+        "format":  { "value": "csv" }
+      }
+    }
+  ],
+  "timeout_ms": 3600000
+}
+```
+
+- 2 to 16 steps, run in the order written. Step IDs are unique within the
+  chain, lowercase letters, digits and `_`.
+- A step is a published version of a SQL Job or an external-program job,
+  never a chain: there are no nested chains and no dynamic `jobs.run`.
+- Each input of the step's job version is bound **exactly once**, by one of:
+  - `from_input`: an input of the chain, from the chain's form;
+  - `from_step` + `from_output`: a declared output of an **earlier** step;
+  - `value`: a constant written in the definition.
+
+  An input left unbound uses its default, or NULL when optional; a required
+  input without a source or a default is an error.
+- Since a step can only read earlier steps, a chain has no cycles by
+  construction. There are no `${}` expressions and no references read from
+  text (P-03, D25). `native_flow`, if it ever returns, compiles to this same
+  structure (Q-09).
+- A source's kind must equal the target's, except that a `Text` target takes
+  any kind. A target with choices takes only one of them.
+- The definition is checked when it is saved and again at admission, against
+  the versions it names: an unknown job or version, an unbound required
+  input, an output that does not exist or a kind that does not match is
+  reported by step and input, and the chain cannot run.
+- `timeout_ms` bounds the whole chain (default 3,600 s); each step keeps its
+  own job's timeout as well.
+
+#### 9.3.4 Confirmation and the plan
+
+A manual chain run confirms **the whole plan once**, before anything runs,
+as a report does (section 7.2):
+
+1. The chain's form takes its inputs.
+2. The password of every connection the SQL steps use is asked for, one
+   connection after another, when the profile does not remember it.
+3. One dialog lists every SQL step on a production connection with its
+   `guard::risk` findings, and every external program whose version has not
+   run before, with the trusted-code warning (Q-10).
+4. On confirmation the engine freezes the **plan snapshot**: the chain
+   definition, each step's version definition, each connection's ID and
+   profile revision, and the chain's input specifications, without values.
+
+Exactly the confirmed plan runs. If a connection's profile revision changes
+before its step starts, that step does not start and the chain fails with
+cause `PlanChanged`.
+
+#### 9.3.5 Execution
+
+- One owner task runs the chain: it admits each step as an ordinary run (a
+  SQL run or a process run, with the executors of phases 1 and 3), waits
+  for its outcome, maps its outputs to the next step's inputs, and so on.
+- **A chain holds no admission slot of its own**; only its active step
+  does. A step's run releases its session and its slot before the next step
+  is admitted (P-14), so a chain progresses even with a global limit of 1.
+- A step's mapped inputs are checked as a form's would be
+  (`reports::params::value`). A value that fails stops the chain before that
+  step is admitted, with cause `Input`; the step leaves no run (section 4.3).
+- The chain run's state follows its steps:
+
+  | Event | Chain run |
+  | --- | --- |
+  | Every step succeeded | `Succeeded`, with the last step's outputs |
+  | A step failed, or its outputs or inputs did not map | `Failed`, with the step's cause and `failed_step` |
+  | Stop on the chain, or on its active step | `Cancelled`; the active step is stopped (or leaves the queue) and no later step starts |
+  | The chain's deadline | `Failed`, cause `Timeout`; the active step is stopped |
+  | Forced exit | `Interrupted` at recovery, with the active step's own recovery |
+
+  `effect_unknown` is set on the chain when any of its steps has it. Steps
+  that never started have no run; the chain's history shows them as not run.
+- There is no resume, retry or compensation (section 9.6). After a failure
+  the user runs the chain again, as a new run.
+- A step run again on its own from a chain run's history opens that job's
+  form, prefilled from the outputs the earlier step stored, when its job
+  opted in and the values have not expired (ADR-0034). It never runs
+  without the form.
+
+#### 9.3.6 Queue
+
+Queues arrive with chains, for every run, not only for chain steps. The
+review's "8/4/60 s" is read as:
+
+- A run that finds the limits of section 5.3 full (2 active, 1 per
+  connection) **waits in a queue** instead of being refused, in `Queued`, a
+  state held in memory only: a queued run has done no I/O and has no row.
+- The queue holds at most **8** runs in the application and **4** per
+  connection. A run beyond either is refused at once, with the reason, as in
+  phase 1.
+- A run waits at most **60 s**. Past that it leaves the queue: a run of a job
+  on its own is refused, with the reason; a chain step fails the chain with
+  cause `QueueTimeout`.
+- The queue is FIFO in admission order; a run whose connection is busy does
+  not hold back a later run on another connection. Stop removes a queued run
+  at once (`Cancelled` for a chain, a refusal for a job on its own); quitting
+  empties the queue first.
+
+#### 9.3.7 Causes, events and history
+
+- New causes: `Output` (outputs did not match the declaration), `Input`
+  (mapped inputs did not pass the form's checks), `PlanChanged` and
+  `QueueTimeout`.
+- The chain run publishes its state and the active step's progress through
+  the same bounded channel as a run (section 5.6), with the step index.
+- History records the chain run (state, cause, `failed_step`, timing,
+  `effect_unknown`, plan fingerprint) and each step's run linked to it, never
+  input values; outputs only under ADR-0034.
 
 ### 9.4 Phase 6 — On-demand capabilities
 
@@ -742,7 +905,7 @@ alternative transports and execution while the application is closed.
 | CA-03 | 3 | stdout and stderr are captured without blocking; cancelling or timing out kills grandchildren. |
 | CA-07 | 3–4 | Exit 0 (or `complete` plus exit 0) succeeds; `fail`, nonzero exit, timeout or Stop produce one consistent state and cause. |
 | CA-04 | 4 | *Replaced.* Framing survives partial and joined chunks, invalid UTF-8 and oversized frames; invalid or reused tokens and duplicate terminals are rejected. |
-| CA-09 | 5 | A SQL output feeds a later step; cancellation and failure cascade; a global limit of 1 still progresses. |
+| CA-09 | 5 | A SQL output feeds a later SQL step and an external program; exactly the confirmed plan runs; cancellation and failure cascade and leave later steps not run; a global limit of 1 still progresses; the queue's limits and 60 s wait hold. |
 | CA-06 | 6 | `ask` enters `WaitingInput` and its timeout applies the job's policy. |
 | CA-08 | 6 | Artifacts are copied through verified handles, within quotas, and survive a crash between copy and index. |
 | CA-10 | 7 | Non-normative until phase 7 is specified (Appendix A). |
@@ -761,7 +924,7 @@ and the measured budgets.
 | 2 | Create, run, cancel, error and navigation flows; keyboard and focus; stall and publication budgets |
 | 3 | Grandchildren killed on Stop and timeout; ignored signals and inherited pipes cannot trap Studio; a sentinel variable is not inherited; newline-free output spam cannot exhaust memory or disk |
 | 4 | Framing across chunks and UTF-8 boundaries; preallocation cap; invalid and reused tokens; duplicate `hello`; conflicting terminals; disconnect; cancellation with a saturated queue; method allowlist; tokens absent from logs and OTLP |
-| 5 | SQL → SQL and SQL → process; cycles and missing inputs refused; cascading cancellation and failure; no deadlock at limit 1 |
+| 5 | SQL → SQL and SQL → process; each `row` rule with zero, one and several rows; output kinds and size limits; unbound, unknown and forward references refused at save and admission; a connection revision changed mid-chain (`PlanChanged`); cascading cancellation and failure; Stop on a queued step; no deadlock at limit 1; queue limits 8/4 and the 60 s wait; published versions immutable and protected from deletion; recovery of an interrupted chain without replay |
 | 6 | Artifact TOCTOU, quotas and crash between copy and index; questions never block cancellation; late answers ignored |
 
 ## 12. Decisions required from the maintainer
