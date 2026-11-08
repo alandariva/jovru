@@ -137,6 +137,8 @@ impl AppView {
                         if let Some(warning) = loaded.warning {
                             connection.status = Feedback::new(Tone::Warning, warning);
                         }
+                        // The save bumped the profile's revision.
+                        this.sync_automation(cx);
                     }
                     (Ok(_), None) => {}
                     (Err(error), _) => {

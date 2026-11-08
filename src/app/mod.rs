@@ -1,6 +1,7 @@
 use jykre::tr;
 mod assistant_panel;
 mod assistant_settings;
+mod automation;
 mod connections;
 mod copying;
 mod databricks_connection;
@@ -199,6 +200,7 @@ enum Section {
     Explorer,
     Saved,
     Reports,
+    Automation,
     History,
 }
 
@@ -287,6 +289,8 @@ struct AppView {
     report_tabs: HashMap<TabId, reports::ReportTab>,
     /// The saved reports.
     reports: jykre::reports::ReportLibrary,
+    /// The automation engine, its jobs and tabs ([`automation`]).
+    automation: automation::Host,
     /// The reports were read, so writing them loses nothing.
     persist_reports: bool,
     /// Bumped by every change, so only the last of a burst is written.
@@ -501,6 +505,9 @@ struct AppView {
     /// The user confirmed closing the window although transactions were
     /// open; it closes without asking again.
     closing: bool,
+    /// The question about open transactions was answered for this close;
+    /// the one about active automation runs comes next.
+    transactions_settled: bool,
     /// **Restart now** of an installed update: when the window closes after
     /// its questions, this executable starts. Any other close clears it.
     restart_to: Option<std::path::PathBuf>,
@@ -528,6 +535,7 @@ impl AppView {
                     this.restart_to = Some(path.clone());
                     this.files_settled = false;
                     this.discard_file_edits = false;
+                    this.transactions_settled = false;
                     this.close_window(window, cx);
                 }
             });
@@ -544,7 +552,9 @@ impl AppView {
         let tab_subscription =
             cx.subscribe_in(&tabs, window, |this, _, event, window, cx| match event {
                 // A report's own group offers no new tab.
-                GroupedTabsEvent::NewTabRequested(group) if this.is_report_group(*group) => {}
+                GroupedTabsEvent::NewTabRequested(group)
+                    if this.is_report_group(*group)
+                        || this.automation.tab_groups().any(|own| own == *group) => {}
                 GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
                 GroupedTabsEvent::TabClosed(tab) => {
                     // What the tab keeps (never its results or session) can
@@ -561,6 +571,7 @@ impl AppView {
                     }
                     this.unsaved_marked.remove(tab);
                     this.report_tabs.remove(tab);
+                    this.automation.forget(*tab);
                     this.save_state_soon(cx);
                 }
                 GroupedTabsEvent::SelectionChanged(_) => this.save_state_soon(cx),
@@ -654,6 +665,7 @@ impl AppView {
             panels: HashMap::new(),
             report_tabs: HashMap::new(),
             reports: jykre::reports::ReportLibrary::default(),
+            automation: automation::Host::default(),
             persist_reports: false,
             reports_revision: 0,
             sql_catalogs: std::sync::Arc::default(),
@@ -808,6 +820,7 @@ impl AppView {
             selection_before_search: None,
             node_focus: std::cell::RefCell::new(HashMap::new()),
             closing: false,
+            transactions_settled: false,
             restart_to: None,
             _subscriptions: vec![
                 // The last edits are written before the application exits.
@@ -847,6 +860,7 @@ impl AppView {
                 this.restart_to = None;
                 this.files_settled = false;
                 this.discard_file_edits = false;
+                this.transactions_settled = false;
                 this.may_close(window, cx)
             })
             .unwrap_or(true)
@@ -1028,6 +1042,7 @@ impl AppView {
         ));
         app.filter_library(cx);
         app.load_connections(window, cx);
+        app.start_automation(window, cx);
         assistant_settings::load(cx);
         telemetry_settings::load(cx);
         jykre::telemetry::startup_finished();
@@ -1062,7 +1077,7 @@ impl AppView {
                     .collect();
                 return;
             }
-            Section::Explorer => {
+            Section::Explorer | Section::Automation => {
                 self.library_shown.clear();
                 return;
             }
@@ -1271,6 +1286,8 @@ impl AppView {
             panel.update(cx, |panel, cx| panel.focus_editor(window, cx));
         } else if let Some(report) = self.report_tabs.get(&tab) {
             report.view.update(cx, |view, cx| view.focus(window, cx));
+        } else {
+            self.focus_automation_tab(tab, window, cx);
         }
     }
 
@@ -1641,8 +1658,9 @@ impl AppView {
             .values()
             .filter(|panel| panel.read(cx).has_open_transaction())
             .count();
-        if open == 0 {
-            return true;
+        // Last, runs still active are named and stopped (ADR-0034).
+        if open == 0 || self.transactions_settled {
+            return self.automation_may_close(window, cx);
         }
         let (title, description) = if open == 1 {
             (
@@ -1667,8 +1685,10 @@ impl AppView {
                 focus: ConfirmFocus::Dialog,
             },
             move |window, cx| {
-                let _ = view.update(cx, |this, _| this.closing = true);
-                window.remove_window();
+                let _ = view.update(cx, |this, cx| {
+                    this.transactions_settled = true;
+                    this.close_window(window, cx);
+                });
             },
         );
         false
@@ -1692,6 +1712,10 @@ impl AppView {
             let view = report.view.read(cx);
             let (busy, unsaved) = (view.is_busy(), view.has_unsaved_changes(cx));
             self.request_report_close(tab, busy, unsaved, window, cx);
+            return;
+        }
+        if self.automation.owns(tab) {
+            self.request_automation_close(tab, window, cx);
             return;
         }
         let (busy, unsaved, transaction, exporting) =
@@ -1778,8 +1802,13 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let same_group = self.tabs.read(cx).group_of(tab) == Some(group);
-        // A report tab stays in its own group, and no other tab joins one.
-        if self.report_tabs.contains_key(&tab) || self.is_report_group(group) {
+        // A report's or a job's tab stays in its own group, and no other tab
+        // joins one.
+        if self.report_tabs.contains_key(&tab)
+            || self.is_report_group(group)
+            || self.automation.owns(tab)
+            || self.automation.tab_groups().any(|own| own == group)
+        {
             if same_group {
                 let _ = self
                     .tabs
@@ -1860,6 +1889,8 @@ impl AppView {
             report.view.update(cx, |view, cx| view.stop(cx));
         } else if let Some(panel) = active.and_then(|tab| self.panels.get(&tab)) {
             panel.update(cx, |panel, cx| panel.stop(cx));
+        } else if let Some(tab) = active {
+            self.stop_automation_tab(tab, cx);
         }
     }
 
@@ -2124,6 +2155,10 @@ impl AppView {
                     if section == Section::Saved {
                         this.scan_library(cx);
                     }
+                    // Automation held by another window: try its lock again.
+                    if section == Section::Automation {
+                        this.automation_shown(cx);
+                    }
                 }
                 cx.notify();
             }))
@@ -2145,6 +2180,7 @@ impl AppView {
                     (Section::Explorer, I::Database, tr!("Explorer")),
                     (Section::Saved, I::Bookmark, tr!("Saved queries")),
                     (Section::Reports, I::FileChartColumn, tr!("Reports")),
+                    (Section::Automation, I::Zap, tr!("Automation")),
                     (Section::History, I::Clock, tr!("History")),
                 ]
                 .into_iter()
@@ -2194,6 +2230,7 @@ impl AppView {
             Section::Explorer => tr!("Explorer"),
             Section::Saved => tr!("Saved queries"),
             Section::Reports => tr!("Reports"),
+            Section::Automation => tr!("Automation"),
             Section::History => tr!("History"),
         };
         column()
@@ -2234,6 +2271,9 @@ impl AppView {
                                             this.new_report(window, cx)
                                         })),
                                 )
+                            })
+                            .when(self.section == Section::Automation, |s| {
+                                s.child(self.automation_add_menu(cx))
                             })
                             .child(
                                 icon_button(
@@ -2883,6 +2923,9 @@ impl AppView {
             .when(self.section == Section::Reports, |s| {
                 self.reports_list(s, cx)
             })
+            .when(self.section == Section::Automation, |s| {
+                self.automation_list(s, cx)
+            })
     }
 
     /// Hands the SQL catalogs to every tab, and to the ones opened later.
@@ -3020,7 +3063,7 @@ impl AppView {
     /// The tabs, or a welcome state with the next step when there is nothing
     /// to show yet.
     fn main_area(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.connections_loading || !self.connections.is_empty() {
+        if self.connections_loading || !self.connections.is_empty() || self.automation.has_tabs() {
             return self.tabs.clone().into_any_element();
         }
         column()
@@ -3539,6 +3582,7 @@ impl Render for AppView {
                             let close = view
                                 .update(cx, |this, cx| {
                                     this.restart_to = None;
+                                    this.transactions_settled = false;
                                     this.may_close(window, cx)
                                 })
                                 .unwrap_or(true);
@@ -3606,6 +3650,23 @@ impl Render for AppView {
                         1 => tr!("1 connection").to_string(),
                         count => tr!("{0} connections", count),
                     }))
+                    .when_some(self.automation.stopping(), |s, count| {
+                        s.child(
+                            row()
+                                .id("automation-stopping")
+                                .role(Role::Status)
+                                .gap_1()
+                                .child(spinning_icon(
+                                    "automation-stopping-spinner",
+                                    I::LoaderCircle,
+                                    colors().amber,
+                                ))
+                                .child(label(tr!(
+                                    "Stopping {0} automation runs before closing (up to about 11 s)…",
+                                    count
+                                ))),
+                        )
+                    })
                     .child(
                         row()
                             .gap_3()
