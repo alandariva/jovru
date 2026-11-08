@@ -29,3 +29,5 @@ pub fn orphan_alive(_group: i64, _started: &str) -> bool {
 pub fn end_group(_group: i64) -> std::io::Result<()> {
     Ok(())
 }
+/// STUB: the variables a program never inherits (section 9.1.3).
+pub const ENV_DENYLIST: &[&str] = &["JYKRE_*", "OTEL_*", "NODE_OPTIONS", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME"];
