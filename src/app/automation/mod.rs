@@ -263,6 +263,7 @@ impl AppView {
     /// Something changed in the engine: the list of jobs, the open views'
     /// histories and the global list read it again.
     fn automation_changed(&mut self, cx: &mut Context<Self>) {
+        let _timer = jykre::logging::UiTimer::start("automation changes");
         self.reload_jobs(cx);
         for tab in self.automation.tabs.values() {
             match &tab.view {
@@ -532,16 +533,16 @@ impl AppView {
             this.job_event(view, event, window, cx)
         });
         let status = cx.observe(&view, |this, view, cx| {
-            let (status, title) = {
+            let (status, title, name) = {
                 let view = view.read(cx);
-                (view.tab_status(), view.title())
+                (view.tab_status(), view.title(), view.name())
             };
             if let Some(tab) = this.automation_tab_of(view.entity_id()) {
                 let group = this.automation.tabs.get(&tab).map(|tab| tab.group);
                 let _ = this.tabs.update(cx, |tabs, cx| {
                     let _ = tabs.set_tab_status(tab, status, cx);
                     if let Some(group) = group {
-                        let _ = tabs.rename_group(group, title.clone(), cx);
+                        let _ = tabs.rename_group(group, name, cx);
                     }
                     tabs.set_tab_title(tab, title, cx)
                 });

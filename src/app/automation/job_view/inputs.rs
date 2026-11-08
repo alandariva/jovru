@@ -100,6 +100,7 @@ impl JobView {
                             }),
                     )
                     .child(note_line(words::refused_note()))
+                    .when(self.kind == JobKind::Process, |s| s.child(note_line(words::stop_note())))
     }
 
     fn value_field(

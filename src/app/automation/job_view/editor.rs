@@ -11,7 +11,8 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, Input};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use jykre::automation::definition::{
-    DEFAULT_CHAIN_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, MAX_OUTPUTS, MAX_STEPS, MIN_STEPS, RowRule,
+    ChainProblem, DEFAULT_CHAIN_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, MAX_OUTPUTS, MAX_STEPS, MIN_STEPS,
+    RowRule,
 };
 use jykre::parameters::KINDS;
 use jykre::reports::ConnectionRef;
@@ -956,6 +957,7 @@ impl JobView {
         Some(
             row()
                 .id(("job-version", index))
+                .w_full()
                 .role(Role::ListItem)
                 .h(px(VERSION_ROW))
                 .gap_2()
@@ -1054,6 +1056,7 @@ impl JobView {
             .child(warning(words::trusted_note()))
             .child(note(words::logs_note()))
             .child(note(words::stdin_note()))
+            .child(note(words::stop_note()))
     }
 
     fn edit_program(
@@ -1078,6 +1081,14 @@ impl JobView {
             .child(warning(words::environment_note(
                 super::super::program_bits::denylist(),
             )))
+            .child(note(if fields.removed.is_empty() {
+                tr!("None of these is set in Jykre Studio's environment now.").to_owned()
+            } else {
+                tr!(
+                    "Removed from Jykre Studio's environment now: {0}.",
+                    fields.removed.join(", ")
+                )
+            }))
             .child(label(tr!("Also removed")))
             .children(fields.unset.iter().enumerate().map(|(index, name)| {
                 row()
@@ -1210,7 +1221,7 @@ impl JobView {
             .map(|plan| {
                 plan.problems
                     .iter()
-                    .filter(|problem| problem.step().is_empty())
+                    .filter(|problem| problem.step().is_empty() && body.steps.len() >= MIN_STEPS)
                     .map(words::chain_problem)
                     .collect()
             })
@@ -1273,6 +1284,10 @@ impl JobView {
                 plan.problems
                     .iter()
                     .filter(|problem| problem.step() == step.id)
+                    // A step on no job yet says what to choose instead.
+                    .filter(|problem| {
+                        job.is_some() || !matches!(problem, ChainProblem::UnknownVersion { .. })
+                    })
                     .map(words::chain_problem)
                     .collect()
             })
@@ -1435,6 +1450,9 @@ impl JobView {
                             })),
                     ),
             )
+            .when(job.is_none(), |s| {
+                s.child(note(tr!("Choose the step's job, then one of its published versions.")))
+            })
             .when(job.is_some() && unpublished, |s| {
                 s.child(warning(tr!(
                     "This job has no published version: publish it in its own tab, since a chain runs published versions only."

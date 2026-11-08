@@ -329,7 +329,7 @@ pub fn outcome_lines(outcome: &RunOutcome, dialect: Option<SqlDialect>) -> Vec<L
         }
     }
     if let Some(program) = &outcome.program {
-        match program.killed {
+        match program_bits::killed(program) {
             Some(true) => lines.push(Line::new(
                 Level::Warning,
                 tr!("The program did not end within 5 s of being asked, so its process tree was killed."),
@@ -340,14 +340,17 @@ pub fn outcome_lines(outcome: &RunOutcome, dialect: Option<SqlDialect>) -> Vec<L
             )),
             None => {}
         }
-        if let Some(protocol) = &program.protocol {
-            lines.push(Line::new(Level::Error, protocol.clone()));
+        if let Some(text) = program_bits::start_error(program) {
+            lines.push(Line::new(Level::Error, text));
+        }
+        if let Some(text) = program_bits::protocol_problem(program) {
+            lines.push(Line::new(Level::Error, text));
         }
         lines.extend(program_lines(
             program.exit_code,
             program.exit_signal,
             program.failure_code.as_deref(),
-            program_bits::log_sizes(&program.log_bytes),
+            program_bits::log_sizes(program),
         ));
     }
     if let Some(Err(problem)) = &outcome.outputs {
@@ -674,7 +677,7 @@ pub fn publish_error(error: &PublishError) -> String {
     match error {
         PublishError::Save(error) => save_error(error),
         PublishError::Chain => tr!("A chain is not published; its steps are.").to_owned(),
-        PublishError::Program(refused) => program_bits::refused(refused).0,
+        PublishError::Program(refused) => program_bits::publish_refused(refused.as_ref()),
     }
 }
 
@@ -771,6 +774,13 @@ pub fn production_outputs(connection: &str) -> String {
 pub fn logs_note() -> &'static str {
     tr!(
         "Program logs (stdout, stderr and jjp/1 messages) are kept on this computer for 7 days, at most 1 MiB per stream. Do not print passwords, tokens or personal data."
+    )
+}
+
+/// How Stop ends a program (Q-17).
+pub fn stop_note() -> &'static str {
+    tr!(
+        "Stop asks the program to end (jjp/1's cancel, or a signal to its process group on Unix) and kills its whole process tree if it has not ended 5 s later. On Windows a program without jjp/1 cannot be asked: Stop waits the 5 s, then kills the tree."
     )
 }
 

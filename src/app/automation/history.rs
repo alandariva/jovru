@@ -77,6 +77,7 @@ struct LogView {
     stream: Stream,
     /// `None` while it is read.
     lines: Option<Rc<Vec<SharedString>>>,
+    /// The file's size, when only its first `LOG_LIMIT` bytes are shown.
     dropped: Option<u64>,
     missing: bool,
     scroll: UniformListScrollHandle,
@@ -207,6 +208,7 @@ impl HistoryList {
                 if this.generation != generation {
                     return;
                 }
+                let _timer = jykre::logging::UiTimer::start("automation history page");
                 this.loading = false;
                 match read {
                     Ok(page) => {
@@ -365,27 +367,28 @@ impl HistoryList {
         cx.notify();
         cx.spawn(async move |weak, cx| {
             let read = backend::run(async move {
-                let log = tokio::task::spawn_blocking(move || {
-                    program_bits::read_log(&dir, run, stream).map(|log| {
-                        let lines: Vec<SharedString> = log
-                            .text
-                            .lines()
-                            .map(|line| {
-                                if line.len() > LOG_LINE_CHARS {
-                                    let cut: String = line.chars().take(LOG_LINE_CHARS).collect();
-                                    SharedString::from(format!("{cut}…"))
-                                } else {
-                                    SharedString::from(line.to_owned())
-                                }
-                            })
-                            .collect();
-                        (lines, log.dropped)
-                    })
+                let Ok(Some(log)) = program_bits::read_log(&dir, run, stream).await else {
+                    return Ok(None);
+                };
+                // Split into lines off the UI thread, each cut where shown.
+                let lines = tokio::task::spawn_blocking(move || {
+                    let lines: Vec<SharedString> = log
+                        .text
+                        .lines()
+                        .map(|line| {
+                            if line.len() > LOG_LINE_CHARS {
+                                let cut: String = line.chars().take(LOG_LINE_CHARS).collect();
+                                SharedString::from(format!("{cut}…"))
+                            } else {
+                                SharedString::from(line.to_owned())
+                            }
+                        })
+                        .collect();
+                    (lines, (!log.complete).then_some(log.bytes))
                 })
                 .await
-                .ok()
-                .flatten();
-                Ok(log)
+                .ok();
+                Ok(lines)
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
@@ -519,6 +522,7 @@ impl HistoryList {
         Some(
             row()
                 .id(("history-entry", index))
+                .w_full()
                 .role(Role::ListItem)
                 .aria_label(format!("{name}: {state_text}, {detail}"))
                 .aria_selected(selected)
@@ -819,12 +823,16 @@ impl HistoryList {
             .gap_1()
             .child(label(header))
             .child(body)
-            .when_some(log.dropped, |s, dropped| {
+            .when_some(log.dropped, |s, bytes| {
                 s.child(label(tr!(
-                    "{0} bytes past the 1 MiB limit were read and dropped.",
-                    dropped
+                    "The file holds {0}; only its first {1} are shown.",
+                    jykre::cell_format::size(bytes),
+                    jykre::cell_format::size(program_bits::LOG_LIMIT)
                 )))
             })
+            .child(label(tr!(
+                "A stream past 1 MiB was still read; its file ends with a line saying how many bytes were dropped."
+            )))
     }
 
     fn step_row(

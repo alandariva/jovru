@@ -34,6 +34,12 @@ pub fn statements_note(lines: &[usize]) -> Option<String> {
     if lines.is_empty() {
         return None;
     }
+    if let [line] = lines {
+        return Some(tr!(
+            "This job holds 2 statements, and a job runs exactly one. The extra statement starts on line {0}; remove it before running.",
+            line
+        ));
+    }
     let lines: Vec<String> = lines.iter().map(ToString::to_string).collect();
     Some(tr!(
         "This job holds {0} statements, and a job runs exactly one. The extra statements start on lines {1}; remove them before running.",
@@ -328,11 +334,16 @@ pub fn plan_changed(
     }
     let step = chain.failed_step.as_deref()?;
     let connection = connection_of_step(step)?;
-    Some(tr!(
+    Some(plan_changed_text(&connection, step))
+}
+
+/// Which connection changed and which step did not start (`PlanChanged`).
+pub fn plan_changed_text(connection: &str, step: &str) -> String {
+    tr!(
         "The settings of {0} changed after the plan was confirmed, so step {1} did not start.",
         connection,
         step
-    ))
+    )
 }
 
 /// A run's or chain run's frozen definition, from its snapshot.
@@ -393,6 +404,12 @@ mod tests {
             statements_note(&[4, 5]).as_deref(),
             Some(
                 "This job holds 3 statements, and a job runs exactly one. The extra statements start on lines 4, 5; remove them before running."
+            )
+        );
+        assert_eq!(
+            statements_note(&[2]).as_deref(),
+            Some(
+                "This job holds 2 statements, and a job runs exactly one. The extra statement starts on line 2; remove it before running."
             )
         );
         assert_eq!(statements_note(&[]), None);

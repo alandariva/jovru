@@ -133,6 +133,9 @@ struct ProgramFields {
     working_directory: Entity<InputState>,
     arguments: Vec<Entity<InputState>>,
     unset: Vec<Entity<InputState>>,
+    /// The variables of the environment now that the program will not
+    /// receive, read again as the lists change.
+    removed: Vec<String>,
     set: Vec<(Entity<InputState>, Entity<InputState>)>,
 }
 
@@ -143,6 +146,9 @@ struct ChainFields {
     /// The chain checked against its versions (`Engine::plan`).
     plan: Option<Plan>,
     plan_generation: u64,
+    /// Bumped by each change typed, so the plan is read again once typing
+    /// pauses.
+    typing: u64,
     /// The published versions of each SQL Job and program.
     versions: HashMap<JobId, Vec<StoredVersion>>,
 }
@@ -357,17 +363,23 @@ impl JobView {
         self.id
     }
 
-    pub fn title(&self) -> String {
+    /// The job's name, for its tab group.
+    pub fn name(&self) -> String {
         let name = self.definition.name.trim();
-        let name = if name.is_empty() {
-            tr!("Untitled job")
+        if name.is_empty() {
+            tr!("Untitled job").to_owned()
         } else {
-            name
-        };
+            name.to_owned()
+        }
+    }
+
+    /// The tab's title: the name, with `●` while the job is not saved.
+    pub fn title(&self) -> String {
+        let name = self.name();
         if self.unsaved {
             format!("{name} ●")
         } else {
-            name.to_owned()
+            name
         }
     }
 
@@ -555,6 +567,7 @@ impl JobView {
                     working_directory,
                     arguments: Vec::new(),
                     unset: Vec::new(),
+                    removed: super::program_bits::removed_variables(&body.environment),
                     set: Vec::new(),
                 });
             }
@@ -767,8 +780,37 @@ impl JobView {
             Some(saved) => !saved.same_definition(&current),
             None => true,
         };
+        if let (Some(program), JobBody::Process(body)) = (self.program.as_mut(), &current.body) {
+            program.removed = super::program_bits::removed_variables(&body.environment);
+        }
         self.definition.name = current.name;
+        self.plan_soon(cx);
         cx.notify();
+    }
+
+    /// A chain's step IDs and constants were typed: its plan is read again
+    /// once typing pauses for 300 ms.
+    fn plan_soon(&mut self, cx: &mut Context<Self>) {
+        let Some(chain) = self.chain.as_mut() else {
+            return;
+        };
+        chain.typing += 1;
+        let typing = chain.typing;
+        cx.spawn(async move |weak, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(300))
+                .await;
+            let _ = weak.update(cx, |this, cx| {
+                if this
+                    .chain
+                    .as_ref()
+                    .is_some_and(|chain| chain.typing == typing)
+                {
+                    this.refresh_plan(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// The parameters' (or inputs') specification rows, a program's lists,
@@ -1656,6 +1698,7 @@ impl JobView {
         dialect: Option<SqlDialect>,
         cx: &mut Context<Self>,
     ) {
+        let _timer = jykre::logging::UiTimer::start("automation run status");
         match &status {
             RunStatus::Finished(outcome) => {
                 self.tick = None;
@@ -1674,6 +1717,7 @@ impl JobView {
                             .await;
                         let _ = weak.update(cx, |this, cx| {
                             if let Some(data) = data {
+                                let _timer = jykre::logging::UiTimer::start("automation result");
                                 this.has_result = data.column_count() > 0;
                                 grid.update(cx, |grid, cx| grid.set_page(data, false, 0, None, cx));
                                 cx.notify();
@@ -1748,7 +1792,26 @@ impl JobView {
     }
 
     fn show_chain_status(&mut self, status: ChainStatus, cx: &mut Context<Self>) {
+        let _timer = jykre::logging::UiTimer::start("automation chain status");
         let mut follow = None;
+        // Each SQL step's connection by name, to say which one changed.
+        let connections: HashMap<String, String> = self
+            .chain
+            .as_ref()
+            .and_then(|chain| chain.plan.as_ref())
+            .map(|plan| {
+                plan.steps
+                    .iter()
+                    .filter_map(|step| match &step.definition.body {
+                        JobBody::Sql(sql) => {
+                            let source = source_of(&self.sources.sources, sql.connection?)?;
+                            Some((step.id.clone(), source.connection.name.clone()))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         if let Active::Chain {
             status: shown,
             step,
@@ -1770,7 +1833,7 @@ impl JobView {
                     *step_status = None;
                 }
                 ChainStatus::Finished(outcome) => {
-                    self.run_lines = chain_outcome_lines(outcome);
+                    self.run_lines = chain_outcome_lines(outcome, &connections);
                     self.step_watch = None;
                     self.tick = None;
                     self.history.update(cx, |history, cx| history.refresh(cx));
@@ -1907,7 +1970,10 @@ impl JobView {
 
 /// What a finished chain says: its state and cause, `effect_unknown`, and
 /// each step's outcome; steps after the one that stopped it did not run.
-fn chain_outcome_lines(outcome: &jykre::automation::ChainOutcome) -> Vec<Line> {
+fn chain_outcome_lines(
+    outcome: &jykre::automation::ChainOutcome,
+    connections: &HashMap<String, String>,
+) -> Vec<Line> {
     let mut lines = Vec::new();
     let elapsed = Some(outcome.elapsed);
     let state = words::state_label(outcome.state, outcome.cause, elapsed);
@@ -1926,6 +1992,15 @@ fn chain_outcome_lines(outcome: &jykre::automation::ChainOutcome) -> Vec<Line> {
         first.push_str(&tr!("It stopped at step {0}.", step));
     }
     lines.push(Line { level, text: first });
+    if outcome.cause == Some(jykre::automation::Cause::PlanChanged)
+        && let Some(step) = &outcome.failed_step
+        && let Some(connection) = connections.get(step)
+    {
+        lines.push(Line {
+            level: Level::Error,
+            text: logic::plan_changed_text(connection, step),
+        });
+    }
     if let Some(problem) = &outcome.input_problem {
         lines.push(Line {
             level: Level::Error,
