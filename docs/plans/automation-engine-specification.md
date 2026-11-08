@@ -1,27 +1,33 @@
 # Jykre Studio — Automation engine specification
 
-**Version:** 1.1, consolidated proposal
-**Date:** November 7, 2026
-**Approval:** Proposed
-**Implementation:** Not started
+**Version:** 1.2, decisions answered
+**Date:** November 8, 2026 (1.1: November 7, 2026)
+**Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
+Q-01…Q-14 ([section 12](#12-decisions-required-from-the-maintainer)),
+ADR-0033 and ADR-0034 accepted. Phase 3 still waits for the supervision
+dependency (Q-11) and phase 5 for its revision of this document
+**Implementation:** Not started (the [proof of concept](automation-sql-job-poc.md) is partial)
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
 
 Version 1.1 consolidates the original 1.0 proposal with the
 [architecture review](../research/automation-engine-architecture-review.md)
-of the same date. It keeps the direction of 1.0, applies the review's
-proposed changes and narrows the first delivery to a **manual SQL Job**. The
+of the same date. It kept the direction of 1.0, applied the review's
+proposed changes and narrowed the first delivery to a **manual SQL Job**;
+version 1.2 widens it to **SQL → script** (Q-01). The
 1.0 text remains in the Git history; [Appendix B](#appendix-b--traceability-from-version-10)
 maps each of its sections to what happened to it here. Finding IDs (`P-xx`),
 design IDs (`Dxx`) and question IDs (`Q-xx`) refer to the review.
 
-> **This document authorizes nothing.** Every recommendation the review made
-> is written here as the proposal, but the decisions in
-> [section 12](#12-decisions-required-from-the-maintainer) are still open.
-> Text marked *pending Q-xx* depends on that decision, and implementation of
-> a phase starts only after the questions blocking it are answered. A
-> [proof of concept](automation-sql-job-poc.md) may run before them because
-> it needs no approval.
+> **Version 1.2** records the maintainer's answers of 2026-11-08
+> ([section 12](#12-decisions-required-from-the-maintainer)). The first
+> delivery is now **SQL → script** in version 0.3.0 (Q-01), built straight
+> through phases 1, 3, 4 and 5 with the interface at the end. Text that said
+> *pending Q-xx* now states the answer.
+> [ADR-0033](../adr/0033-automation-database-service-and-lock.md),
+> [ADR-0034](../adr/0034-persisted-declared-outputs.md) and the
+> [0.3.0 plan](releases/0.3.0.md) were accepted on 2026-11-08. Phase 3 starts
+> only once the process-supervision dependency is approved (Q-11).
 
 ## Contents
 
@@ -84,8 +90,9 @@ chains come later, through the same engine, states and history.
 ### 1.4 Release placement
 
 Automation does **not** belong in 0.2.0, whose thesis is daily-use hardening
-without new capabilities (D02, [release plan](releases/0.2.0.md)). Work on
-this specification, including the proof of concept, lands after 0.2.0.
+without new capabilities (D02, [release plan](releases/0.2.0.md)). It is the
+thesis of [0.3.0](releases/0.3.0.md), which ships once SQL → script works
+end to end (decision R, 2026-11-08).
 
 ### 1.5 Architecture
 
@@ -108,18 +115,21 @@ Section 5.1 places each part in the existing crates.
 
 ## 2. Scope by phase
 
-Each phase is accepted on its own: criteria from later phases can never block
-an earlier one (D03).
+Each phase keeps its own acceptance criteria, and criteria from later phases
+never change an earlier one's (D03). Since Q-01 chose SQL → script, phases 1,
+3, 4 and 5 are built one after another without an intermediate release, and
+the interface (phase 2, widened to processes and chains) comes last; 0.3.0
+ships when all of them are accepted. Phases 6 and 7 stay later.
 
 | Phase | Priority | Delivery | Blocked by |
 | --- | --- | --- | --- |
 | PoC | Optional | Headless SQL executor and engine without persistence or UI, to measure the open risks ([plan](automation-sql-job-poc.md)) | Nothing |
-| 0 — Decisions | P0 | Answers to Q-01…Q-07, the automation ADR (persistence, service, lock), the phase 1 DDL | — |
-| 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Q-01, Q-02, Q-04…Q-07 |
-| 2 — Minimal UI | P0 | Section 8; usable SQL Job | Phase 1 |
-| 3 — External process without protocol | P1 | Section 9.1 | Q-10, Q-11 |
-| 4 — Minimal protocol `jjp/1` | P1 | Section 9.2 | Q-12, Q-13, phase 3 |
-| 5 — Linear chain | P1 | Section 9.3 | Q-03, Q-09 |
+| 0 — Decisions | P0 | Answers to Q-01…Q-14, ADR-0033 and ADR-0034 with the DDL (all done 2026-11-08) | — |
+| 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Phase 0 |
+| 3 — External process without protocol | P0 | Section 9.1 | Approval of the supervision dependency (Q-11) |
+| 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3 |
+| 5 — Linear chain | P0 | Section 9.3; SQL → script | Phases 1 and 4; the phase 5 revision of this document |
+| 2 — Interface | P0 | Section 8, for SQL Jobs, processes and chains | Phase 5 |
 | 6 — On-demand capabilities | P2 | Section 9.4 | One ADR per capability |
 | 7 — Evolution | P3 | Section 9.5 | Q-14 and per-capability decisions |
 
@@ -257,8 +267,11 @@ already use.
 
 ### 4.3 One statement
 
-The dialect splitter must find exactly one statement. Anything else fails with
-a validation error before a session opens. Multi-statement jobs need their own
+The dialect splitter must find exactly one statement. Anything else is
+refused before admission, with the reason, and leaves no run in the history,
+as a tab that stops before sending leaves nothing; so is a missing or
+malformed value. `Failed` with cause `Validation` is kept for what a driver
+refuses after admission (proof of concept, 8.6). Multi-statement jobs need their own
 error, transaction and result policy and are not planned.
 
 ### 4.4 Session
@@ -311,10 +324,15 @@ executor applies one rule (D11):
 | SQLite | At the limit, waits for idle and interrupts only at the deadline, rolling back writes | Consume until completion |
 | Databricks | Warehouse and classic return rows only after a terminal state; `has_more` is a local remainder | Discarding the remainder cannot change the commit; `effect_unknown` only without terminal confirmation |
 
-Whether drivers should report confirmed remote completion as typed metadata
-in `DriverOutcome` is Q-08. Until it is answered, the executor treats
-uncertainty conservatively. The proof of concept measures whether the drain
-in step 2 is enough.
+Drivers do not report confirmed remote completion as typed metadata: the
+executor treats uncertainty conservatively and `DriverOutcome` does not
+change (Q-08). The executor's sink never asks the driver to stop a write's
+result, since MySQL would then drain for up to 5 s and may kill the
+statement, and PostgreSQL cancels the backend at the next command. Drivers
+report `rows_affected` as `None` for a statement that returns rows; the run
+then counts the rows it read, kept and discarded. Phase 1 runs a job through
+a backend function of its own: `backend::query_in_context` settles the
+session after the run, which would discard a write's result still open.
 
 ### 4.7 Results
 
@@ -360,17 +378,21 @@ The engine is an **application-root service**. Views subscribe to it; closing
 a view does not cancel its runs. Quitting the application with runs active
 asks the user, then cancels them and waits for the shutdown to finish before
 exiting. This deviates from the rule that dropping a view cancels its
-operations, and the automation ADR records the deviation (D07, P-27,
-pending Q-05).
+operations, and [ADR-0033](../adr/0033-automation-database-service-and-lock.md)
+records the deviation (D07, P-27, Q-05).
 
 ### 5.3 Admission and concurrency
 
 - At most **2 active runs** in the application and **1 per `ConnectionId`**.
   A run beyond either limit is refused immediately with a visible reason;
-  there is no queue until phase 5 (D13, pending Q-07).
+  there is no queue until phase 5 (D13, Q-07).
 - The per-connection limit counts profiles, not physical resources: two
   SQLite profiles that open the same file are not serialized, and recovery
   connections are not counted (P-31). This is a documented limitation.
+- SQLite has one writer per file: a job that writes while a tab holds a write
+  transaction on the same file waits for the lock (4 s) and fails with
+  `Database`, its effect known; it never touches the tab's transaction
+  (proof of concept, H3).
 - Limits are revisited after measurement, not raised by default.
 
 ### 5.4 States
@@ -413,7 +435,11 @@ never a terminal state. Run lists are virtualized.
 
 ## 6. Persistence and recovery
 
-All of this section is pending Q-02 and the automation ADR.
+This section is decided by
+[ADR-0033](../adr/0033-automation-database-service-and-lock.md) (Q-02,
+Q-06) and, for declared outputs,
+[ADR-0034](../adr/0034-persisted-declared-outputs.md) (Q-03), both accepted.
+Where they differ from the text below, the ADRs win.
 
 ### 6.1 `automation.db`
 
@@ -452,12 +478,16 @@ Persisted operational data: delivered row count, `rows_affected`,
 `truncated`, `effect_unknown`, SQLSTATE or driver error code, cause, timing.
 The history shows *what ran, when and how it ended*, not what it returned.
 
-Persisting declared outputs for chains (phase 5) needs its own ADR. The
-review's proposed defaults, if approved, are at most 4 KiB per run, values
-kept 7 days, metadata 90 days, opt-in per job and an extra confirmation for
-production jobs (D29, pending Q-03).
+The one exception is declared scalar outputs for chains (phase 5), under
+[ADR-0034](../adr/0034-persisted-declared-outputs.md): opt-in per job, at
+most 4 KiB per run, values kept 7 days, metadata 90 days, and an extra
+confirmation for production jobs (D29, Q-03).
 
-### 6.5 Phase 1 schema (illustrative)
+### 6.5 Phase 1 schema (superseded by ADR-0033)
+
+The approved DDL is in
+[ADR-0033](../adr/0033-automation-database-service-and-lock.md#2-migration-1-jobs-and-runs);
+the sketch below is kept as the 1.1 text.
 
 ```sql
 CREATE TABLE jobs (
@@ -496,10 +526,13 @@ until their phase (D01).
 
 ### 6.6 Lock and recovery
 
-- The engine takes an **exclusive lock per data directory**, following the
-  metadata writer lock, before migrating, recovering or admitting runs. A
-  second instance on the same directory stays usable but cannot run
-  automation, and says so (D17, pending Q-06).
+- The engine takes an **exclusive operating-system lock** on
+  `automation.lock` in the data folder (`File::try_lock`, as the metadata
+  writer lock), before migrating, recovering or admitting runs. The system
+  releases it when the process ends, crash included; the file left behind
+  means nothing, so a lock is never stranded. A second instance on the same
+  folder stays usable, shows Automation read-only, says why, and tries the
+  lock again when Automation opens (D17, Q-06).
 - At startup, the lock holder marks every run still `Running` as
   `Interrupted`, adding `effect_unknown` unless the snapshot only reads. It
   never replays a run and uses no leases.
@@ -593,22 +626,24 @@ honour, not as finished designs.
   a kill-on-close Job Object on Windows and process groups on Unix. `unsafe`
   is forbidden and `kill_on_drop` kills only the direct child (P-07).
   `process-wrap` is the candidate to evaluate for license, weight, advisories
-  and features (pending Q-11). **No approval, no external phase.**
+  and features through a formal proposal (Q-11). **No approval, no external
+  phase.**
 - Unix residual risk is documented: if Studio crashes, the group survives.
   Recovery records group ID and start time, warns, and never kills a PID or
   PGID that may have been reused.
 - Spawn with an argument vector and no shell. The environment is an
   operating-system and runtime allowlist (for example `SystemRoot`, `PATH`,
   `TEMP` on Windows; `HOME`, `LANG` on Unix) plus explicit passthrough. No
-  default `NODE_OPTIONS`, `PYTHONPATH` or `JYKRE_CONFIG_DIR` (P-19).
+  default `NODE_OPTIONS`, `PYTHONPATH` or `JYKRE_CONFIG_DIR` (P-19). The
+  `jjp/1` token never travels in the environment (section 9.2).
 - Execute a snapshot of the entrypoint, not the original path, and say
   clearly that local imports, `node_modules` and runtimes found on `PATH`
   are not frozen (P-24).
 - stdout and stderr are drained into bounded files; excess is discarded with a
   marker. A full pipe never blocks the child or Studio (P-13).
 - Success is exit code 0; anything else, a timeout or Stop fails. Importing or
-  first running external code warns that it runs with the user's privileges
-  (pending Q-10).
+  first running external code warns that it runs with the user's privileges,
+  and explains that grants protect Studio's APIs, not the machine (Q-10).
 
 ### 9.2 Phase 4 — Minimal `jjp/1`
 
@@ -616,9 +651,16 @@ honour, not as finished designs.
   startup. One session per run, no reconnection, no batches.
 - NDJSON framing with a 1 MiB limit enforced before allocating. JSON-RPC 2.0
   messages.
-- Authentication: a 256-bit per-run token, passed in the environment and
-  consumed atomically by `hello`; reuse fails. The token and inputs travel
-  only in the `hello` request and response (pending Q-12).
+- Authentication: a 256-bit per-run token, written by the host as the first
+  line of the child's **stdin**, which the host then closes, and consumed
+  atomically by `hello`; reuse fails. The environment carries only the
+  listener's address, which is not a secret. Unlike an environment variable,
+  the token is not inherited by the processes the job starts and cannot be
+  read from `/proc/<pid>/environ` or the process environment by other
+  processes of the same user; a same-user process allowed to debug the job
+  can still read its memory, which is documented. A job therefore cannot use
+  stdin for anything else. The token and inputs travel only in stdin and the
+  `hello` exchange (Q-12).
 - Jobs are **pure clients** (P-12): there is no `execute`, `accepted` or
   `ping`. The host sends only a `cancel` notification.
 
@@ -637,7 +679,7 @@ honour, not as finished designs.
 - A terminal intent is decided by the run owner together with process exit
   (section 5.5): `complete` followed by a nonzero exit fails.
 - A testable JavaScript example lives in `examples/`; there is no published
-  SDK until `jjp/1` is stable (D24, pending Q-13).
+  SDK until `jjp/1` is stable (D24, Q-13).
 
 ### 9.3 Phase 5 — Linear chain
 
@@ -649,7 +691,10 @@ honour, not as finished designs.
   waits on itself (P-14). Dynamic `jobs.run` stays excluded.
 - Queues arrive here, with limits the review proposed as 8/4/60 s, defined
   precisely in this phase's revision.
-- Outputs are in memory unless Q-03 approves persistence (section 6.4).
+- Outputs are in memory, and persisted only for jobs that opt in, under
+  [ADR-0034](../adr/0034-persisted-declared-outputs.md) (Q-03).
+- `native_flow` stays removed; if it ever returns, it compiles to this same
+  linear plan (Q-09).
 - Cancelling or failing a step cancels the rest of the chain.
 
 ### 9.4 Phase 6 — On-demand capabilities
@@ -667,7 +712,8 @@ Each needs its own ADR before implementation.
 
 ### 9.5 Phase 7 — Evolution
 
-Scheduling (consent, time zone, overlap and missed triggers; pending Q-14),
+Scheduling only while the application is open (consent, time zone, overlap
+and missed triggers; Q-14), never while it is closed,
 cache and secret broker as separate stores with generations, TTL,
 consumer-ACL reevaluation and waiter cancellation (P-23, D28), references
 bound to origin, audience and authentication type with no redirects (P-16),
@@ -700,7 +746,7 @@ alternative transports and execution while the application is closed.
 | CA-06 | 6 | `ask` enters `WaitingInput` and its timeout applies the job's policy. |
 | CA-08 | 6 | Artifacts are copied through verified handles, within quotas, and survive a crash between copy and index. |
 | CA-10 | 7 | Non-normative until phase 7 is specified (Appendix A). |
-| CA-12 | All | Each phase is validated on Windows, Linux and macOS separately. |
+| CA-12 | All | Each phase is validated on Windows, Linux and macOS separately. For 0.3.0, Windows and Linux only (maintainer, 2026-11-08). |
 
 ## 11. Test matrix
 
@@ -722,20 +768,24 @@ and the measured budgets.
 
 | ID | Question | Proposal | Blocks | Status |
 | --- | --- | --- | --- | --- |
-| Q-01 | First indispensable flow: reusable manual SQL, SQL → script, or an SFMC/HTTP connector? | Manual SQL Job (D01) | Phase 0 | Pending |
-| Q-02 | Approve the automation ADR: `automation.db`, minimal schema, recorded run data (D05, D14–D16)? | Approve as in section 6 | Phase 1 | Pending |
-| Q-03 | Allow persisting declared scalar outputs by ADR, with which defaults? | D29; no values without an ADR | Phase 5 | Pending |
-| Q-04 | Approve minimal pure automation DTOs in `jykre-core`? | Approve | Phase 1 | Pending |
-| Q-05 | Application-root service and coordinated quit, deviating from view-owned cancellation? | Accept D07 | Phase 1 | Pending |
-| Q-06 | A second instance on the same data directory cannot run automation? | Accept D17 | Phase 1 | Pending |
-| Q-07 | 2 global runs, 1 per connection, immediate refusal and a 300 s timeout? | Confirm, measure, revisit | Phase 1 | Pending |
-| Q-08 | Typed remote-completion metadata in `DriverOutcome`, or conservative uncertainty? | Conservative in phase 1; the PoC measures the need | Phase 1 (optional) | Pending |
-| Q-09 | Keep `native_flow`, or replace it with linear chaining? | Replace; if revived, compile it to the same plan | Roadmap | Pending |
-| Q-10 | Treat external code as explicitly trusted, with the UI explaining that grants protect Studio APIs, not the machine? | Yes; warn on import and first run | Phase 3 | Pending |
-| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | Pending |
-| Q-12 | Accept per-run IPC tokens in the environment, visible to same-user processes during the run? | Accept, with `hello` consumption and documented risk | Phase 4 | Pending |
-| Q-13 | Keep the SDK out of the repository until `jjp/1` stabilizes? | Yes (D24) | Phase 4 | Pending |
-| Q-14 | Durable scheduling consent and execution while the application is closed? | Design with scheduling | Phase 7 | Pending |
+| Q-01 | First indispensable flow: reusable manual SQL, SQL → script, or an SFMC/HTTP connector? | Manual SQL Job (D01) | Phase 0 | **SQL → script**, built straight through phases 1, 3, 4 and 5 for 0.3.0 |
+| Q-02 | Approve the automation ADR: `automation.db`, minimal schema, recorded run data (D05, D14–D16)? | Approve as in section 6 | Phase 1 | **Approved**; ADR-0033 accepted |
+| Q-03 | Allow persisting declared scalar outputs by ADR, with which defaults? | D29; no values without an ADR | Phase 5 | **D29 defaults approved**; ADR-0034 accepted |
+| Q-04 | Approve minimal pure automation DTOs in `jykre-core`? | Approve | Phase 1 | **Approved** |
+| Q-05 | Application-root service and coordinated quit, deviating from view-owned cancellation? | Accept D07 | Phase 1 | **Accepted** |
+| Q-06 | A second instance on the same data directory cannot run automation? | Accept D17 | Phase 1 | **Accepted**, with an OS lock that the system releases when the process ends |
+| Q-07 | 2 global runs, 1 per connection, immediate refusal and a 300 s timeout? | Confirm, measure, revisit | Phase 1 | **Confirmed** |
+| Q-08 | Typed remote-completion metadata in `DriverOutcome`, or conservative uncertainty? | Conservative in phase 1; the PoC measures the need | Phase 1 (optional) | **Conservative**; no contract change |
+| Q-09 | Keep `native_flow`, or replace it with linear chaining? | Replace; if revived, compile it to the same plan | Roadmap | **Replace** |
+| Q-10 | Treat external code as explicitly trusted, with the UI explaining that grants protect Studio APIs, not the machine? | Yes; warn on import and first run | Phase 3 | **Yes** |
+| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | **Evaluate formally**; the proposal is still to be written and approved |
+| Q-12 | Accept per-run IPC tokens in the environment, visible to same-user processes during the run? | Accept, with `hello` consumption and documented risk | Phase 4 | **Token through stdin**, not the environment (section 9.2) |
+| Q-13 | Keep the SDK out of the repository until `jjp/1` stabilizes? | Yes (D24) | Phase 4 | **Yes** |
+| Q-14 | Durable scheduling consent and execution while the application is closed? | Design with scheduling | Phase 7 | **Only while the application is open**; execution while it is closed is excluded |
+
+Answers given by the maintainer on 2026-11-08, together with the release
+decision R: automation is the thesis of [0.3.0](releases/0.3.0.md), which
+ships SQL → script.
 
 The review's design register (D01–D29) and its trade-offs remain in
 [its section 4](../research/automation-engine-architecture-review.md#4-recommended-design-and-trade-offs);
@@ -764,7 +814,7 @@ phases. The scenarios remain useful as targets, not as contracts:
 
 | Scenario | Needs | Constraints that still apply |
 | --- | --- | --- |
-| Look up a Data Extension address with SQL against a catalog table | Phase 1–2 only | This is the first delivery's natural example; no palette until phase 7 |
+| Look up a Data Extension address with SQL against a catalog table | Phase 1–2 only | The SQL step of the first delivery; no palette until phase 7 |
 | Authenticate once and reuse the token in several jobs | Phase 7 cache and secret broker | The token is never an ordinary output; references are bound to origin, audience and authentication type; no redirects |
 | Look up and export a Data Extension from a script | Phases 3–6 | The script must not log input values; HTTP from the script is the process's own and is not restricted by grants |
 | Ask before exporting many rows | Phase 6 `ask` | A declined answer is a business outcome, not an infrastructure failure |

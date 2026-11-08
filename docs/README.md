@@ -71,8 +71,9 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | --- | --- |
 | [Technical debt](plans/technical-debt.md) | Accepted debts, severity, status and completion criteria |
 | [Version 0.2.0](plans/releases/0.2.0.md) | Daily-use hardening, application icon, Linux validation and release acceptance |
-| [Automation engine specification](plans/automation-engine-specification.md) | Version 1.1 proposal consolidating the architecture review; manual SQL Job first, decisions still open |
-| [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes |
+| [Version 0.3.0](plans/releases/0.3.0.md) | Approved milestones for the first automation: SQL → script |
+| [Automation engine specification](plans/automation-engine-specification.md) | Version 1.2, approved for 0.3.0 on 2026-11-08: SQL → script first; ADR-0033 and ADR-0034 accepted |
+| [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes; findings recorded, live runs pending |
 | [Large `.sql` files in the editor](plans/editor-large-files.md) | Proposal for ADR-0031's D7 file limit: the editor component's soft wrap on opening, measured options and a recommendation |
 | [SQL catalog proposal](plans/sql-catalog-proposal.md) | Original format proposal and future standalone catalog repository; see the reference for current behavior |
 
