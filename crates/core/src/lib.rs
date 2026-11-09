@@ -8,6 +8,7 @@ mod error;
 mod metadata;
 mod registry;
 mod result;
+pub mod write;
 
 pub use async_trait::async_trait;
 pub use connection::*;

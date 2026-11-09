@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 mod cluster;
+mod edit;
 
 fn error(code: ErrorCode, message: &str) -> DriverError {
     DriverError::new(code, message)
@@ -1378,6 +1379,7 @@ impl Session for DatabricksSession {
                             .ok_or_else(protocol)?
                             .to_owned(),
                         nullable: None,
+                        origin: Default::default(),
                     })
                 })
                 .collect::<DriverResult<Vec<_>>>()?;
@@ -1460,6 +1462,28 @@ impl Session for DatabricksSession {
     }
     async fn ping(&mut self) -> DriverResult<()> {
         Ok(())
+    }
+    /// Inferred from the statement's text and resolved against Unity
+    /// Catalog (ADR-0039, section 9); no compute runs and an open result
+    /// stays open.
+    async fn edit_target(
+        &mut self,
+        statement: &str,
+        columns: &[ColumnInfo],
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        edit::edit_target(
+            &self.client,
+            self.catalog.as_deref(),
+            self.schema.as_deref(),
+            statement,
+            columns,
+            &cancel,
+        )
+        .await
+    }
+    fn write_script(&self, request: &write::WriteRequest) -> DriverResult<write::WriteScript> {
+        edit::write_script(request)
     }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         Ok(())

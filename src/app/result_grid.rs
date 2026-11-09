@@ -22,11 +22,13 @@ use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
 use jykre::grid::{
     self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, selection_block,
 };
+use jykre::grid_edit::{self, EditSession, EditValue, Overlay, RowMark};
 use jykre::result::ResultData;
 use jykre::result_tabs::ResultId;
 use jykre::stats::{self, BlockSummary, ColumnSummary, Sample, SelectionSummary};
 use jykre::tr;
 use jykre_core::SqlDialect;
+use jykre_core::write;
 use std::collections::HashMap;
 use std::time::Duration;
 use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
@@ -46,6 +48,43 @@ pub enum ResultGridEvent {
     /// The side panel opened, closed or changed tab, for the toolbar's
     /// Statistics button.
     PanelChanged,
+    /// Editing started on a result tab whose table is not known yet: the
+    /// workspace reads it from the session and answers with
+    /// [`ResultGrid::set_editing`] (ADR-0039).
+    EditRequested(ResultId),
+    /// The pending edits changed.
+    EditsChanged,
+    /// **Write…** (or **Generate SQL…**) was asked for.
+    WriteRequested,
+    /// **Discard** was asked for.
+    DiscardRequested,
+}
+
+/// Where editing a result tab stands (ADR-0039).
+pub enum Editing {
+    /// Its table is being read from the session.
+    Resolving,
+    /// It cannot be edited, for this reason.
+    ReadOnly(write::ReadOnlyReason),
+    /// Its pending edits.
+    Session(Box<EditSession>),
+}
+
+/// What an editing key asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditAction {
+    Cell,
+    Null,
+    Insert,
+    Delete,
+}
+
+/// The field a cell is typed in, over the cell.
+struct CellEditor {
+    /// (data row, result column).
+    cell: (usize, usize),
+    input: Entity<InputState>,
+    _events: Subscription,
 }
 
 /// The statistics of the selected cells, for the footer.
@@ -342,6 +381,12 @@ pub struct ResultGrid {
     records_pan: ScrollHandle,
     sql: GridSql,
     copy_job: Option<super::copying::CopyJob>,
+    /// Editing, by result tab: kept while the tab is open (ADR-0039).
+    editing: HashMap<ResultId, Editing>,
+    /// The key that asked for a table still being read, done once it is.
+    edit_after: Option<EditAction>,
+    /// The cell being typed in.
+    cell_editor: Option<CellEditor>,
 }
 
 impl EventEmitter<ResultGridEvent> for ResultGrid {}
@@ -459,6 +504,9 @@ impl ResultGrid {
             records_pan: ScrollHandle::new(),
             sql: GridSql::default(),
             copy_job: None,
+            editing: HashMap::new(),
+            edit_after: None,
+            cell_editor: None,
         }
     }
 
@@ -506,7 +554,14 @@ impl ResultGrid {
         // A sort chosen for one result tab does not carry to another; the
         // pages of the same tab keep it, their column widths and layout,
         // while the result has the same columns.
-        let same_columns = self.result.columns() == result.columns();
+        let same_columns = self.result.column_count() == result.column_count()
+            && self
+                .result
+                .columns()
+                .iter()
+                .zip(result.columns())
+                .all(|(old, new)| old.same_as(new));
+        self.cell_editor = None;
         if !same_tab {
             self.sort = None;
             self.widths.clear();
@@ -545,6 +600,83 @@ impl ResultGrid {
     /// Forgets where closed result tabs were left.
     pub fn retain_places(&mut self, open: &[ResultId]) {
         self.places.retain(|id, _| open.contains(id));
+        self.editing.retain(|id, _| open.contains(id));
+    }
+
+    /// Where editing result tab `id` stands.
+    pub fn editing(&self, id: ResultId) -> Option<&Editing> {
+        self.editing.get(&id)
+    }
+
+    /// The pending edits of the result tab on screen.
+    fn session(&self) -> Option<&EditSession> {
+        match self.editing.get(&self.shown?.0)? {
+            Editing::Session(session) => Some(session),
+            _ => None,
+        }
+    }
+
+    /// Changed rows waiting to be written, in the result tabs among `ids`
+    /// (all of them with `None`).
+    pub fn pending_edits(&self, ids: Option<&[ResultId]>) -> usize {
+        self.editing
+            .iter()
+            .filter(|(id, _)| ids.is_none_or(|ids| ids.contains(id)))
+            .map(|(_, editing)| match editing {
+                Editing::Session(session) => session.pending(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// The workspace's answer to [`ResultGridEvent::EditRequested`]: what
+    /// result tab `id` can be written back to. The key that asked is done
+    /// now when it is the tab on screen. `None` forgets the question (the
+    /// user did not go on).
+    pub fn set_editing(
+        &mut self,
+        id: ResultId,
+        editing: Option<Editing>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let after = self.edit_after.take();
+        match editing {
+            None => {
+                self.editing.remove(&id);
+            }
+            Some(editing) => {
+                if let Editing::ReadOnly(reason) = &editing {
+                    let text = grid_edit::read_only_text(reason);
+                    cx.emit(ResultGridEvent::Notice(Feedback::new(Tone::Info, text)));
+                }
+                let ready = matches!(editing, Editing::Session(_));
+                self.editing.insert(id, editing);
+                if ready
+                    && self.shown.map(|(shown, _)| shown) == Some(id)
+                    && let Some(action) = after
+                {
+                    self.perform(action, window, cx);
+                }
+            }
+        }
+        cx.emit(ResultGridEvent::EditsChanged);
+        cx.notify();
+    }
+
+    /// Changes result tab `id`'s pending edits with `change` (after a
+    /// write, or a discard), and draws them.
+    pub fn update_session(
+        &mut self,
+        id: ResultId,
+        change: impl FnOnce(&mut EditSession),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(Editing::Session(session)) = self.editing.get_mut(&id) {
+            change(session);
+            cx.emit(ResultGridEvent::EditsChanged);
+            cx.notify();
+        }
     }
 
     /// Filters rows by text in any column, ignoring case. An empty filter
@@ -590,11 +722,14 @@ impl ResultGrid {
 
     /// The grid for the current result, filter, sort and number format.
     fn view(&self) -> Arc<GridView> {
+        let session = self.session();
         let key = GridKey {
             result: self.version,
             filter: self.filter.clone(),
             sort: self.sort,
             numbers_pt_br: self.numbers_pt_br,
+            edits: session.map_or(0, EditSession::version),
+            inserted: session.map_or(0, EditSession::drawn_inserted),
         };
         self.cache.get(&self.result, key)
     }
@@ -1390,7 +1525,10 @@ impl ResultGrid {
         if keystroke.key != "escape" || keystroke.modifiers.modified() {
             return;
         }
-        if self.copy_job.is_some() {
+        if self.cell_editor.is_some() {
+            // What was typed is dropped; the cell keeps its value.
+            self.finish_cell_edit(false, window, cx);
+        } else if self.copy_job.is_some() {
             self.cancel_copy(cx);
         } else if self.inspector.is_some() {
             self.set_inspector(None, cx);
@@ -1422,7 +1560,244 @@ impl ResultGrid {
                 self.open_inspector(Inspector::Value, cx)
             }
             KeyAction::Inspect => cx.propagate(),
+            KeyAction::Edit(action) => self.edit(action, window, cx),
+            KeyAction::Write => cx.emit(ResultGridEvent::WriteRequested),
+            KeyAction::Discard => cx.emit(ResultGridEvent::DiscardRequested),
         }
+    }
+
+    /// An editing key: done now when the tab's table is known, after the
+    /// workspace read it otherwise; a read-only result says why.
+    fn edit(&mut self, action: EditAction, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, _)) = self.shown else {
+            self.edit_notice(tr!("Only a query tab's result can be edited.").into(), cx);
+            return;
+        };
+        match self.editing.get(&id) {
+            None => {
+                self.edit_after = Some(action);
+                self.editing.insert(id, Editing::Resolving);
+                cx.emit(ResultGridEvent::EditRequested(id));
+                cx.notify();
+            }
+            Some(Editing::Resolving) => {
+                self.edit_after = Some(action);
+            }
+            Some(Editing::ReadOnly(reason)) => {
+                let text = grid_edit::read_only_text(reason);
+                self.edit_notice(text, cx);
+            }
+            Some(Editing::Session(_)) => self.perform(action, window, cx),
+        }
+    }
+
+    fn edit_notice(&self, text: String, cx: &mut Context<Self>) {
+        cx.emit(ResultGridEvent::Notice(Feedback::new(Tone::Info, text)));
+    }
+
+    /// Changes the tab's pending edits with `change`; a refusal is said.
+    fn change_edits(
+        &mut self,
+        change: impl FnOnce(&mut EditSession, &ResultData, usize) -> Result<(), grid_edit::Refused>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((id, _)) = self.shown else {
+            return false;
+        };
+        let (result, first_row) = (self.result.clone(), self.first_row);
+        let Some(Editing::Session(session)) = self.editing.get_mut(&id) else {
+            return false;
+        };
+        let done = change(session, &result, first_row);
+        cx.emit(ResultGridEvent::EditsChanged);
+        cx.notify();
+        match done {
+            Ok(()) => true,
+            Err(refused) => {
+                self.edit_notice(grid_edit::refused_text(&refused), cx);
+                false
+            }
+        }
+    }
+
+    /// The data rows and result columns of the visible selection.
+    fn selected_block(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        let view = self.view();
+        let (rows, columns) = selection_block(self.selection?, &view.rows, &self.layout)?;
+        let rows = rows
+            .filter_map(|position| view.rows.get(position).copied())
+            .collect();
+        Some((rows, grid::block_columns(&self.layout, columns)))
+    }
+
+    fn perform(&mut self, action: EditAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            EditAction::Cell => self.start_cell_edit(window, cx),
+            EditAction::Null => {
+                let Some((rows, columns)) = self.selected_block() else {
+                    self.edit_notice(tr!("Select the cells to set to NULL.").into(), cx);
+                    return;
+                };
+                self.change_edits(
+                    |session, result, first_row| {
+                        for row in &rows {
+                            for column in &columns {
+                                set_cell(
+                                    session,
+                                    result,
+                                    first_row,
+                                    *row,
+                                    *column,
+                                    EditValue::Null,
+                                )?;
+                            }
+                        }
+                        Ok(())
+                    },
+                    cx,
+                );
+            }
+            EditAction::Insert => {
+                let mut added = None;
+                self.change_edits(
+                    |session, result, _| {
+                        if session.needs_key() {
+                            return Err(grid_edit::Refused::NeedsKey);
+                        }
+                        added = Some(result.row_count() + session.insert_row());
+                        Ok(())
+                    },
+                    cx,
+                );
+                let first = self
+                    .layout
+                    .visible()
+                    .iter()
+                    .copied()
+                    .find(|column| {
+                        self.session()
+                            .is_some_and(|session| session.editable_column(*column).is_ok())
+                    })
+                    .or_else(|| self.layout.column(0));
+                if let (Some(row), Some(column)) = (added, first) {
+                    self.select(Some(CellSelection::cell(row, column)), cx);
+                    let view = self.view();
+                    let position = view.rows.iter().position(|each| *each == row);
+                    if let Some(display) = self.layout.position(column) {
+                        self.reveal(position, display, &view);
+                    }
+                }
+            }
+            EditAction::Delete => {
+                let Some((mut rows, _)) = self.selected_block() else {
+                    self.edit_notice(tr!("Select the rows to delete.").into(), cx);
+                    return;
+                };
+                // Inserted rows go from the last, so the others keep their
+                // place.
+                rows.sort_unstable_by(|a, b| b.cmp(a));
+                self.change_edits(
+                    |session, result, first_row| {
+                        for row in &rows {
+                            match row.checked_sub(result.row_count()) {
+                                Some(inserted) if inserted < session.inserted() => {
+                                    session.remove_inserted(inserted)
+                                }
+                                Some(_) => {}
+                                None => {
+                                    let read = |column: usize| {
+                                        result.value(*row, column).map(str::to_owned)
+                                    };
+                                    session.toggle_delete(first_row + row, &read)?;
+                                }
+                            }
+                        }
+                        Ok(())
+                    },
+                    cx,
+                );
+                self.select(None, cx);
+            }
+        }
+    }
+
+    /// Opens the field over the focused cell, with its value (pending or
+    /// read) selected.
+    fn start_cell_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, column)) = self.selection.map(|selection| selection.focus) else {
+            self.edit_notice(tr!("Select the cell to edit.").into(), cx);
+            return;
+        };
+        let Some(session) = self.session() else {
+            return;
+        };
+        let refused = if session.needs_key() {
+            Some(grid_edit::Refused::NeedsKey)
+        } else {
+            session.editable_column(column).err()
+        };
+        if let Some(refused) = refused {
+            self.edit_notice(grid_edit::refused_text(&refused), cx);
+            return;
+        }
+        let read_rows = self.result.row_count();
+        let current = match row.checked_sub(read_rows) {
+            Some(inserted) => session
+                .inserted_value(inserted, column)
+                .and_then(|overlay| overlay.value().text().map(str::to_owned)),
+            None => match session.overlay(self.first_row + row, column) {
+                Some(overlay) => overlay.value().text().map(str::to_owned),
+                None => self.result.value(row, column).map(str::to_owned),
+            },
+        };
+        let input =
+            cx.new(|cx| InputState::new(window, cx).default_value(current.unwrap_or_default()));
+        let events = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => this.finish_cell_edit(true, window, cx),
+                // Leaving the field keeps what was typed, pending.
+                InputEvent::Blur => this.finish_cell_edit(true, window, cx),
+                _ => {}
+            }
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        self.cell_editor = Some(CellEditor {
+            cell: (row, column),
+            input,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    /// Closes the cell's field, keeping what was typed as the cell's pending
+    /// value (`keep`) or not, and gives the grid the keyboard back.
+    fn finish_cell_edit(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.cell_editor.take() else {
+            return;
+        };
+        if keep {
+            let text = editor.input.read(cx).value().to_string();
+            let (row, column) = editor.cell;
+            self.change_edits(
+                |session, result, first_row| {
+                    set_cell(
+                        session,
+                        result,
+                        first_row,
+                        row,
+                        column,
+                        EditValue::Text(text),
+                    )
+                },
+                cx,
+            );
+        }
+        drop(editor);
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     fn table(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1969,7 +2344,30 @@ impl ResultGrid {
                 let last = this.layout.visible().last().copied().unwrap_or_default();
                 this.drag_over(index, last, event, cx)
             }))
-            .child((self.first_row + index + 1).to_string())
+            .map(|s| {
+                // An inserted row has no number yet; an edited row's number
+                // takes the colour of its edit.
+                let inserted = index.checked_sub(self.result.row_count());
+                let mark = self
+                    .session()
+                    .map_or(RowMark::Unchanged, |session| match inserted {
+                        Some(inserted) => session.inserted_mark(inserted),
+                        None => session.row_mark(self.first_row + index),
+                    });
+                let color = match mark {
+                    RowMark::Unchanged => None,
+                    RowMark::Changed => Some(colors().amber),
+                    RowMark::Deleted | RowMark::WrittenDeleted | RowMark::Failed => {
+                        Some(colors().red)
+                    }
+                    RowMark::Written => Some(colors().mint),
+                };
+                s.when_some(color, |s, color| s.text_color(rgb(color)))
+                    .child(match inserted {
+                        Some(_) => "+".to_owned(),
+                        None => (self.first_row + index + 1).to_string(),
+                    })
+            })
     }
 
     /// The cell of data row `index` (at display `position`) and result
@@ -1994,13 +2392,49 @@ impl ResultGrid {
             .get(col)
             .copied()
             .unwrap_or(grid::MIN_COLUMN_WIDTH);
-        let raw = self.result.value(index, col);
+        // Pending and written edits are drawn over the values read; an
+        // inserted row follows the result's rows.
+        let session = self.session();
+        let inserted = index.checked_sub(self.result.row_count());
+        let (overlay, mark) = match (session, inserted) {
+            (Some(session), Some(inserted)) => (
+                session.inserted_value(inserted, col),
+                session.inserted_mark(inserted),
+            ),
+            (Some(session), None) => (
+                session.overlay(self.first_row + index, col),
+                session.row_mark(self.first_row + index),
+            ),
+            (None, _) => (None, RowMark::Unchanged),
+        };
+        let raw = match overlay {
+            Some(overlay) => overlay.value().text(),
+            None => self.result.value(index, col),
+        };
+        // A column an inserted row leaves out takes the table's default.
+        let default = inserted.is_some() && overlay.is_none();
+        let editor = self
+            .cell_editor
+            .as_ref()
+            .filter(|editor| editor.cell == (index, col))
+            .map(|editor| editor.input.clone());
         // A cell is one line: line breaks show as ↵ and the full value stays
         // in the tooltip and in copies.
-        let displayed = cell_format::display(raw, family, self.numbers_pt_br)
-            .replace("\r\n", "↵")
-            .replace(['\n', '\r'], "↵");
+        let displayed = if default {
+            tr!("DEFAULT").to_owned()
+        } else {
+            cell_format::display(raw, family, self.numbers_pt_br)
+                .replace("\r\n", "↵")
+                .replace(['\n', '\r'], "↵")
+        };
         let is_null = raw.is_none();
+        let deleted = matches!(mark, RowMark::Deleted | RowMark::WrittenDeleted);
+        let edge = match (overlay, mark) {
+            (_, RowMark::Failed) => Some(colors().red),
+            (Some(Overlay::Pending(_)), _) => Some(colors().amber),
+            (Some(Overlay::Written(_)), _) => Some(colors().mint),
+            _ => None,
+        };
         // Only values that do not fit get a tooltip, so it does not cover the
         // context menu or neighbours.
         let tooltip = raw
@@ -2037,6 +2471,7 @@ impl ResultGrid {
             .border_color(rgb(colors().grid_line))
             .when(!selected, |s| s.hover(|s| s.bg(rgb(colors().grid_hover))))
             .when(selected, |s| s.bg(rgb(colors().grid_selected)))
+            .when_some(edge, |s, edge| s.border_color(rgb(edge)))
             .when(focused, |s| s.border_color(rgb(colors().grid_focus)))
             // Pressing selects the cell (Shift extends from the anchor) and
             // starts a drag; a double click shows the full value.
@@ -2081,14 +2516,24 @@ impl ResultGrid {
             )
             .font_family(fonts().mono.clone())
             .text_size(px(13.))
-            .when(is_null, |s| s.italic())
+            .when(is_null || default, |s| s.italic())
             .when(family == ValueFamily::Boolean, |s| s.justify_center())
             .when_some(tooltip, |s, tooltip| {
                 s.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             })
             .when(family == ValueFamily::Number, |s| s.justify_end())
-            .text_color(rgb(value_color(raw, family)))
-            .child(div().truncate().child(displayed))
+            .text_color(rgb(if deleted {
+                colors().red
+            } else if default {
+                colors().faint
+            } else {
+                value_color(raw, family)
+            }))
+            .when(deleted, |s| s.line_through())
+            .map(|s| match editor {
+                Some(input) => s.px_0().child(Input::new(&input).small().w_full()),
+                None => s.child(div().truncate().child(displayed)),
+            })
     }
 
     /// The pointer moved over the cell at data row `row` and `column`
@@ -3439,9 +3884,100 @@ impl ResultGrid {
         )
         .separator()
         .item(
+            PopupMenuItem::new(tr!(
+                "Edit the cell ({0})",
+                super::shortcuts::label::<super::shortcuts::GridEditCell>(cx)
+            ))
+            .disabled(!has_selection)
+            .on_click(action(weak.clone(), |this, window, cx| {
+                this.edit(EditAction::Cell, window, cx)
+            })),
+        )
+        .item(
+            PopupMenuItem::new(tr!(
+                "Set to NULL ({0})",
+                super::shortcuts::label::<super::shortcuts::GridSetNull>(cx)
+            ))
+            .disabled(!has_selection)
+            .on_click(action(weak.clone(), |this, window, cx| {
+                this.edit(EditAction::Null, window, cx)
+            })),
+        )
+        .item(
+            PopupMenuItem::new(tr!(
+                "Insert a row ({0})",
+                super::shortcuts::label::<super::shortcuts::GridInsertRow>(cx)
+            ))
+            .on_click(action(weak.clone(), |this, window, cx| {
+                this.edit(EditAction::Insert, window, cx)
+            })),
+        )
+        .item(
+            PopupMenuItem::new(tr!(
+                "Delete the rows ({0})",
+                super::shortcuts::label::<super::shortcuts::GridDeleteRows>(cx)
+            ))
+            .disabled(!has_selection)
+            .on_click(action(weak.clone(), |this, window, cx| {
+                this.edit(EditAction::Delete, window, cx)
+            })),
+        )
+        .separator()
+        .item(
             PopupMenuItem::new(tr!("Select all"))
                 .on_click(action(weak.clone(), |this, _, cx| this.select_all(cx))),
         )
+    }
+
+    /// Starts editing the focused cell (the toolbar's **Edit**).
+    pub fn edit_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Cell, window, cx);
+    }
+
+    /// Adds a row to insert (the edit bar's **Insert a row**).
+    pub fn insert_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Insert, window, cx);
+    }
+
+    /// Marks the selected rows for deletion (the edit bar's **Delete**).
+    pub fn delete_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Delete, window, cx);
+    }
+
+    /// Sets the selected cells to NULL (the edit bar's **Set to NULL**).
+    pub fn set_null(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Null, window, cx);
+    }
+
+    /// The result columns of the visible selection, for naming a key.
+    pub fn selected_columns(&self) -> Vec<usize> {
+        self.selected_block()
+            .map(|(_, columns)| columns)
+            .unwrap_or_default()
+    }
+
+    /// Gives the grid the keyboard.
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus, cx);
+    }
+}
+
+/// Gives data row `row` of the page (an inserted row past the result's
+/// rows) the value `value` in `column`.
+fn set_cell(
+    session: &mut EditSession,
+    result: &ResultData,
+    first_row: usize,
+    row: usize,
+    column: usize,
+    value: EditValue,
+) -> Result<(), grid_edit::Refused> {
+    match row.checked_sub(result.row_count()) {
+        Some(inserted) => session.set_inserted(inserted, column, value),
+        None => {
+            let read = |column: usize| result.value(row, column).map(str::to_owned);
+            session.set(first_row + row, &read, column, value)
+        }
     }
 }
 
@@ -3761,6 +4297,9 @@ enum KeyAction {
         extend: bool,
     },
     Inspect,
+    Edit(EditAction),
+    Write,
+    Discard,
 }
 
 /// The grid's actions on the table: each one is a key of the keymap.
@@ -3826,5 +4365,11 @@ fn grid_keys(grid: Stateful<Div>, cx: &mut Context<ResultGrid>) -> Stateful<Div>
         },
         cx,
     );
+    let grid = on::<GridEditCell>(grid, KeyAction::Edit(EditAction::Cell), cx);
+    let grid = on::<GridSetNull>(grid, KeyAction::Edit(EditAction::Null), cx);
+    let grid = on::<GridInsertRow>(grid, KeyAction::Edit(EditAction::Insert), cx);
+    let grid = on::<GridDeleteRows>(grid, KeyAction::Edit(EditAction::Delete), cx);
+    let grid = on::<GridWriteEdits>(grid, KeyAction::Write, cx);
+    let grid = on::<GridDiscardEdits>(grid, KeyAction::Discard, cx);
     on::<GridInspect>(grid, KeyAction::Inspect, cx)
 }

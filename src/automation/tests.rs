@@ -120,6 +120,7 @@ impl Driver for Scripted {
                 default_port: None,
                 identifier_quote: '"',
                 named_parameters: true,
+                row_writes: false,
             },
         }
     }
@@ -987,6 +988,7 @@ async fn the_result_keeps_order_duplicates_null_and_exact_text() {
             name: "d".into(),
             data_type: "NUMERIC".into(),
             nullable: None,
+            origin: Default::default(),
         }],
         vec![vec![Cell::Decimal(exact.into())]],
     ));

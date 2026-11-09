@@ -306,6 +306,73 @@ alignment only; the value itself is never converted.
   coming back to the same page restores them (`ResultGrid` keeps them by
   `ResultId`); another page starts at the top with nothing selected.
 
+## Editing
+
+A query tab's result can be written back to its table
+([ADR-0039](../adr/0039-editing-result-data-through-the-driver.md)); report
+panels, jobs and the assistant's results stay read-only.
+
+- **Which results.** The first editing key (or the toolbar's pencil) asks the
+  tab's session what the result can be written back to
+  (`Session::edit_target`, see [Drivers](drivers.md#editing-results)), once
+  per result tab; runs cost nothing extra. When the result still has rows
+  to read, the grid says first that asking closes them, so only the rows
+  read so far can be edited. A result is editable when its stored columns
+  come from one table with a primary key, or a unique key on NOT NULL
+  columns, all of whose columns are in the result; every other result shows
+  in a bar under the toolbar why it is read-only. A driver that cannot tell
+  where a column comes from keeps its results read-only.
+- **Pending edits.** `jykre::grid_edit::EditSession` holds them, outside the
+  views: changed cells, NULLs, rows marked for deletion and inserted rows.
+  The grid draws them over the cached view: the cache key gains the edits'
+  version and the inserted rows, which follow the result's rows whatever the
+  filter or sort, numbered `+`. A pending cell has an amber border, a written
+  one a mint border; a row marked for deletion is struck through in red; an
+  inserted row's untouched columns read `DEFAULT`. Rows are addressed in the
+  whole result, so every page's edits are kept, and the key's values are
+  taken when a row is first edited. Edits live in memory only: never in
+  `config.db`, logs or telemetry, and they go with the result tab.
+- **Values.** `F2` (or the pencil) opens a field over the focused cell with
+  its value; `Enter` or leaving the field keeps what was typed as pending,
+  `Esc` drops it. **Set to NULL** (`Ctrl Shift N`) sets the selected cells
+  to NULL; typing `NULL` gives the four-letter text and clearing a cell the
+  empty text. A binary column takes `0x` followed by hexadecimal digits.
+  A value equal to the one read is no change. Computed, generated and
+  identity-always columns, and a column whose cells arrived both as bytes and
+  as text, cannot be edited and say so.
+- **Rows.** **Insert a row** (`Alt Insert`) adds a row whose columns take the
+  table's default until given a value. `Delete` marks the selected rows for
+  deletion, which drops their pending values, or takes the mark away; an
+  inserted row goes. A row whose key is NULL cannot be changed.
+- **Write…** (`Ctrl Alt S`) opens one confirmation before anything is sent.
+  It lists the table, each change with its key and, per column, the value
+  read and the new one (NULL as NULL, every text quoted, so the text `NULL`
+  reads `“NULL”`), the statements with their placeholders (the values bound
+  apart), whether the changes are committed or stay in the tab's open
+  transaction, the table's triggers and the foreign keys that cascade, and
+  that a change made meanwhile to the same row is overwritten. On a
+  connection marked Production the same dialog says so and its button reads
+  **Write to production**. Changes are written in this order: deletions,
+  updates, inserts. At most 10,000 changed rows are written at once.
+- **The write** runs in the tab's session as a run of the tab: it takes the
+  session, answers Stop (the edit bar's **Stop**, `Ctrl F2`), makes closing
+  the tab ask, and is logged in Messages with its counts, never its values.
+  Afterwards the toolbar shows the session's transaction. A written cell
+  shows what was written, marked, since the database may store it otherwise
+  (a rounded `numeric`, a default, a trigger); `↻` reads the rows back. A
+  change that matched other than one row rolls everything back and its row
+  is marked red.
+- **Databricks** has no write: **Generate SQL…** opens a new query tab on the
+  same connection and context with one statement per change and their
+  values in its parameter fields, after a header comment saying that each
+  statement commits on its own and nothing checks it changes one row. The
+  table is the one the result's single-table `SELECT` names; a table that
+  declares no key takes the columns the user selects (**Use as key**) before
+  the first edit.
+- **Discard** (`Ctrl Alt Z`) drops the pending edits, asking first. Running
+  a statement in the tab while edits are pending, or closing the tab, asks
+  first: a run loses the edits of the result tabs it replaces.
+
 ## Copying
 
 - `Ctrl C` copies the selection in the format chosen in the **copy menu**
@@ -491,6 +558,10 @@ format ([User experience](ux.md#feedback)).
 - [ ] An export of a result larger than the tab holds writes every row in
       order, in each format, and a cancelled or failed export leaves the
       chosen file as it was.
+- [ ] Edits written to PostgreSQL, MySQL and SQLite read back exactly
+      (exact numbers, NULL apart from the text `NULL`, temporal values),
+      a write whose change matches other than one row leaves the table as
+      it was, and inside an open transaction they stay uncommitted.
 
 ## Known deviations
 

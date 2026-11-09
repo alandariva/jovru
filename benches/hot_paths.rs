@@ -92,6 +92,7 @@ fn driver_rows(rows: usize) -> (Vec<ColumnInfo>, Vec<Vec<Cell>>) {
             name: format!("column_{index}"),
             data_type: ["int8", "text", "numeric", "timestamptz", "bool"][index % 5].into(),
             nullable: Some(true),
+            origin: Default::default(),
         })
         .collect();
     let rows = (0..rows)

@@ -466,6 +466,15 @@ Rules:
   drops data (`DROP`, `TRUNCATE`, an `ALTER` that drops something) asks
   first, naming each such statement of the run (`jykre::guard`). Nothing
   runs until the user confirms.
+- Writing a result's edits (**Write…**) always asks first, in one dialog
+  that lists every change, the statements with their placeholders, whether
+  they are committed or stay in the open transaction, the table's triggers
+  and cascades, and that the last write wins. On a production connection
+  the same dialog warns so and its button reads **Write to production**.
+  Editing a result whose rest is still open asks first, since reading the
+  table closes it. Discarding pending edits asks first. Running a statement
+  while edits are pending asks first (**Run and lose N pending changes?**),
+  and so does closing the tab ([Results](results.md#editing)).
 - Running a SQL Job goes: the form's values (a missing or malformed value
   is outlined in red and nothing runs), the password of its connection when
   it is not remembered, then, on a production connection, one question
@@ -547,7 +556,13 @@ inside one focused control, marked *fixed*.
 | Grid: copy in the format of the copy menu, the same with the column names | `Ctrl C`, `Ctrl Shift C` |
 | Grid or report panel: cancel a pending copy, before closing the inspector/records view or clearing the selection | `Esc` (fixed) |
 | Grid: show the focused cell's full value in the side panel | `Enter` (or a double click) |
-| Grid: close the side panel, then the records view, then clear the selection | `Esc` (fixed) |
+| Grid of a query tab's editable result ([Results](results.md#editing)): edit the focused cell in a field over it (also the result toolbar's pencil); `Enter` keeps what was typed as pending, `Esc` drops it | `F2`; `Enter`, `Esc` in the field (fixed) |
+| Grid of an editable result: set the selected cells to NULL | `Ctrl Shift N` |
+| Grid of an editable result: add a row to insert | `Alt Insert` |
+| Grid of an editable result: mark the selected rows for deletion, or take the mark away (an inserted row goes) | `Delete` |
+| Grid of an editable result: write the pending edits after one confirmation (**Write…**), or generate their statements into a new tab (**Generate SQL…**) | `Ctrl Alt S` |
+| Grid of an editable result: discard the pending edits, asking first | `Ctrl Alt Z` |
+| Grid: close the field of the cell being edited, then the side panel, then the records view, then clear the selection | `Esc` (fixed) |
 | Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |
 | Grid (a query tab's, a report panel's or a job's): the menu on the focused header's column, or the focused cell's, to hide, freeze at the left or move the column, show hidden columns or reset the layout. With the mouse, a header dragged onto another takes its place | `Shift F10` |
 | Find a column by name, ignoring case and accents, in the grid that has the keyboard, else in the query tab's result on screen (also the result toolbar's button); while its text is there, the records view lists only the columns it finds | `Ctrl Shift F` |

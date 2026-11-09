@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 /// detail and hint, its SQLSTATE and the position it reported; errors from
 /// the connection keep the operating system's reason. Anything else (such as
 /// configuration, which may hold the connection URL) gets a fixed message.
-fn map_error(error: sqlx::Error) -> DriverError {
+pub(crate) fn map_error(error: sqlx::Error) -> DriverError {
     match &error {
         sqlx::Error::Database(db) => {
             let state = db.code().map(|code| code.into_owned());
@@ -254,10 +254,23 @@ enum Command {
     Encryption {
         reply: oneshot::Sender<DriverResult<Encryption>>,
     },
+    EditTarget {
+        columns: Vec<ColumnInfo>,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    Write {
+        request: Box<write::WriteRequest>,
+        reply: oneshot::Sender<DriverResult<write::WriteOutcome>>,
+        cancel: CancellationToken,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
 }
+
+/// How long reading a table's catalog for editing may take.
+const CATALOG: Duration = Duration::from_secs(60);
 
 enum Event {
     Columns(Vec<ColumnInfo>),
@@ -406,6 +419,51 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
+    /// Read from `pg_class`, `pg_attribute`, `pg_index`, `pg_trigger` and
+    /// `pg_constraint` for the relation the columns' OIDs name, inside a
+    /// savepoint when a transaction is open.
+    async fn edit_target(
+        &mut self,
+        _statement: &str,
+        columns: &[ColumnInfo],
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::EditTarget {
+                columns: columns.to_vec(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    async fn write(
+        &mut self,
+        request: &write::WriteRequest,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::WriteOutcome> {
+        request.validate()?;
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Write {
+                request: Box::new(request.clone()),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -552,6 +610,57 @@ async fn transaction_wrote(connection: &mut PgConnection) -> DriverResult<bool> 
     .await
     .map_err(map_error)?;
     Ok(row.try_get::<String, _>(0).map_err(map_error)? == "true")
+}
+
+/// Where an edit runs, from the transaction state of the last
+/// `ReadyForQuery`: `true` inside an open transaction (in a savepoint),
+/// `false` outside one; a failed transaction refuses edits until it is
+/// rolled back.
+async fn edit_scope(connection: &mut PgConnection) -> DriverResult<bool> {
+    use sqlx::postgres::PgTransactionStatus;
+    match connection.transaction_status().await.map_err(map_error)? {
+        PgTransactionStatus::Idle => Ok(false),
+        PgTransactionStatus::Transaction => Ok(true),
+        PgTransactionStatus::Error => Err(DriverError::validation(
+            "The transaction failed; roll it back before editing rows",
+        )),
+    }
+}
+
+/// Runs a session command the driver writes itself (no value in it).
+async fn simple(connection: &mut PgConnection, sql: &str) -> DriverResult<()> {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(&mut *connection)
+        .await
+        .map(|_| ())
+        .map_err(map_error)
+}
+
+/// Ends what an edit opened, within [`RECOVERY`]: its savepoint (`nested`)
+/// or its own transaction, kept (`keep`: released or committed) or rolled
+/// back.
+async fn end_edit(connection: &mut PgConnection, nested: bool, keep: bool) -> DriverResult<()> {
+    let savepoint = crate::edit::SAVEPOINT;
+    let sql = match (nested, keep) {
+        (true, true) => format!("RELEASE SAVEPOINT {savepoint}"),
+        (true, false) => {
+            format!("ROLLBACK TO SAVEPOINT {savepoint}; RELEASE SAVEPOINT {savepoint}")
+        }
+        (false, true) => "COMMIT".to_owned(),
+        (false, false) => "ROLLBACK".to_owned(),
+    };
+    tokio::time::timeout(RECOVERY, simple(connection, &sql))
+        .await
+        .unwrap_or_else(|_| Err(timed_out()))
+}
+
+/// A write whose `COMMIT` got no answer: it may or may not have been
+/// written, and it is never sent again.
+fn commit_unknown() -> DriverError {
+    DriverError::new(
+        ErrorCode::Connection,
+        "The connection was lost while committing: the changes may or may not have been written. Read the rows again before writing them again.",
+    )
 }
 
 /// What the connection's task does after a statement.
@@ -728,6 +837,26 @@ impl Server {
                         }
                     }
                 }
+                Command::EditTarget {
+                    columns,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.edit_target(&mut connection, &columns, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::Write {
+                    request,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.write(&mut connection, &request, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
                     let _ = reply.send(connection.close().await.map_err(map_error));
@@ -851,6 +980,7 @@ impl Server {
                     name: c.name().into(),
                     data_type: c.type_info().name().into(),
                     nullable: None,
+                    origin: crate::edit::origin(c.relation_id(), c.relation_attribute_no()),
                 })
                 .collect::<Vec<_>>())
         })
@@ -935,6 +1065,146 @@ impl Server {
                     return self.fail(connection, error, &events).await;
                 }
             }
+        }
+    }
+
+    /// Reads what a result with `columns` can be written back to. Inside an
+    /// open transaction the catalog is read in a savepoint, rolled back
+    /// afterwards, so neither a failure nor a cancellation reaches that
+    /// transaction.
+    async fn edit_target(
+        &mut self,
+        connection: &mut PgConnection,
+        columns: &[ColumnInfo],
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::EditTarget>, Flow) {
+        let nested = match edit_scope(connection).await {
+            Ok(nested) => nested,
+            Err(error) => return (Err(error), Flow::Ready),
+        };
+        if nested {
+            // The catalog's queries take the transaction's snapshot.
+            self.unread = false;
+            if let Err(error) =
+                simple(connection, &format!("SAVEPOINT {}", crate::edit::SAVEPOINT)).await
+            {
+                let flow = self.abandon(connection, None, &error).await;
+                return (Err(error), flow);
+            }
+        }
+        let read = bounded(
+            cancel,
+            Some(CATALOG),
+            crate::edit::edit_target(connection, &self.database, columns),
+        )
+        .await;
+        match read {
+            Ok(target) => {
+                let flow = if nested && end_edit(connection, true, false).await.is_err() {
+                    Flow::Broken
+                } else {
+                    Flow::Ready
+                };
+                (Ok(target), flow)
+            }
+            Err(error) => {
+                let flow = self
+                    .abandon(connection, nested.then_some(true), &error)
+                    .await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Writes `request` in a transaction of its own, or in a savepoint of the
+    /// open one, and commits (or releases the savepoint) only when every
+    /// change affected exactly one row. A failure, a cancellation or the
+    /// timeout rolls back what the write did.
+    async fn write(
+        &mut self,
+        connection: &mut PgConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        let nested = match edit_scope(connection).await {
+            Ok(nested) => nested,
+            Err(error) => return (Err(error), Flow::Ready),
+        };
+        let open = if nested {
+            format!("SAVEPOINT {}", crate::edit::SAVEPOINT)
+        } else {
+            "BEGIN".to_owned()
+        };
+        if let Err(error) = simple(connection, &open).await {
+            let flow = self.abandon(connection, None, &error).await;
+            return (Err(error), flow);
+        }
+        self.unread = false;
+        let applied = bounded(
+            cancel,
+            request.timeout,
+            crate::edit::apply(connection, &self.database, request),
+        )
+        .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => {
+                match end_edit(connection, nested, true).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::Written {
+                            rows,
+                            committed: !nested,
+                        }),
+                        Flow::Ready,
+                    ),
+                    // The server answered: it rolled the transaction back (a
+                    // deferred constraint failed at COMMIT).
+                    Err(error) if error.server.is_some() => (Err(error), Flow::Ready),
+                    Err(_) => (Err(commit_unknown()), Flow::Broken),
+                }
+            }
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => {
+                match end_edit(connection, nested, false).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::RolledBack { index, matched }),
+                        Flow::Ready,
+                    ),
+                    // Closing the session rolls the write back.
+                    Err(error) => (Err(error), Flow::Broken),
+                }
+            }
+            Err(error) => {
+                let flow = self.abandon(connection, Some(nested), &error).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// After a failed edit step: brings the protocol back (cancelling a
+    /// statement that may still run), then rolls back what the edit opened
+    /// (`opened`). A connection that cannot be brought back is closed, which
+    /// rolls it back too.
+    async fn abandon(
+        &self,
+        connection: &mut PgConnection,
+        opened: Option<bool>,
+        error: &DriverError,
+    ) -> Flow {
+        if error.code == ErrorCode::Connection {
+            return Flow::Broken;
+        }
+        let running = matches!(
+            error.code,
+            ErrorCode::Cancelled | ErrorCode::Timeout | ErrorCode::Protocol
+        );
+        if let Flow::Broken = self.recover(connection, running).await {
+            return Flow::Broken;
+        }
+        let Some(nested) = opened else {
+            return Flow::Ready;
+        };
+        match end_edit(connection, nested, false).await {
+            Ok(()) => Flow::Ready,
+            Err(_) => Flow::Broken,
         }
     }
 

@@ -5,6 +5,7 @@ pub mod config;
 pub use config::{MySqlConfig, MySqlSslMode};
 
 use jykre_core::*;
+mod edit;
 mod position;
 mod runtime;
 
@@ -35,6 +36,7 @@ impl Driver for MySqlDriver {
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
                 named_parameters: true,
+                row_writes: true,
                 sql: true,
                 metadata: true,
                 transactions: true,

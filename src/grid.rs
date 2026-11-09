@@ -65,6 +65,12 @@ pub struct GridKey {
     /// The column the rows are sorted by; `None` keeps the server's order.
     pub sort: Option<ColumnSort>,
     pub numbers_pt_br: bool,
+    /// The version of the pending edits drawn over the result
+    /// ([`crate::grid_edit`]), so a change to them is drawn.
+    pub edits: u64,
+    /// Rows the edits insert: they follow the result's rows, as data rows
+    /// `row_count..row_count + inserted`, unfiltered and unsorted.
+    pub inserted: usize,
 }
 
 /// Rows sorted by the values of one column.
@@ -149,6 +155,9 @@ impl GridView {
                 )
             });
         }
+        // Inserted rows have no values to filter or sort by: they stay last,
+        // in the order they were added.
+        rows.extend(result.row_count()..result.row_count() + key.inserted);
         // Widths follow the first rows only, so a long result sizes as fast
         // as a short one.
         let widths = result
@@ -616,7 +625,23 @@ mod tests {
             filter: filter.into(),
             sort: sort.map(|(column, descending)| ColumnSort { column, descending }),
             numbers_pt_br: false,
+            edits: 0,
+            inserted: 0,
         }
+    }
+
+    #[test]
+    fn inserted_rows_follow_the_result_whatever_its_filter_and_sort() {
+        let result = table(&[vec!["b".into(), "1".into()], vec!["a".into(), "2".into()]]);
+        let view = GridView::new(
+            &result,
+            GridKey {
+                inserted: 2,
+                edits: 3,
+                ..key(1, "a", Some((0, false)))
+            },
+        );
+        assert_eq!(view.rows, [1, 2, 3]);
     }
 
     #[test]

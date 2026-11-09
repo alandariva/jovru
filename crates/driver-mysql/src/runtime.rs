@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 /// and its error number and SQLSTATE; errors from the connection keep the
 /// operating system's reason. Anything else (such as configuration, which may
 /// hold the connection URL) gets a fixed message.
-fn map_error(error: sqlx::Error) -> DriverError {
+pub(crate) fn map_error(error: sqlx::Error) -> DriverError {
     if matches!(&error, sqlx::Error::Protocol(message) if message.contains("RSA auth backend disabled"))
     {
         return DriverError::new(
@@ -200,9 +200,40 @@ enum Command {
     Encryption {
         reply: oneshot::Sender<DriverResult<Encryption>>,
     },
+    EditTarget {
+        columns: Vec<ColumnInfo>,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    Write {
+        request: Box<write::WriteRequest>,
+        reply: oneshot::Sender<DriverResult<write::WriteOutcome>>,
+        cancel: CancellationToken,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
+}
+
+/// How long reading a table's catalog for editing may take.
+const CATALOG: Duration = Duration::from_secs(60);
+
+/// Runs a session command the driver writes itself (no value in it).
+async fn simple(connection: &mut MySqlConnection, sql: String) -> DriverResult<()> {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(&mut *connection)
+        .await
+        .map(|_| ())
+        .map_err(map_error)
+}
+
+/// A write whose `COMMIT` got no answer: it may or may not have been
+/// written, and it is never sent again.
+fn commit_unknown() -> DriverError {
+    DriverError::new(
+        ErrorCode::Connection,
+        "The connection was lost while committing: the changes may or may not have been written. Read the rows again before writing them again.",
+    )
 }
 
 enum Event {
@@ -355,6 +386,51 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
+    /// Read from `information_schema` (`TABLES`, `ENGINES`, `COLUMNS`,
+    /// `STATISTICS`, `TRIGGERS`, `REFERENTIAL_CONSTRAINTS`) for the table the
+    /// columns' origins name.
+    async fn edit_target(
+        &mut self,
+        _statement: &str,
+        columns: &[ColumnInfo],
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::EditTarget {
+                columns: columns.to_vec(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    async fn write(
+        &mut self,
+        request: &write::WriteRequest,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::WriteOutcome> {
+        request.validate()?;
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Write {
+                request: Box::new(request.clone()),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -520,6 +596,35 @@ impl Server {
                         }
                     }
                 }
+                Command::EditTarget {
+                    columns,
+                    reply,
+                    cancel,
+                } => {
+                    let limit = Limit::new(&cancel, Some(CATALOG));
+                    let read = self
+                        .step(&limit, crate::edit::edit_target(&mut connection, &columns))
+                        .await;
+                    let (result, flow) = match read {
+                        Ok(target) => (Ok(target), Flow::Ready),
+                        Err((error, unfinished)) => {
+                            (Err(error), self.recover(&mut connection, unfinished).await)
+                        }
+                    };
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::Write {
+                    request,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.write(&mut connection, &request, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
                     let _ = reply.send(connection.close().await.map_err(map_error));
@@ -626,6 +731,7 @@ impl Server {
                         name: c.name().into(),
                         data_type: c.type_info().name().into(),
                         nullable: None,
+                        origin: crate::edit::origin(c.origin()),
                     })
                     .collect::<Vec<_>>())
             })
@@ -729,6 +835,108 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// Writes `request` in a transaction of its own, or in a savepoint of the
+    /// open one (autocommit off included), and commits (or releases the
+    /// savepoint) only when every change affected exactly one row and MySQL
+    /// adjusted no value. A failure, a cancellation or the timeout rolls back
+    /// what the write did.
+    async fn write(
+        &mut self,
+        connection: &mut MySqlConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        let nested = transaction_status(connection) != TransactionStatus::Idle;
+        let savepoint = crate::edit::SAVEPOINT;
+        let open = if nested {
+            format!("SAVEPOINT {savepoint}")
+        } else {
+            "START TRANSACTION".to_owned()
+        };
+        let opening = Limit::new(cancel, Some(RECOVERY));
+        if let Err((error, unfinished)) = self.step(&opening, simple(connection, open)).await {
+            let flow = self.recover(connection, unfinished).await;
+            return (Err(error), flow);
+        }
+        let limit = Limit::new(cancel, request.timeout);
+        let applied = self
+            .step(&limit, crate::edit::apply(connection, request))
+            .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => {
+                match self.end_edit(connection, nested, true).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::Written {
+                            rows,
+                            committed: !nested,
+                        }),
+                        Flow::Ready,
+                    ),
+                    // The server answered, and ended the transaction.
+                    Err(error) if error.server.is_some() => (Err(error), Flow::Ready),
+                    Err(_) => (Err(commit_unknown()), Flow::Broken),
+                }
+            }
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => {
+                match self.end_edit(connection, nested, false).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::RolledBack { index, matched }),
+                        Flow::Ready,
+                    ),
+                    // Closing the session rolls the write back.
+                    Err(error) => (Err(error), Flow::Broken),
+                }
+            }
+            Ok(crate::edit::Applied::Adjusted { index, warning }) => {
+                let error = DriverError::validation(format!(
+                    "MySQL would have changed a value of change {} ({warning}), so nothing was written",
+                    index + 1
+                ));
+                match self.end_edit(connection, nested, false).await {
+                    Ok(()) => (Err(error), Flow::Ready),
+                    Err(_) => (Err(error), Flow::Broken),
+                }
+            }
+            Err((error, unfinished)) => {
+                let flow = match self.recover(connection, unfinished).await {
+                    Flow::Ready if self.end_edit(connection, nested, false).await.is_ok() => {
+                        Flow::Ready
+                    }
+                    _ => Flow::Broken,
+                };
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Ends what a write opened, within [`RECOVERY`]: its savepoint
+    /// (`nested`) or its own transaction, kept (`keep`) or rolled back.
+    async fn end_edit(
+        &self,
+        connection: &mut MySqlConnection,
+        nested: bool,
+        keep: bool,
+    ) -> DriverResult<()> {
+        let savepoint = crate::edit::SAVEPOINT;
+        let commands: Vec<String> = match (nested, keep) {
+            (true, true) => vec![format!("RELEASE SAVEPOINT {savepoint}")],
+            (true, false) => vec![
+                format!("ROLLBACK TO SAVEPOINT {savepoint}"),
+                format!("RELEASE SAVEPOINT {savepoint}"),
+            ],
+            (false, true) => vec!["COMMIT".to_owned()],
+            (false, false) => vec!["ROLLBACK".to_owned()],
+        };
+        let never = CancellationToken::new();
+        for command in commands {
+            let limit = Limit::new(&never, Some(RECOVERY));
+            self.step(&limit, simple(connection, command))
+                .await
+                .map_err(|(error, _)| error)?;
+        }
+        Ok(())
     }
 
     /// Kills the session's running statement from another connection. One
@@ -880,6 +1088,7 @@ impl Server {
                                 name: column.name().into(),
                                 data_type: column.type_info().name().into(),
                                 nullable: None,
+                                origin: crate::edit::origin(column.origin()),
                             })
                             .collect();
                         if !deliver(events, Event::Columns(columns), limit).await? {

@@ -829,3 +829,267 @@ async fn inspection_and_definitions_come_from_the_schema() {
         .unwrap_err();
     assert_eq!(error.code, ErrorCode::NotFound);
 }
+
+/// What a result read with `sql` can be written back to (ADR-0039).
+async fn target_of(session: &mut Box<dyn Session>, sql: &str) -> write::EditTarget {
+    let (_, sink) = run(session, sql).await.unwrap();
+    session
+        .edit_target(sql, &sink.columns, CancellationToken::new())
+        .await
+        .unwrap()
+}
+
+async fn editable(session: &mut Box<dyn Session>, sql: &str) -> write::EditableTable {
+    target_of(session, sql).await.editable().unwrap()
+}
+
+/// Runs each statement of `script` (none holds a `;` of its own).
+async fn run_all(session: &mut Box<dyn Session>, script: &str) {
+    for statement in script.split(';').filter(|part| !part.trim().is_empty()) {
+        run(session, statement).await.unwrap();
+    }
+}
+
+fn text(value: &str) -> write::WriteValue {
+    write::WriteValue::Text(value.into())
+}
+
+async fn write(
+    session: &mut Box<dyn Session>,
+    target: &write::EditableTable,
+    changes: Vec<write::RowChange>,
+) -> DriverResult<write::WriteOutcome> {
+    let request = write::WriteRequest {
+        target: target.clone(),
+        changes,
+        timeout: Some(Duration::from_secs(30)),
+    };
+    session.write(&request, CancellationToken::new()).await
+}
+
+const EDITS: &str = r#"
+CREATE TABLE items (
+    id INTEGER PRIMARY KEY,
+    note TEXT,
+    data BLOB,
+    doubled INTEGER GENERATED ALWAYS AS (id * 2)
+);
+INSERT INTO items (id, note, data) VALUES (1, 'one', x'00ff'), (2, 'two', NULL);
+CREATE TABLE loose (a TEXT);
+CREATE TABLE measures (v REAL PRIMARY KEY, w TEXT);
+CREATE TABLE codes (code TEXT NOT NULL UNIQUE, label TEXT);
+"#;
+
+#[tokio::test]
+async fn a_result_says_whether_and_how_it_can_be_written_back() {
+    use write::{EditTarget, KeyKind, ReadOnlyReason, ReferenceAction, SideEffect};
+    let folder = Folder::new();
+    let path = seeded(&folder).await;
+    let mut session = SqliteDriver
+        .open_session(&input(&path, false), CancellationToken::new())
+        .await
+        .unwrap();
+    run_all(&mut session, EDITS).await;
+
+    let items = editable(&mut session, "SELECT id, note, data, doubled FROM items").await;
+    assert_eq!(items.key, [0]);
+    assert_eq!(items.key_kind, KeyKind::PrimaryKey);
+    assert_eq!(items.writes, write::WriteMode::Direct);
+    assert!(!items.columns[3].as_ref().unwrap().writable, "generated");
+    assert!(items.columns[2].as_ref().unwrap().binary);
+    assert_eq!(
+        items.table,
+        ObjectPath::default()
+            .child(ObjectKind::Schema, "main")
+            .child(ObjectKind::Table, "items")
+    );
+
+    // A unique key on a NOT NULL column when there is no primary key.
+    let codes = editable(&mut session, "SELECT label, code FROM codes").await;
+    assert_eq!(
+        (codes.key, codes.key_kind),
+        (vec![1], KeyKind::UniqueNotNull)
+    );
+
+    // Customers are referenced by orders, which cascade on delete.
+    let customers = editable(&mut session, "SELECT * FROM customers").await;
+    assert!(customers.side_effects.contains(&SideEffect::Reference {
+        table: "orders".into(),
+        name: "orders #0".into(),
+        on_delete: Some(ReferenceAction::Cascade),
+        on_update: None,
+    }));
+    // SQLite names the base table even through a view.
+    let through_view = editable(&mut session, "SELECT * FROM big_customers").await;
+    assert_eq!(through_view.table.relation(), Some("customers"));
+
+    for (sql, reason) in [
+        ("SELECT 1 AS n", ReadOnlyReason::ComputedOnly),
+        (
+            "SELECT c.name, o.note FROM customers c JOIN orders o ON o.customer_id = c.id",
+            ReadOnlyReason::SeveralTables,
+        ),
+        (
+            "SELECT name FROM customers",
+            ReadOnlyReason::KeyNotInResult {
+                missing: vec!["id".into()],
+            },
+        ),
+        ("SELECT a FROM loose", ReadOnlyReason::NoKey),
+        (
+            "SELECT v, w FROM measures",
+            ReadOnlyReason::KeyType { column: "v".into() },
+        ),
+    ] {
+        assert_eq!(
+            target_of(&mut session, sql).await,
+            EditTarget::ReadOnly(reason),
+            "{sql}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn edits_are_written_with_bound_values_and_roll_back_on_a_mismatch() {
+    use write::{RowChange, WriteOutcome, WriteValue};
+    let folder = Folder::new();
+    let path = seeded(&folder).await;
+    let mut session = SqliteDriver
+        .open_session(&input(&path, false), CancellationToken::new())
+        .await
+        .unwrap();
+    run_all(&mut session, EDITS).await;
+    let items = editable(&mut session, "SELECT id, note, data FROM items").await;
+
+    // Outside a transaction: committed when each change touched one row.
+    let written = write(
+        &mut session,
+        &items,
+        vec![
+            RowChange::Update {
+                key: vec![text("1")],
+                set: vec![(1, text("NULL"))],
+            },
+            RowChange::Insert {
+                values: vec![
+                    (0, text("3")),
+                    (1, WriteValue::Null),
+                    (2, WriteValue::Bytes(vec![0, 1, 2])),
+                ],
+            },
+            RowChange::Insert {
+                values: vec![(0, text("4")), (1, text("O'Brien; DROP TABLE items"))],
+            },
+            RowChange::Update {
+                key: vec![text("2")],
+                set: vec![(1, text(""))],
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        written,
+        WriteOutcome::Written {
+            rows: 4,
+            committed: true
+        }
+    );
+    let (_, sink) = run(&mut session, "SELECT id, note, data FROM items ORDER BY id")
+        .await
+        .unwrap();
+    assert_eq!(
+        sink.rows,
+        vec![
+            vec![
+                Cell::Integer(1),
+                Cell::Text("NULL".into()),
+                Cell::Binary(vec![0, 0xff])
+            ],
+            vec![Cell::Integer(2), Cell::Text(String::new()), Cell::Null],
+            vec![Cell::Integer(3), Cell::Null, Cell::Binary(vec![0, 1, 2])],
+            vec![
+                Cell::Integer(4),
+                Cell::Text("O'Brien; DROP TABLE items".into()),
+                Cell::Null
+            ],
+        ]
+    );
+
+    // A change that matches no row rolls back the whole request.
+    let rolled = write(
+        &mut session,
+        &items,
+        vec![
+            RowChange::Delete {
+                key: vec![text("4")],
+            },
+            RowChange::Update {
+                key: vec![text("999")],
+                set: vec![(1, text("nobody"))],
+            },
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rolled,
+        WriteOutcome::RolledBack {
+            index: 1,
+            matched: 0
+        }
+    );
+    let (_, sink) = run(&mut session, "SELECT count(*) FROM items")
+        .await
+        .unwrap();
+    assert_eq!(sink.rows, vec![vec![Cell::Integer(4)]]);
+
+    // Inside an open transaction the change stays uncommitted.
+    run(&mut session, "BEGIN").await.unwrap();
+    let inside = write(
+        &mut session,
+        &items,
+        vec![RowChange::Update {
+            key: vec![text("1")],
+            set: vec![(1, text("inside"))],
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        inside,
+        WriteOutcome::Written {
+            rows: 1,
+            committed: false
+        }
+    );
+    assert_eq!(
+        session.transaction(CancellationToken::new()).await.unwrap(),
+        Some(TransactionStatus::Open { changes: None })
+    );
+    run(&mut session, "ROLLBACK").await.unwrap();
+    let (_, sink) = run(&mut session, "SELECT note FROM items WHERE id = 1")
+        .await
+        .unwrap();
+    assert_eq!(sink.rows, vec![vec![Cell::Text("NULL".into())]]);
+
+    // A table changed since the result was read is not written.
+    run(&mut session, "DROP TABLE items").await.unwrap();
+    run(
+        &mut session,
+        "CREATE TABLE items (id TEXT PRIMARY KEY, note TEXT, data BLOB)",
+    )
+    .await
+    .unwrap();
+    let changed = write(
+        &mut session,
+        &items,
+        vec![RowChange::Delete {
+            key: vec![text("1")],
+        }],
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(changed.code, ErrorCode::Validation);
+    assert!(session.is_open());
+}

@@ -5,6 +5,7 @@ pub mod config;
 pub use config::{PostgresConfig, PostgresSslMode};
 
 use jykre_core::*;
+mod edit;
 mod runtime;
 
 #[derive(Debug, Default)]
@@ -34,6 +35,7 @@ impl Driver for PostgresDriver {
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
                 named_parameters: true,
+                row_writes: true,
                 sql: true,
                 metadata: true,
                 transactions: true,

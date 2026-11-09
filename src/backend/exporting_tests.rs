@@ -107,11 +107,13 @@ impl Session for PagedSession {
                 name: "n".into(),
                 data_type: "int8".into(),
                 nullable: Some(false),
+                origin: Default::default(),
             },
             ColumnInfo {
                 name: "note".into(),
                 data_type: "text".into(),
                 nullable: Some(true),
+                origin: Default::default(),
             },
         ]);
         Ok(self.send(request.options.max_rows, sink))

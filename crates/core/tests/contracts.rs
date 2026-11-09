@@ -46,6 +46,7 @@ impl Driver for TestDriver {
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
                 named_parameters: false,
+                row_writes: false,
                 sql: true,
                 metadata: true,
                 transactions: false,
@@ -124,6 +125,7 @@ impl Session for TestSession {
             name: "value".into(),
             data_type: "DECIMAL".into(),
             nullable: Some(true),
+            origin: Default::default(),
         }];
         if sink.columns(columns) == SinkControl::Stop {
             return Ok(DriverOutcome::default());
@@ -471,6 +473,7 @@ fn generated_names_quote_every_structural_segment_with_the_driver_quote() {
 async fn namespace_levels_end_at_relations_and_discovery_defaults_to_not_implemented() {
     let capabilities = |hierarchy: Vec<ObjectKind>| DriverCapabilities {
         named_parameters: false,
+        row_writes: false,
         sql: true,
         metadata: true,
         transactions: false,
@@ -574,6 +577,54 @@ async fn a_session_that_knows_no_context_reports_an_empty_one() {
         session.transaction(CancellationToken::new()).await.unwrap(),
         None
     );
+}
+
+/// A driver that cannot tell where a column comes from keeps every result
+/// read-only (ADR-0039, section 7).
+#[tokio::test]
+async fn a_session_that_cannot_tell_keeps_results_read_only() {
+    use jykre_core::write::*;
+    let mut session: Box<dyn Session> = Box::new(TestSession {
+        requests: Arc::new(Mutex::new(Vec::new())),
+        closed: Arc::new(AtomicBool::new(false)),
+    });
+    let column = ColumnInfo::new("id", "int");
+    assert_eq!(column.origin, ColumnOrigin::Unknown);
+    assert_eq!(
+        session
+            .edit_target("SELECT id FROM t", &[column], CancellationToken::new())
+            .await
+            .unwrap(),
+        EditTarget::ReadOnly(ReadOnlyReason::DriverCannotTell)
+    );
+    let request = WriteRequest {
+        target: EditableTable {
+            table: ObjectPath::default().child(ObjectKind::Table, "t"),
+            writes: WriteMode::Direct,
+            columns: vec![None],
+            key: vec![],
+            key_kind: KeyKind::PrimaryKey,
+            side_effects: vec![],
+        },
+        changes: vec![],
+        timeout: None,
+    };
+    let written = session
+        .write(&request, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(written.code, ErrorCode::NotImplemented);
+    assert_eq!(
+        session.write_script(&request).unwrap_err().code,
+        ErrorCode::NotImplemented
+    );
+    // A descriptor stored before the capability existed reads without it.
+    let stored = json!({
+        "sql": true, "metadata": true, "transactions": true,
+        "hierarchy": ["table"], "default_port": null, "identifier_quote": "\""
+    });
+    let capabilities: DriverCapabilities = serde_json::from_value(stored).unwrap();
+    assert!(!capabilities.row_writes);
 }
 
 #[derive(Default)]

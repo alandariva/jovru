@@ -1260,3 +1260,363 @@ async fn live_a_procedure_call_delivers_its_columns_and_values() {
     .await
     .expect("live scenario exceeded its time budget");
 }
+
+/// A sink that keeps the columns, for editing (ADR-0039).
+#[derive(Default)]
+struct Edited {
+    columns: Vec<ColumnInfo>,
+    rows: Vec<Row>,
+}
+impl RowSink for Edited {
+    fn columns(&mut self, columns: Vec<ColumnInfo>) -> SinkControl {
+        self.columns = columns;
+        SinkControl::Continue
+    }
+    fn row(&mut self, row: Row) -> SinkControl {
+        self.rows.push(row);
+        SinkControl::Continue
+    }
+}
+
+async fn read(session: &mut Box<dyn Session>, sql: &str) -> DriverResult<Edited> {
+    let mut sink = Edited::default();
+    session
+        .execute(
+            &QueryRequest::new(sql, ExecutionOptions::default()),
+            &mut sink,
+            CancellationToken::new(),
+        )
+        .await?;
+    Ok(sink)
+}
+
+async fn target_of(session: &mut Box<dyn Session>, sql: &str) -> write::EditTarget {
+    let sink = read(session, sql).await.unwrap();
+    session
+        .edit_target(sql, &sink.columns, CancellationToken::new())
+        .await
+        .unwrap()
+}
+
+async fn write_changes(
+    session: &mut Box<dyn Session>,
+    target: &write::EditableTable,
+    changes: Vec<write::RowChange>,
+) -> DriverResult<write::WriteOutcome> {
+    let request = write::WriteRequest {
+        target: target.clone(),
+        changes,
+        timeout: Some(Duration::from_secs(30)),
+    };
+    session.write(&request, CancellationToken::new()).await
+}
+
+fn text(value: &str) -> write::WriteValue {
+    write::WriteValue::Text(value.into())
+}
+
+const EDIT_SETUP: [&str; 11] = [
+    "DROP VIEW IF EXISTS jykre_edit_view",
+    "DROP TABLE IF EXISTS jykre_edit_refs, jykre_edit_items, jykre_edit_loose, jykre_edit_measures, jykre_edit_stamps, jykre_edit_myisam",
+    "CREATE TABLE jykre_edit_items (id bigint unsigned PRIMARY KEY, amount decimal(65,30), note text, at datetime(3), raw varbinary(16), label varchar(3), doubled bigint GENERATED ALWAYS AS (id * 2) STORED) ENGINE=InnoDB",
+    "CREATE TABLE jykre_edit_refs (id int PRIMARY KEY, item bigint unsigned, FOREIGN KEY (item) REFERENCES jykre_edit_items (id) ON DELETE CASCADE) ENGINE=InnoDB",
+    "CREATE TABLE jykre_edit_loose (a text) ENGINE=InnoDB",
+    "CREATE TABLE jykre_edit_measures (v double PRIMARY KEY, w text) ENGINE=InnoDB",
+    "CREATE TABLE jykre_edit_stamps (t timestamp PRIMARY KEY, w text) ENGINE=InnoDB",
+    "CREATE TABLE jykre_edit_myisam (id int PRIMARY KEY) ENGINE=MyISAM",
+    "CREATE VIEW jykre_edit_view AS SELECT id, note FROM jykre_edit_items",
+    "INSERT INTO jykre_edit_items (id, amount, note) VALUES (1, 1, 'one'), (2, 2, 'two')",
+    "SET autocommit = 1",
+];
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_results_say_whether_they_can_be_written_back() {
+    use write::{EditTarget, KeyKind, ReadOnlyReason, ReferenceAction, SideEffect};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut session = MySqlDriver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        for sql in EDIT_SETUP {
+            read(&mut session, sql).await.unwrap();
+        }
+        let items = target_of(&mut session, "SELECT * FROM jykre_edit_items")
+            .await
+            .editable()
+            .unwrap();
+        assert_eq!(
+            (items.key.clone(), items.key_kind),
+            (vec![0], KeyKind::PrimaryKey)
+        );
+        assert!(!items.columns[6].as_ref().unwrap().writable, "generated");
+        assert!(items.columns[4].as_ref().unwrap().binary, "varbinary");
+        assert!(items.side_effects.contains(&SideEffect::Reference {
+            table: "jykre.jykre_edit_refs".into(),
+            name: "jykre_edit_refs_ibfk_1".into(),
+            on_delete: Some(ReferenceAction::Cascade),
+            on_update: None,
+        }));
+        for (sql, reason) in [
+            ("SELECT 1 AS n", ReadOnlyReason::ComputedOnly),
+            (
+                "SELECT i.note, r.id FROM jykre_edit_items i JOIN jykre_edit_refs r ON r.item = i.id",
+                ReadOnlyReason::SeveralTables,
+            ),
+            (
+                "SELECT note FROM jykre_edit_items",
+                ReadOnlyReason::KeyNotInResult {
+                    missing: vec!["id".into()],
+                },
+            ),
+            ("SELECT a FROM jykre_edit_loose", ReadOnlyReason::NoKey),
+            (
+                "SELECT * FROM jykre_edit_measures",
+                ReadOnlyReason::KeyType { column: "v".into() },
+            ),
+            (
+                "SELECT * FROM jykre_edit_stamps",
+                ReadOnlyReason::KeyType { column: "t".into() },
+            ),
+            (
+                "SELECT * FROM jykre_edit_myisam",
+                ReadOnlyReason::NotTransactional,
+            ),
+        ] {
+            assert_eq!(
+                target_of(&mut session, sql).await,
+                EditTarget::ReadOnly(reason),
+                "{sql}"
+            );
+        }
+        // Whether a view's columns name the view or its table depends on
+        // the server's view algorithm; either way, never another table.
+        match target_of(&mut session, "SELECT * FROM jykre_edit_view").await {
+            EditTarget::Editable(table) => {
+                assert_eq!(table.table.relation(), Some("jykre_edit_items"))
+            }
+            other => assert_eq!(
+                other,
+                EditTarget::ReadOnly(ReadOnlyReason::NotATable {
+                    kind: "view".into()
+                })
+            ),
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live edit targets took too long");
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_edits_are_bound_exact_and_honour_the_transaction() {
+    use write::{RowChange, WriteOutcome, WriteValue};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut session = MySqlDriver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        for sql in EDIT_SETUP {
+            read(&mut session, sql).await.unwrap();
+        }
+        let sql = "SELECT id, amount, note, at, raw, label FROM jykre_edit_items";
+        let items = target_of(&mut session, sql).await.editable().unwrap();
+
+        // Outside a transaction: exact numbers above 2^53, NULL apart from
+        // the text NULL, temporal text as typed and bytes as bytes.
+        let written = write_changes(
+            &mut session,
+            &items,
+            vec![
+                RowChange::Update {
+                    key: vec![text("1")],
+                    set: vec![
+                        (1, text("12345678901234567890.0123456789")),
+                        (2, text("NULL")),
+                        (3, text("2026-11-02 10:00:00.123")),
+                        (4, WriteValue::Bytes(vec![0, 0xff])),
+                    ],
+                },
+                RowChange::Insert {
+                    values: vec![
+                        (0, text("18446744073709551615")),
+                        (2, WriteValue::Null),
+                        (5, text("abc")),
+                    ],
+                },
+                RowChange::Update {
+                    key: vec![text("2")],
+                    set: vec![(2, text(""))],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            written,
+            WriteOutcome::Written {
+                rows: 3,
+                committed: true
+            }
+        );
+        let rows = read(
+            &mut session,
+            "SELECT id, amount, note, at, raw, label FROM jykre_edit_items ORDER BY id",
+        )
+        .await
+        .unwrap()
+        .rows;
+        let text_cell = |value: &str| Cell::Text(value.into());
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    text_cell("1"),
+                    text_cell("12345678901234567890.012345678900000000000000000000"),
+                    text_cell("NULL"),
+                    text_cell("2026-11-02 10:00:00.123"),
+                    Cell::Binary(vec![0, 0xff]),
+                    Cell::Null
+                ],
+                vec![
+                    text_cell("2"),
+                    text_cell("2.000000000000000000000000000000"),
+                    text_cell(""),
+                    Cell::Null,
+                    Cell::Null,
+                    Cell::Null
+                ],
+                vec![
+                    text_cell("18446744073709551615"),
+                    Cell::Null,
+                    Cell::Null,
+                    Cell::Null,
+                    Cell::Null,
+                    text_cell("abc")
+                ],
+            ]
+        );
+
+        // A value MySQL would cut or convert is refused, and nothing of the
+        // request is written.
+        for (column, value) in [(5, "abcd"), (1, "12x")] {
+            let refused = write_changes(
+                &mut session,
+                &items,
+                vec![
+                    RowChange::Update {
+                        key: vec![text("2")],
+                        set: vec![(2, text("first"))],
+                    },
+                    RowChange::Update {
+                        key: vec![text("1")],
+                        set: vec![(column, text(value))],
+                    },
+                ],
+            )
+            .await;
+            assert!(refused.is_err(), "{value}");
+            let note = read(
+                &mut session,
+                "SELECT note FROM jykre_edit_items WHERE id = 2",
+            )
+            .await
+            .unwrap()
+            .rows;
+            assert_eq!(note, vec![vec![text_cell("")]], "{value}");
+        }
+
+        // A change that matches no row rolls the whole request back.
+        let rolled = write_changes(
+            &mut session,
+            &items,
+            vec![
+                RowChange::Delete {
+                    key: vec![text("2")],
+                },
+                RowChange::Update {
+                    key: vec![text("999")],
+                    set: vec![(2, text("nobody"))],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rolled,
+            WriteOutcome::RolledBack {
+                index: 1,
+                matched: 0
+            }
+        );
+        let count = read(&mut session, "SELECT COUNT(*) FROM jykre_edit_items")
+            .await
+            .unwrap()
+            .rows;
+        assert_eq!(count, vec![vec![text_cell("3")]]);
+
+        // Inside an open transaction, and with autocommit off, the change
+        // stays uncommitted until the user ends it.
+        for open in ["BEGIN", "SET autocommit = 0"] {
+            read(&mut session, open).await.unwrap();
+            let inside = write_changes(
+                &mut session,
+                &items,
+                vec![RowChange::Update {
+                    key: vec![text("1")],
+                    set: vec![(2, text("inside"))],
+                }],
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                inside,
+                WriteOutcome::Written {
+                    rows: 1,
+                    committed: false
+                },
+                "{open}"
+            );
+            assert_ne!(
+                session.transaction(CancellationToken::new()).await.unwrap(),
+                Some(TransactionStatus::Idle),
+                "{open}"
+            );
+            read(&mut session, "ROLLBACK").await.unwrap();
+            read(&mut session, "SET autocommit = 1").await.unwrap();
+            let after = read(
+                &mut session,
+                "SELECT note FROM jykre_edit_items WHERE id = 1",
+            )
+            .await
+            .unwrap()
+            .rows;
+            assert_eq!(after, vec![vec![text_cell("NULL")]], "{open}");
+        }
+
+        // A table changed since the result was read is not written.
+        read(
+            &mut session,
+            "ALTER TABLE jykre_edit_items MODIFY note varchar(100)",
+        )
+        .await
+        .unwrap();
+        let changed = write_changes(
+            &mut session,
+            &items,
+            vec![RowChange::Delete {
+                key: vec![text("1")],
+            }],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(changed.code, ErrorCode::Validation);
+        for sql in EDIT_SETUP.iter().take(2) {
+            read(&mut session, sql).await.unwrap();
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live edits took too long");
+}

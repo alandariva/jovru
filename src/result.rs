@@ -5,7 +5,7 @@
 //! instead of one per cell, and its size in memory is known exactly. Values
 //! keep the database's text: exact numbers, temporal values and the text
 //! `NULL` are never reinterpreted ([Results](../docs/reference/results.md)).
-use crate::drivers::{Cell, ColumnInfo, Row, RowSink, SinkControl};
+use crate::drivers::{Cell, ColumnInfo, ColumnOrigin, Row, RowSink, SinkControl};
 use std::fmt::Write as _;
 
 /// The largest row limit a connection may set.
@@ -17,11 +17,18 @@ pub const DEFAULT_ROW_LIMIT: u32 = 1_000;
 /// How much memory one result may take before reading stops (256 MiB).
 pub const DEFAULT_MEMORY_CEILING: usize = 256 * 1024 * 1024;
 
-/// Name and database type of a result column.
+/// Name and database type of a result column, where its values come from,
+/// and how they arrived.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResultColumn {
     pub name: String,
     pub data_type: String,
+    /// The column's source, as the driver described it (ADR-0039).
+    pub origin: ColumnOrigin,
+    /// How this page's cells of the column arrived: `Some(true)` as bytes
+    /// (shown as `0x…`), `Some(false)` as text or all NULL, `None` mixed
+    /// (possible in SQLite). Set by the [`ResultBuilder`].
+    pub binary: Option<bool>,
 }
 
 impl ResultColumn {
@@ -29,7 +36,31 @@ impl ResultColumn {
         Self {
             name: name.into(),
             data_type: data_type.into(),
+            origin: ColumnOrigin::Unknown,
+            binary: Some(false),
         }
+    }
+
+    /// Whether `other` is the same column: its name and type, whatever its
+    /// cells were on another page.
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.name == other.name && self.data_type == other.data_type
+    }
+
+    /// The column as a driver describes it, for asking where it can be
+    /// written back to.
+    pub fn info(&self) -> ColumnInfo {
+        let mut info = ColumnInfo::new(self.name.clone(), self.data_type.clone());
+        info.origin = self.origin.clone();
+        info
+    }
+
+    fn heap_bytes(&self) -> usize {
+        let origin = match &self.origin {
+            ColumnOrigin::Stored(source) => source.relation.len() + source.column.len(),
+            _ => 0,
+        };
+        self.name.len() + self.data_type.len() + origin
     }
 }
 
@@ -177,7 +208,7 @@ impl ResultData {
             + self
                 .columns
                 .iter()
-                .map(|column| column.name.capacity() + column.data_type.capacity())
+                .map(ResultColumn::heap_bytes)
                 .sum::<usize>()
     }
 
@@ -190,7 +221,7 @@ impl ResultData {
             + self
                 .columns
                 .iter()
-                .map(|column| column.name.len() + column.data_type.len())
+                .map(ResultColumn::heap_bytes)
                 .sum::<usize>()
     }
 
@@ -272,6 +303,8 @@ pub struct ResultBuilder {
     max_rows: u32,
     max_bytes: usize,
     limit: Option<ResultLimit>,
+    /// Per column: whether a cell arrived as text, and as bytes.
+    kinds: Vec<(bool, bool)>,
 }
 
 impl ResultBuilder {
@@ -284,6 +317,7 @@ impl ResultBuilder {
             max_rows,
             max_bytes: max_bytes.min(u32::MAX as usize),
             limit: None,
+            kinds: Vec::new(),
         }
     }
 
@@ -291,6 +325,7 @@ impl ResultBuilder {
     /// the first page.
     pub fn page(columns: Vec<ResultColumn>, max_rows: u32, max_bytes: usize) -> Self {
         let mut builder = Self::new(max_rows, max_bytes);
+        builder.kinds = vec![(false, false); columns.len()];
         builder.data = ResultData::new(columns);
         builder
     }
@@ -300,6 +335,12 @@ impl ResultBuilder {
     /// it does. Drivers stop at the limit themselves and say whether more
     /// rows exist, so this marks only rows the driver sent beyond it.
     pub fn finish(mut self) -> (ResultData, Option<ResultLimit>) {
+        for (column, (text, bytes)) in self.data.columns.iter_mut().zip(&self.kinds) {
+            column.binary = match (text, bytes) {
+                (true, true) => None,
+                (_, bytes) => Some(*bytes),
+            };
+        }
         self.data.shrink_to_fit();
         (self.data, self.limit)
     }
@@ -307,10 +348,15 @@ impl ResultBuilder {
 
 impl RowSink for ResultBuilder {
     fn columns(&mut self, columns: Vec<ColumnInfo>) -> SinkControl {
+        self.kinds = vec![(false, false); columns.len()];
         self.data = ResultData::new(
             columns
                 .into_iter()
-                .map(|column| ResultColumn::new(column.name, column.data_type))
+                .map(|column| {
+                    let mut kept = ResultColumn::new(column.name, column.data_type);
+                    kept.origin = column.origin;
+                    kept
+                })
                 .collect(),
         );
         SinkControl::Continue
@@ -330,6 +376,13 @@ impl RowSink for ResultBuilder {
             self.data.nulls.len(),
         );
         self.data.push_cells(&row);
+        for (kind, cell) in self.kinds.iter_mut().zip(&row) {
+            match cell {
+                Cell::Null => {}
+                Cell::Binary(_) => kind.1 = true,
+                _ => kind.0 = true,
+            }
+        }
         drop(row);
         // Capacity grows in steps; what counts against the ceiling is what
         // the result keeps once it is shrunk.
@@ -372,6 +425,7 @@ mod tests {
             name: name.into(),
             data_type: data_type.into(),
             nullable: Some(true),
+            origin: Default::default(),
         }
     }
 
@@ -501,6 +555,45 @@ mod tests {
             let (data, limit) = builder.finish();
             assert_eq!((data.row_count(), limit), (rows as usize, None));
         }
+    }
+
+    #[test]
+    fn the_builder_keeps_each_columns_origin_and_how_its_cells_arrived() {
+        use crate::drivers::SourceColumn;
+        let mut builder = ResultBuilder::new(10, DEFAULT_MEMORY_CEILING);
+        let mut stored = info("id", "int8");
+        stored.origin = ColumnOrigin::Stored(SourceColumn {
+            relation: "16384".into(),
+            column: "1".into(),
+        });
+        builder.columns(vec![
+            stored.clone(),
+            info("raw", "blob"),
+            info("any", ""),
+            info("none", "text"),
+        ]);
+        builder.row(vec![
+            Cell::Integer(1),
+            Cell::Binary(vec![1]),
+            Cell::Binary(vec![2]),
+            Cell::Null,
+        ]);
+        builder.row(vec![
+            Cell::Integer(2),
+            Cell::Null,
+            Cell::Text("x".into()),
+            Cell::Null,
+        ]);
+        let (data, _) = builder.finish();
+        let columns = data.columns();
+        assert_eq!(columns[0].origin, stored.origin);
+        assert_eq!(columns[0].info().origin, stored.origin);
+        let binary: Vec<Option<bool>> = columns.iter().map(|column| column.binary).collect();
+        assert_eq!(binary, [Some(false), Some(true), None, Some(false)]);
+        // Another page of the same columns is the same column.
+        let mut other = columns[1].clone();
+        other.binary = Some(false);
+        assert!(other.same_as(&columns[1]));
     }
 
     #[test]

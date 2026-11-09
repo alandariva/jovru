@@ -97,6 +97,20 @@ actions!(
         GridExtendPageDown,
         /// Enter: shows the focused cell's full value in the side panel.
         GridInspect,
+        /// F2: edits the focused cell of an editable result (ADR-0039).
+        GridEditCell,
+        /// Ctrl+Shift+N: sets the selected cells to NULL.
+        GridSetNull,
+        /// Alt+Insert: adds a row to insert.
+        GridInsertRow,
+        /// Delete: marks the selected rows for deletion, or takes the mark
+        /// away; an inserted row goes.
+        GridDeleteRows,
+        /// Ctrl+Alt+S: writes the pending edits, after one confirmation (or
+        /// generates their statements into a new tab).
+        GridWriteEdits,
+        /// Ctrl+Alt+Z: discards the pending edits, asking first.
+        GridDiscardEdits,
         /// Up in the explorer: the previous node, or the previous match of the quick search.
         ExplorerUp,
         /// Down in the explorer: the next node, or the next match of the quick search.
@@ -156,6 +170,12 @@ pub(super) fn default_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("shift-pageup", GridExtendPageUp, grid),
         KeyBinding::new("shift-pagedown", GridExtendPageDown, grid),
         KeyBinding::new("enter", GridInspect, grid),
+        KeyBinding::new("f2", GridEditCell, grid),
+        KeyBinding::new("ctrl-shift-n", GridSetNull, grid),
+        KeyBinding::new("alt-insert", GridInsertRow, grid),
+        KeyBinding::new("delete", GridDeleteRows, grid),
+        KeyBinding::new("ctrl-alt-s", GridWriteEdits, grid),
+        KeyBinding::new("ctrl-alt-z", GridDiscardEdits, grid),
         KeyBinding::new("up", ExplorerUp, explorer),
         KeyBinding::new("down", ExplorerDown, explorer),
         KeyBinding::new("left", ExplorerLeft, explorer),
@@ -334,6 +354,12 @@ pub(super) fn catalog() -> Vec<Entry> {
         entry::<GridExtendPageUp>(Grid, tr!("Extend the selection a screen up")),
         entry::<GridExtendPageDown>(Grid, tr!("Extend the selection a screen down")),
         entry::<GridInspect>(Grid, tr!("Show the cell's full value in the side panel")),
+        entry::<GridEditCell>(Grid, tr!("Edit the cell")),
+        entry::<GridSetNull>(Grid, tr!("Set the selected cells to NULL")),
+        entry::<GridInsertRow>(Grid, tr!("Insert a row")),
+        entry::<GridDeleteRows>(Grid, tr!("Delete the selected rows, or keep them again")),
+        entry::<GridWriteEdits>(Grid, tr!("Write the pending edits")),
+        entry::<GridDiscardEdits>(Grid, tr!("Discard the pending edits")),
     ]
 }
 

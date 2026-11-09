@@ -75,7 +75,7 @@ flowchart TB
 | --- | --- | --- | --- |
 | **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
 | **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread, draws the **Go to line** prompt (`GoToLine`) and reports through events ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), what **Go to line** reads and where it leads (`go_to_line`), the keys the user chooses for the keymap's actions: how a key reads, where it collides and how the choices are stored (`keymap`, applied to GPUI's keymap by `src/app/shortcuts.rs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine: SQL Jobs, external programs, `jjp/1`, linear chains and schedules while the application is open, run by an application-root service that records what ran in `automation.db` (`automation`, with its scheduler and rules in `automation::schedule` over `jiff`, [specification](../plans/automation-engine-specification.md), [ADR-0034](../adr/0034-automation-database-service-and-lock.md) to [ADR-0038](../adr/0038-external-program-runs.md) and [ADR-0041](../adr/0041-schedules-and-grants.md); its interface is `src/app/automation/`, see [User experience](ux.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Depend on a specific view; use the editor's language features |
+| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), a result's pending edits and the write request they become (`grid_edit`, [ADR-0039](../adr/0039-editing-result-data-through-the-driver.md)), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the theme the user chose (`theme`), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), what **Go to line** reads and where it leads (`go_to_line`), the keys the user chooses for the keymap's actions: how a key reads, where it collides and how the choices are stored (`keymap`, applied to GPUI's keymap by `src/app/shortcuts.rs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine: SQL Jobs, external programs, `jjp/1`, linear chains and schedules while the application is open, run by an application-root service that records what ran in `automation.db` (`automation`, with its scheduler and rules in `automation::schedule` over `jiff`, [specification](../plans/automation-engine-specification.md), [ADR-0034](../adr/0034-automation-database-service-and-lock.md) to [ADR-0038](../adr/0038-external-program-runs.md) and [ADR-0041](../adr/0041-schedules-and-grants.md); its interface is `src/app/automation/`, see [User experience](ux.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry, and automation's pure types (`automation`: IDs, `RunState`, `Cause`, run records, the schedule policies and outcomes) | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
 | **Storage** | `crates/storage` | SQLite repositories for configuration, preferences, per-connection metadata and automation (`AutomationRepository` and `AutomationLock` own `automation.db` and `automation.lock`, [Persistence](persistence.md#automation-automationdb)) | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
@@ -184,7 +184,8 @@ The full types live in `jykre-core`.
 | `Credentials`, `ResolvedConnection` | Configuration plus resolved secrets. In memory only; not serializable (checked by `compile_fail` doctests). |
 | `DriverDescriptor`, `DriverStatus` | What a driver is and supports. Consumers check status and capabilities, not the kind. |
 | `QueryRequest`, `ExecutionOptions` | SQL as written plus row limit, timeout and session context. |
-| `ColumnInfo`, `Cell`, `Row`, `RowSink` | Streaming result model; NULL and exact decimals are preserved. |
+| `ColumnInfo`, `Cell`, `Row`, `RowSink` | Streaming result model; NULL and exact decimals are preserved. A column says where its values come from (`ColumnOrigin`). |
+| `write::EditTarget`, `WriteRequest`, `WriteOutcome` | What a result can be written back to and the changes written to it ([ADR-0039](../adr/0039-editing-result-data-through-the-driver.md)). |
 | `MetadataObject`, `ObjectPath` | Database, catalog, schema, table, view, materialized view, column, foreign key and partition nodes addressed by structural paths, with types, defaults, comments and keys. |
 | `MetadataScope` (`jykre::metadata_scope`) | What the user chose to introspect: everything, whole namespaces (including what is created in them later) or last-level namespaces. Pending until chosen. |
 | `DriverError`, `ErrorCode`, `ServerDiagnostic` | Classified errors; messages never contain secrets, SQL or raw configuration. A database error keeps the server's own message, SQLSTATE, vendor code and position. |
@@ -329,6 +330,30 @@ its request is still the window's latest. See [Results](results.md#copying).
    session comes back to the tab, with its context and transaction state
    when the result was read to its end; a rest read for the file is closed in
    the tab.
+
+### Edit a result
+
+A query tab's result is written back to its table through the driver
+([ADR-0039](../adr/0039-editing-result-data-through-the-driver.md),
+[Results](results.md#editing)):
+
+1. The drivers report each column's origin with its result
+   (`ColumnInfo::origin`, kept in `ResultColumn`), at no cost to a run.
+2. The first editing key in the grid emits `ResultGridEvent::EditRequested`;
+   the workspace hands the tab's session to `backend::edit_target`, which
+   asks `Session::edit_target` for what the result can be written back to,
+   read from the catalog in that session, and the session comes back as
+   after a run. The answer is kept per result tab in the grid
+   (`result_grid::Editing`).
+3. `jykre::grid_edit::EditSession` holds the pending edits; the grid draws
+   them over its cached view, keyed by their version.
+4. **Write…** builds the `WriteRequest` (`EditSession::request`), shows one
+   confirmation and runs `backend::write` with the tab's session:
+   `Session::write` writes it atomically (a transaction of its own, or a
+   savepoint inside the tab's open one), then the session's transaction
+   state is asked. Databricks results generate their statements instead
+   (`Session::write_script`), which open in a new tab with their values in
+   its parameter fields.
 
 ### Run a report
 

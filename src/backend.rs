@@ -1777,6 +1777,105 @@ pub async fn fetch(
     })
 }
 
+/// What asking a tab's session where a result can be written back leaves.
+pub struct EditTargetRun {
+    pub target: DriverResult<write::EditTarget>,
+    /// The session for the tab's next run, or `None` when it was closed.
+    pub session: Option<Box<dyn Session>>,
+}
+
+/// Asks the tab's session what the result read with `statement`, whose
+/// columns are `columns`, can be written back to (ADR-0039). Like a run it
+/// takes the session and hands it back; asking discards a result still open
+/// for paging.
+pub async fn edit_target(
+    mut session: Box<dyn Session>,
+    statement: String,
+    columns: Vec<ColumnInfo>,
+    cancel: CancellationToken,
+) -> EditTargetRun {
+    let span = crate::client_span!("edit_target");
+    let target = session
+        .edit_target(&statement, &columns, cancel)
+        .instrument(span.clone())
+        .await;
+    record_outcome(&span, &target);
+    {
+        let _entered = span.enter();
+        tracing::info!(
+            editable = matches!(target, Ok(write::EditTarget::Editable(_))),
+            error_code = ?target.as_ref().err().map(|error| error.code),
+            "edit target read"
+        );
+    }
+    EditTargetRun {
+        target,
+        session: kept(session).await,
+    }
+}
+
+/// What writing a result's edits leaves.
+pub struct WriteRun {
+    pub outcome: DriverResult<write::WriteOutcome>,
+    /// The session's transaction state afterwards, as the driver reports it.
+    pub transaction: Option<TransactionStatus>,
+    /// The session for the tab's next run, or `None` when it was closed.
+    pub session: Option<Box<dyn Session>>,
+}
+
+/// Writes `request` in the tab's session, which the driver does atomically
+/// (ADR-0039), then asks the session's transaction state. Logged with its
+/// counts and outcome, never a value.
+pub async fn write(
+    mut session: Box<dyn Session>,
+    request: write::WriteRequest,
+    cancel: CancellationToken,
+) -> WriteRun {
+    let started = Instant::now();
+    let span = crate::client_span!(
+        "write",
+        db.system.name = tracing::field::Empty,
+        jykre.statements = crate::telemetry::attributes::count(request.changes.len())
+    );
+    let outcome = session
+        .write(&request, cancel)
+        .instrument(span.clone())
+        .await;
+    record_outcome(&span, &outcome);
+    {
+        let _entered = span.enter();
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            changes = request.changes.len(),
+            outcome = ?outcome.as_ref().ok(),
+            error_code = ?outcome.as_ref().err().map(|error| error.code),
+            "write finished"
+        );
+    }
+    // Asked whatever the write did, with a token of its own: a cancelled
+    // write still leaves a transaction the toolbar must show.
+    let transaction = if session.is_open() {
+        transaction_status(&mut *session, &CancellationToken::new()).await
+    } else {
+        None
+    };
+    WriteRun {
+        outcome,
+        transaction,
+        session: kept(session).await,
+    }
+}
+
+/// The session when it is still open; otherwise it is closed.
+async fn kept(session: Box<dyn Session>) -> Option<Box<dyn Session>> {
+    if session.is_open() {
+        Some(session)
+    } else {
+        close_session(Some(session)).await;
+        None
+    }
+}
+
 /// Closes a tab's session within a short deadline; a close failure only
 /// means the server drops the connection on its own.
 pub async fn close_session(session: Option<Box<dyn Session>>) {
@@ -2023,6 +2122,7 @@ mod tests {
                 name: "value".into(),
                 data_type: "text".into(),
                 nullable: Some(false),
+                origin: Default::default(),
             }]);
             for _ in 0..self.rows.min(request.options.max_rows) {
                 if sink.row(vec![Cell::Text("synthetic-cell-value".into())]) == SinkControl::Stop {
@@ -2357,6 +2457,7 @@ mod tests {
                     name: "n".into(),
                     data_type: "int".into(),
                     nullable: Some(false),
+                    origin: Default::default(),
                 }]);
                 self.pending = rows.parse().unwrap_or(0);
                 self.next = 0;
@@ -2377,6 +2478,7 @@ mod tests {
                 name: "state".into(),
                 data_type: "text".into(),
                 nullable: Some(false),
+                origin: Default::default(),
             }]);
             sink.row(vec![Cell::Text(format!(
                 "{}:{}",

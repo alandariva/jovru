@@ -44,8 +44,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 mod copy_menu;
+mod editing;
 mod export;
 mod parameters;
+use editing::EditJob;
 use export::{ExportBar, ExportState};
 use parameters::ParameterForm;
 
@@ -209,6 +211,12 @@ pub struct Workspace {
     /// Tells the filter text typed last from earlier keystrokes still
     /// waiting to apply.
     filter_revision: u64,
+    /// Editing has the session out: reading a table, or writing (ADR-0039).
+    edit_job: Option<EditJob>,
+    /// A run that waits for the user to accept losing pending edits.
+    edits_run: Option<(Scope, Placement)>,
+    /// The waiting run was accepted: the next start does not ask again.
+    edits_confirmed: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -291,8 +299,14 @@ impl Workspace {
         let grid = cx.new(|cx| ResultGrid::new(first, sales, cx));
         // The grid notifies only itself; the workspace keeps the little it
         // shows: the selected count and notices.
-        let grid_subscription =
-            cx.subscribe(&grid, |this, _, event: &ResultGridEvent, cx| match event {
+        let grid_subscription = cx.subscribe_in(
+            &grid,
+            window,
+            |this, _, event: &ResultGridEvent, window, cx| match event {
+                ResultGridEvent::EditRequested(id) => this.edit_requested(*id, window, cx),
+                ResultGridEvent::EditsChanged => cx.notify(),
+                ResultGridEvent::WriteRequested => this.write_edits(window, cx),
+                ResultGridEvent::DiscardRequested => this.discard_edits(window, cx),
                 ResultGridEvent::SelectionChanged { cells } => {
                     this.selected_cells = *cells;
                     cx.notify();
@@ -310,7 +324,8 @@ impl Workspace {
                     cx.notify();
                 }
                 ResultGridEvent::RecordsShown | ResultGridEvent::PanelChanged => cx.notify(),
-            });
+            },
+        );
         // The copy button names the format Ctrl+C copies in, which any tab's
         // menu can change.
         let copy_observation =
@@ -428,6 +443,9 @@ impl Workspace {
             notice: None,
             filter_open: false,
             filter_revision: 0,
+            edit_job: None,
+            edits_run: None,
+            edits_confirmed: false,
             _subscriptions: vec![
                 assistant_subscription,
                 filter_subscription,
@@ -571,6 +589,12 @@ impl Workspace {
     /// Asks the run to stop. The footer reports the cancellation; there is
     /// no second message.
     fn stop_execution(&mut self, cx: &mut Context<Self>) {
+        // A write stops like a run: the driver rolls back what it did.
+        if self.edit_job.is_some() {
+            self.cancellation.cancel();
+            cx.notify();
+            return;
+        }
         if self.run.cancel() {
             self.cancellation.cancel();
             cx.notify();
@@ -1392,6 +1416,26 @@ impl Workspace {
             ));
             cx.notify();
             return;
+        }
+        if self.edit_job.is_some() {
+            self.notice = Some(Feedback::new(
+                Tone::Info,
+                tr!(
+                    "Edits are being read or written in this tab's session. Wait for them, or stop them first."
+                ),
+            ));
+            cx.notify();
+            return;
+        }
+        // A run may replace a result tab that holds edits not written; the
+        // toolbar's COMMIT and ROLLBACK replace none.
+        if placement != Placement::Hidden && !self.edits_confirmed {
+            let pending = self.grid.read(cx).pending_edits(None);
+            if pending > 0 {
+                self.edits_run = Some((scope, placement));
+                cx.emit(WorkspaceEvent::ConfirmPendingEdits { pending });
+                return;
+            }
         }
         if self.input.is_none() && !self.demo {
             // Nothing runs without a connection: the results area offers
@@ -2721,6 +2765,26 @@ impl Workspace {
                             })
                             .child(
                                 icon_button(
+                                    "edit-results",
+                                    I::Pencil,
+                                    tr!(
+                                        "Edit the focused cell ({0})",
+                                        super::shortcuts::label::<super::shortcuts::GridEditCell>(
+                                            cx
+                                        )
+                                    ),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.grid.update(cx, |grid, cx| {
+                                            grid.focus(window, cx);
+                                            grid.edit_focused(window, cx)
+                                        });
+                                    },
+                                )),
+                            )
+                            .child(
+                                icon_button(
                                     "refresh-results",
                                     I::RefreshCw,
                                     tr!("Run this result's statement again"),
@@ -2728,6 +2792,12 @@ impl Workspace {
                                 .on_click(cx.listener(|this, _, _, cx| this.run_again(cx))),
                             ),
                     ),
+            )
+            .when_some(
+                (self.result_view == ResultView::Table)
+                    .then(|| self.edit_bar(cx))
+                    .flatten(),
+                |s, bar| s.child(bar),
             )
             .when(self.filter_open, |s| {
                 s.child(
@@ -3744,6 +3814,19 @@ pub enum WorkspaceEvent {
         connection: String,
         description: String,
     },
+    /// A run may replace result tabs whose edits are not written. The host
+    /// asks and, on a yes, calls [`Workspace::confirm_pending_edits`].
+    ConfirmPendingEdits { pending: usize },
+    /// Statements generated from a result's edits, for a database not
+    /// written directly (ADR-0039, section 9): the host opens them in a new
+    /// tab on `connection` and calls [`Workspace::open_generated`].
+    OpenGenerated {
+        title: String,
+        connection: String,
+        sql: String,
+        parameters: Vec<jykre::parameters::TabParameter>,
+        context: SessionContext,
+    },
     /// The user chose another connection for this tab in the toolbar.
     ConnectionRequested(String),
     /// **Save** or **Save as…**: the host writes the tab's file, asking
@@ -3883,7 +3966,10 @@ impl Workspace {
     /// A statement, a page read or an export that reads from the session is
     /// in progress.
     pub fn is_busy(&self) -> bool {
-        self.run.is_active() || self.fetching || self.export_uses_session()
+        self.run.is_active()
+            || self.fetching
+            || self.export_uses_session()
+            || self.edit_job.is_some()
     }
 
     /// Applies a saved connection's new name, password, row limit or
@@ -3942,7 +4028,10 @@ impl Workspace {
     /// has it.
     pub fn resume_pending(&mut self, cx: &mut Context<Self>) {
         if let Some((scope, placement)) = self.pending_run.take() {
+            // Pending edits were asked about before the password was.
+            self.edits_confirmed = true;
             self.execute_queries(scope, placement, cx);
+            self.edits_confirmed = false;
         }
         if let Some(query) = self.pending_assistant.take() {
             self.run_assistant_query(query, cx);
@@ -3952,9 +4041,12 @@ impl Workspace {
     /// Runs what waited for the user to confirm its risky statements.
     pub fn confirm_risk(&mut self, cx: &mut Context<Self>) {
         if let Some((scope, placement)) = self.risky_run.take() {
+            // Pending edits were asked about before the risk was.
             self.risk_confirmed = true;
+            self.edits_confirmed = true;
             self.execute_queries(scope, placement, cx);
             self.risk_confirmed = false;
+            self.edits_confirmed = false;
         }
     }
 

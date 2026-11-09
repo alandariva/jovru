@@ -43,6 +43,7 @@ impl Driver for DatabricksDriver {
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
                 named_parameters: true,
+                row_writes: true,
                 sql: true,
                 metadata: true,
                 transactions: false,

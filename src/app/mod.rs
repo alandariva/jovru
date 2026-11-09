@@ -1472,6 +1472,47 @@ impl AppView {
                             },
                         );
                     }
+                    WorkspaceEvent::ConfirmPendingEdits { pending } => {
+                        let panel = panel_entity.downgrade();
+                        confirm(
+                            window,
+                            cx,
+                            Confirmation {
+                                title: tr!(
+                                    "Run and lose {0} pending changes?",
+                                    jykre::cell_format::count(*pending)
+                                ),
+                                description: tr!(
+                                    "Edits in this tab's results are not written. The result tabs this run replaces lose theirs; write them first to keep them."
+                                )
+                                .to_owned(),
+                                ok: tr!("Run"),
+                                cancel: tr!("Cancel"),
+                                focus: ConfirmFocus::Dialog,
+                            },
+                            move |_, cx| {
+                                let _ =
+                                    panel.update(cx, |panel, cx| panel.confirm_pending_edits(cx));
+                            },
+                        );
+                    }
+                    WorkspaceEvent::OpenGenerated {
+                        title,
+                        connection,
+                        sql,
+                        parameters,
+                        context,
+                    } => {
+                        let group = this.group_for(connection, cx);
+                        if let Some(tab) = this.add_query(group, title, sql, window, cx)
+                            && let Some(panel) = this.panels.get(&tab).cloned()
+                        {
+                            panel.update(cx, |panel, cx| {
+                                panel.open_generated(parameters, context.clone(), cx);
+                                panel.focus_editor(window, cx);
+                            });
+                        }
+                    }
                     WorkspaceEvent::PasswordRequired => {
                         let name = panel_entity.read(cx).connection_name().to_owned();
                         if let Some(index) = this.connections.iter().position(|c| c.name == name) {
@@ -1786,6 +1827,33 @@ impl AppView {
             ))
         } else {
             None
+        };
+        // Edits not written are lost with the tab (ADR-0039).
+        let pending = self
+            .panels
+            .get(&tab)
+            .map_or(0, |panel| panel.read(cx).pending_edits(cx));
+        let question = match question {
+            _ if pending == 0 => question,
+            Some((title, description, ok)) => Some((
+                title,
+                format!(
+                    "{description} {}",
+                    tr!(
+                        "The {0} pending changes to its results are lost.",
+                        jykre::cell_format::count(pending)
+                    )
+                ),
+                ok,
+            )),
+            None => Some((
+                tr!("Edits in this tab are not written.").to_string(),
+                tr!(
+                    "Closing the tab loses {0} pending changes to its results.",
+                    jykre::cell_format::count(pending)
+                ),
+                tr!("Close and discard"),
+            )),
         };
         match question {
             Some((title, description, ok)) => confirm(

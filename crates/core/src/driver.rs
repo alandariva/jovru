@@ -1,8 +1,9 @@
+use crate::write::{EditTarget, ReadOnlyReason, WriteOutcome, WriteRequest, WriteScript};
 use crate::{
-    CancellationToken, ConnectionConfig, DriverError, DriverKind, DriverOutcome, DriverResult,
-    Encryption, ExecutionOptions, Inspection, IntrospectionLevel, IntrospectionReport,
-    MetadataObject, ObjectKind, ObjectPath, QueryRequest, ResolvedConnection, RowSink, ServerInfo,
-    SessionContext, SqlDialect, TransactionStatus,
+    CancellationToken, ColumnInfo, ConnectionConfig, DriverError, DriverKind, DriverOutcome,
+    DriverResult, Encryption, ExecutionOptions, Inspection, IntrospectionLevel,
+    IntrospectionReport, MetadataObject, ObjectKind, ObjectPath, QueryRequest, ResolvedConnection,
+    RowSink, ServerInfo, SessionContext, SqlDialect, TransactionStatus,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,11 @@ pub struct DriverCapabilities {
     /// still reject them for some connections.
     #[serde(default)]
     pub named_parameters: bool,
+    /// Implements [`Session::edit_target`], and [`Session::write`] or
+    /// [`Session::write_script`] as [`crate::write::EditableTable::writes`]
+    /// says (ADR-0039).
+    #[serde(default)]
+    pub row_writes: bool,
 }
 
 impl DriverCapabilities {
@@ -144,6 +150,47 @@ pub trait Session: Debug + Send {
     /// their own have nothing to check.
     async fn ping(&mut self) -> DriverResult<()> {
         Ok(())
+    }
+
+    /// What the rows of a result with these columns can be written back to,
+    /// read now from the server's catalog in this session. `statement` is
+    /// the SQL the result was read with, as it ran; only a driver that
+    /// infers the table from it (Databricks, ADR-0039 section 9) reads it.
+    /// Like [`Session::context`], asking discards a result still open for
+    /// paging. The default cannot tell, so the result is read-only.
+    async fn edit_target(
+        &mut self,
+        statement: &str,
+        columns: &[ColumnInfo],
+        cancel: CancellationToken,
+    ) -> DriverResult<EditTarget> {
+        let _ = (statement, columns, cancel);
+        Ok(EditTarget::ReadOnly(ReadOnlyReason::DriverCannotTell))
+    }
+
+    /// Writes `request` atomically: in a transaction of its own, or inside a
+    /// savepoint of the session's open transaction, committed (or released)
+    /// only when every change affected exactly one row, after checking the
+    /// target again. Every value is bound. The default reports
+    /// `NotImplemented`.
+    async fn write(
+        &mut self,
+        request: &WriteRequest,
+        cancel: CancellationToken,
+    ) -> DriverResult<WriteOutcome> {
+        let _ = (request, cancel);
+        Err(DriverError::not_implemented("this driver", "writing rows"))
+    }
+
+    /// The statements that would write `request`, with `:name` markers and
+    /// their values apart, for a new query tab (`WriteMode::Script`). Runs
+    /// nothing. The default reports `NotImplemented`.
+    fn write_script(&self, request: &WriteRequest) -> DriverResult<WriteScript> {
+        let _ = request;
+        Err(DriverError::not_implemented(
+            "this driver",
+            "generating writes",
+        ))
     }
 
     async fn close(self: Box<Self>) -> DriverResult<()>;

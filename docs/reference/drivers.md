@@ -429,6 +429,99 @@ commands) asks the driver how to write names:
   session is bound to one database. A driver overrides these defaults when its
   rules differ; callers never decide by `DriverKind`.
 
+## Editing results
+
+[ADR-0039](../adr/0039-editing-result-data-through-the-driver.md) lets a
+query tab's result be written back to its table. The contract
+(`jykre_core::write`):
+
+- `ColumnInfo::origin` says where each column comes from, from what the
+  protocol said when the statement was prepared, with no extra I/O:
+  `Stored(SourceColumn)` (the driver's own identifiers of the relation and
+  the column, compared for equality only), `Expression`, or `Unknown`, the
+  default.
+- `DriverCapabilities::row_writes` (serialized with a default of `false`):
+  the driver implements `Session::edit_target`, and `Session::write` or
+  `Session::write_script` as `EditableTable::writes` says. PostgreSQL, MySQL
+  and SQLite write directly (`WriteMode::Direct`); Databricks generates
+  statements (`WriteMode::Script`).
+- `Session::edit_target(statement, columns, cancel)` reads, from the
+  catalog in the session, what the result can be written back to:
+  `EditTarget::Editable(EditableTable)` with the table's path, one entry per
+  result column (`None` for a computed one; `writable` false for a generated
+  column or an identity the table always generates), the key's columns and
+  kind, and what a write can change beyond the rows written (triggers, and
+  foreign keys of other tables that cascade, set NULL or set the default),
+  or `EditTarget::ReadOnly(ReadOnlyReason)`. Like `context`, asking
+  discards a result still open for paging. The default answers
+  `ReadOnly(DriverCannotTell)`.
+- `Session::write(request, cancel)` writes a `WriteRequest` atomically and
+  answers `WriteOutcome::Written { rows, committed }`, or
+  `RolledBack { index, matched }` when change `index` affected other than
+  one row. The default reports `NotImplemented`.
+- `Session::write_script(request)` returns the statements with `:name`
+  markers and their values apart (`WriteScript`). The default reports
+  `NotImplemented`.
+- `write::statement` builds every statement's text from the driver's
+  quoting and a placeholder the driver chooses; `write::resolve` picks the
+  key (the primary key, else the first unique key on NOT NULL columns
+  without expressions or a predicate whose columns are all in the result)
+  and refuses a key column whose text does not identify one value;
+  `write::still_matches` compares a target with the catalog read again
+  before a write. At most `write::MAX_CHANGES` (10,000) changes per request.
+
+What every driver with `Direct` writes does:
+
+- **Atomic.** Outside a transaction it opens one (`BEGIN`, `START
+  TRANSACTION`, SQLite's `BEGIN IMMEDIATE`) and commits only when every
+  change affected exactly one row; inside an open transaction (MySQL's
+  autocommit off included) it uses `SAVEPOINT jykre_edit`, released on
+  success (`committed: false`) and rolled back to on a mismatch, so the
+  user's transaction keeps what it had. A failure, a cancellation or the
+  timeout rolls back what the write did. A `COMMIT` that gets no answer is
+  reported as a `Connection` error that says the changes may or may not
+  have been written; nothing is sent again.
+- **Checked again.** Before its first statement, inside the same
+  transaction, the driver reads the catalog again and fails with
+  `Validation` ("The table changed since this result was read") when the
+  table, a column's type or its key changed.
+- **Bound.** Every value is a bound parameter; NULL is bound as a typed
+  NULL. Each statement runs through SQLx's prepared path, unsaved
+  (`persistent(false)`).
+
+| | PostgreSQL | MySQL | SQLite |
+| --- | --- | --- | --- |
+| Origin | `PgColumn::relation_id()` and `relation_attribute_no()` as decimal text; none (or a system column) is `Expression` | `Column::origin()`: `schema.table` and the physical column name | `Column::origin()`: `db.table` (`table` for `main`) and the column's own name |
+| Relation | `pg_class` joined to `pg_namespace` by the OID: path and `relkind` (`r` or `p`; a view, a materialized view or a foreign table is `NotATable`) | Split at its only dot; with several, each split is checked against `information_schema.TABLES` and used only when exactly one exists (E-6). `TABLES` joined to `ENGINES`: `BASE TABLE` and `TRANSACTIONS = 'YES'`, else `NotATable` or `NotTransactional` | Read as `main.<name>` or split at a dot; with dots, each reading is checked against `pragma_database_list` and the database's `sqlite_schema`, and used only when exactly one exists. A view or a virtual table is `NotATable`. A view in the query reports its base table, which is written |
+| Columns | `pg_attribute` joined to `pg_type`: `format_type(atttypid, NULL)` (the type without its modifier, so an explicit cast never cuts a `varchar(n)` text that the column's own assignment refuses), `attnotnull`, `atthasdef`, `attgenerated`, `attidentity` (`a` is not writable); `float4` and `float8` cannot be a key | `COLUMNS`: `COLUMN_TYPE`, `DATA_TYPE`, `IS_NULLABLE`, `COLUMN_DEFAULT`, `EXTRA` (generated columns are not writable); binary types and `BIT` are bound as bytes; spatial types are left out; `FLOAT`, `DOUBLE` and `TIMESTAMP` cannot be a key | `pragma_table_xinfo(table, schema)`: `type`, `notnull`, `dflt_value`, `pk`, `hidden` (2 and 3 are generated); a declared `BLOB` is bound as bytes; `REAL` affinity cannot be a key |
+| Key | `pg_index` (`indisunique`, `indisvalid`, `indimmediate`): `indisprimary`, else a unique index without `indexprs` or `indpred` whose key columns (`indkey`, first `indnkeyatts`) are all `attnotnull` | `STATISTICS` with `NON_UNIQUE = 0`: `PRIMARY`, else a unique index without a functional part whose columns are all NOT NULL | `pk` of `pragma_table_xinfo`, else `pragma_index_list(table, schema)` (`unique`, not `partial`) and `pragma_index_info(index, schema)` without an expression (`cid = -2`), every column NOT NULL. The `rowid` is not used |
+| Side effects | `pg_trigger` without `tgisinternal`; `pg_constraint` with `contype = 'f'` and `confrelid` the table, whose `confdeltype` or `confupdtype` is `c`, `n` or `d` | `TRIGGERS` of the table; `REFERENTIAL_CONSTRAINTS` that reference it with `CASCADE`, `SET NULL` or `SET DEFAULT` | Triggers in `sqlite_schema`; `pragma_foreign_key_list` of every table of the schema that references it, with its `on_delete` and `on_update` |
+| Values | `CAST($n AS <type>)` with the text bound as `text`: the server's input function reads it; `bytea` travels as its `\x` text | By the type's family: `CAST(? AS SIGNED)` or `UNSIGNED` for integers, `CAST(? AS DECIMAL(p,s))`, `CAST(? AS DATE)`, `CAST(? AS DATETIME(fsp))` (also for `TIMESTAMP`), `CAST(? AS TIME(fsp))`; text without a cast, so the column's collation applies; bytes for binary columns. After each statement `SELECT @@warning_count` over the text protocol: a warning (a value MySQL adjusted) rolls the request back and names `SHOW WARNINGS`' message | `?N`: text bound as text (the column's affinity converts it), bytes as bytes |
+| Rows matched | `rows_affected` | `rows_affected`, which counts the rows an `UPDATE` matched (`CLIENT_FOUND_ROWS`) | `changes()` of the statement |
+| Inside a transaction | The catalog is read in a savepoint, rolled back afterwards; a failed transaction refuses edits until it is rolled back | The catalog reads cannot fail the transaction | An interrupted write inside an open transaction makes SQLite roll that whole transaction back; the toolbar shows it |
+
+Databricks reports no column's origin, so its driver infers the table from
+the result's SQL text, by the maintainer's decision (ADR-0039, section 9):
+only a `SELECT` from one table, with no join, subquery, table-valued
+function, `LATERAL VIEW`, `PIVOT`, time travel or CTE, no `UNION`,
+`INTERSECT`, `EXCEPT` or `MINUS`, no `GROUP BY`, `HAVING`, `QUALIFY`,
+`WINDOW` or `DISTINCT`, and result columns that are plain column references
+(optionally renamed) or `*`; `WHERE`, `ORDER BY`, `LIMIT` and `OFFSET` may
+follow (`runtime/edit.rs`, unit-tested on fixtures). A one- or two-part name
+takes the session's catalog and schema; the table is read from Unity
+Catalog's tables endpoint (`/api/2.1/unity-catalog/tables/{full name}`, the
+catalog `information_schema` reflects), without compute: `MANAGED` or
+`EXTERNAL` tables only, its columns' `type_text`, `nullable` and
+`position`, and its declared primary key (`table_constraints`). The key is
+that primary key when all its columns are in the result
+(`KeyKind::Informational`); otherwise the user names it
+(`KeyKind::Chosen`). Each column gets a parameter kind from its type
+(numbers, text, booleans, dates, timestamps); `BINARY`, `INTERVAL`, complex
+types and `VARIANT` have none and are not editable; `FLOAT`, `DOUBLE` and
+`TIMESTAMP` cannot be a key. `write_script` writes one statement per change
+with `:column_n` markers and checks each value against its kind, refusing
+one that does not fit rather than rewriting it.
+
 ## Adding a driver
 
 1. Create a crate in `crates/driver-<database>` that depends on `jykre-core`.

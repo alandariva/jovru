@@ -22,6 +22,7 @@ pub mod export;
 pub mod favorites;
 pub mod go_to_line;
 pub mod grid;
+pub mod grid_edit;
 pub mod grouped_tabs;
 pub mod guard;
 pub mod i18n;
