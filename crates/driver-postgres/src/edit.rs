@@ -149,8 +149,10 @@ async fn catalog(
             .find(|attribute| attribute.0 == number)
             .map(|attribute| (attribute.1.clone(), attribute.3))
     };
+    // `int2vector` casts to an array that starts at 0, which SQLx does not
+    // decode; the slice starts at 1.
     let indexes: Vec<(bool, Vec<i16>, i16, bool)> = sqlx::query_as(
-        "SELECT i.indisprimary, i.indkey::int2[], i.indnkeyatts, \
+        "SELECT i.indisprimary, (i.indkey::int2[])[0:], i.indnkeyatts, \
          (i.indexprs IS NULL AND i.indpred IS NULL) \
          FROM pg_catalog.pg_index i \
          WHERE i.indrelid = $1 AND i.indisunique AND i.indisvalid AND i.indimmediate \

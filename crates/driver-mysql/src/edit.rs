@@ -324,17 +324,33 @@ async fn catalog(
     })))
 }
 
-/// The placeholder of a value of `column`: the cast that makes MySQL read
-/// the text as the column's type, so a number is never compared to a
-/// string as floating point. Text columns take the text as it is, so their
-/// collation applies; binary columns take bytes.
-pub(crate) fn placeholder(column: &EditableColumn) -> String {
+/// The declared type in lower case and its name without arguments or
+/// attributes, such as `bigint` for `bigint(20) unsigned`.
+fn declared(column: &EditableColumn) -> (String, String) {
     let declared = column.declared_type.to_lowercase();
     let base = declared
         .split(['(', ' '])
         .next()
         .unwrap_or_default()
         .to_owned();
+    (declared, base)
+}
+
+/// Whether `column` is an `UNSIGNED` integer.
+fn unsigned_integer(column: &EditableColumn) -> bool {
+    let (declared, base) = declared(column);
+    matches!(
+        base.as_str(),
+        "tinyint" | "smallint" | "mediumint" | "int" | "integer" | "bigint"
+    ) && declared.contains("unsigned")
+}
+
+/// The placeholder of a value of `column`: the cast that makes MySQL read
+/// the text as the column's type, so a number is never compared to a
+/// string as floating point. Text columns take the text as it is, so their
+/// collation applies; binary columns take bytes.
+pub(crate) fn placeholder(column: &EditableColumn) -> String {
+    let (declared, base) = declared(column);
     let arguments = declared
         .split_once('(')
         .and_then(|(_, rest)| rest.split_once(')'))
@@ -351,20 +367,13 @@ pub(crate) fn placeholder(column: &EditableColumn) -> String {
                 "CAST(? AS SIGNED)".to_owned()
             }
         }
-        "decimal" | "numeric" | "dec" | "fixed" => {
-            let (precision, scale) = arguments
-                .as_deref()
-                .map(|inside| {
-                    let mut parts = inside.split(',').map(|part| part.trim().parse::<u8>().ok());
-                    (
-                        parts.next().flatten().unwrap_or(10),
-                        parts.next().flatten().unwrap_or(0),
-                    )
-                })
-                .unwrap_or((10, 0));
-            format!("CAST(? AS DECIMAL({precision},{scale}))")
-        }
-        "date" => "CAST(? AS DATE)".to_owned(),
+        // MySQL's widest decimal: a cast to the column's own `DECIMAL(p,s)`
+        // would round a longer fraction without a warning, while storing
+        // this one in the column warns when it rounds.
+        "decimal" | "numeric" | "dec" | "fixed" => "CAST(? AS DECIMAL(65,30))".to_owned(),
+        // `CAST(? AS DATE)` drops a time of day without a warning; storing
+        // a `DATETIME` in the column warns when its time is not midnight.
+        "date" => "CAST(? AS DATETIME(6))".to_owned(),
         "datetime" | "timestamp" => format!("CAST(? AS DATETIME{fsp})"),
         "time" => format!("CAST(? AS TIME{fsp})"),
         _ => "?".to_owned(),
@@ -411,7 +420,15 @@ pub(crate) async fn apply(
             let binary = target.column(*position).is_some_and(|column| column.binary);
             query = match (value, binary) {
                 (WriteValue::Null, _) => query.bind(None::<String>),
-                (WriteValue::Text(text), false) => query.bind(text.clone()),
+                // A prepared `CAST(? AS UNSIGNED)` reads a text above
+                // 2^63 - 1 as 2^63 - 1, with a warning; a whole number
+                // bound as `u64` keeps its value. Other text goes as text.
+                (WriteValue::Text(text), false) => match text.parse::<u64>() {
+                    Ok(number) if target.column(*position).is_some_and(unsigned_integer) => {
+                        query.bind(number)
+                    }
+                    _ => query.bind(text.clone()),
+                },
                 (WriteValue::Bytes(bytes), true) => query.bind(bytes.clone()),
                 // MySQL's boolean is `TINYINT(1)`: 1 or 0 (ADR-0040).
                 (WriteValue::Boolean(flag), false) => query.bind(i64::from(*flag)),
@@ -486,9 +503,9 @@ mod tests {
             ("bigint unsigned", "CAST(? AS UNSIGNED)"),
             ("tinyint(1)", "CAST(? AS SIGNED)"),
             ("decimal(65,30)", "CAST(? AS DECIMAL(65,30))"),
-            ("decimal(12,2) unsigned", "CAST(? AS DECIMAL(12,2))"),
-            ("decimal", "CAST(? AS DECIMAL(10,0))"),
-            ("date", "CAST(? AS DATE)"),
+            ("decimal(12,2) unsigned", "CAST(? AS DECIMAL(65,30))"),
+            ("decimal", "CAST(? AS DECIMAL(65,30))"),
+            ("date", "CAST(? AS DATETIME(6))"),
             ("datetime(6)", "CAST(? AS DATETIME(6))"),
             ("datetime", "CAST(? AS DATETIME)"),
             ("timestamp(3)", "CAST(? AS DATETIME(3))"),
@@ -500,6 +517,20 @@ mod tests {
         ];
         for (declared, expected) in cases {
             assert_eq!(placeholder(&column(declared)), expected, "{declared}");
+        }
+    }
+
+    #[test]
+    fn only_unsigned_integers_are_bound_as_unsigned_numbers() {
+        for (declared, unsigned) in [
+            ("bigint unsigned", true),
+            ("int(10) unsigned zerofill", true),
+            ("bigint", false),
+            ("decimal(20,0) unsigned", false),
+            ("double unsigned", false),
+            ("varchar(20)", false),
+        ] {
+            assert_eq!(unsigned_integer(&column(declared)), unsigned, "{declared}");
         }
     }
 

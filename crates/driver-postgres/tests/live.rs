@@ -1173,6 +1173,15 @@ fn text(value: &str) -> write::WriteValue {
     write::WriteValue::Text(value.into())
 }
 
+/// The tables an editing test reads and writes, with the names starting
+/// with `prefix`: each test has its own, since tests run at the same time.
+fn edit_setup(prefix: &str) -> Vec<String> {
+    EDIT_SETUP
+        .iter()
+        .map(|sql| sql.replace("jykre_edit", prefix))
+        .collect()
+}
+
 const EDIT_SETUP: [&str; 9] = [
     "DROP VIEW IF EXISTS jykre_edit_view",
     "DROP TABLE IF EXISTS jykre_edit_refs, jykre_edit_items, jykre_edit_loose, jykre_edit_measures",
@@ -1194,43 +1203,43 @@ async fn live_results_say_whether_they_can_be_written_back() {
             .open_session(&input(), CancellationToken::new())
             .await
             .unwrap();
-        for sql in EDIT_SETUP {
-            read(&mut session, sql).await.unwrap();
+        for sql in edit_setup("jykre_target") {
+            read(&mut session, &sql).await.unwrap();
         }
-        let items = target_of(&mut session, "SELECT * FROM jykre_edit_items")
+        let items = target_of(&mut session, "SELECT * FROM jykre_target_items")
             .await
             .editable()
             .unwrap();
         assert_eq!((items.key.clone(), items.key_kind), (vec![0], KeyKind::PrimaryKey));
         assert!(!items.columns[6].as_ref().unwrap().writable, "generated");
-        assert_eq!(items.table.relation(), Some("jykre_edit_items"));
+        assert_eq!(items.table.relation(), Some("jykre_target_items"));
         assert!(items.side_effects.contains(&SideEffect::Reference {
-            table: "jykre_edit_refs".into(),
-            name: "jykre_edit_refs_item_fkey".into(),
+            table: "jykre_target_refs".into(),
+            name: "jykre_target_refs_item_fkey".into(),
             on_delete: Some(ReferenceAction::Cascade),
             on_update: None,
         }));
         for (sql, reason) in [
             ("SELECT 1 AS n", ReadOnlyReason::ComputedOnly),
             (
-                "SELECT i.note, r.id FROM jykre_edit_items i JOIN jykre_edit_refs r ON r.item = i.id",
+                "SELECT i.note, r.id FROM jykre_target_items i JOIN jykre_target_refs r ON r.item = i.id",
                 ReadOnlyReason::SeveralTables,
             ),
             (
-                "SELECT * FROM jykre_edit_view",
+                "SELECT * FROM jykre_target_view",
                 ReadOnlyReason::NotATable {
                     kind: "view".into(),
                 },
             ),
             (
-                "SELECT note FROM jykre_edit_items",
+                "SELECT note FROM jykre_target_items",
                 ReadOnlyReason::KeyNotInResult {
                     missing: vec!["id".into()],
                 },
             ),
-            ("SELECT a FROM jykre_edit_loose", ReadOnlyReason::NoKey),
+            ("SELECT a FROM jykre_target_loose", ReadOnlyReason::NoKey),
             (
-                "SELECT * FROM jykre_edit_measures",
+                "SELECT * FROM jykre_target_measures",
                 ReadOnlyReason::KeyType { column: "v".into() },
             ),
         ] {
@@ -1239,6 +1248,9 @@ async fn live_results_say_whether_they_can_be_written_back() {
                 EditTarget::ReadOnly(reason),
                 "{sql}"
             );
+        }
+        for sql in edit_setup("jykre_target").iter().take(2) {
+            read(&mut session, sql).await.unwrap();
         }
         session.close().await.unwrap();
     })
@@ -1255,8 +1267,8 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
             .open_session(&input(), CancellationToken::new())
             .await
             .unwrap();
-        for sql in EDIT_SETUP {
-            read(&mut session, sql).await.unwrap();
+        for sql in edit_setup("jykre_edit") {
+            read(&mut session, &sql).await.unwrap();
         }
         let sql = "SELECT id, amount, note, at, raw, label FROM jykre_edit_items";
         let items = target_of(&mut session, sql).await.editable().unwrap();
@@ -1441,7 +1453,11 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
         .rows;
         assert_eq!(after, vec![vec![text_cell("NULL")]]);
 
-        // A table changed since the result was read is not written.
+        // A table changed since the result was read is not written. The view
+        // on the column would keep its type from changing.
+        read(&mut session, "DROP VIEW jykre_edit_view")
+            .await
+            .unwrap();
         read(
             &mut session,
             "ALTER TABLE jykre_edit_items ALTER COLUMN note TYPE varchar(100)",
@@ -1458,7 +1474,7 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
         .await
         .unwrap_err();
         assert_eq!(changed.code, ErrorCode::Validation);
-        for sql in EDIT_SETUP.iter().take(2) {
+        for sql in edit_setup("jykre_edit").iter().take(2) {
             read(&mut session, sql).await.unwrap();
         }
         session.close().await.unwrap();

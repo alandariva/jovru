@@ -6,6 +6,9 @@
   the statements into a new query tab, from a table inferred from the SQL
   text ([section 9](#9-databricks-statements-generated-into-a-new-tab));
   E-4 (b); E-5 (a); E-6 (a); E-7 10,000
+- **Amended:** 2026-11-08, with the maintainer's approval: MySQL's casts
+  for unsigned integers, decimals and `DATE` (section 4), after the live
+  tests showed the declared casts adjusting values without a warning
 - **Date:** 2026-11-08
 - **Authors:** Claude (draft), for the maintainer's review (milestone A10 of
   [Version 0.3.0](../plans/releases/0.3.0.md))
@@ -390,10 +393,17 @@ and writes nothing.
     print text that reads back exactly. `bytea` arrives and returns as its
     `\x…` text.
   - MySQL: by the declared type's family:
-    - integers: `CAST(? AS SIGNED)` or `CAST(? AS UNSIGNED)`;
-    - decimals: `CAST(? AS DECIMAL(p,s))`, with `p` and `s` from the
-      declared type;
-    - `DATE`, `DATETIME(fsp)` and `TIME(fsp)`: the matching `CAST`;
+    - integers: `CAST(? AS SIGNED)` or `CAST(? AS UNSIGNED)`; an
+      `UNSIGNED` column's whole number is bound as an unsigned integer,
+      since a prepared `CAST(? AS UNSIGNED)` reads a text above 2^63 - 1
+      as 2^63 - 1;
+    - decimals: `CAST(? AS DECIMAL(65,30))`, MySQL's widest, since a cast
+      to the declared `DECIMAL(p,s)` rounds a longer fraction without a
+      warning, while storing the wider value in the column warns;
+    - `DATETIME(fsp)` and `TIME(fsp)`: the matching `CAST`; `DATE`:
+      `CAST(? AS DATETIME(6))`, since `CAST(? AS DATE)` drops a time of day
+      without a warning, while storing a time other than midnight in the
+      column warns;
     - text: no cast, so the column's collation applies;
     - binary columns: the bytes decoded from the cell's `0x…` text, bound as
       bytes.
