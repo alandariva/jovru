@@ -189,7 +189,11 @@ these rules; the specification explains why
   memory and are dropped by quitting, losing the lock, turning the schedule
   off, editing it or a suspension (they stay counted as missed). Each
   schedule remembers its last handled due time and never considers an
-  earlier one, so a wall clock set back repeats nothing. Before each run the
+  earlier one, so a wall clock set back repeats nothing. A time counts as
+  handled once its mark is written, once the scheduler took it while the
+  application runs, or once a run was admitted for it (the run's row holds
+  the schedule and the due time), so a mark that could not be written, or a
+  crash before it, never runs the same due time twice. Before each run the
   grant is checked against the connections' profile revisions and
   environment labels, the chain's revision, the target's fingerprint and the
   zone; any difference suspends the schedule and takes its queued run out of

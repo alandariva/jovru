@@ -744,6 +744,10 @@ struct Slot {
     backlog: VecDeque<UtcMillis>,
     /// The due time *queue one* holds until the schedule's runs end.
     waiting: Option<UtcMillis>,
+    /// The latest due time this pass loop took (submitted, held, skipped or
+    /// missed): never taken again while the application runs, even when its
+    /// mark could not be written.
+    handled: Option<UtcMillis>,
 }
 
 impl Slot {
@@ -914,10 +918,21 @@ impl Engine {
             connections,
         };
         // Never a time before the consent, nor one already handled: a wall
-        // clock set back repeats nothing.
-        let floor = schedule
-            .last_due_at
-            .map_or(grant.granted_at, |last| last.max(grant.granted_at));
+        // clock set back repeats nothing. Handled is what the schedule's mark
+        // says, what this loop took, and what a run was admitted for: a mark
+        // that could not be written (or a crash before it) never lets a
+        // time run twice.
+        let admitted = match repository.latest_admitted_due(id).await {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                tracing::warn!(schedule = %id, error_code = ?error.code, "schedule's runs unreadable");
+                return (wrote, None);
+            }
+        };
+        let floor = [schedule.last_due_at, slot.handled, admitted]
+            .into_iter()
+            .flatten()
+            .fold(grant.granted_at, UtcMillis::max);
         let limit = match schedule.draft.missed_policy {
             MissedPolicy::Queue => usize::try_from(schedule.draft.missed_limit.unwrap_or(1))
                 .unwrap_or(1)
@@ -939,6 +954,7 @@ impl Engine {
             mark.missed = i64::try_from(missed_count).unwrap_or(i64::MAX);
             mark.missed_last_at = Some(last_missed);
             self.mark(repository, id, &mark).await;
+            slot.handled = slot.handled.max(Some(last_missed));
             wrote = true;
             tracing::info!(schedule = %id, missed = missed_count, "schedule missed times");
             match schedule.draft.missed_policy {
@@ -959,6 +975,7 @@ impl Engine {
         }
         if let Some(due_at) = on_time {
             wrote = true;
+            slot.handled = slot.handled.max(Some(due_at));
             if slot.live() {
                 match schedule.draft.overlap_policy {
                     OverlapPolicy::Skip => {

@@ -108,8 +108,11 @@ pub(super) fn check_shared_strings(reader: impl Read + Seek, limit: u64) -> Driv
             .take(SHARED_STRINGS_HEAD)
             .read_to_end(&mut head)
             .map_err(|_| not_a_workbook())?;
-        // The shortest string entry, `<si/>`, takes five bytes.
-        if declared_count(&head).is_some_and(|count| count > size / 5 + 1) {
+        // The shortest string entry, `<si/>`, takes five bytes. A table
+        // whose count cannot be read here is refused too: `calamine` might
+        // read one.
+        if declared_count(&head).is_none_or(|count| count.is_some_and(|count| count > size / 5 + 1))
+        {
             return Err(DriverError::validation(tr!(
                 "The workbook declares more shared text than it holds; it may be damaged. Open it in Excel and save it again."
             )));
@@ -119,32 +122,67 @@ pub(super) fn check_shared_strings(reader: impl Read + Seek, limit: u64) -> Driv
 }
 
 /// The `uniqueCount` the `<sst>` element of a shared strings table
-/// declares, when its start tag is in `head`.
-fn declared_count(head: &[u8]) -> Option<u64> {
-    let text = String::from_utf8_lossy(head);
-    let mut rest = text.as_ref();
-    // The first element whose local name is `sst`, prefixed or not.
-    let tag = loop {
-        let at = rest.find('<')?;
-        rest = rest.get(at + 1..)?;
-        let end = rest.find('>')?;
-        let tag = rest.get(..end)?;
-        let name = tag
-            .split(|ch: char| ch.is_whitespace() || ch == '/')
-            .next()?;
-        if name == "sst" || name.ends_with(":sst") {
-            break tag;
+/// declares, read as an XML reader reads it: after an optional byte order
+/// mark, processing instructions (the XML declaration), comments and white
+/// space, the first element must be `sst` (prefixed or not), and its start
+/// tag must end within `head`. `Some(None)` when it declares no count;
+/// `None` when the table does not start so, or its count is not a plain
+/// number, since `calamine` reserves room for the count it reads, and what
+/// this cannot read it might.
+fn declared_count(head: &[u8]) -> Option<Option<u64>> {
+    let mut rest = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    loop {
+        rest = rest.trim_ascii_start();
+        if let Some(after) = rest.strip_prefix(b"<?") {
+            rest = &after[find(after, b"?>")? + 2..];
+        } else if let Some(after) = rest.strip_prefix(b"<!--") {
+            rest = &after[find(after, b"-->")? + 3..];
+        } else {
+            break;
         }
-    };
-    let at = tag.find("uniqueCount")?;
-    let value = tag.get(at + "uniqueCount".len()..)?.trim_start();
-    let value = value.strip_prefix('=')?.trim_start();
-    let quote = value
-        .chars()
-        .next()
-        .filter(|ch| *ch == '"' || *ch == '\'')?;
-    let value = value.get(1..)?;
-    value.get(..value.find(quote)?)?.trim().parse().ok()
+    }
+    let mut tag = rest.strip_prefix(b"<")?;
+    let name_end = tag
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))?;
+    let name = &tag[..name_end];
+    if name != b"sst" && !name.ends_with(b":sst") {
+        return None;
+    }
+    tag = &tag[name_end..];
+    let mut count = None;
+    loop {
+        tag = tag.trim_ascii_start();
+        if tag.starts_with(b">") || tag.starts_with(b"/>") {
+            return Some(count);
+        }
+        let key_end = tag
+            .iter()
+            .position(|byte| byte.is_ascii_whitespace() || *byte == b'=')?;
+        let key = &tag[..key_end];
+        tag = tag[key_end..]
+            .trim_ascii_start()
+            .strip_prefix(b"=")?
+            .trim_ascii_start();
+        let quote = *tag.first().filter(|byte| matches!(byte, b'"' | b'\''))?;
+        tag = &tag[1..];
+        let value_end = tag.iter().position(|byte| *byte == quote)?;
+        let value = &tag[..value_end];
+        tag = &tag[value_end + 1..];
+        if key == b"uniqueCount" && count.is_none() {
+            if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            count = Some(std::str::from_utf8(value).ok()?.parse().ok()?);
+        }
+    }
+}
+
+/// Where `needle` first starts in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn not_a_workbook() -> DriverError {

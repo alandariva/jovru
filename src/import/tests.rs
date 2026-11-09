@@ -807,6 +807,53 @@ fn a_shared_strings_table_over_the_limit_is_refused_before_opening() {
     let path = handmade_xlsx(&folder, "lying.xlsx", false, Some(&lying), "A1", rows);
     let error = events(&path, &xlsx("Data")).unwrap_err();
     assert!(error.message.contains("declares more"), "{}", error.message);
+    // The count is read where `calamine` reads it, whatever comes first: a
+    // comment past the part read here, a count inside a comment, or
+    // another attribute whose name ends the same.
+    let huge = "uniqueCount=\"500000000\"";
+    let padding = "x".repeat(70 * 1024);
+    for table in [
+        SHARED
+            .replace("<sst ", &format!("<!-- {padding} --><sst "))
+            .replace("uniqueCount=\"3\"", huge),
+        SHARED
+            .replace("<sst ", "<!-- <sst uniqueCount=\"3\"> --><sst ")
+            .replace("uniqueCount=\"3\" xmlns", "xmlns")
+            .replace(
+                "count=\"3\" uniqueCount=\"3\"",
+                &format!("count=\"3\" {huge}"),
+            ),
+        SHARED.replace(
+            "count=\"3\" uniqueCount=\"3\"",
+            &format!("xuniqueCount=\"3\" {huge}"),
+        ),
+        SHARED.replace("uniqueCount=\"3\"", "uniqueCount=\"+500000000\""),
+    ] {
+        let path = handmade_xlsx(&folder, "hidden.xlsx", false, Some(&table), "A1", rows);
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(
+            workbook::check_shared_strings(file, 1024 * 1024).is_err(),
+            "{}",
+            &table[..table.len().min(200)]
+        );
+    }
+    // What Excel and other writers produce still opens: a byte order mark,
+    // the declaration, a prefixed element, no count at all.
+    for table in [
+        format!("\u{feff}{SHARED}"),
+        SHARED
+            .replace("<sst ", "<x:sst ")
+            .replace("</sst>", "</x:sst>"),
+        SHARED.replace(" count=\"3\" uniqueCount=\"3\"", ""),
+        SHARED.replace("?><sst", "?>\r\n<!-- written by a tool --><sst"),
+    ] {
+        let path = handmade_xlsx(&folder, "fine.xlsx", false, Some(&table), "A1", rows);
+        let file = std::fs::File::open(&path).unwrap();
+        assert!(
+            workbook::check_shared_strings(file, 1024 * 1024).is_ok(),
+            "{table}"
+        );
+    }
     // Not a workbook at all.
     let path = folder.file("fake.xlsx", b"id,name\n");
     let error = workbook::sheets(&path).unwrap_err();

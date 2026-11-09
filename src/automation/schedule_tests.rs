@@ -57,6 +57,17 @@ impl Bench {
     }
 
     async fn in_dir(dir: PathBuf, script: Script, limits: Limits, clock: ManualClock) -> Self {
+        Self::on(dir, script, limits, clock, ConnectionId::new()).await
+    }
+
+    /// [`Bench::in_dir`] on a given connection, as after a restart.
+    async fn on(
+        dir: PathBuf,
+        script: Script,
+        limits: Limits,
+        clock: ManualClock,
+        connection: ConnectionId,
+    ) -> Self {
         let engine = Engine::with_clock(
             Handle::current(),
             dir,
@@ -69,7 +80,7 @@ impl Bench {
         let bench = Self {
             engine,
             clock,
-            connection: ConnectionId::new(),
+            connection,
             driver: Scripted::new(script),
         };
         bench.connections(1, None, true);
@@ -359,6 +370,83 @@ async fn queue_up_to_n_catches_up_the_most_recent_one_at_a_time() {
 
 // ---------------------------------------------------------------------------
 // Overlap policies (Q-35).
+
+/// Makes every write of a schedule's last due time fail, as a full disk
+/// would, through a trigger on `automation.db`.
+async fn fail_schedule_marks(engine: &Engine) {
+    let input = ResolvedConnection {
+        config: ConnectionConfig {
+            driver: DriverKind::Sqlite,
+            options: serde_json::json!({
+                "path": engine.data_dir().join("automation.db").to_string_lossy()
+            }),
+        },
+        credentials: Credentials::default(),
+    };
+    let mut session = SqliteDriver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    exec(
+        &mut *session,
+        "CREATE TRIGGER synthetic_full_disk BEFORE UPDATE OF last_due_at ON schedules \
+         BEGIN SELECT RAISE(ABORT, 'synthetic full disk'); END",
+    )
+    .await;
+    session.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_due_time_whose_mark_failed_never_runs_again() {
+    let dir = data_dir();
+    let bench = Bench::in_dir(
+        dir.clone(),
+        Script::Rows(Vec::new(), Vec::new()),
+        Limits::default(),
+        ManualClock::new(t0()),
+    )
+    .await;
+    let job = bench.job().await;
+    let schedule = bench
+        .schedule(job, MissedPolicy::Queue, Some(3), OverlapPolicy::Concurrent)
+        .await;
+    fail_schedule_marks(&bench.engine).await;
+    let due = t0().plus(15 * MINUTE);
+    bench.set(due.plus(Duration::from_secs(10))).await;
+    let runs = bench.wait_runs(job.0, 1).await;
+    assert_eq!(runs[0].due_at, Some(due));
+    bench.idle().await;
+    assert_eq!(bench.stored(schedule).await.last_due_at, None, "not marked");
+    // Still within the grace, with the run over: the time is not new.
+    bench.set(due.plus(Duration::from_secs(30))).await;
+    bench.set(due.plus(Duration::from_secs(40))).await;
+    bench.idle().await;
+    assert_eq!(bench.runs(job.0).await.len(), 1);
+
+    // Nor after a restart, which forgets what the scheduler took: the run's
+    // own row says the time was handled.
+    bench.engine.shutdown().await;
+    let again = Bench::on(
+        dir,
+        Script::Rows(Vec::new(), Vec::new()),
+        Limits::default(),
+        ManualClock::new(due.plus(Duration::from_secs(45))),
+        bench.connection,
+    )
+    .await;
+    again.set(due.plus(Duration::from_secs(50))).await;
+    again.idle().await;
+    assert_eq!(again.runs(job.0).await.len(), 1);
+    assert!(again.stored(schedule).await.suspended.is_none());
+    // The next time still runs.
+    again
+        .set(t0().plus(30 * MINUTE).plus(Duration::from_secs(5)))
+        .await;
+    let runs = again.wait_runs(job.0, 2).await;
+    assert_eq!(runs[1].due_at, Some(t0().plus(30 * MINUTE)));
+    again.idle().await;
+    again.engine.shutdown().await;
+}
 
 #[tokio::test]
 async fn overlap_skip_records_and_never_starts_a_second_run() {

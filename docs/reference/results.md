@@ -535,7 +535,12 @@ through the driver's write path ([Drivers](drivers.md#importing-rows)).
   cells out of order stop the read at their address. A row without values
   is skipped. Where the file has numbers, the dialog says that Excel stores
   them as floating point. A workbook whose shared strings table is over
-  256 MiB uncompressed is refused before it is opened, suggesting CSV.
+  256 MiB uncompressed is refused before it is opened, suggesting CSV, as is
+  one whose table declares more strings (`uniqueCount`) than its size can
+  hold, or whose count cannot be read in its first 64 KiB the way an XML
+  reader reads it (the `sst` element first, after the declaration and
+  comments; the exact attribute; a plain number), since `calamine` reserves
+  room for the count it reads.
 - **The mapping** fills each table column from one file column, or leaves it
   out so it takes its default: by header name ignoring case, or by position
   without a header; the user changes either. A required column (not null,

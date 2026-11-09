@@ -1910,6 +1910,28 @@ impl AutomationRepository {
         Ok(changed > 0)
     }
 
+    /// The latest due time a run or chain run of `schedule` was admitted
+    /// for. Its row is written before the run sends or starts anything, so
+    /// the time counts as handled even when the schedule's own mark was
+    /// never written (a failed write, or a crash just after admission).
+    pub async fn latest_admitted_due(
+        &self,
+        schedule: ScheduleId,
+    ) -> DriverResult<Option<UtcMillis>> {
+        let latest: Option<String> = sqlx::query_scalar(
+            "SELECT max(due_at) FROM (\
+             SELECT max(due_at) AS due_at FROM runs WHERE schedule_id=?1 \
+             UNION ALL SELECT max(due_at) FROM chain_runs WHERE schedule_id=?1)",
+        )
+        .bind(schedule.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(sql_error)?;
+        latest
+            .map(|text| parse_time(&text).ok_or_else(corrupt))
+            .transpose()
+    }
+
     /// Records what a due time came to. The last handled due time only moves
     /// forward, so a wall clock set back never makes a time new again. A run
     /// not yet admitted (its row is written by its owner) is linked later by
