@@ -1,6 +1,11 @@
 # ADR-0039: Editing result data through the driver, which reports each column's source and the row key (amends the `Session` contract)
 
-- **Status:** Proposed
+- **Status:** Accepted on 2026-11-08 by the maintainer, with the decisions
+  recorded [below](#decisions-of-the-maintainer): E-1 (a) write directly on
+  PostgreSQL, MySQL and SQLite; E-2 (a); E-3 changed: Databricks generates
+  the statements into a new query tab, from a table inferred from the SQL
+  text ([section 9](#9-databricks-statements-generated-into-a-new-tab));
+  E-4 (b); E-5 (a); E-6 (a); E-7 10,000
 - **Date:** 2026-11-08
 - **Authors:** Claude (draft), for the maintainer's review (milestone A10 of
   [Version 0.3.0](../plans/releases/0.3.0.md))
@@ -30,8 +35,9 @@ The milestone fixes these requirements:
 
 The milestone leaves three questions open: whether an edit writes directly
 or generates statements into the editor, whether pending edits are written
-together or one by one, and whether Databricks is included. They are
-[decisions for the maintainer](#decisions-for-the-maintainer) below.
+together or one by one, and whether Databricks is included. They were
+[decisions for the maintainer](#decisions-for-the-maintainer), answered on
+2026-11-08 ([decisions of the maintainer](#decisions-of-the-maintainer)).
 
 What the code offers today (read on 2026-11-08 at `release/0.3.0`, `f85ac9b`):
 
@@ -87,6 +93,10 @@ A result is **editable** when all of the following hold:
    results stay read-only. Their sessions belong to the report, the engine
    or the assistant, not to a tab.
 2. Its driver has `DriverCapabilities::row_writes` (section 2).
+   PostgreSQL, MySQL and SQLite write the changes themselves
+   (`WriteMode::Direct`); Databricks generates them into a new query tab
+   (`WriteMode::Script`, [section 9](#9-databricks-statements-generated-into-a-new-tab)),
+   where the rules below are replaced by those of section 9.
 3. Each column whose origin is a stored relation comes from the **same
    table**. That table is an ordinary table: a PostgreSQL ordinary or
    partitioned table, a MySQL base table in a transactional engine, or a
@@ -114,8 +124,9 @@ Within an editable result:
 Every result that is not editable states **why**, with the first rule it
 failed, in words. Examples: "Computed columns only", "Columns from two
 tables", "`orders` has no primary key or unique key on NOT NULL columns",
-"The key column `id` is not in the result", "Databricks results are
-read-only", "Read by a report panel".
+"The key column `id` is not in the result", "Only a SELECT from one table,
+without joins, grouping or computed columns, can be edited here", "Read by
+a report panel".
 
 ### 2. The contract change
 
@@ -160,7 +171,8 @@ pub struct SourceColumn {
 // driver.rs
 pub struct DriverCapabilities {
     // … existing fields …
-    /// Implements `Session::edit_target` and `Session::write` (ADR-0039).
+    /// Implements `Session::edit_target`, and `Session::write` or
+    /// `Session::write_script` as its `EditableTable::writes` says (ADR-0039).
     #[serde(default)]
     pub row_writes: bool,
 }
@@ -170,15 +182,18 @@ pub trait Session {
     // … existing methods …
 
     /// What the rows of a result with these columns can be written back to,
-    /// read now from the server's catalog in this session. Like `context`,
-    /// asking discards a result still open for paging. The default answers
-    /// `ReadOnly(DriverCannotTell)`.
+    /// read now from the server's catalog in this session. `statement` is
+    /// the SQL the result was read with, as it ran; only a driver that
+    /// infers the table from it (Databricks, section 9) reads it. Like
+    /// `context`, asking discards a result still open for paging. The
+    /// default answers `ReadOnly(DriverCannotTell)`.
     async fn edit_target(
         &mut self,
+        statement: &str,
         columns: &[ColumnInfo],
         cancel: CancellationToken,
     ) -> DriverResult<EditTarget> {
-        let _ = (columns, cancel);
+        let _ = (statement, columns, cancel);
         Ok(EditTarget::ReadOnly(ReadOnlyReason::DriverCannotTell))
     }
 
@@ -191,6 +206,14 @@ pub trait Session {
     ) -> DriverResult<WriteOutcome> {
         let _ = (request, cancel);
         Err(DriverError::not_implemented("this driver", "writing rows"))
+    }
+
+    /// The statements that would write `request`, with `:name` markers and
+    /// their values apart, for a new query tab (`WriteMode::Script`,
+    /// section 9). Runs nothing. The default reports `NotImplemented`.
+    fn write_script(&self, request: &WriteRequest) -> DriverResult<WriteScript> {
+        let _ = request;
+        Err(DriverError::not_implemented("this driver", "generating writes"))
     }
 }
 ```
@@ -206,12 +229,18 @@ pub enum EditTarget {
 pub struct EditableTable {
     /// The table as a structural path, resolved from the catalog.
     pub table: ObjectPath,
-    /// One entry per result column: `Some` for a column of `table` that
-    /// can be written, `None` for one that cannot (computed, generated).
+    /// How changes reach it: `Direct` (`Session::write`) or `Script`
+    /// (`Session::write_script`, section 9).
+    pub writes: WriteMode,
+    /// One entry per result column: `Some` for a column of `table` (its
+    /// `writable` says whether it can be set), `None` for one that is not
+    /// (computed, or a type the driver cannot bind there).
     pub columns: Vec<Option<EditableColumn>>,
     /// The result columns, by position, that form the row key, in key order.
+    /// Empty only with `WriteMode::Script` when the table declares none: the
+    /// user then names the key columns (section 9).
     pub key: Vec<usize>,
-    pub key_kind: KeyKind, // PrimaryKey | UniqueNotNull
+    pub key_kind: KeyKind, // PrimaryKey | UniqueNotNull | Informational | Chosen
     /// What a write here can change beyond the rows written, named in the
     /// confirmation: triggers, and foreign keys of other tables whose
     /// ON DELETE or ON UPDATE cascades, sets NULL or sets the default.
@@ -225,10 +254,16 @@ pub struct EditableColumn {
     /// Only the driver reads it, to bind values.
     pub declared_type: String,
     pub nullable: bool,
+    /// It can be set. False for a generated column and a PostgreSQL
+    /// `GENERATED ALWAYS AS IDENTITY`, which may still be part of the key.
+    pub writable: bool,
     /// An insert may leave it out and get the table's default.
     pub has_default: bool,
     /// Its values are bound as bytes, not text.
     pub binary: bool,
+    /// Its text identifies one value (rule 5 of section 1), so it may be
+    /// part of a key the user names (section 9).
+    pub can_key: bool,
 }
 
 #[non_exhaustive]
@@ -241,6 +276,28 @@ pub enum ReadOnlyReason {
     NoKey,
     KeyNotInResult { missing: Vec<String> },
     KeyType { column: String },
+    /// Section 9: the statement is not a SELECT from one table whose
+    /// columns are plain references or `*`.
+    NotASingleTableSelect,
+    /// Section 9: the catalog has no table by the name the SQL gives.
+    TableNotFound { name: String },
+    /// Section 9: the result's columns are not the ones the SQL names.
+    ColumnsDoNotMatch,
+}
+
+/// What `Session::write_script` generates (section 9).
+pub struct WriteScript {
+    /// One statement per change, in order, each ending with `;`.
+    pub statements: Vec<String>,
+    /// The values of the statements' `:name` markers, for the new tab's
+    /// parameter fields. `value: None` is NULL.
+    pub parameters: Vec<ScriptParameter>,
+}
+
+pub struct ScriptParameter {
+    pub name: String,
+    pub kind: ParameterKind,
+    pub value: Option<String>,
 }
 
 pub struct WriteRequest {
@@ -281,18 +338,25 @@ pub enum WriteOutcome {
 The result model keeps the origins. `ResultColumn` gains `origin:
 ColumnOrigin`. It also gains `binary: Option<bool>`, which the
 `ResultBuilder` sets from the cells it converts: `Some(true)` when they
-arrived as `Cell::Binary`, `Some(false)` as text, `None` when mixed. This
-adds a few bytes per column and nothing per cell.
+arrived as `Cell::Binary`, `Some(false)` as text (or when every cell was
+NULL), `None` when mixed. This adds a few bytes per column and nothing per
+cell.
+
+The text of each statement (section 4) is built once, in `jykre-core`
+(`write::statement`), from the driver's quoting and a placeholder the
+driver chooses (`CAST($1 AS numeric(12,2))`, `?`, `?1`, `:id_1`), so every
+driver writes the same shapes. The confirmation shows the same text with
+`?` placeholders.
 
 ### 3. How each driver tells
 
 | | PostgreSQL | MySQL | SQLite | Databricks |
 | --- | --- | --- | --- | --- |
 | Origin at execute, no extra I/O | `relation_id()` and `relation_attribute_no()` of the prepared statement's columns, kept as decimal text. `None` is `Expression` | `Column::origin()`: the relation is the `schema.table` text, the column is the physical column name | `Column::origin()`: the relation is `db.table` or `table`, the column is the origin name | None: `Unknown` for every column |
-| Resolution (`edit_target`, catalog queries in the session, with bound arguments) | `pg_class` and `pg_namespace` for the OID: path, `relkind` (`r` or `p`). `pg_attribute`: the name, `format_type(atttypid, atttypmod)`, `attnotnull`, `atthasdef`, `attgenerated`, `attidentity`. `pg_index`: `indisprimary`, else `indisunique` with every column `attnotnull`, `indpred IS NULL` and no expression column. Side effects: `pg_trigger` without `tgisinternal`, and `pg_constraint` (`contype = 'f'`) that references the table with `confdeltype` or `confupdtype` among `c`, `n` and `d` | The relation is split at its only dot. When it has several dots, each split is checked against `information_schema.TABLES` and the one that exists is used. If none or more than one exists, the result is read-only (decision E-6). `TABLES`: `TABLE_TYPE = 'BASE TABLE'` and `ENGINE` transactional (InnoDB). `COLUMNS`: `COLUMN_TYPE`, `IS_NULLABLE`, `COLUMN_DEFAULT`, `EXTRA` (generated). `STATISTICS`: `PRIMARY`, else `NON_UNIQUE = 0` with every column `NOT NULL` and no functional part. Side effects: `TRIGGERS` and `REFERENTIAL_CONSTRAINTS` | Same split rule against `pragma_database_list`. `pragma_table_xinfo` (`pk`, `notnull`, `dflt_value`, `hidden` for generated columns). `pragma_index_list` and `pragma_index_info` for unique keys. Side effects: `sqlite_schema` triggers, and `pragma_foreign_key_list` of the other tables (`on_delete`, `on_update`). The `rowid` is not used as a key | — |
+| Resolution (`edit_target`, catalog queries in the session, with bound arguments; Databricks: section 9) | `pg_class` and `pg_namespace` for the OID: path, `relkind` (`r` or `p`). `pg_attribute`: the name, `format_type(atttypid, atttypmod)`, `attnotnull`, `atthasdef`, `attgenerated`, `attidentity`. `pg_index`: `indisprimary`, else `indisunique` with every column `attnotnull`, `indpred IS NULL` and no expression column. Side effects: `pg_trigger` without `tgisinternal`, and `pg_constraint` (`contype = 'f'`) that references the table with `confdeltype` or `confupdtype` among `c`, `n` and `d` | The relation is split at its only dot. When it has several dots, each split is checked against `information_schema.TABLES` and the one that exists is used. If none or more than one exists, the result is read-only (decision E-6). `TABLES`: `TABLE_TYPE = 'BASE TABLE'` and `ENGINE` transactional (InnoDB). `COLUMNS`: `COLUMN_TYPE`, `IS_NULLABLE`, `COLUMN_DEFAULT`, `EXTRA` (generated). `STATISTICS`: `PRIMARY`, else `NON_UNIQUE = 0` with every column `NOT NULL` and no functional part. Side effects: `TRIGGERS` and `REFERENTIAL_CONSTRAINTS` | Same split rule against `pragma_database_list`. `pragma_table_xinfo` (`pk`, `notnull`, `dflt_value`, `hidden` for generated columns). `pragma_index_list` and `pragma_index_info` for unique keys. Side effects: `sqlite_schema` triggers, and `pragma_foreign_key_list` of the other tables (`on_delete`, `on_update`). The `rowid` is not used as a key | — |
 | A view in the query | Parse-time origin. A plain view's columns are expected to name the view, which is then not a table and so read-only. **To be confirmed by the live tests** | Depends on the server's view algorithm; `TABLE_TYPE` decides. **To be confirmed by the live tests** | Names the base table even through a view, so the write goes to that table. The confirmation names it | — |
 | Atomic writes | `BEGIN`/`COMMIT`, or `SAVEPOINT` inside a transaction | The same, InnoDB only. A non-transactional engine (MyISAM) is read-only | The same. One writer per file, 4 s busy wait | No multi-statement transactions. Each statement is its own Delta commit |
-| Feasible in 0.3.0 | **Yes** | **Yes**, for InnoDB tables | **Yes** | **No**: recommended read-only (decision E-3) |
+| In 0.3.0 (decision E-3) | **Written directly** | **Written directly**, for InnoDB tables | **Written directly** | **Generated into a new query tab**, from the table the SQL names ([section 9](#9-databricks-statements-generated-into-a-new-tab)) |
 
 The resolution runs in the tab's own session, so it sees what the session
 sees, including a table its open transaction created. It runs when the user
@@ -424,6 +488,15 @@ connection's results cannot be edited: its driver does not report which
 table a column comes from." No editing control is offered. The application
 never guesses a table from the SQL text.
 
+**One deliberate, narrow exception, by the maintainer's decision
+(2026-11-08, E-3):** the Databricks driver infers the table from the SQL
+text of a result, because its protocol reports no origin at all. The
+inference lives in the driver, behind `Session::edit_target`, never in the
+application (golden rule 3). It accepts only the shapes of
+[section 9](#9-databricks-statements-generated-into-a-new-tab); anything
+else stays read-only and says why. It never writes directly: it only
+generates statements that the user reviews and runs.
+
 ### 8. In the application
 
 - The pending edits and the request that turns them into `RowChange`s live
@@ -441,7 +514,84 @@ never guesses a table from the SQL text.
   discard) are GPUI actions in the keymap, listed in User experience and
   **Preferences › Shortcuts** (milestone A12).
 
+### 9. Databricks: statements generated into a new tab
+
+Databricks results are edited like the others (pending edits, NULL apart
+from the text `NULL`, inserted and deleted rows), but nothing is written
+directly. **Generate SQL…** opens a new query tab on the same connection and
+context with one statement per change, for the user to review and run:
+`UPDATE` for changed cells, `DELETE` for rows marked for deletion and
+`INSERT` for added rows.
+
+- **The table is inferred from the SQL text** (the exception of
+  [section 7](#7-a-driver-that-cannot-tell)), by the Databricks driver in
+  `edit_target`. It accepts only a `SELECT` from **one table**, with:
+  - no join, subquery, table-valued function, `LATERAL VIEW`, `PIVOT`,
+    time travel (`VERSION AS OF`, `TIMESTAMP AS OF`) or CTE in `FROM`, and
+    no `WITH` before the `SELECT`;
+  - no `UNION`, `INTERSECT`, `EXCEPT` or `MINUS`, no `GROUP BY`, `HAVING`,
+    `QUALIFY`, `WINDOW` or `DISTINCT`;
+  - result columns that are plain column references (`price`, `t.price`,
+    `` `price` ``, optionally renamed with `AS`) or `*` (`t.*`), so no
+    aggregate, function or other expression.
+
+  `WHERE` (subqueries included), `ORDER BY`, `LIMIT` and `OFFSET` may
+  follow. Anything else is read-only with `NotASingleTableSelect`.
+- **The name is resolved against Unity Catalog**, through the same tables
+  endpoint the driver's metadata reads (what `information_schema` reflects),
+  in the session's client. A one- or two-part name takes the catalog and
+  schema the session is in. A name that is not found, or a session without a
+  catalog or schema to complete it, is read-only with `TableNotFound`, naming
+  the name as written. A view or a materialized view is `NotATable`. The
+  result's columns must be the table's columns the SQL names, in order and
+  by name (`*` in the table's order); otherwise `ColumnsDoNotMatch`.
+- **The key:**
+  - the table's declared primary key in Unity Catalog (informational, not
+    enforced: `KeyKind::Informational`), when it exists and every one of its
+    columns is in the result;
+  - otherwise `key` is empty and the user names the key columns before the
+    statements are generated (`KeyKind::Chosen`), among the columns with
+    `can_key`;
+  - with no key, nothing is generated.
+- **Values are `:name` parameters** ([ADR-0026](0026-named-parameters-in-sql-tabs.md)),
+  never literals: each statement names its values `:column_n`, and the new
+  tab's parameter fields are filled with them (NULL as the field's NULL).
+  On a warehouse the Statement API binds them; on a classic cluster the
+  driver writes typed literals at run time as ADR-0026 already does. A
+  column whose type has no parameter kind (`BINARY`, `INTERVAL`, `ARRAY`,
+  `MAP`, `STRUCT`, `VARIANT` and the like) cannot be edited there: its
+  entry in `columns` is `None` and the grid says so. Approximate numbers
+  (`FLOAT`, `DOUBLE`) and `TIMESTAMP` (shown in the session's time zone) are
+  not `can_key`. A value whose text does not fit its kind (a timestamp
+  printed with a time zone) is refused when the statements are generated,
+  naming the column; it is never rewritten.
+- **Consequences, stated in the generated tab's header comment:** there is
+  no transaction around the statements, each statement is its own Delta
+  commit (a failure leaves the statements before it written), and nothing
+  checks that each statement changes exactly one row. The key is the one
+  named above, so last write wins as in section 4.
+- **Production:** running the generated tab goes through `jykre::guard`
+  like any run. Generating writes nothing, so it asks nothing.
+- The same 10,000-change limit applies (E-7).
+
+## Decisions of the maintainer
+
+Recorded on 2026-11-08, when the maintainer accepted this ADR:
+
+| ID | Decision |
+| --- | --- |
+| E-1 | **(a)** Write directly, after the confirmation of section 6, for PostgreSQL, MySQL and SQLite |
+| E-2 | **(a)** Together: pending in the grid, one confirmation, one atomic write |
+| E-3 | **Changed from the options below:** Databricks is not read-only. Its edits generate the statements into a new query tab ([section 9](#9-databricks-statements-generated-into-a-new-tab)); nothing is written directly. The table is inferred from the SQL text, as a deliberate, narrow exception (section 7) |
+| E-4 | **(b)** The primary key, else a unique index whose columns are all NOT NULL, without expressions or a partial predicate |
+| E-5 | **(a)** Key only: last write wins, and the dialog says so |
+| E-6 | **(a)** Split at the only dot; with several, check each split against the catalog; read-only unless exactly one exists |
+| E-7 | **10,000** changed rows per write, refused above with the reason |
+
 ## Decisions for the maintainer
+
+The questions as they were proposed; the answers are
+[above](#decisions-of-the-maintainer).
 
 | ID | Question | Options | Recommendation |
 | --- | --- | --- | --- |
@@ -457,7 +607,7 @@ never guesses a table from the SQL text.
 
 | Alternative | Pros | Cons | Why not |
 | --- | --- | --- | --- |
-| Guess the table from the SQL text (`SELECT … FROM t`) | No contract change; works on Databricks | Wrong for aliases, joins, views, CTEs and `search_path`; parsing SQL in the application | Golden rule 3; the protocol already tells PostgreSQL, MySQL and SQLite |
+| Guess the table from the SQL text (`SELECT … FROM t`) | No contract change; works on Databricks | Wrong for aliases, joins, views, CTEs and `search_path`; parsing SQL in the application | Golden rule 3; the protocol already tells PostgreSQL, MySQL and SQLite. **Exception for Databricks only** (E-3, section 9): in the driver, for a single-table `SELECT` of plain columns resolved against Unity Catalog, and only to generate statements the user runs |
 | Use the metadata cache for keys | No catalog query | The cache may be stale or not introspected; it misses what the session's transaction created | The session's catalog is the truth at the moment of the write |
 | Resolve the source on every run | The grid knows at once whether a result is editable | A catalog query per `SELECT` (budgets, and a PostgreSQL snapshot taken in a transaction) | Asked only when the user starts editing |
 | Use SQLx's `ColumnOrigin` text for PostgreSQL | No OID handling | `attrelid::regclass::text` depends on `search_path` and is cached per connection by OID | The OID and attribute number are exact |
@@ -476,8 +626,11 @@ never guesses a table from the SQL text.
     path for imports.
 - Negative or costs:
   - A field in `ColumnInfo`, so every `ColumnInfo` literal changes.
-  - Two methods and a capability on `Session`.
+  - Three methods on `Session` and a capability.
   - A write module in core.
+  - Databricks: a narrow SQL inference in its driver, and generated
+    statements without a transaction or a one-row check, which the
+    generated tab says.
   - Catalog queries per driver, with live tests on each.
   - The edited cells show what was written, not what was stored, until the
     rows are read again.
@@ -492,8 +645,10 @@ never guesses a table from the SQL text.
 - What becomes forbidden:
   - Writing a value into generated SQL.
   - Writing without the confirmation.
-  - Editing a result whose driver cannot tell, or guessing its table.
+  - Editing a result whose driver cannot tell, or guessing its table
+    outside the Databricks driver's inference of section 9.
   - Committing a write in which a change affected other than one row.
+  - Writing Databricks changes without the user running them.
 
 ## How to validate
 
@@ -518,7 +673,11 @@ never guesses a table from the SQL text.
   - a MySQL value that would be truncated is refused (`@@warning_count`);
   - a table changed after the result was read fails with `Validation`;
   - Stop in a write of 10,000 rows leaves the table as it was.
-- Databricks: a local HTTP test shows its results read-only.
+- Databricks, with fixtures and a local HTTP test: the inference accepts
+  the shapes of section 9 and refuses the others with their reason; the
+  name resolves against the catalog (and a missing one says so); the key
+  comes from the declared primary key or is left to the user; the
+  generated statements carry `:name` markers and never a value.
 - In the application: edit, set to NULL, insert, delete, write and discard
   with the keyboard alone, the Production dialog, and the grid's budgets
   with a result at the row limit and edits pending
