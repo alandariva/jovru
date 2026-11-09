@@ -499,6 +499,7 @@ mod tests {
 
     #[test]
     fn due_times_read_in_the_zone_with_the_local_equivalent() {
+        crate::app::source_text();
         let berlin = time_zone("Europe/Berlin").unwrap();
         let sao_paulo = time_zone("America/Sao_Paulo").unwrap();
         let due = at("2026-11-09T08:00:00Z");
@@ -512,6 +513,7 @@ mod tests {
 
     #[test]
     fn rules_read_as_one_sentence() {
+        crate::app::source_text();
         let calendar = Rule::Calendar {
             at: vec![
                 LocalTime::parse("09:00").unwrap(),
@@ -542,6 +544,7 @@ mod tests {
 
     #[test]
     fn dst_notes_and_policies_are_stated() {
+        crate::app::source_text();
         assert!(
             shift_note(&Occurrence {
                 at: UtcMillis(0),

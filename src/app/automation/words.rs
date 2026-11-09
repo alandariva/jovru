@@ -938,6 +938,7 @@ mod tests {
 
     #[test]
     fn a_timeout_reads_apart_from_stop() {
+        crate::app::source_text();
         assert_eq!(
             state_label(
                 RunState::Failed,
@@ -969,6 +970,7 @@ mod tests {
 
     #[test]
     fn counters_tell_rows_kept_from_rows_discarded_or_left_unread() {
+        crate::app::source_text();
         let mut query = record(JobKind::Sql);
         query.rows_delivered = Some(1000);
         query.truncated = true;
@@ -989,6 +991,7 @@ mod tests {
 
     #[test]
     fn sqlite_one_writer_is_named_only_for_its_codes() {
+        crate::app::source_text();
         assert!(is_one_writer(
             Some(Cause::Database),
             Some("5"),
@@ -1019,6 +1022,7 @@ mod tests {
 
     #[test]
     fn programs_say_their_exit_failure_logs_and_outputs() {
+        crate::app::source_text();
         let mut run = record(JobKind::Process);
         run.state = RunState::Failed;
         run.cause = Some(Cause::Program);
@@ -1038,6 +1042,7 @@ mod tests {
 
     #[test]
     fn a_queued_run_names_its_limit_holders_place_and_time() {
+        crate::app::source_text();
         let text = queued(
             2,
             Duration::from_millis(44_100),
@@ -1060,6 +1065,7 @@ mod tests {
 
     #[test]
     fn the_rules_state_the_limits_of_the_engine() {
+        crate::app::source_text();
         assert_eq!(
             limits_note(),
             "At most 2 runs at once and 1 per connection. A run beyond them waits in a queue of at most 8 runs (4 per connection) for at most 1 min 0 s; a full queue refuses the run."
@@ -1083,6 +1089,7 @@ mod tests {
 
     #[test]
     fn stored_times_read_as_utc_dates() {
+        crate::app::source_text();
         assert_eq!(utc(UtcMillis(0)), "1970-01-01 00:00 UTC");
         // 2026-11-08T18:02:13Z.
         assert_eq!(utc(UtcMillis(1_794_160_933_000)), "2026-11-08 18:02 UTC");
@@ -1092,6 +1099,7 @@ mod tests {
 
     #[test]
     fn deleting_what_a_chain_uses_names_the_chains() {
+        crate::app::source_text();
         let text = save_error(&SaveError::InUse(vec![
             ChainRef {
                 id: JobId::new(),

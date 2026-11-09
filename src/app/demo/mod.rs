@@ -333,6 +333,7 @@ mod tests {
 
     #[test]
     fn the_demo_runs_only_read_queries_with_something_to_select() {
+        crate::app::source_text();
         assert!(preview_error("SELECT;").is_some());
         assert!(preview_error("DELETE FROM orders;").is_some());
         assert!(preview_error("SELECT 1;").is_none());

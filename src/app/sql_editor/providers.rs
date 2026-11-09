@@ -174,6 +174,7 @@ mod tests {
 
     #[test]
     fn an_object_uri_reads_back_the_same_path() {
+        crate::app::source_text();
         let path = ObjectPath::default()
             .child(ObjectKind::Schema, "a/b:c")
             .child(ObjectKind::Table, "ção \"x\"");

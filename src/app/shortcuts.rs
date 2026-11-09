@@ -863,6 +863,7 @@ mod tests {
     /// user's keys for it replace only its text-field bindings.
     #[test]
     fn a_text_action_changes_only_in_text_fields() {
+        crate::app::source_text();
         use super::{ShortcutState, covers};
         use gpui_kit::base::actions::SelectUp;
         use jykre::keymap::UserKeys;
@@ -901,6 +902,7 @@ mod tests {
 
     #[test]
     fn every_listed_action_is_listed_once_and_named() {
+        crate::app::source_text();
         let catalog = catalog();
         let mut seen = HashSet::new();
         for entry in &catalog {
@@ -918,6 +920,7 @@ mod tests {
 
     #[test]
     fn the_application_binds_every_listed_action_of_its_own() {
+        crate::app::source_text();
         let bound: HashSet<&str> = default_bindings()
             .iter()
             .chain(super::super::application_bindings().iter())
@@ -934,6 +937,7 @@ mod tests {
 
     #[test]
     fn the_application_defaults_do_not_collide() {
+        crate::app::source_text();
         let bindings: Vec<KeyBinding> = default_bindings()
             .into_iter()
             .chain(super::super::application_bindings())

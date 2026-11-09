@@ -235,14 +235,18 @@ What each format gives, and how it reaches the table, is set by
   and its unchecked `_ => unreachable_unchecked()` arms after matches that
   are exhaustive since Rust 1.75 (`fallback.rs:44`, `simd/sse_avx.rs:190`,
   `:501`, `simd/neon.rs:70`, `:175`), plus a `get_unchecked` in a NEON
-  macro (`simd/neon.rs:18`). Turning debug assertions on for `atoi_simd`
-  too would cover the first group.
+  macro (`simd/neon.rs:18`). The root `Cargo.toml` also sets
+  `[profile.release.package.atoi_simd] debug-assertions = true` (approved
+  2026-11-08), which covers the first group; the exhaustive arms and the
+  NEON macro remain.
 - `calamine` 0.38 adds up a cell reference's row and column in `u32`
   without checks (`xlsx/mod.rs:3096` and `:3112`): an absurd reference
   (`A99999999999999999999`, `ZZZZZZZZ1`) panics in debug builds, where the
-  import reports a failed read, and wraps in release builds. The import
-  refuses any position past 1,048,576 rows or 16,384 columns, which catches
-  a wrapped value that lands there but not one that lands inside the sheet.
+  import reports a failed read. The root `Cargo.toml` sets
+  `[profile.release.package.calamine] overflow-checks = true` (approved
+  2026-11-08), so release builds panic there too instead of wrapping, and
+  the import reports a failed read. The import also refuses any position
+  past 1,048,576 rows or 16,384 columns.
 - `calamine` reads a shared string index it cannot parse (`-1`, `x`) as
   index 0 (`cells_reader.rs:790`, `unwrap_or(0)`), so such a damaged cell
   becomes the table's first shared string. Only a damaged or hand-made file

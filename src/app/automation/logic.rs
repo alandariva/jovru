@@ -393,6 +393,7 @@ mod tests {
 
     #[test]
     fn the_extra_statements_are_found_by_their_first_line() {
+        crate::app::source_text();
         let sql = "SELECT 1;\n\n  -- next\n  UPDATE t SET a = 1;\nDELETE FROM t";
         assert_eq!(
             extra_statements(sql, Some(SqlDialect::Postgres)),
@@ -417,6 +418,7 @@ mod tests {
 
     #[test]
     fn production_asks_for_a_risk_or_stored_outputs_only() {
+        crate::app::source_text();
         assert_eq!(
             production_confirmation("Prod", false, Some("x".into()), true),
             None
@@ -432,6 +434,7 @@ mod tests {
 
     #[test]
     fn the_plan_lists_every_step_connection_risk_and_new_program() {
+        crate::app::source_text();
         let lines = vec![
             PlanLine {
                 id: "lookup".into(),
@@ -507,6 +510,7 @@ mod tests {
 
     #[test]
     fn a_step_input_offers_chain_inputs_earlier_outputs_and_a_constant() {
+        crate::app::source_text();
         let lookup = sql_version(&["address"]);
         let quiet = program_version(Protocol::None);
         let export = program_version(Protocol::Jjp1);
@@ -554,6 +558,7 @@ mod tests {
 
     #[test]
     fn a_step_run_again_is_prefilled_only_from_stored_values() {
+        crate::app::source_text();
         let export = program_version(Protocol::Jjp1);
         let mut step = ChainStep::new("export", export.id, 1);
         step.inputs = vec![
@@ -626,6 +631,7 @@ mod tests {
 
     #[test]
     fn steps_after_a_failure_read_not_run_with_the_step_and_cause() {
+        crate::app::source_text();
         let chain = ChainRunRecord {
             id: ChainRunId::new(),
             job_id: None,
@@ -670,6 +676,7 @@ mod tests {
 
     #[test]
     fn snapshots_give_back_their_definitions() {
+        crate::app::source_text();
         let job = sql_version(&[]);
         let snapshot = serde_json::json!({"kind": "sql", "definition": job.to_value()}).to_string();
         assert_eq!(snapshot_definition(&snapshot), Some(job.clone()));

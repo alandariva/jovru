@@ -80,6 +80,7 @@ mod tests {
 
     #[test]
     fn the_quit_handler_awaits_writes_queued_after_it_was_called() {
+        crate::app::source_text();
         let queue = Queue::default();
         let done = Rc::new(RefCell::new(Vec::new()));
         // GPUI calls the quit handler before it releases the window.
@@ -105,6 +106,7 @@ mod tests {
 
     #[test]
     fn nothing_queued_finishes_at_once() {
+        crate::app::source_text();
         block_on(Queue::default().drain());
     }
 }

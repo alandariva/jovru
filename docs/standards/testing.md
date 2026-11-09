@@ -40,6 +40,12 @@ cargo xtask check
 Remove-Item Env:CARGO_NET_OFFLINE
 ```
 
+Tests assert the source (English) text on any machine. The library's own unit
+tests ignore the machine's language by themselves; the application binary's
+tests link the library as an ordinary dependency, so each of them calls
+`crate::app::source_text()` first, which pins the source locale for the test
+process (`jykre::i18n::use_source_locale`).
+
 The gate stops at the first error, exits with a non-zero code and reports that
 later steps were not run. An unavailable command is also a failure; there is
 no fallback that skips checks.

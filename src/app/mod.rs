@@ -3889,6 +3889,16 @@ pub fn run() {
     });
 }
 
+/// The first call of every test of the application: its assertions read the
+/// source text, whatever the machine's language ([`jykre::i18n::use_source_locale`]).
+#[cfg(test)]
+pub(crate) fn source_text() {
+    assert!(
+        jykre::i18n::use_source_locale(),
+        "a test read a translated text before choosing the source locale"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::APP_ID;
@@ -3900,6 +3910,7 @@ mod tests {
     /// entry names the icon `install.sh` installs under the same ID.
     #[test]
     fn the_desktop_entry_names_the_app_id() {
+        crate::app::source_text();
         let keys: Vec<&str> = DESKTOP_ENTRY.lines().collect();
         assert!(keys.contains(&format!("Icon={APP_ID}").as_str()));
         assert!(keys.contains(&format!("StartupWMClass={APP_ID}").as_str()));

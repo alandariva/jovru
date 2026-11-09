@@ -575,6 +575,7 @@ mod tests {
 
     #[test]
     fn the_app_mark_renders_at_the_sizes_the_title_bar_uses() {
+        crate::app::source_text();
         let renderer = SvgRenderer::new(std::sync::Arc::new(()));
         // 21 px at 100 %, 125 %, 150 % and 200 %.
         for edge in [21, 26, 32, 42] {

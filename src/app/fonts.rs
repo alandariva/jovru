@@ -138,6 +138,7 @@ mod tests {
 
     #[test]
     fn the_first_installed_candidate_wins() {
+        crate::app::source_text();
         let family = first_installed(
             &["Cascadia Mono", "DejaVu Sans Mono", "Liberation Mono"],
             &installed(&["Liberation Mono", "DejaVu Sans Mono", "Ubuntu"]),
@@ -147,12 +148,14 @@ mod tests {
 
     #[test]
     fn without_a_candidate_installed_gpui_chooses_the_system_font() {
+        crate::app::source_text();
         let family = first_installed(&["Cascadia Mono"], &installed(&["Ubuntu"]));
         assert_eq!(family, SYSTEM_UI_FONT);
     }
 
     #[test]
     fn families_match_by_their_whole_name() {
+        crate::app::source_text();
         let family = first_installed(
             &["Cascadia Code", "Consolas"],
             &installed(&["Cascadia Code PL", "Consolas"]),
@@ -162,6 +165,7 @@ mod tests {
 
     #[test]
     fn each_platform_has_monospace_candidates() {
+        crate::app::source_text();
         assert!(!CANDIDATES.code.is_empty());
         assert!(!CANDIDATES.mono.is_empty());
     }

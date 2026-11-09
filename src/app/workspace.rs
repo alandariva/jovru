@@ -4800,6 +4800,7 @@ mod tests {
 
     #[test]
     fn the_header_offers_to_disconnect_only_an_idle_open_session() {
+        crate::app::source_text();
         assert_eq!(
             SessionIndicator::of(true, false),
             SessionIndicator::Connected

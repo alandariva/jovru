@@ -191,6 +191,16 @@ harness = false
 [profile.release.package.debug_unsafe]
 debug-assertions = true
 
+# `atoi_simd` also branches on `cfg!(debug_assertions)` to its own
+# `unreachable_unchecked`, and `calamine` adds up cell references in `u32`
+# without a check. Both are checked in release builds too, for the same
+# reason. Approved by the maintainer on 2026-11-08.
+[profile.release.package.atoi_simd]
+debug-assertions = true
+
+[profile.release.package.calamine]
+overflow-checks = true
+
 # SQLx 0.9.0 plus public readers of the transaction state the server reports
 # (ADR-0030, TD-001), from a fork pinned to one revision of its branch
 # `jykre/transaction-status` until a SQLx release has them. Every SQLx crate
