@@ -89,6 +89,16 @@ pub fn display(value: Option<&str>, family: ValueFamily, numbers_pt_br: bool) ->
     }
 }
 
+/// The text a grid cell paints. Line breaks are the `↵` drawn in their place.
+pub fn shown(value: Option<&str>, family: ValueFamily, numbers_pt_br: bool) -> String {
+    let text = display(value, family, numbers_pt_br);
+    if text.contains(['\n', '\r']) {
+        text.replace("\r\n", "↵").replace(['\n', '\r'], "↵")
+    } else {
+        text
+    }
+}
+
 /// A count for user-facing text, with digits grouped in the UI language
 /// (`100,000` in English, `100.000` in Portuguese).
 pub fn count(value: usize) -> String {

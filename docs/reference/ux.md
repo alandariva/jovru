@@ -366,7 +366,7 @@ Each state has one consistent representation.
 | A connection's colour and environment | Explorer entry (a stripe on its left), its tab group and the editor header | The colour chosen in the connection dialog, or the driver's; a `DEV`, `STAGING` or `PROD` badge after the name |
 | What ran in the tab | Messages | A log of every statement that ended, independent of the result tabs |
 | Run duration | Footer, Messages, history | In the scale that reads best: `850 ms`, `12.4 s`, `3 min 3 s`, `1 h 2 min` |
-| Filtered rows | Footer | While the filter is open, the rows it shows of the page: "3 of 1,000 rows". The grid filters once typing pauses for 150 ms, not on every keystroke |
+| Result search | The bar under the result toolbar, opened by its button or `Ctrl F` while the query tab's grid has the keyboard | The text, **Highlight** or **Filter**, the current occurrence as `1/3` while highlighting, and a button that closes it. The match is the text drawn in the cell, ignoring case (a boolean shows "true" or "false", and that is what the search finds). Matching text is marked (`MATCH_TEXT`, `MATCH_BG`). **Highlight** keeps every row. **Filter** shows only the matching rows. Both count in the footer. The count and the row hiding wait until typing pauses for 150 ms; the marks follow each keystroke. `Enter`, `↓`, `Shift Enter` and `↑` move to the next or previous occurrence, and `Esc` closes the bar and returns the keyboard to the grid. It searches only the rows held for the page |
 | Format | Editor toolbar | While a Format runs, its button reads **Cancel format** (with the time it has run after 2 s) and stops it: the formatter ends before its next statement and the SQL is left as it was |
 | Explorer search | The search field over the connections | A spinner at the end of the field while the search reads the local caches, off the UI thread (one or two characters scan the whole name index) |
 | Sorted column | Grid header | An arrow after the name; a click on a header sorts the page's rows by that column's values, ascending, then descending, then in the server's order. NULLs come last and numbers compare exactly |
@@ -589,6 +589,8 @@ inside one focused control, marked *fixed*.
 | Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |
 | Grid (a query tab's, a report panel's or a job's): the menu on the focused header's column, or the focused cell's, to hide, freeze at the left or move the column, show hidden columns or reset the layout. With the mouse, a header dragged onto another takes its place | `Shift F10` |
 | Find a column by name, ignoring case and accents, in the grid that has the keyboard, else in the query tab's result on screen (also the result toolbar's button); while its text is there, the records view lists only the columns it finds | `Ctrl Shift F` |
+| Query tab's result grid, while it has the keyboard: open the result search and focus its field (selects the text when the bar is already open). The toolbar's button opens it the same way, and a second click closes it | `Ctrl F` |
+| Result search field: the next or previous occurrence while highlighting, close the bar and give the keyboard back to the grid | `Enter`, `↓`, `Shift Enter`, `↑`, `Esc` (fixed) |
 | Column search field: choose a match, go to it (showing it when hidden), close the field | `↑`, `↓`, `Enter`, `Esc` (fixed) |
 | Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
 | Tab bar: move between tabs | Arrows, `Home`, `End` (fixed) |
@@ -600,8 +602,9 @@ works without the mouse.
 
 By default `Ctrl F` acts where the keyboard is: in a SQL editor it opens
 that editor's search, on the explorer's tree it marks or filters the quick
-search, and elsewhere (the result grid, a text field, a dialog) it does
-nothing. Search, replace and multiple cursors belong to the editor component
+search, in a query tab's result grid it opens the result search, and
+elsewhere (a report or job grid, a text field, a dialog) it does nothing.
+Search, replace and multiple cursors belong to the editor component
 (`EditorState` of `gpui-base`), which binds their keys itself, in every SQL
 editor alike: a query tab, a report panel and a SQL Job's editor.
 

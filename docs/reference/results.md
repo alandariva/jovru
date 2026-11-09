@@ -302,14 +302,33 @@ alignment only; the value itself is never converted.
   numbers, pins and what a run replaces do not change.
 - Right-clicking outside the selection selects the cell under the pointer
   first, so the context menu acts on what is under it.
-- The filter bar matches text in any column, ignoring case, and stops hiding
-  rows when it is closed. It applies once typing pauses for 150 ms, so a
-  burst of keystrokes rebuilds the grid's view once. It matches values, not how they are drawn: a NULL
-  never matches, even a filter for "null", while the text 'NULL' does.
-- The filter searches only the rows held for the page on screen. Below the
-  field it says so ("Filters this page only (1,000 rows)…") whenever the
-  result has other pages or stopped at a limit, and an empty match reads "No
-  rows on this page match the filter", never "no results".
+- The result search matches text in any column, ignoring case, and stops
+  hiding rows and marking text when it is closed. **Highlight** (the mode it
+  opens in) keeps every row and marks the matching text. **Filter** shows
+  only the matching rows. The footer counts the matching rows either way
+  ("3 of 1,000 rows", or "3 of rows 1–1,000" when the page is not the whole
+  result). While highlighting, the bar shows the current occurrence as
+  `1/3`: each visible cell that matches, left to right and top to bottom.
+  A row with two matching cells counts once in the footer and twice in
+  `1/3`. `Enter`, `↓`, `Shift Enter` and `↑` move that occurrence, wrapping. Hiding
+  rows and both counts wait until typing pauses for 150 ms, so a burst of
+  keystrokes rebuilds the grid's view once; the marks follow each keystroke.
+  It matches the text drawn in the cell, ignoring case. A boolean stored
+  as `t` or `1` matches "true", because that is what the cell shows; a
+  number in the pt-BR format matches the grouped text on screen. NULL is
+  drawn as NULL, empty text as "(empty)", and a line break as ↵, so a
+  search follows those. The mark is that text (`MATCH_TEXT`, `MATCH_BG`).
+  Searches run on the background executor with a ten-second scan limit;
+  typing, closing the bar or changing the page cancels the previous scan,
+  and superseded responses are discarded. Pending and written edits,
+  inserted rows (including DEFAULT), and number-format changes participate
+  in the search just as they do in the painted cells.
+- The search covers only the rows held for the page on screen. Below the
+  field it says so ("Filters this page only (1,000 rows)…", or "Highlights
+  this page only…" in the other mode) whenever the result has other pages or
+  stopped at a limit, and an empty filter reads "No rows on this page match
+  the filter", never "no results". With text and no highlight hit, the
+  footer reads "0 of 1,000 rows" and the bar shows no `0/0`.
 - Each result tab keeps its own selection and scroll: switching tabs and
   coming back to the same page restores them (`ResultGrid` keeps them by
   `ResultId`); another page starts at the top with nothing selected.

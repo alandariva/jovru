@@ -20,8 +20,8 @@ use jykre::column_layout::{ColumnLayout, ColumnWidths};
 use jykre::column_search::{self, ColumnMatch};
 use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
 use jykre::grid::{
-    self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, WidthsCache,
-    selection_block,
+    self, CellMark, CellSelection, ColumnSort, FindMode, GridCache, GridKey, GridView, Jump,
+    WidthsCache, selection_block,
 };
 use jykre::grid_edit::{self, EditSession, EditValue, Overlay, RowMark};
 use jykre::result::ResultData;
@@ -38,8 +38,11 @@ use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
 pub enum ResultGridEvent {
     /// The number of selected visible cells changed.
     SelectionChanged { cells: usize },
-    /// How many rows the open filter shows, or `None` without a filter.
+    /// How many rows the open search counts: the rows the filter shows, or
+    /// the rows a highlight matches. `None` when the bar is closed or empty.
     RowsShown { rows: Option<usize> },
+    /// The highlight search's `1/3`, or `None` when it is not showing one.
+    FindPosition(Option<String>),
     /// Feedback for the notice bar, such as the outcome of a copy.
     Notice(Feedback),
     /// The statistics of the selected cells changed.
@@ -68,7 +71,7 @@ pub enum Editing {
     /// It cannot be edited, for this reason.
     ReadOnly(write::ReadOnlyReason),
     /// Its pending edits.
-    Session(Box<EditSession>),
+    Session(Arc<EditSession>),
 }
 
 /// What an editing key asks for.
@@ -360,6 +363,11 @@ struct ColumnStats {
 /// The key context of the grid and its bars, where Shift F10 opens the
 /// menu ([`super::ResultGridMenu`]).
 pub const GRID_CONTEXT: &str = "ResultGrid";
+
+/// The key context of the result search field. The input stacks its own
+/// context under this one, so the field's keys read `ResultFind > Input`.
+pub const FIND_CONTEXT: &str = "ResultFind";
+pub const FIND_FIELD_CONTEXT: &str = "ResultFind > Input";
 /// Height of a data row, in pixels.
 const ROW_HEIGHT: f32 = 34.;
 /// Height of the header and width of the row numbers, in pixels.
@@ -379,6 +387,38 @@ const PANEL_WIDTH: f32 = 380.;
 const RECORD_WIDTH: f32 = 280.;
 const FIELD_WIDTH: f32 = 220.;
 
+/// The displayed text, with a search hit marked when `mark` names ranges.
+fn painted(displayed: String, mark: CellMark) -> AnyElement {
+    match mark {
+        CellMark::Ranges(ranges) => marked(displayed, ranges).into_any_element(),
+        _ => displayed.into_any_element(),
+    }
+}
+
+/// Cancels the worker when its owner closes or supersedes the search.
+struct FindCancellation(jykre_core::CancellationToken);
+
+impl Drop for FindCancellation {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// The result search while its bar is open.
+struct OpenFind {
+    mode: FindMode,
+    /// Lower case text painted on the visible cells, including keystrokes
+    /// that have not settled yet.
+    needle: String,
+    /// The needle `hits` and `matching_rows` were scanned for.
+    scanned: String,
+    hits: Vec<(usize, usize)>,
+    hit_at: HashMap<(usize, usize), usize>,
+    /// 0-based index into `hits`.
+    index: Option<usize>,
+    matching_rows: usize,
+}
+
 pub struct ResultGrid {
     result: Arc<ResultData>,
     /// The result tab and page on screen, when it is a result tab's.
@@ -390,8 +430,18 @@ pub struct ResultGrid {
     version: u64,
     /// The demo result has fixed column proportions.
     sales: bool,
-    /// Lowercase text of the open filter; empty when the bar is closed.
+    /// Lowercase text of the open filter; empty when the bar is closed or
+    /// the search is only highlighting.
     filter: String,
+    /// The open result search. Highlight keeps every row and marks hits;
+    /// filter hides the other rows through [`Self::filter`].
+    find: Option<OpenFind>,
+    /// The `1/3` last reported, so an unchanged position is not sent.
+    reported_position: Option<String>,
+    find_generation: u64,
+    find_task: Option<Task<()>>,
+    find_cancel: Option<FindCancellation>,
+    find_view: Option<Arc<GridView>>,
     /// The column the rows are sorted by, chosen in the header.
     sort: Option<ColumnSort>,
     /// The visible row count last reported while filtering.
@@ -669,6 +719,12 @@ impl ResultGrid {
             sales,
             first_row: 0,
             filter: String::new(),
+            find: None,
+            reported_position: None,
+            find_generation: 0,
+            find_task: None,
+            find_cancel: None,
+            find_view: None,
             sort: None,
             reported_rows: None,
             numbers_pt_br: false,
@@ -800,6 +856,7 @@ impl ResultGrid {
         self.select(selection, cx);
         // Another result has other columns to find.
         self.search_columns(cx);
+        self.refresh_find(cx);
         cx.notify();
     }
 
@@ -879,28 +936,307 @@ impl ResultGrid {
         cx: &mut Context<Self>,
     ) {
         if let Some(Editing::Session(session)) = self.editing.get_mut(&id) {
-            change(session);
+            change(Arc::make_mut(session));
+            self.refresh_find(cx);
             cx.emit(ResultGridEvent::EditsChanged);
             cx.notify();
         }
     }
 
-    /// Filters rows by text in any column, ignoring case. An empty filter
-    /// (or a closed filter bar) shows every row.
-    pub fn set_filter(&mut self, filter: &str, cx: &mut Context<Self>) {
-        let filter = filter.to_lowercase();
-        if self.filter != filter {
-            self.filter = filter;
-            // The selection addresses data rows: it stays while its ends are
-            // visible and reappears when they are again; only the count
-            // reported to the footer changes.
+    /// Paints `text` on the visible cells at once. The row count and the
+    /// `1/3` wait until [`Self::settle_find`].
+    pub fn set_find_needle(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_mut() else {
+            return;
+        };
+        let needle = text.to_lowercase();
+        if find.needle == needle {
+            return;
+        }
+        find.needle = needle;
+        self.find_generation += 1;
+        self.find_cancel = None;
+        self.find_task = None;
+        self.publish_find(cx);
+        cx.notify();
+    }
+
+    /// Applies a settled search: filter hides the other rows, highlight
+    /// keeps them, counts the matching rows and lands on an occurrence.
+    pub fn settle_find(&mut self, text: &str, mode: FindMode, cx: &mut Context<Self>) {
+        let needle = text.to_lowercase();
+        if self.find.is_none() {
+            self.find = Some(OpenFind {
+                mode,
+                needle: String::new(),
+                scanned: String::new(),
+                hits: Vec::new(),
+                hit_at: HashMap::new(),
+                index: None,
+                matching_rows: 0,
+            });
+        }
+        if let Some(find) = self.find.as_mut() {
+            find.mode = mode;
+            find.needle = needle.clone();
+            let drop_hits = mode == FindMode::Filter || needle.is_empty();
+            if drop_hits {
+                find.hits.clear();
+                find.hit_at.clear();
+                find.index = None;
+                find.matching_rows = 0;
+                find.scanned = if needle.is_empty() && mode == FindMode::Highlight {
+                    String::new()
+                } else {
+                    needle.clone()
+                };
+            } else {
+                find.scanned = needle.clone();
+            }
+        }
+        self.filter = if mode == FindMode::Filter {
+            needle.clone()
+        } else {
+            String::new()
+        };
+        if needle.is_empty() {
+            self.find_generation += 1;
+            self.find_cancel = None;
+            self.find_task = None;
+            self.find_view = None;
             self.select(self.selection, cx);
+        } else {
+            self.rescan_find(cx);
+        }
+        cx.notify();
+    }
+
+    /// Closes the search: every row shows, and nothing stays marked.
+    pub fn close_find(&mut self, cx: &mut Context<Self>) {
+        self.find_generation += 1;
+        self.find_cancel = None;
+        self.find_task = None;
+        self.find_view = None;
+        self.find = None;
+        self.filter.clear();
+        self.select(self.selection, cx);
+        self.publish_find(cx);
+    }
+
+    /// The next or previous occurrence, from the list the last scan stored.
+    /// `Enter`, `↓` and `Shift Enter`, `↑` in the field. `false` when
+    /// highlighting has no settled occurrence to land on.
+    pub fn step_find(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
+        let Some(find) = self.find.as_ref() else {
+            return false;
+        };
+        if self.find_task.is_some()
+            || find.mode != FindMode::Highlight
+            || find.needle != find.scanned
+        {
+            return false;
+        }
+        let Some(index) = grid::step_index(find.hits.len(), find.index, forward) else {
+            return false;
+        };
+        let Some(hit) = find.hits.get(index).copied() else {
+            return false;
+        };
+        if let Some(find) = self.find.as_mut() {
+            find.index = Some(index);
+        }
+        self.go_to_hit(hit, cx);
+        true
+    }
+
+    /// The search follows edits, number formatting, a new page, sort or layout.
+    /// Keystrokes still waiting keep the list they will replace.
+    fn refresh_find(&mut self, cx: &mut Context<Self>) {
+        let settled = self
+            .find
+            .as_ref()
+            .is_some_and(|find| !find.needle.is_empty() && find.needle == find.scanned);
+        if settled {
+            self.rescan_find(cx);
+        }
+    }
+
+    /// Rebuilds the search off the UI thread and publishes only the latest scan.
+    fn rescan_find(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = self.find.as_ref() else {
+            return;
+        };
+        if find.needle.is_empty() {
+            return;
+        }
+        let needle = find.needle.clone();
+        let mode = find.mode;
+        self.find_generation += 1;
+        let generation = self.find_generation;
+        let result = self.result.clone();
+        let session = self.shown.and_then(|(id, _)| match self.editing.get(&id) {
+            Some(Editing::Session(session)) => Some(session.clone()),
+            _ => None,
+        });
+        let key = self.view_key();
+        let layout = self.layout.clone();
+        let first_row = self.first_row;
+        let focus = self.selection.map(|selection| selection.focus);
+        let cancel = jykre_core::CancellationToken::new();
+        self.find_cancel = Some(FindCancellation(cancel.clone()));
+        self.find_task = Some(cx.spawn(async move |this, cx| {
+            let (view, scan, hit_at) = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut view = GridView::new(
+                        &result,
+                        GridKey {
+                            filter: String::new(),
+                            ..key.clone()
+                        },
+                    );
+                    let scan = grid::scan_find_cells(
+                        grid::FindCells {
+                            result: &result,
+                            session: session.as_deref(),
+                            first_row,
+                            cancel: Some(&cancel),
+                        },
+                        &view.rows,
+                        layout.visible(),
+                        &view.families,
+                        key.numbers_pt_br,
+                        &needle,
+                        focus,
+                    );
+                    if mode == FindMode::Filter {
+                        view.rows.clone_from(&scan.matching);
+                    }
+                    view.key = key;
+                    let hit_at: HashMap<_, _> = scan
+                        .hits
+                        .iter()
+                        .enumerate()
+                        .map(|(i, hit)| (*hit, i))
+                        .collect();
+                    (Arc::new(view), scan, hit_at)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.find_generation != generation {
+                    return;
+                }
+                this.find_task = None;
+                this.find_cancel = None;
+                if !scan.complete {
+                    if let Some(find) = this.find.as_mut() {
+                        find.hits.clear();
+                        find.hit_at.clear();
+                        find.index = None;
+                        find.scanned.clear();
+                    }
+                    this.publish_find(cx);
+                    cx.emit(ResultGridEvent::Notice(Feedback::new(
+                        Tone::Warning,
+                        tr!("Result search timed out. Try a narrower result."),
+                    )));
+                    cx.notify();
+                    return;
+                }
+                this.find_view = Some(view);
+                if let Some(find) = this.find.as_mut() {
+                    find.matching_rows = scan.rows;
+                    find.hits = scan.hits;
+                    find.hit_at = hit_at;
+                    find.index = scan.index;
+                    find.scanned = find.needle.clone();
+                }
+                if mode == FindMode::Highlight {
+                    let hit = this
+                        .find
+                        .as_ref()
+                        .and_then(|find| find.index.and_then(|i| find.hits.get(i).copied()));
+                    if let Some(hit) = hit {
+                        this.go_to_hit(hit, cx);
+                    } else {
+                        this.select(this.selection, cx);
+                    }
+                } else {
+                    this.select(this.selection, cx);
+                }
+                cx.notify();
+            });
+        }));
+        self.publish_find(cx);
+        cx.notify();
+    }
+
+    fn go_to_hit(&mut self, hit: (usize, usize), cx: &mut Context<Self>) {
+        let view = self.view();
+        let row_position = view.rows.iter().position(|candidate| *candidate == hit.0);
+        let display = self.layout.position(hit.1);
+        self.select(Some(CellSelection::cell(hit.0, hit.1)), cx);
+        if let Some(display) = display {
+            let view = self.view();
+            self.reveal(row_position, display, &view);
+        }
+    }
+
+    /// `1/3` while highlight has settled and the focus is that occurrence.
+    fn position_label(&self) -> Option<String> {
+        let find = self.find.as_ref()?;
+        if self.find_task.is_some()
+            || find.mode != FindMode::Highlight
+            || find.needle.is_empty()
+            || find.needle != find.scanned
+        {
+            return None;
+        }
+        let index = find.index?;
+        let hit = *find.hits.get(index)?;
+        if self.selection.map(|selection| selection.focus) != Some(hit) {
+            return None;
+        }
+        Some(format!(
+            "{}/{}",
+            cell_format::count(index + 1),
+            cell_format::count(find.hits.len())
+        ))
+    }
+
+    fn publish_find(&mut self, cx: &mut Context<Self>) {
+        let label = self.position_label();
+        if label != self.reported_position {
+            self.reported_position = label.clone();
+            cx.emit(ResultGridEvent::FindPosition(label));
+        }
+    }
+
+    /// Rows the footer counts while the search is open.
+    fn shown_rows(&self, view: &GridView) -> Option<usize> {
+        if !self.filter.is_empty() {
+            return Some(view.rows.len());
+        }
+        self.find.as_ref().and_then(|find| {
+            (find.mode == FindMode::Highlight
+                && !find.scanned.is_empty()
+                && find.needle == find.scanned)
+                .then_some(find.matching_rows)
+        })
+    }
+
+    /// The mark for a cell, from the text painted now.
+    fn cell_mark(&self, displayed: &str) -> CellMark {
+        match self.find.as_ref() {
+            Some(find) if !find.needle.is_empty() => grid::cell_mark(displayed, &find.needle),
+            _ => CellMark::None,
         }
     }
 
     pub fn set_number_format(&mut self, numbers_pt_br: bool, cx: &mut Context<Self>) {
         if self.numbers_pt_br != numbers_pt_br {
             self.numbers_pt_br = numbers_pt_br;
+            self.refresh_find(cx);
             cx.notify();
         }
     }
@@ -927,16 +1263,27 @@ impl ResultGrid {
     }
 
     /// The grid for the current result, filter, sort and number format.
-    fn view(&self) -> Arc<GridView> {
+    fn view_key(&self) -> GridKey {
         let session = self.session();
-        let key = GridKey {
+        GridKey {
             result: self.version,
             filter: self.filter.clone(),
             sort: self.sort,
             numbers_pt_br: self.numbers_pt_br,
             edits: session.map_or(0, EditSession::version),
             inserted: session.map_or(0, EditSession::drawn_inserted),
-        };
+        }
+    }
+
+    fn view(&self) -> Arc<GridView> {
+        let mut key = self.view_key();
+        if let Some(view) = &self.find_view
+            && view.key == key
+        {
+            return view.clone();
+        }
+        // Until the background search publishes, paint the unfiltered page.
+        key.filter.clear();
         self.cache.get(&self.result, key)
     }
 
@@ -969,6 +1316,7 @@ impl ResultGrid {
         self.select(self.selection, cx);
         // Whether a match is hidden, and their order, follow the layout.
         self.search_columns(cx);
+        self.refresh_find(cx);
     }
 
     /// Opens the field that finds a column by name (`Ctrl Shift F` or the
@@ -1116,18 +1464,26 @@ impl ResultGrid {
     /// selected count to the workspace.
     fn select(&mut self, selection: Option<CellSelection>, cx: &mut Context<Self>) {
         self.selection = selection;
+        if let Some(find) = self.find.as_mut()
+            && find.mode == FindMode::Highlight
+            && let Some(focus) = selection.map(|selection| selection.focus)
+            && let Some(&at) = find.hit_at.get(&focus)
+        {
+            find.index = Some(at);
+        }
         let view = self.view();
         let cells = grid::selected_cells(selection, &view.rows, &self.layout);
         if cells != self.reported {
             self.reported = cells;
             cx.emit(ResultGridEvent::SelectionChanged { cells });
         }
-        // The footer counts the rows the filter shows, as the grid does.
-        let rows = (!self.filter.is_empty()).then_some(view.rows.len());
+        // The footer counts the rows the search matches, as the grid does.
+        let rows = self.shown_rows(&view);
         if rows != self.reported_rows {
             self.reported_rows = rows;
             cx.emit(ResultGridEvent::RowsShown { rows });
         }
+        self.publish_find(cx);
         // The side panel follows the focused cell; in the records view it
         // keeps the cell double-clicked there.
         if !self.records {
@@ -1836,7 +2192,8 @@ impl ResultGrid {
         let Some(Editing::Session(session)) = self.editing.get_mut(&id) else {
             return false;
         };
-        let done = change(session, &result, first_row);
+        let done = change(Arc::make_mut(session), &result, first_row);
+        self.refresh_find(cx);
         cx.emit(ResultGridEvent::EditsChanged);
         cx.notify();
         match done {
@@ -2363,6 +2720,7 @@ impl ResultGrid {
                 }
                 this.sort = ColumnSort::next(this.sort, index);
                 this.select(this.selection, cx);
+                this.refresh_find(cx);
             }))
             .child(
                 div()
@@ -2665,10 +3023,10 @@ impl ResultGrid {
         let displayed = if default {
             tr!("DEFAULT").to_owned()
         } else {
-            cell_format::display(raw, family, self.numbers_pt_br)
-                .replace("\r\n", "↵")
-                .replace(['\n', '\r'], "↵")
+            cell_format::shown(raw, family, self.numbers_pt_br)
         };
+        let found = self.cell_mark(&displayed);
+        let whole = matches!(found, CellMark::Whole) && editor.is_none();
         let is_null = raw.is_none();
         let deleted = matches!(mark, RowMark::Deleted | RowMark::WrittenDeleted);
         let edge = match (overlay, mark) {
@@ -2712,6 +3070,7 @@ impl ResultGrid {
             .border_1()
             .border_color(rgb(colors().grid_line))
             .when(!selected, |s| s.hover(|s| s.bg(rgb(colors().grid_hover))))
+            .when(whole && !selected, |s| s.bg(rgba(colors().match_bg)))
             .when(selected, |s| s.bg(rgb(colors().grid_selected)))
             .when_some(edge, |s, edge| s.border_color(rgb(edge)))
             .when(focused, |s| s.border_color(rgb(colors().grid_focus)))
@@ -2777,7 +3136,7 @@ impl ResultGrid {
             .when(deleted, |s| s.line_through())
             .map(|s| match editor {
                 Some(input) => s.px_0().child(Input::new(&input).small().w_full()),
-                None => s.child(div().truncate().child(displayed)),
+                None => s.child(div().truncate().child(painted(displayed, found))),
             })
     }
 
@@ -3180,10 +3539,10 @@ impl ResultGrid {
                     .children(records.iter().map(|row| {
                         let row = *row;
                         let raw = self.result.value(row, col);
-                        let displayed = cell_format::display(raw, family, self.numbers_pt_br)
-                            .replace("\r\n", "↵")
-                            .replace(['\n', '\r'], "↵");
+                        let displayed = cell_format::shown(raw, family, self.numbers_pt_br);
                         let inspected = self.inspected == Some((row, col));
+                        let mark = self.cell_mark(&displayed);
+                        let whole = matches!(mark, CellMark::Whole);
                         div()
                             .id(("record-value", row))
                             .role(Role::GridCell)
@@ -3204,6 +3563,7 @@ impl ResultGrid {
                             .border_color(rgb(colors().grid_line))
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(colors().grid_hover)))
+                            .when(whole && !inspected, |s| s.bg(rgba(colors().match_bg)))
                             .when(inspected, |s| s.bg(rgb(colors().grid_selected)))
                             .font_family(fonts().mono.clone())
                             .text_size(px(13.))
@@ -3226,7 +3586,7 @@ impl ResultGrid {
                                     cx.notify();
                                 }),
                             )
-                            .child(div().truncate().child(displayed))
+                            .child(div().truncate().child(painted(displayed, mark)))
                     }))
             })
             .collect()
