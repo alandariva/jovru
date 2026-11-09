@@ -77,8 +77,15 @@ column that fills it (**Match by name** or **Match by position**,
 **Required** marked) and the preview. Reading shows its progress after
 300 ms, then its elapsed time and **Cancel** past 2 s. What stops the
 mapping is listed above the footer, which holds the time limit (15 min,
-1 h by default, 4 h, no limit), **Cancel** and **Import**, not available
-yet. `Esc` (or the key chosen to close a dialog) closes it; Tab stays inside while it is open.
+1 h by default, 4 h, no limit), **Cancel** and **Import**. **Import** asks
+for the connection's password when it is not in memory and, on a
+connection marked **Production**, asks first, naming the file, the table
+and the connection. While it runs, the footer shows the rows written and
+the share of the file read after 300 ms, then the elapsed time and
+**Cancel import** past 2 s; closing the dialog or `Esc` cancels it too.
+Then it says, in words, what the table holds: every row imported, nothing
+imported (with the reason, a rejected value naming its line), or that the
+commit's answer was lost. `Esc` (or the key chosen to close a dialog) closes it; Tab stays inside while it is open.
 
 A **report** ([ADR-0024](../adr/0024-reports.md),
 [ADR-0025](../adr/0025-report-panels.md)) opens in a tab of its own, in a tab

@@ -522,6 +522,35 @@ types and `VARIANT` have none and are not editable; `FLOAT`, `DOUBLE` and
 with `:column_n` markers and checks each value against its kind, refusing
 one that does not fit rather than rewriting it.
 
+### Importing rows
+
+[ADR-0040](../adr/0040-importing-files-into-a-table.md) reuses the same
+write path for an import into a table, in a session of its own:
+
+- `Session::table_target(path, cancel)` reads the table at `path` from the
+  catalog, as `edit_target` does, and answers `write::insert_target`: every
+  column in table order and no key, since an import only inserts. A table
+  that is not there is `ReadOnly(TableNotFound)`; a view, a foreign table or
+  (MySQL) an engine without transactions is read-only as for an edit. The
+  default answers `ReadOnly(DriverCannotTell)`.
+- `Session::begin_writes(cancel)` opens a transaction (`BEGIN`,
+  `START TRANSACTION`, SQLite's `BEGIN IMMEDIATE`, which holds the file's
+  write lock to the end), refused while one is open.
+  `Session::end_writes(commit, cancel)` commits or rolls it back; it is
+  never cancelled. A `COMMIT` the server answers with an error rolled it
+  back; one without an answer is a `Connection` error, and the session
+  closes. Both default to `NotImplemented`.
+- `WriteRequest::scope` is `WriteScope::Atomic` for an edit and
+  `WriteScope::Caller` for an import's batch: `write` then runs
+  `edit::apply` inside that transaction, with nothing committed or rolled
+  back. A change that fails, affects other than one row or (MySQL) has a
+  value the server would adjust fails the write with
+  `DriverError::change()` naming its index, and the transaction is left
+  for `end_writes`. `validate` accepts a request of inserts without a key.
+- `WriteValue::Boolean` is an XLSX boolean: bound as `boolean` in
+  PostgreSQL (`CAST($n AS <type>)` converts it), `1` or `0` in MySQL and
+  SQLite. Databricks writes no import.
+
 ## Adding a driver
 
 1. Create a crate in `crates/driver-<database>` that depends on `jykre-core`.

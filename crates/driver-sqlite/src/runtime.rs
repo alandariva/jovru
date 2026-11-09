@@ -194,6 +194,19 @@ enum Command {
         reply: oneshot::Sender<DriverResult<write::WriteOutcome>>,
         cancel: CancellationToken,
     },
+    TableTarget {
+        path: ObjectPath,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    BeginWrites {
+        reply: oneshot::Sender<DriverResult<()>>,
+        cancel: CancellationToken,
+    },
+    EndWrites {
+        commit: bool,
+        reply: oneshot::Sender<DriverResult<()>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
@@ -215,6 +228,22 @@ async fn simple(connection: &mut SqliteConnection, sql: String) -> DriverResult<
 async fn autocommit(connection: &mut SqliteConnection) -> DriverResult<bool> {
     let mut handle = connection.lock_handle().await.map_err(map_error)?;
     Ok(handle.is_autocommit())
+}
+
+/// Commits (`commit`) or rolls back the import's transaction. A `COMMIT`
+/// that fails (the file is locked) leaves the transaction open, so it is
+/// rolled back too.
+async fn end_writes(connection: &mut SqliteConnection, commit: bool) -> (DriverResult<()>, Flow) {
+    match end_edit(connection, false, commit).await {
+        Ok(()) => (Ok(()), Flow::Ready),
+        Err(error) => {
+            let flow = match end_edit(connection, false, false).await {
+                Ok(()) => Flow::Ready,
+                Err(_) => Flow::Broken,
+            };
+            (Err(error), flow)
+        }
+    }
 }
 
 /// Ends what a write opened, within [`RECOVERY`]: its savepoint (`nested`)
@@ -433,6 +462,43 @@ impl Session for DatabaseSession {
         answer.await.map_err(|_| session_closed())?
     }
 
+    /// Read from the database's `sqlite_schema` and the table's pragmas for
+    /// the table at `path`.
+    async fn table_target(
+        &mut self,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::TableTarget {
+                path: path.clone(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    /// `BEGIN IMMEDIATE`: the file's write lock is held from the start to
+    /// the end of the import.
+    async fn begin_writes(&mut self, cancel: CancellationToken) -> DriverResult<()> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        self.ask(|reply| Command::BeginWrites { reply, cancel })
+            .await
+    }
+
+    /// Never cancelled: a commit or a rollback is not left half done.
+    async fn end_writes(&mut self, commit: bool, _cancel: CancellationToken) -> DriverResult<()> {
+        self.ask(|reply| Command::EndWrites { commit, reply }).await
+    }
+
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -588,6 +654,37 @@ impl Server {
                     cancel,
                 } => {
                     let (result, flow) = self.write(&mut connection, &request, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::TableTarget {
+                    path,
+                    reply,
+                    cancel,
+                } => {
+                    let limit = Limit::new(&cancel, Some(CATALOG));
+                    let read = self
+                        .step(&limit, crate::edit::table_target(&mut connection, &path))
+                        .await;
+                    let (result, flow) = match read {
+                        Ok(target) => (Ok(target), Flow::Ready),
+                        Err((error, unfinished)) => {
+                            (Err(error), self.recover(&mut connection, unfinished).await)
+                        }
+                    };
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::BeginWrites { reply, cancel } => {
+                    let (result, flow) = self.begin_writes(&mut connection, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::EndWrites { commit, reply } => {
+                    let (result, flow) = end_writes(&mut connection, commit).await;
                     // The handle may have stopped waiting.
                     let _ = reply.send(result);
                     flow
@@ -766,18 +863,100 @@ impl Server {
         }
     }
 
+    /// Opens the import's transaction with `BEGIN IMMEDIATE`, which takes
+    /// the file's write lock until `end_writes`.
+    async fn begin_writes(
+        &self,
+        connection: &mut SqliteConnection,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<()>, Flow) {
+        match autocommit(connection).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    Err(DriverError::validation(
+                        "The session already holds a transaction",
+                    )),
+                    Flow::Ready,
+                );
+            }
+            Err(error) => return (Err(error), Flow::Ready),
+        }
+        let opening = Limit::new(cancel, Some(RECOVERY));
+        match self
+            .step(&opening, simple(connection, "BEGIN IMMEDIATE".to_owned()))
+            .await
+        {
+            Ok(()) => (Ok(()), Flow::Ready),
+            Err((error, unfinished)) => {
+                let flow = self.recover(connection, unfinished).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// A write that joins the import's transaction (`WriteScope::Caller`):
+    /// nothing is committed or rolled back, and a change that fails or
+    /// affects another number of rows than one fails the write at its
+    /// index. The transaction is left to `end_writes`.
+    async fn write_in_caller(
+        &self,
+        connection: &mut SqliteConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        match autocommit(connection).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return (
+                    Err(DriverError::validation("Begin the writes first")),
+                    Flow::Ready,
+                );
+            }
+            Err(error) => return (Err(error), Flow::Ready),
+        }
+        let limit = Limit::new(cancel, request.timeout);
+        let applied = self
+            .step(&limit, crate::edit::apply(connection, request))
+            .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => (
+                Ok(write::WriteOutcome::Written {
+                    rows,
+                    committed: false,
+                }),
+                Flow::Ready,
+            ),
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => (
+                Err(DriverError::validation(format!(
+                    "The row affected {matched} rows of the table, not one"
+                ))
+                .at_change(index)),
+                Flow::Ready,
+            ),
+            Err((error, unfinished)) => {
+                let flow = self.recover(connection, unfinished).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
     /// Writes `request` in a transaction of its own (`BEGIN IMMEDIATE`, so
     /// the file's write lock is taken first), or in a savepoint of the open
     /// one, and commits (or releases the savepoint) only when every change
     /// affected exactly one row. A failure, a cancellation or the timeout
     /// rolls back what the write did; an interrupted write inside an open
-    /// transaction makes SQLite roll that whole transaction back.
+    /// transaction makes SQLite roll that whole transaction back. A write
+    /// with `WriteScope::Caller` joins the import's transaction instead.
     async fn write(
         &self,
         connection: &mut SqliteConnection,
         request: &write::WriteRequest,
         cancel: &CancellationToken,
     ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        if request.scope == write::WriteScope::Caller {
+            return self.write_in_caller(connection, request, cancel).await;
+        }
         let nested = match autocommit(connection).await {
             Ok(outside) => !outside,
             Err(error) => return (Err(error), Flow::Ready),

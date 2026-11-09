@@ -3767,6 +3767,8 @@ impl Render for AppView {
             .when(self.connection_open, |s| {
                 s.child(self.connection_dialog(cx))
             })
+            // Under the password prompt an import may ask for.
+            .when_some(self.import_view(), |s, dialog| s.child(dialog))
             .when(self.password_prompt.is_some(), |s| {
                 s.child(self.password_dialog(cx))
             })
@@ -3774,7 +3776,6 @@ impl Render for AppView {
             .when(self.report_picker.is_some(), |s| {
                 s.child(self.report_picker_dialog(cx))
             })
-            .when_some(self.import_view(), |s, dialog| s.child(dialog))
             .when(self.settings_open, |s| {
                 s.child(self.settings_dialog(window, cx))
             })

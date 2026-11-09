@@ -1307,6 +1307,7 @@ async fn write_changes(
         target: target.clone(),
         changes,
         timeout: Some(Duration::from_secs(30)),
+        scope: write::WriteScope::Atomic,
     };
     session.write(&request, CancellationToken::new()).await
 }
@@ -1619,4 +1620,139 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
     })
     .await
     .expect("live edits took too long");
+}
+
+/// An import's writes (ADR-0040): one transaction the import begins and
+/// ends, values bound and converted by the server's casts, a boolean as 1
+/// or 0, and a value MySQL would truncate or adjust refused at its change,
+/// leaving nothing behind. An XLSX date arrives as `YYYY-MM-DD 00:00:00`:
+/// a `DATE` column takes it whole, and a time it would drop is refused.
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
+    use write::{RowChange, WriteOutcome, WriteScope, WriteValue};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut session = MySqlDriver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        for sql in [
+            "DROP TABLE IF EXISTS jykre_import",
+            "CREATE TABLE jykre_import (id bigint AUTO_INCREMENT PRIMARY KEY, amount decimal(38,10), big bigint, day date, note varchar(5) NOT NULL, flag tinyint(1)) ENGINE=InnoDB",
+        ] {
+            read(&mut session, sql).await.unwrap();
+        }
+        let path = ObjectPath::default()
+            .child(ObjectKind::Database, "jykre")
+            .child(ObjectKind::Table, "jykre_import");
+        let target = session
+            .table_target(&path, CancellationToken::new())
+            .await
+            .unwrap()
+            .editable()
+            .unwrap();
+        assert!(target.key.is_empty());
+        let required: Vec<&str> = target
+            .columns
+            .iter()
+            .flatten()
+            .filter(|column| !column.has_default)
+            .map(|column| column.name.as_str())
+            .collect();
+        assert_eq!(required, ["note"], "the auto-increment key has a value of its own");
+        let row = |amount: &str, big: &str, day: &str, note: WriteValue, flag: WriteValue| {
+            RowChange::Insert {
+                values: vec![
+                    (1, text(amount)),
+                    (2, text(big)),
+                    (3, text(day)),
+                    (4, note),
+                    (5, flag),
+                ],
+            }
+        };
+        let request = |changes: Vec<RowChange>| write::WriteRequest {
+            target: target.clone(),
+            changes,
+            timeout: Some(Duration::from_secs(30)),
+            scope: WriteScope::Caller,
+        };
+        session.begin_writes(CancellationToken::new()).await.unwrap();
+        let written = session
+            .write(
+                &request(vec![
+                    row(
+                        "1234567890123456789012345678.1234567891",
+                        "9007199254740993",
+                        "2025-01-31 00:00:00",
+                        text("NULL"),
+                        WriteValue::Boolean(true),
+                    ),
+                    row("0.1", "-1", "2025-02-01", text(""), WriteValue::Boolean(false)),
+                ]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            written,
+            WriteOutcome::Written {
+                rows: 2,
+                committed: false
+            }
+        );
+        session.end_writes(true, CancellationToken::new()).await.unwrap();
+        let rows = read(
+            &mut session,
+            "SELECT CAST(amount AS CHAR), CAST(big AS CHAR), CAST(day AS CHAR), note, CAST(flag AS CHAR) FROM jykre_import ORDER BY id",
+        )
+        .await
+        .unwrap()
+        .rows;
+        assert_eq!(
+            rows[0],
+            texts(&[
+                "1234567890123456789012345678.1234567891",
+                "9007199254740993",
+                "2025-01-31",
+                "NULL",
+                "1"
+            ])
+        );
+        assert_eq!(rows[1][4], Cell::Text("0".into()));
+        // Each of these would be changed by MySQL: refused at its change,
+        // and the rollback leaves the table as it was.
+        for (index, refused) in [
+            row("1", "1", "2025-01-01", text("too long"), WriteValue::Null),
+            row("1.123456789012", "1", "2025-01-01", text("x"), WriteValue::Null),
+            row("1", "1", "2025-01-01 10:30:00", text("x"), WriteValue::Null),
+            row("1", "not a number", "2025-01-01", text("x"), WriteValue::Null),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            session.begin_writes(CancellationToken::new()).await.unwrap();
+            let failed = session
+                .write(
+                    &request(vec![
+                        row("2", "2", "2025-01-01", text("kept?"), WriteValue::Null),
+                        refused,
+                    ]),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(failed.change(), Some(1), "case {index}: {}", failed.message);
+            session.end_writes(false, CancellationToken::new()).await.unwrap();
+            let count = read(&mut session, "SELECT CAST(count(*) AS CHAR) FROM jykre_import")
+                .await
+                .unwrap()
+                .rows;
+            assert_eq!(count, [texts(&["2"])], "case {index}");
+        }
+        read(&mut session, "DROP TABLE jykre_import").await.unwrap();
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
 }

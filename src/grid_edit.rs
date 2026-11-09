@@ -631,6 +631,7 @@ impl EditSession {
                 target: self.target.clone(),
                 changes,
                 timeout,
+                scope: crate::drivers::write::WriteScope::Atomic,
             },
             origins,
         ))

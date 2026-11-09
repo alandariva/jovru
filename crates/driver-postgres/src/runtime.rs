@@ -264,6 +264,19 @@ enum Command {
         reply: oneshot::Sender<DriverResult<write::WriteOutcome>>,
         cancel: CancellationToken,
     },
+    TableTarget {
+        path: ObjectPath,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    BeginWrites {
+        reply: oneshot::Sender<DriverResult<()>>,
+        cancel: CancellationToken,
+    },
+    EndWrites {
+        commit: bool,
+        reply: oneshot::Sender<DriverResult<()>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
@@ -462,6 +475,41 @@ impl Session for DatabaseSession {
             .await
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
+    }
+
+    /// Read from `pg_class`, `pg_attribute`, `pg_index`, `pg_trigger` and
+    /// `pg_constraint` for the table at `path`.
+    async fn table_target(
+        &mut self,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::TableTarget {
+                path: path.clone(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    async fn begin_writes(&mut self, cancel: CancellationToken) -> DriverResult<()> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        self.ask(|reply| Command::BeginWrites { reply, cancel })
+            .await
+    }
+
+    /// Never cancelled: a commit or a rollback is not left half done.
+    async fn end_writes(&mut self, commit: bool, _cancel: CancellationToken) -> DriverResult<()> {
+        self.ask(|reply| Command::EndWrites { commit, reply }).await
     }
 
     async fn close(self: Box<Self>) -> DriverResult<()> {
@@ -663,6 +711,28 @@ fn commit_unknown() -> DriverError {
     )
 }
 
+/// The error of a change of an import's write that affected `matched` rows,
+/// not one.
+fn mismatch(index: usize, matched: u64) -> DriverError {
+    DriverError::validation(format!(
+        "The row affected {matched} rows of the table, not one"
+    ))
+    .at_change(index)
+}
+
+/// Commits (`commit`) or rolls back the import's transaction. A commit the
+/// server answered with an error rolled it back; one without an answer may
+/// or may not have been written, and closes the session.
+async fn end_writes(connection: &mut PgConnection, commit: bool) -> (DriverResult<()>, Flow) {
+    match end_edit(connection, false, commit).await {
+        Ok(()) => (Ok(()), Flow::Ready),
+        Err(error) if error.server.is_some() => (Err(error), Flow::Ready),
+        Err(_) if commit => (Err(commit_unknown()), Flow::Broken),
+        // Closing the session rolls the transaction back.
+        Err(error) => (Err(error), Flow::Broken),
+    }
+}
+
 /// What the connection's task does after a statement.
 enum Flow {
     /// Wait for the next command.
@@ -853,6 +923,28 @@ impl Server {
                     cancel,
                 } => {
                     let (result, flow) = self.write(&mut connection, &request, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::TableTarget {
+                    path,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.table_target(&mut connection, &path, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::BeginWrites { reply, cancel } => {
+                    let (result, flow) = self.begin_writes(&mut connection, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::EndWrites { commit, reply } => {
+                    let (result, flow) = end_writes(&mut connection, commit).await;
                     // The handle may have stopped waiting.
                     let _ = reply.send(result);
                     flow
@@ -1116,16 +1208,118 @@ impl Server {
         }
     }
 
+    /// The table at `path` as an import's target. Read in the session's
+    /// snapshot, outside any transaction an import opens later.
+    async fn table_target(
+        &mut self,
+        connection: &mut PgConnection,
+        path: &ObjectPath,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::EditTarget>, Flow) {
+        let read = bounded(
+            cancel,
+            Some(CATALOG),
+            crate::edit::table_target(connection, &self.database, path),
+        )
+        .await;
+        match read {
+            Ok(target) => (Ok(target), Flow::Ready),
+            Err(error) => {
+                let flow = self.abandon(connection, None, &error).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Opens the import's transaction, which only the session's own
+    /// `end_writes` ends.
+    async fn begin_writes(
+        &mut self,
+        connection: &mut PgConnection,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<()>, Flow) {
+        match edit_scope(connection).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return (
+                    Err(DriverError::validation(
+                        "The session already holds a transaction",
+                    )),
+                    Flow::Ready,
+                );
+            }
+            Err(error) => return (Err(error), Flow::Ready),
+        }
+        match bounded(cancel, Some(RECOVERY), simple(connection, "BEGIN")).await {
+            Ok(()) => {
+                self.unread = false;
+                (Ok(()), Flow::Ready)
+            }
+            Err(error) => {
+                let flow = self.abandon(connection, None, &error).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// A write that joins the import's transaction (`WriteScope::Caller`):
+    /// the changes run with nothing committed or rolled back, and one that
+    /// fails or affects another number of rows than one fails the write at
+    /// its index. The transaction is left to `end_writes`.
+    async fn write_in_caller(
+        &mut self,
+        connection: &mut PgConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        match edit_scope(connection).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    Err(DriverError::validation("Begin the writes first")),
+                    Flow::Ready,
+                );
+            }
+            Err(error) => return (Err(error), Flow::Ready),
+        }
+        let applied = bounded(
+            cancel,
+            request.timeout,
+            crate::edit::apply(connection, &self.database, request),
+        )
+        .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => (
+                Ok(write::WriteOutcome::Written {
+                    rows,
+                    committed: false,
+                }),
+                Flow::Ready,
+            ),
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => {
+                (Err(mismatch(index, matched)), Flow::Ready)
+            }
+            Err(error) => {
+                let flow = self.abandon(connection, None, &error).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
     /// Writes `request` in a transaction of its own, or in a savepoint of the
     /// open one, and commits (or releases the savepoint) only when every
     /// change affected exactly one row. A failure, a cancellation or the
-    /// timeout rolls back what the write did.
+    /// timeout rolls back what the write did. A write with
+    /// `WriteScope::Caller` joins the import's transaction instead.
     async fn write(
         &mut self,
         connection: &mut PgConnection,
         request: &write::WriteRequest,
         cancel: &CancellationToken,
     ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        if request.scope == write::WriteScope::Caller {
+            return self.write_in_caller(connection, request, cancel).await;
+        }
         let nested = match edit_scope(connection).await {
             Ok(nested) => nested,
             Err(error) => return (Err(error), Flow::Ready),

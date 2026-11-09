@@ -863,6 +863,7 @@ async fn write(
         target: target.clone(),
         changes,
         timeout: Some(Duration::from_secs(30)),
+        scope: write::WriteScope::Atomic,
     };
     session.write(&request, CancellationToken::new()).await
 }
@@ -1092,4 +1093,137 @@ async fn edits_are_written_with_bound_values_and_roll_back_on_a_mismatch() {
     .unwrap_err();
     assert_eq!(changed.code, ErrorCode::Validation);
     assert!(session.is_open());
+}
+
+#[tokio::test]
+async fn an_import_writes_inside_one_transaction_that_only_it_ends() {
+    use write::{RowChange, WriteOutcome, WriteScope, WriteValue};
+    let folder = Folder::new();
+    let path = seeded(&folder).await;
+    let mut session = SqliteDriver
+        .open_session(&input(&path, false), CancellationToken::new())
+        .await
+        .unwrap();
+    run_all(&mut session, EDITS).await;
+    let items = ObjectPath::default()
+        .child(ObjectKind::Schema, "main")
+        .child(ObjectKind::Table, "items");
+    let target = session
+        .table_target(&items, CancellationToken::new())
+        .await
+        .unwrap()
+        .editable()
+        .unwrap();
+    // Every column, in table order, and no key: an import only inserts.
+    assert!(target.key.is_empty());
+    assert_eq!(
+        target
+            .columns
+            .iter()
+            .flatten()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        ["id", "note", "data", "doubled"]
+    );
+    let missing = session
+        .table_target(
+            &ObjectPath::default()
+                .child(ObjectKind::Schema, "main")
+                .child(ObjectKind::Table, "nothing"),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        missing,
+        write::EditTarget::ReadOnly(write::ReadOnlyReason::TableNotFound { .. })
+    ));
+    let insert = |note: WriteValue| RowChange::Insert {
+        values: vec![(1, note)],
+    };
+    let request = |changes: Vec<RowChange>| write::WriteRequest {
+        target: target.clone(),
+        changes,
+        timeout: Some(Duration::from_secs(30)),
+        scope: WriteScope::Caller,
+    };
+    // Without begin_writes there is no transaction to join.
+    let refused = session
+        .write(&request(vec![insert(text("x"))]), CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Validation);
+    session
+        .begin_writes(CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(
+        session
+            .begin_writes(CancellationToken::new())
+            .await
+            .is_err(),
+        "one transaction at a time"
+    );
+    let written = session
+        .write(
+            &request(vec![
+                insert(text("three")),
+                insert(WriteValue::Boolean(true)),
+                insert(WriteValue::Null),
+            ]),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        written,
+        WriteOutcome::Written {
+            rows: 3,
+            committed: false
+        }
+    );
+    session
+        .end_writes(false, CancellationToken::new())
+        .await
+        .unwrap();
+    let (_, rows) = run(&mut session, "SELECT count(*) FROM items")
+        .await
+        .unwrap();
+    assert_eq!(rows.rows, [vec![Cell::Integer(2)]], "rolled back");
+    // A change the table refuses fails at its index, inside the transaction.
+    session
+        .begin_writes(CancellationToken::new())
+        .await
+        .unwrap();
+    let failed = session
+        .write(
+            &write::WriteRequest {
+                changes: vec![
+                    RowChange::Insert {
+                        values: vec![(0, text("10")), (1, text("ten"))],
+                    },
+                    RowChange::Insert {
+                        values: vec![(0, text("1")), (1, text("duplicate key"))],
+                    },
+                ],
+                ..request(vec![])
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(failed.change(), Some(1));
+    session
+        .end_writes(true, CancellationToken::new())
+        .await
+        .unwrap();
+    let (_, rows) = run(&mut session, "SELECT note FROM items WHERE id = 10")
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.rows,
+        [vec![Cell::Text("ten".into())]],
+        "the caller decides: committed with the row before the failure"
+    );
+    session.close().await.unwrap();
 }

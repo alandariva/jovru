@@ -171,6 +171,24 @@ pub struct WriteRequest {
     pub changes: Vec<RowChange>,
     /// The tab's statement timeout, for the whole write.
     pub timeout: Option<Duration>,
+    /// Whether the write is atomic on its own or joins the transaction
+    /// [`crate::Session::begin_writes`] opened (ADR-0040).
+    pub scope: WriteScope,
+}
+
+/// Which transaction a write runs in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WriteScope {
+    /// ADR-0039: the request is atomic on its own (its own transaction, or a
+    /// savepoint inside an open one).
+    #[default]
+    Atomic,
+    /// Inside the transaction [`crate::Session::begin_writes`] opened
+    /// (ADR-0040): nothing is committed, and a change that fails, affects
+    /// another number of rows than one or (MySQL) has a value adjusted fails
+    /// the write with that change's index ([`DriverError::change`]),
+    /// leaving the transaction for [`crate::Session::end_writes`] to end.
+    Caller,
 }
 
 /// One row's change.
@@ -199,6 +217,9 @@ pub enum WriteValue {
     /// database converts it to the column's type.
     Text(String),
     Bytes(Vec<u8>),
+    /// An XLSX boolean (ADR-0040), bound as the database's boolean:
+    /// PostgreSQL's `boolean`, `1` or `0` in MySQL and SQLite.
+    Boolean(bool),
 }
 
 /// How a write ended.
@@ -244,7 +265,12 @@ impl WriteRequest {
                 "A write may hold at most {MAX_CHANGES} changed rows"
             )));
         }
-        if self.target.key.is_empty() {
+        // An insert needs no key: an import's target has none (ADR-0040).
+        let keyed = self
+            .changes
+            .iter()
+            .any(|change| !matches!(change, RowChange::Insert { .. }));
+        if keyed && self.target.key.is_empty() {
             return Err(DriverError::validation(
                 "Name the key columns that identify a row first",
             ));
@@ -531,6 +557,29 @@ pub fn resolve(catalog: CatalogTable, sources: &[Option<String>], writes: WriteM
     })
 }
 
+/// The target an import inserts into (ADR-0040, [`crate::Session::table_target`]):
+/// every column of `catalog`'s table, in table order, and no key, since an
+/// import only inserts.
+pub fn insert_target(catalog: CatalogTable) -> EditTarget {
+    let key_kind = if catalog.primary_key.is_empty() {
+        KeyKind::UniqueNotNull
+    } else {
+        KeyKind::PrimaryKey
+    };
+    EditTarget::Editable(EditableTable {
+        table: catalog.table,
+        writes: WriteMode::Direct,
+        columns: catalog
+            .columns
+            .into_iter()
+            .map(|(_, column)| Some(column))
+            .collect(),
+        key: Vec::new(),
+        key_kind,
+        side_effects: catalog.side_effects,
+    })
+}
+
 /// Whether the table `catalog` describes, read again before a write, is
 /// still the one `target` was resolved against: the same path, every
 /// column of the target with the same type and as writable, and the key
@@ -551,6 +600,8 @@ pub fn still_matches(target: &EditableTable, catalog: &CatalogTable) -> bool {
         .collect();
     let key_match = match (target.key_kind, key) {
         (_, None) => false,
+        // An insert target has no key to keep.
+        (_, Some(key)) if key.is_empty() => true,
         (KeyKind::PrimaryKey, Some(key)) => catalog.primary_key == key,
         (KeyKind::UniqueNotNull, Some(key)) => {
             catalog.primary_key.is_empty() && catalog.unique_keys.contains(&key)
@@ -668,6 +719,7 @@ mod tests {
             target: target(),
             changes,
             timeout: None,
+            scope: WriteScope::Atomic,
         };
         assert!(request(vec![]).validate().is_err());
         assert!(
@@ -828,6 +880,43 @@ mod tests {
         assert_eq!(
             resolve(unique_only, &sources(&[Some("1")]), WriteMode::Direct),
             EditTarget::ReadOnly(ReadOnlyReason::NoKey)
+        );
+    }
+
+    #[test]
+    fn an_import_target_has_every_column_and_no_key() {
+        let target = insert_target(catalog()).editable().unwrap();
+        assert!(target.key.is_empty());
+        assert_eq!(target.columns.len(), 3);
+        assert!(still_matches(&target, &catalog()), "no key to keep");
+        let request = |changes: Vec<RowChange>| WriteRequest {
+            target: target.clone(),
+            changes,
+            timeout: None,
+            scope: WriteScope::Caller,
+        };
+        assert!(
+            request(vec![RowChange::Insert {
+                values: vec![(0, WriteValue::Boolean(true))]
+            }])
+            .validate()
+            .is_ok(),
+            "inserts need no key"
+        );
+        assert!(
+            request(vec![RowChange::Delete {
+                key: vec![text("1")]
+            }])
+            .validate()
+            .is_err(),
+            "anything else does"
+        );
+        let error = DriverError::validation("x").at_change(41);
+        assert_eq!(error.change(), Some(41));
+        assert_eq!(DriverError::validation("x").change(), None);
+        assert!(
+            std::mem::size_of::<DriverError>() < 128,
+            "an error stays small"
         );
     }
 

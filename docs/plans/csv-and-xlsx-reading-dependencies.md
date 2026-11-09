@@ -10,7 +10,7 @@ recommendation of the open decisions [below](#open-decisions-of-a11)
 `debug_unsafe` in release builds
 ([residual risks](#residual-risks)) after `umya-spreadsheet` was evaluated
 as its replacement and set aside ([alternatives](#alternatives-considered)).
-**Implementation:** In progress: the three crates are declared and
+**Implementation:** Complete, with checks pending (see A11): the three crates are declared and
 `jykre::import` reads with them; `zip` became a direct dependency of the
 `jykre` crate for the shared strings check (it was only a development
 dependency, not direct as section 4 assumed), and `atoi_simd` brings

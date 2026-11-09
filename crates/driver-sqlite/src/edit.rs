@@ -9,8 +9,8 @@ use crate::runtime::map_error;
 use crate::{MAIN_SCHEMA, SqliteDriver};
 use jykre_core::write::{
     CatalogTable, EditTarget, EditableColumn, ReadOnlyReason, ReferenceAction, SideEffect,
-    WriteMode, WriteRequest, WriteValue, changed, resolve, single_relation, statement,
-    still_matches,
+    WriteMode, WriteRequest, WriteValue, changed, insert_target, resolve, single_relation,
+    statement, still_matches,
 };
 use jykre_core::*;
 use sqlx::sqlite::SqliteConnection;
@@ -131,6 +131,23 @@ fn affinity(declared: &str) -> &'static str {
     } else {
         "NUMERIC"
     }
+}
+
+/// The table at `path` (its database, `main` or attached, and name) as an
+/// import's target, read from the schema.
+pub(crate) async fn table_target(
+    connection: &mut SqliteConnection,
+    path: &ObjectPath,
+) -> DriverResult<EditTarget> {
+    let Some(table) = path.name_of(ObjectKind::Table) else {
+        return Err(DriverError::validation("Choose a table to import into"));
+    };
+    let schema = path.name_of(ObjectKind::Schema).unwrap_or(MAIN_SCHEMA);
+    Ok(match catalog(connection, schema, table).await? {
+        Some(Ok(catalog)) => insert_target(catalog),
+        Some(Err(reason)) => EditTarget::ReadOnly(reason),
+        None => EditTarget::ReadOnly(ReadOnlyReason::TableNotFound { name: table.into() }),
+    })
 }
 
 /// The table as a write target, or why it cannot be one; `None` when it is
@@ -337,12 +354,14 @@ pub(crate) async fn apply(
                 WriteValue::Null => query.bind(None::<String>),
                 WriteValue::Text(text) => query.bind(text.clone()),
                 WriteValue::Bytes(bytes) => query.bind(bytes.clone()),
+                // SQLite has no boolean: 1 or 0 (ADR-0040).
+                WriteValue::Boolean(flag) => query.bind(i64::from(*flag)),
             };
         }
         let matched = query
             .execute(&mut *connection)
             .await
-            .map_err(map_error)?
+            .map_err(|error| map_error(error).at_change(index))?
             .rows_affected();
         if matched != 1 {
             return Ok(Applied::Mismatch { index, matched });

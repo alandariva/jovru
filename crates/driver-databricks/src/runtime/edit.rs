@@ -616,8 +616,12 @@ pub(super) fn write_script(request: &WriteRequest) -> DriverResult<WriteScript> 
             };
             let value = match value {
                 WriteValue::Null => None,
+                // A boolean's text, read as the parameter's kind like any.
+                WriteValue::Boolean(flag) if is_parameter_value(kind, &flag.to_string()) => {
+                    Some(flag.to_string())
+                }
                 WriteValue::Text(text) if is_parameter_value(kind, &text) => Some(text),
-                WriteValue::Text(_) => {
+                WriteValue::Text(_) | WriteValue::Boolean(_) => {
                     return Err(DriverError::validation(format!(
                         "The value of {} in change {} does not fit a {} parameter",
                         column.name,
@@ -903,6 +907,7 @@ mod tests {
                 },
             ],
             timeout: None,
+            scope: write::WriteScope::Atomic,
         };
         let script = write_script(&request).unwrap();
         assert_eq!(

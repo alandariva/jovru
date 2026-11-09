@@ -75,6 +75,8 @@ pub enum Problem {
     GeneratedFilled(String),
     /// A column is filled from a file column the file no longer has.
     MissingSource(String),
+    /// A column chosen from the metadata is no longer in the table.
+    TargetGone(String),
 }
 
 impl Problem {
@@ -93,6 +95,10 @@ impl Problem {
             ),
             Self::MissingSource(column) => tr!(
                 "The file no longer has the column chosen for {0}. Choose it again.",
+                column
+            ),
+            Self::TargetGone(column) => tr!(
+                "The table no longer has the column {0}. Refresh its metadata and choose the columns again.",
                 column
             ),
         }
@@ -168,6 +174,39 @@ impl Mapping {
 
     pub fn targets(&self) -> &[TargetColumn] {
         &self.targets
+    }
+
+    /// The same choices against `targets`, the table as the driver
+    /// describes it when the import starts: each table column keeps the
+    /// file column chosen for its name. A chosen column the table no longer
+    /// has is refused.
+    pub fn with_targets(&self, targets: Vec<TargetColumn>) -> Result<Mapping, Problem> {
+        let mut sources = vec![None; targets.len()];
+        for (target, source) in self.targets.iter().zip(&self.sources) {
+            let Some(source) = source else {
+                continue;
+            };
+            let Some(slot) = targets
+                .iter()
+                .position(|fresh| fresh.name == target.name)
+                .and_then(|index| sources.get_mut(index))
+            else {
+                return Err(Problem::TargetGone(target.name.clone()));
+            };
+            *slot = Some(*source);
+        }
+        Ok(Mapping { targets, sources })
+    }
+
+    /// The positions of the table columns that take a value, in table order:
+    /// the columns of [`Mapping::project`]'s values.
+    pub fn mapped(&self) -> Vec<usize> {
+        self.sources
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| source.is_some())
+            .map(|(index, _)| index)
+            .collect()
     }
 
     /// The file column that fills the table column `target`.

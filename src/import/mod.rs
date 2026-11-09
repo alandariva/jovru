@@ -26,8 +26,11 @@ pub mod delimited;
 pub mod draft;
 pub mod mapping;
 pub mod pipeline;
+pub mod session;
 pub mod workbook;
 
+#[cfg(test)]
+mod session_tests;
 #[cfg(test)]
 mod tests;
 

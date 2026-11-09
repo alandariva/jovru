@@ -359,8 +359,8 @@ A query tab's result is written back to its table through the driver
 
 ### Import a file into a table
 
-[ADR-0040](../adr/0040-importing-files-into-a-table.md). Implemented up to
-the preview; writing waits for ADR-0039's write path.
+[ADR-0040](../adr/0040-importing-files-into-a-table.md), on ADR-0039's
+write path ([Drivers](drivers.md#importing-rows)).
 
 1. **Import from file…** in the explorer's menu of a table (or of a
    last-level namespace) opens `src/app/import/`'s dialog on that
@@ -379,11 +379,20 @@ the preview; writing waits for ADR-0039's write path.
    dialog shows the mapped values as they would be bound.
 4. **New table from this file…** opens `import::draft::create_table`, quoted
    by the driver, in a new query tab, not run.
-5. The write part will implement `import::pipeline::BatchWriter` over the
-   import's own session and call `import::pipeline::run`: the reader
-   (`read_batches`, on the blocking pool) sends batches of 1,000 rows or
-   8 MiB through a channel of 2, the writer writes them in one
-   transaction, and a failure, **Cancel** or the time limit rolls it back.
+5. **Import** asks for the password when it is not in memory and, on a
+   connection marked Production, asks first; then the dialog runs
+   `import::session::run` through `backend::run`. It opens a session of its
+   own with `Driver::session_connection` in the table's context, reads the
+   table with `Session::table_target`, checks the mapping against that
+   description (`Mapping::with_targets`: the driver decides what is
+   required and generated), and runs `import::pipeline::run` with
+   `import::session::SessionWriter`: the reader (`read_batches`, on the
+   blocking pool) sends batches of 1,000 rows or 8 MiB through a channel of
+   2, each written as one `WriteRequest` of inserts with
+   `WriteScope::Caller` between `begin_writes` and `end_writes`. A failure,
+   **Cancel** or the time limit rolls back; a rejected value names the
+   file's line (`DriverError::change`). The session is closed at the end,
+   and only the outcome is logged.
 
 ### Run a report
 

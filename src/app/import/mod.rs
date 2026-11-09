@@ -5,14 +5,15 @@
 //! field means, with a preview of the values that would be bound.
 //!
 //! Everything it decides is `jykre::import`'s; the dialog only holds the
-//! choices and shows what the library read, off the UI thread. Writing the
-//! rows needs ADR-0039's write path, which is not accepted yet, so
-//! **Import** stays disabled ([`ImportDialog::import`]).
+//! choices and shows what the library read, off the UI thread. **Import**
+//! runs `jykre::import::session::run` on the runtime, in a session of its
+//! own, all or nothing, and says how it ended ([`ImportDialog::run`]).
 use super::*;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use jykre::import::mapping::{Mapping, MatchBy, TargetColumn};
-use jykre::import::pipeline::TimeLimit;
+use jykre::import::pipeline::{ImportPlan, Outcome, Progress, TimeLimit};
+use jykre::import::session::ImportJob;
 use jykre::import::{
     CsvOptions, Delimiter, EmptyFields, FileKind, ImportValue, Preview, ReadOptions, XlsxOptions,
     delimited::ENCODINGS,
@@ -64,11 +65,30 @@ impl<T> Load<T> {
 /// What the dialog asks of the window.
 pub(super) enum ImportEvent {
     Close,
+    /// Import now: the window asks for the password and, on a Production
+    /// connection, confirms first, then calls [`ImportDialog::run`].
+    Start,
     /// Open `sql`, a draft `CREATE TABLE`, in a new query tab titled
     /// `title`.
     Draft {
         sql: String,
         title: String,
+    },
+}
+
+/// The import, from **Import** to its outcome.
+enum ImportRun {
+    Idle,
+    Running {
+        started: Instant,
+        cancel: CancellationToken,
+        progress: tokio::sync::watch::Receiver<Progress>,
+    },
+    /// How it ended, in words: the outcome and, under it, why.
+    Finished {
+        tone: Tone,
+        text: String,
+        detail: Option<String>,
     },
 }
 
@@ -119,6 +139,8 @@ pub(super) struct ImportDialog {
     shown_columns: Vec<(String, String)>,
     problems: Vec<String>,
     time_limit: TimeLimit,
+    /// The import itself, once started.
+    run: ImportRun,
     /// Bumped by every read, so a late answer for an earlier one is
     /// dropped.
     revision: u64,
@@ -247,6 +269,7 @@ impl ImportDialog {
             shown_columns: Vec::new(),
             problems: Vec::new(),
             time_limit: TimeLimit::default(),
+            run: ImportRun::Idle,
             revision: 0,
             mapping_scroll: UniformListScrollHandle::new(),
             preview_scroll: UniformListScrollHandle::new(),
@@ -685,19 +708,142 @@ impl ImportDialog {
         cx.emit(ImportEvent::Draft { sql, title: table });
     }
 
-    /// **Import**: not available until ADR-0039's write path is accepted.
-    ///
-    /// TODO(ADR-0039): implement `jykre::import::pipeline::BatchWriter` over
-    /// the import's own session (`Driver::session_connection` in the table's
-    /// context; `Session::table_target` to check the mapping against the
-    /// driver's description; `begin_writes`, `write` with
-    /// `WriteScope::Caller` and `end_writes`), ask first on a Production
-    /// connection, then run `jykre::import::pipeline::run` with
-    /// `self.time_limit`, showing its `Progress` after 300 ms and its
-    /// elapsed time and **Cancel** past 2 s, and say its `Outcome` in words.
-    fn import(&mut self, _cx: &mut Context<Self>) {}
+    /// **Import**: once the file, the table and the mapping are ready, the
+    /// window asks for what it must (password, Production) and calls
+    /// [`ImportDialog::run`].
+    fn import(&mut self, cx: &mut Context<Self>) {
+        if self.ready_to_import() {
+            cx.emit(ImportEvent::Start);
+        }
+    }
+
+    /// The file, the table, a mapping without problems and nothing running.
+    fn ready_to_import(&self) -> bool {
+        self.file.is_some()
+            && self.selected_table().is_some()
+            && self.preview.ready().is_some()
+            && self.mapping.is_some()
+            && self.problems.is_empty()
+            && self.header_error.is_none()
+            && !matches!(self.run, ImportRun::Running { .. })
+    }
+
+    fn selected_table(&self) -> Option<&ObjectPath> {
+        self.table.and_then(|index| self.tables.get(index))
+    }
+
+    /// The file's name and the table's, for the Production question.
+    pub(super) fn describe(&self) -> (String, String) {
+        let file = self
+            .file
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let table = self
+            .selected_table()
+            .map(jykre::explorer::qualified_title)
+            .unwrap_or_default();
+        (file, table)
+    }
+
+    /// An import is running, so the dialog stays until it ends.
+    pub(super) fn is_running(&self) -> bool {
+        matches!(self.run, ImportRun::Running { .. })
+    }
+
+    /// Runs the import with `connection` (its password in memory), in a
+    /// session of its own, all or nothing. Progress shows after 300 ms, and
+    /// the elapsed time and **Cancel** past 2 s.
+    pub(super) fn run(&mut self, connection: ResolvedConnection, cx: &mut Context<Self>) {
+        if !self.ready_to_import() {
+            return;
+        }
+        let (Some(path), Some(table), Some(mapping)) = (
+            self.file.clone(),
+            self.selected_table().cloned(),
+            self.mapping.clone(),
+        ) else {
+            return;
+        };
+        let Some(options) = self.read_options(cx) else {
+            cx.notify();
+            return;
+        };
+        let title = jykre::explorer::qualified_title(&table);
+        let job = ImportJob {
+            connection,
+            table,
+            plan: ImportPlan {
+                path,
+                options,
+                mapping,
+            },
+            limit: self.time_limit.duration(),
+        };
+        let (sender, receiver) = tokio::sync::watch::channel(Progress::default());
+        let cancel = CancellationToken::new();
+        self.run = ImportRun::Running {
+            started: Instant::now(),
+            cancel: cancel.clone(),
+            progress: receiver,
+        };
+        self.tick_run(cx);
+        cx.notify();
+        cx.spawn(async move |weak, cx| {
+            let outcome =
+                backend::run(
+                    async move { Ok(jykre::import::session::run(job, cancel, sender).await) },
+                )
+                .await;
+            let _ = weak.update(cx, |this, cx| {
+                this.run = finished(&outcome, &title);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// **Cancel** while importing: the transaction rolls back, and the
+    /// outcome says so.
+    pub(super) fn cancel_import(&mut self, cx: &mut Context<Self>) {
+        if let ImportRun::Running { cancel, .. } = &self.run {
+            cancel.cancel();
+            cx.notify();
+        }
+    }
+
+    /// Redraws while the import runs: after 300 ms for its progress, then
+    /// four times a second.
+    fn tick_run(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| {
+            let mut wait = Duration::from_millis(300);
+            loop {
+                cx.background_executor().timer(wait).await;
+                wait = Duration::from_millis(250);
+                let running = weak
+                    .update(cx, |this, cx| {
+                        let running = this.is_running();
+                        if running {
+                            cx.notify();
+                        }
+                        running
+                    })
+                    .unwrap_or(false);
+                if !running {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
 
     fn close(&mut self, cx: &mut Context<Self>) {
+        if self.is_running() {
+            // Closing while it runs cancels it; the outcome stays on screen.
+            self.cancel_import(cx);
+            return;
+        }
         if let Some(reading) = self.reading.take() {
             reading.cancel();
         }
@@ -1180,7 +1326,76 @@ impl ImportDialog {
             .into_any_element()
     }
 
+    /// The import's progress after 300 ms, its elapsed time and **Cancel**
+    /// past 2 s, then how it ended.
+    fn run_status(&self, cx: &mut Context<Self>) -> AnyElement {
+        match &self.run {
+            ImportRun::Idle => div().into_any_element(),
+            ImportRun::Running {
+                started, progress, ..
+            } => {
+                let elapsed = started.elapsed();
+                if elapsed < Duration::from_millis(300) {
+                    return div().into_any_element();
+                }
+                let progress = *progress.borrow();
+                let rows = jykre::cell_format::count(progress.rows_written as usize);
+                let text = match progress.read {
+                    Some(share) => tr!(
+                        "Importing… {0} rows written, {1} % of the file read",
+                        rows,
+                        (share * 100.0).floor() as u32
+                    ),
+                    None => tr!("Importing… {0} rows written", rows),
+                };
+                row()
+                    .id("import-progress")
+                    .role(Role::Status)
+                    .gap_2()
+                    .child(spinning_icon(
+                        "import-run-spinner",
+                        I::LoaderCircle,
+                        colors().mint,
+                    ))
+                    .child(div().text_size(px(13.)).child(text))
+                    .when(elapsed >= Duration::from_secs(2), |s| {
+                        s.child(label(jykre::cell_format::duration(
+                            elapsed.as_millis() as u64
+                        )))
+                        .child(
+                            button("import-cancel", I::X, tr!("Cancel import"))
+                                .on_click(cx.listener(|this, _, _, cx| this.cancel_import(cx))),
+                        )
+                    })
+                    .into_any_element()
+            }
+            ImportRun::Finished { tone, text, detail } => column()
+                .id("import-outcome")
+                .role(if *tone == Tone::Error {
+                    Role::Alert
+                } else {
+                    Role::Status
+                })
+                .gap_1()
+                .child(feedback_line(&Feedback::new(*tone, text.clone())))
+                .when_some(detail.clone(), |s, detail| {
+                    s.child(
+                        div()
+                            .pl_6()
+                            .font_family(fonts().mono.clone())
+                            .text_size(px(12.))
+                            .text_color(rgb(colors().muted))
+                            .child(detail),
+                    )
+                })
+                .into_any_element(),
+        }
+    }
+
     fn footer(&self, cx: &mut Context<Self>) -> Div {
+        let running = self.is_running();
+        let finished = matches!(self.run, ImportRun::Finished { .. });
+        let ready = self.ready_to_import();
         column()
             .gap_2()
             .when(!self.problems.is_empty(), |s| {
@@ -1201,8 +1416,9 @@ impl ImportDialog {
                         .role(Role::Alert),
                 )
             })
+            .child(self.run_status(cx))
             .child(label(tr!(
-                "Writing the rows into the table is not available yet. The preview shows what an import would write."
+                "The rows are added to the table in one transaction: all of them, or none if anything fails or you cancel. Values are sent as written and converted by the database."
             )))
             .child(
                 row()
@@ -1226,19 +1442,60 @@ impl ImportDialog {
                     .child(
                         row()
                             .gap_2()
-                            .child(
-                                button("import-close", I::X, tr!("Cancel"))
+                            .when(!running, |s| {
+                                s.child(
+                                    button(
+                                        "import-close",
+                                        I::X,
+                                        if finished { tr!("Close") } else { tr!("Cancel") },
+                                    )
                                     .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
-                            )
+                                )
+                            })
                             .child(
                                 primary_button("import-run", I::Upload, tr!("Import"))
-                                    .opacity(0.5)
-                                    .cursor_default()
-                                    .aria_label(tr!("Import, not available yet"))
+                                    .when(!ready, |s| s.opacity(0.5).cursor_default())
                                     .on_click(cx.listener(|this, _, _, cx| this.import(cx))),
                             ),
                     ),
             )
+    }
+}
+
+/// How an import ended, in words (ADR-0040, section 4).
+fn finished(outcome: &DriverResult<Outcome>, table: &str) -> ImportRun {
+    match outcome {
+        Ok(outcome @ Outcome::Imported { .. }) => ImportRun::Finished {
+            tone: Tone::Success,
+            text: outcome.message(table),
+            detail: None,
+        },
+        Ok(outcome @ Outcome::NothingImported { reason }) => ImportRun::Finished {
+            tone: if reason.code == ErrorCode::Cancelled {
+                Tone::Info
+            } else {
+                Tone::Error
+            },
+            text: outcome.message(table),
+            detail: Some(if reason.code == ErrorCode::Cancelled {
+                tr!("The import was cancelled.").to_owned()
+            } else {
+                reason.message.clone()
+            }),
+        },
+        Ok(outcome @ Outcome::Unknown { .. }) => ImportRun::Finished {
+            tone: Tone::Warning,
+            text: outcome.message(table),
+            detail: None,
+        },
+        Err(error) => ImportRun::Finished {
+            tone: Tone::Error,
+            text: tr!(
+                "The import stopped unexpectedly. Check {0} before importing again.",
+                table
+            ),
+            detail: Some(error.message.clone()),
+        },
     }
 }
 
@@ -1398,6 +1655,7 @@ impl AppView {
             window,
             move |this, _, event: &ImportEvent, window, cx| match event {
                 ImportEvent::Close => this.close_import(window, cx),
+                ImportEvent::Start => this.start_import(key, window, cx),
                 ImportEvent::Draft { sql, title } => {
                     let (sql, title) = (sql.clone(), title.clone());
                     this.close_import(window, cx);
@@ -1418,7 +1676,16 @@ impl AppView {
     }
 
     /// Closes the dialog; nothing was written.
+    /// Closes the dialog. While an import runs, closing cancels it instead,
+    /// and the dialog stays to say what it left.
     pub(super) fn close_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(host) = &self.import_dialog
+            && host.dialog.read(cx).is_running()
+        {
+            host.dialog
+                .update(cx, |dialog, cx| dialog.cancel_import(cx));
+            return;
+        }
         if let Some(host) = self.import_dialog.take() {
             // A preview still being read stops with the dialog.
             host.dialog.update(cx, |dialog, _| {
@@ -1429,6 +1696,61 @@ impl AppView {
             self.focus_active_editor(window, cx);
             cx.notify();
         }
+    }
+
+    /// **Import**: asks for the connection's password when it is not in
+    /// memory, then, on a connection marked Production, asks first, naming
+    /// the connection, the table and the file; then the dialog runs it.
+    fn start_import(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = self.connection_index(key) else {
+            return;
+        };
+        let Some(connection) = self.connections.get(index) else {
+            return;
+        };
+        let Some(input) = connection.input.clone() else {
+            return;
+        };
+        if connection_store::needs_password(&input) {
+            self.ask_password(
+                index,
+                Box::new(move |this, window, cx| this.start_import(key, window, cx)),
+                Box::new(|_, _| {}),
+                cx,
+            );
+            return;
+        }
+        let Some(dialog) = self.import_view() else {
+            return;
+        };
+        let production = connection.appearance.environment
+            == Some(jykre::connection_appearance::Environment::Production);
+        if !production {
+            dialog.update(cx, |dialog, cx| dialog.run(input, cx));
+            return;
+        }
+        let (file, table) = dialog.read(cx).describe();
+        let name = connection.name.clone();
+        confirm(
+            window,
+            cx,
+            Confirmation {
+                title: tr!("Import into a production table?").to_owned(),
+                description: tr!(
+                    "The rows of {0} are added to {1} on {2}, a connection marked Production. They are written in one transaction: all of them, or none.",
+                    file,
+                    table,
+                    name
+                ),
+                ok: tr!("Import on production"),
+                cancel: tr!("Cancel"),
+                focus: ConfirmFocus::Dialog,
+            },
+            move |_, cx| {
+                let input = input.clone();
+                dialog.update(cx, |dialog, cx| dialog.run(input, cx));
+            },
+        );
     }
 
     /// Opens the draft `CREATE TABLE` in a new query tab of the connection

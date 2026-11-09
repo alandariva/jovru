@@ -8,8 +8,8 @@ use crate::MySqlDriver;
 use crate::runtime::map_error;
 use jykre_core::write::{
     CatalogTable, EditTarget, EditableColumn, ReadOnlyReason, ReferenceAction, SideEffect,
-    WriteMode, WriteRequest, WriteValue, changed, resolve, single_relation, statement,
-    still_matches,
+    WriteMode, WriteRequest, WriteValue, changed, insert_target, resolve, single_relation,
+    statement, still_matches,
 };
 use jykre_core::*;
 use sqlx::Row as _;
@@ -91,6 +91,27 @@ async fn split(
         }
     }
     Ok(if found.len() == 1 { found.pop() } else { None })
+}
+
+/// The table at `path` (its database and name) as an import's target, read
+/// from `information_schema`.
+pub(crate) async fn table_target(
+    connection: &mut MySqlConnection,
+    path: &ObjectPath,
+) -> DriverResult<EditTarget> {
+    let (Some(schema), Some(table)) = (
+        path.name_of(ObjectKind::Database),
+        path.name_of(ObjectKind::Table),
+    ) else {
+        return Err(DriverError::validation("Choose a table to import into"));
+    };
+    Ok(match catalog(connection, schema, table).await? {
+        Some(Ok(catalog)) => insert_target(catalog),
+        Some(Err(reason)) => EditTarget::ReadOnly(reason),
+        None => EditTarget::ReadOnly(ReadOnlyReason::TableNotFound {
+            name: format!("{schema}.{table}"),
+        }),
+    })
 }
 
 /// The table as a write target, or why it cannot be one; `None` when it is
@@ -392,6 +413,8 @@ pub(crate) async fn apply(
                 (WriteValue::Null, _) => query.bind(None::<String>),
                 (WriteValue::Text(text), false) => query.bind(text.clone()),
                 (WriteValue::Bytes(bytes), true) => query.bind(bytes.clone()),
+                // MySQL's boolean is `TINYINT(1)`: 1 or 0 (ADR-0040).
+                (WriteValue::Boolean(flag), false) => query.bind(i64::from(*flag)),
                 _ => {
                     return Err(DriverError::validation(
                         "A binary column takes bytes and a text column takes text",
@@ -402,7 +425,7 @@ pub(crate) async fn apply(
         let matched = query
             .execute(&mut *connection)
             .await
-            .map_err(map_error)?
+            .map_err(|error| map_error(error).at_change(index))?
             .rows_affected();
         // The text protocol, which leaves the diagnostics as they are.
         let warnings = sqlx::raw_sql("SELECT @@warning_count")

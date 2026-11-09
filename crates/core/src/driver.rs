@@ -182,6 +182,44 @@ pub trait Session: Debug + Send {
         Err(DriverError::not_implemented("this driver", "writing rows"))
     }
 
+    /// The table at `path` as an import's target (ADR-0040): every column,
+    /// in table order, with its declared type, nullability, default and
+    /// whether it can be written, read from the catalog in this session.
+    /// `key` is empty: an import only inserts. The default answers
+    /// `ReadOnly(DriverCannotTell)`.
+    async fn table_target(
+        &mut self,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<EditTarget> {
+        let _ = (path, cancel);
+        Ok(EditTarget::ReadOnly(ReadOnlyReason::DriverCannotTell))
+    }
+
+    /// Opens a transaction that the following [`Session::write`]s with
+    /// [`crate::write::WriteScope::Caller`] join, and
+    /// [`Session::end_writes`] ends (ADR-0040). Refused while the session
+    /// already holds a transaction. The default reports `NotImplemented`.
+    async fn begin_writes(&mut self, cancel: CancellationToken) -> DriverResult<()> {
+        let _ = cancel;
+        Err(DriverError::not_implemented(
+            "this driver",
+            "importing rows",
+        ))
+    }
+
+    /// Commits (`commit = true`) or rolls back the transaction
+    /// [`Session::begin_writes`] opened. A commit whose answer is lost fails
+    /// with `Connection`: the rows may or may not be written. The default
+    /// reports `NotImplemented`.
+    async fn end_writes(&mut self, commit: bool, cancel: CancellationToken) -> DriverResult<()> {
+        let _ = (commit, cancel);
+        Err(DriverError::not_implemented(
+            "this driver",
+            "importing rows",
+        ))
+    }
+
     /// The statements that would write `request`, with `:name` markers and
     /// their values apart, for a new query tab (`WriteMode::Script`). Runs
     /// nothing. The default reports `NotImplemented`.

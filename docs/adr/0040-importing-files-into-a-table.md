@@ -265,3 +265,21 @@ gives each decision's options and trade-offs:
 - In the application: the whole flow with the keyboard, the preview, the
   300 ms and 2 s rules, the Production question and the messages for
   success, rollback and an unknown commit.
+
+## Implementation notes
+
+2026-11-08, implementing A11:
+
+- The contract is as decided: `Session::table_target`, `begin_writes`,
+  `end_writes`, `WriteScope` on `WriteRequest` and `WriteValue::Boolean`.
+  Two additions carry it: `write::insert_target` builds the key-less target
+  from a driver's catalog read, and `DriverError` keeps the index of the
+  change a write failed at (`at_change`, `change()`), which is how the
+  import names the file's line. `WriteRequest::validate` accepts inserts
+  without a key.
+- A rejected value names the file's line and the server's message; the
+  column is named only when the server's message does, since a statement
+  inserts a whole row.
+- `calamine` was kept, with debug assertions on for `debug_unsafe` in
+  release builds, by the maintainer's decision
+  ([proposal](../plans/csv-and-xlsx-reading-dependencies.md#residual-risks)).

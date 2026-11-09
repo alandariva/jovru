@@ -505,10 +505,9 @@ system's save dialog (`jykre::export`, `backend::export`).
 
 ## Import
 
-**Import from file…** reads a CSV or an `.xlsx` sheet for a table
-([ADR-0040](../adr/0040-importing-files-into-a-table.md), `jykre::import`).
-Reading, the preview and the mapping are implemented; writing the rows waits
-for ADR-0039's write path, so **Import** is not available yet.
+**Import from file…** adds the rows of a CSV or an `.xlsx` sheet to a table
+([ADR-0040](../adr/0040-importing-files-into-a-table.md), `jykre::import`),
+through the driver's write path ([Drivers](drivers.md#importing-rows)).
 
 - **CSV:** the delimiter (`,`, `;`, tab or `|`; the first line suggests
   one), the encoding (UTF-8 by default, any of `encoding_rs`'s; a
@@ -540,7 +539,24 @@ for ADR-0039's write path, so **Import** is not available yet.
   mapped columns, NULL in its own style. **New table from this file…** opens
   a `CREATE TABLE` drafted from the header (every column the dialect's text
   type, names quoted by the driver) in a new query tab, not run.
-- File values are never logged or stored.
+- **Writing.** The import opens a session of its own in the table's
+  context, never a tab's, reads the table from the driver (which decides
+  what is required and generated) and writes every row in **one
+  transaction**: batches of 1,000 rows or 8 MiB, each value bound by the
+  driver and converted by the database (PostgreSQL's casts, MySQL's family
+  casts with `@@warning_count`, SQLite's affinity); an XLSX boolean is the
+  database's boolean. A value the database rejects stops the import, naming
+  the file's line and the server's message; MySQL's adjusted values are
+  refused the same way. The whole import has a time limit (15 min, 1 h by
+  default, 4 h or none); each batch has the default statement timeout.
+- **Outcome.** "Imported N rows into `schema.table`.", "Nothing was
+  imported: `schema.table` is as it was." (a failure, **Cancel** or the
+  time limit, which roll back; the reason under it), or "The connection was
+  lost while committing: the rows may or may not have been imported. Check
+  the table before importing again." Nothing is ever retried. SQLite holds
+  the file's write lock from the first row to the commit.
+- File values are never logged or stored; the log has the counts, the
+  table's path, the time and the error's code.
 
 ## Reports
 

@@ -8,8 +8,8 @@ use crate::PostgresDriver;
 use crate::runtime::map_error;
 use jykre_core::write::{
     CatalogTable, EditTarget, EditableColumn, ReadOnlyReason, ReferenceAction, SideEffect,
-    WriteMode, WriteRequest, WriteValue, changed, resolve, single_relation, statement,
-    still_matches,
+    WriteMode, WriteRequest, WriteValue, changed, insert_target, resolve, single_relation,
+    statement, still_matches,
 };
 use jykre_core::*;
 use sqlx::postgres::PgConnection;
@@ -60,6 +60,40 @@ pub(crate) async fn edit_target(
         })
         .collect();
     Ok(resolve(catalog, &sources, WriteMode::Direct))
+}
+
+/// The table at `path` (its schema and name; the session is in its
+/// database) as an import's target, read from the catalog.
+pub(crate) async fn table_target(
+    connection: &mut PgConnection,
+    database: &str,
+    path: &ObjectPath,
+) -> DriverResult<EditTarget> {
+    let (Some(schema), Some(table)) = (
+        path.name_of(ObjectKind::Schema),
+        path.name_of(ObjectKind::Table),
+    ) else {
+        return Err(DriverError::validation("Choose a table to import into"));
+    };
+    let oid: Option<Oid> = sqlx::query_scalar(
+        "SELECT c.oid FROM pg_catalog.pg_class c \
+         JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relname = $2",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(map_error)?;
+    let Some(oid) = oid else {
+        return Ok(EditTarget::ReadOnly(ReadOnlyReason::TableNotFound {
+            name: format!("{schema}.{table}"),
+        }));
+    };
+    Ok(match catalog(connection, database, oid.0).await? {
+        Ok(catalog) => insert_target(catalog),
+        Err(reason) => EditTarget::ReadOnly(reason),
+    })
 }
 
 /// A row of `pg_attribute`: number, name, type without modifier, NOT NULL,
@@ -261,6 +295,9 @@ pub(crate) async fn apply(
             query = match value {
                 WriteValue::Null => query.bind(None::<String>),
                 WriteValue::Text(text) => query.bind(text.clone()),
+                // Read as the column's type from `boolean`, as `CAST`
+                // allows (ADR-0040).
+                WriteValue::Boolean(flag) => query.bind(*flag),
                 // PostgreSQL reads `bytea` as its `\x` text.
                 WriteValue::Bytes(_) => {
                     return Err(DriverError::validation(
@@ -272,7 +309,7 @@ pub(crate) async fn apply(
         let matched = query
             .execute(&mut *connection)
             .await
-            .map_err(map_error)?
+            .map_err(|error| map_error(error).at_change(index))?
             .rows_affected();
         if matched != 1 {
             return Ok(Applied::Mismatch { index, matched });

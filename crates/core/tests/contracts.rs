@@ -608,12 +608,27 @@ async fn a_session_that_cannot_tell_keeps_results_read_only() {
         },
         changes: vec![],
         timeout: None,
+        scope: jykre_core::write::WriteScope::Atomic,
     };
     let written = session
         .write(&request, CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(written.code, ErrorCode::NotImplemented);
+    // Nor can it import (ADR-0040).
+    assert_eq!(
+        session
+            .table_target(&request.target.table, CancellationToken::new())
+            .await
+            .unwrap(),
+        EditTarget::ReadOnly(ReadOnlyReason::DriverCannotTell)
+    );
+    for refused in [
+        session.begin_writes(CancellationToken::new()).await,
+        session.end_writes(true, CancellationToken::new()).await,
+    ] {
+        assert_eq!(refused.unwrap_err().code, ErrorCode::NotImplemented);
+    }
     assert_eq!(
         session.write_script(&request).unwrap_err().code,
         ErrorCode::NotImplemented

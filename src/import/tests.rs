@@ -14,16 +14,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// A folder of the test's own, removed when it ends.
-struct Folder(PathBuf);
+pub(super) struct Folder(pub(super) PathBuf);
 
 impl Folder {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("jykre-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
 
-    fn file(&self, name: &str, bytes: &[u8]) -> PathBuf {
+    pub(super) fn file(&self, name: &str, bytes: &[u8]) -> PathBuf {
         let path = self.0.join(name);
         std::fs::write(&path, bytes).unwrap();
         path

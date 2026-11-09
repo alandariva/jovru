@@ -29,6 +29,10 @@ pub struct DriverError {
     pub message: String,
     /// What the database reported, when the error came from the server.
     pub server: Option<ServerDiagnostic>,
+    /// The change of a [`crate::write::WriteRequest`] the error happened
+    /// at, plus one ([`DriverError::change`]). Kept in four bytes, so the
+    /// error stays as small as before it had one.
+    change: Option<std::num::NonZeroU32>,
 }
 
 /// The parts of a database error the user needs to fix the SQL: the server's
@@ -50,6 +54,7 @@ impl DriverError {
             code,
             message: message.into(),
             server: None,
+            change: None,
         }
     }
 
@@ -63,7 +68,25 @@ impl DriverError {
             code,
             message: message.into(),
             server: Some(server),
+            change: None,
         }
+    }
+
+    /// The same error, at change `index` (zero-based) of a write: what lets
+    /// an import name the file's line (ADR-0040). A write holds far fewer
+    /// changes than `u32::MAX`; an index past it is not kept.
+    pub fn at_change(mut self, index: usize) -> Self {
+        self.change = u32::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .and_then(std::num::NonZeroU32::new);
+        self
+    }
+
+    /// The change of a write the error happened at, zero-based, when the
+    /// driver says which.
+    pub fn change(&self) -> Option<usize> {
+        self.change.map(|number| number.get() as usize - 1)
     }
 
     pub fn validation(message: impl Into<String>) -> Self {
