@@ -4021,7 +4021,7 @@ dependencies = [
 
 [[package]]
 name = "jykre"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "dirs 7.0.0",
@@ -4066,7 +4066,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-assistant"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "genai",
@@ -4082,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-core"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -4096,7 +4096,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-databricks"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "jykre-core",
  "reqwest 0.12.28",
@@ -4109,7 +4109,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-mysql"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4122,7 +4122,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-postgres"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4135,7 +4135,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-sqlite"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4147,7 +4147,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-secrets"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "jykre-core",
  "keyring",
@@ -4157,14 +4157,14 @@ dependencies = [
 
 [[package]]
 name = "jykre-sql"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "jykre-core",
 ]
 
 [[package]]
 name = "jykre-sql-language"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "jykre-core",
  "jykre-sql",
@@ -4175,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-storage"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "jykre-core",
  "serde_json",
@@ -10139,7 +10139,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.2.0-rc.4"
+version = "0.2.0"
 dependencies = [
  "serde_json",
 ]

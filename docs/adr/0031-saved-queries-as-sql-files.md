@@ -1,6 +1,6 @@
 # ADR-0031: Saved queries as plain `.sql` files named by their title, with tags and associations kept locally
 
-- **Status:** Accepted (by the maintainer on 2026-11-07; implemented and checked in the application on Windows the same day; the 4 MiB limit failed its measurement; on 2026-11-08 the maintainer kept it, with soft wrap off above 256 KiB, to be confirmed on the reference machine, see D7)
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented and checked in the application on Windows the same day; the 4 MiB limit failed its measurement; on 2026-11-08 the maintainer kept it, with soft wrap off above 256 KiB, and confirmed it after the measurement on the reference machine the same day, see D7)
 - **Date:** 2026-11-07
 - **Authors:** AI agent, at the maintainer's request (milestone M7 of
   [Version 0.2.0](../plans/releases/0.2.0.md); decisions D1–D7 below approved
@@ -295,8 +295,15 @@ Constraints found in the code and the standards:
   4 MiB, and a tab whose text exceeds 256 KiB does not soft-wrap (wrapping
   comes back at 192 KiB or less), since the editor component's wrapping
   measures every line when the file opens; typing no longer reads the
-  whole text on the UI thread. To be confirmed by measuring on the
-  reference machine ([Large `.sql` files in the editor](../plans/editor-large-files.md)).
+  whole text on the UI thread ([Large `.sql` files in the editor](../plans/editor-large-files.md)).
+  Measured on the reference machine on 2026-11-08 (release, Windows): a
+  4 MiB file opens in one frame of 54 ms and one just under 256 KiB, still
+  wrapped, in 185 ms; typing costs our code at most 2.3 ms a key at 4 MiB;
+  a click into a text that is not wrapped stalls the UI thread about 25 ms
+  per MiB, 97–131 ms at 4 MiB, inside the editor component
+  ([Performance](../standards/performance.md#on-the-reference-machine-2026-11-08)).
+  The maintainer confirmed the 4 MiB limit on 2026-11-08 with these
+  numbers; the click stays a known deviation in Performance.
 - The limits are documented in [Persistence](../reference/persistence.md) and
   [User experience](../reference/ux.md); content is never truncated to fit.
 
