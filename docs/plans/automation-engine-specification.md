@@ -1362,7 +1362,10 @@ A scheduled run never opens a dialog (section 7.1):
   values changes (section 6.4, CA-13).
 - Each schedule keeps its **last outcome** (started, caught up, waiting,
   skipped while still running, missed, refused, suspended), with the time
-  it was due and the run it started. The Automation section shows the
+  it was due and the run it started. It is the outcome of the latest due
+  time handled: a catch-up (or its refusal) for an earlier time that ends
+  after a later time ran adds to the counters and shows in **Runs**, but
+  does not replace it. The Automation section shows the
   outcome with the next run. Revoking or suspending a schedule whose run
   is queued removes that run from the queue, as **Stop** does, and drops
   its catch-ups and its waiting due time. A run already active is not

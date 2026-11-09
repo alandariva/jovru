@@ -1939,12 +1939,20 @@ impl AutomationRepository {
     /// it.
     pub async fn mark_schedule(&self, id: ScheduleId, mark: &ScheduleMark) -> DriverResult<()> {
         let due = format_time(mark.due_at);
+        // The last outcome, reason and run describe the latest due time
+        // handled: a mark for an earlier one (a catch-up, or a refusal of
+        // one, that ends after a later time ran) only adds to the counters.
+        // SQLite reads every column below as it was before this update.
         sqlx::query(
             "UPDATE schedules SET \
              last_due_at=CASE WHEN last_due_at IS NULL OR last_due_at<?1 THEN ?1 ELSE last_due_at END, \
-             last_outcome=?2, last_reason=?3, \
-             last_run_id=COALESCE((SELECT id FROM runs WHERE id=?4), last_run_id), \
-             last_chain_run_id=COALESCE((SELECT id FROM chain_runs WHERE id=?5), last_chain_run_id), \
+             last_outcome=CASE WHEN last_due_at IS NULL OR last_due_at<=?1 THEN ?2 ELSE last_outcome END, \
+             last_reason=CASE WHEN last_due_at IS NULL OR last_due_at<=?1 THEN ?3 ELSE last_reason END, \
+             last_run_id=CASE WHEN last_due_at IS NULL OR last_due_at<=?1 \
+               THEN COALESCE((SELECT id FROM runs WHERE id=?4), last_run_id) ELSE last_run_id END, \
+             last_chain_run_id=CASE WHEN last_due_at IS NULL OR last_due_at<=?1 \
+               THEN COALESCE((SELECT id FROM chain_runs WHERE id=?5), last_chain_run_id) \
+               ELSE last_chain_run_id END, \
              missed_count=missed_count+?6, \
              missed_last_at=COALESCE(?7, missed_last_at) WHERE id=?8",
         )

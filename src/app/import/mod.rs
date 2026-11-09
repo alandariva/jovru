@@ -835,6 +835,10 @@ impl ImportDialog {
                 .await;
             let _ = weak.update(cx, |this, cx| {
                 this.run = finished(&outcome, &title);
+                // **Cancel import** (the button that had the keyboard) is
+                // gone now: the dialog takes the keyboard back, so `Esc`
+                // closes it.
+                this.needs_focus = true;
                 cx.notify();
             });
         })

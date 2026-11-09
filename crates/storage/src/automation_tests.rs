@@ -2042,13 +2042,32 @@ async fn suspension_revocation_and_bookkeeping() {
     repo.mark_schedule(id, &missed).await.unwrap();
     let marked = repo.schedule(id).await.unwrap().unwrap();
     assert_eq!(marked.last_due_at, Some(later));
-    assert_eq!(marked.last_outcome, Some(ScheduleOutcome::Missed));
+    // A mark for an earlier due time only adds to the counters: the last
+    // outcome and run stay those of the latest due time.
+    assert_eq!(marked.last_outcome, Some(ScheduleOutcome::Started));
+    assert_eq!(marked.last_run_id, Some(run.id));
+    assert_eq!((marked.missed_count, marked.missed_last_at), (3, Some(T0)));
+    let earlier = T0.plus(Duration::from_secs(300));
+    let catch_up_run = sql_run(Some(job), earlier);
+    repo.admit_run(&catch_up_run).await.unwrap();
+    let mut caught_up = ScheduleMark::new(earlier, ScheduleOutcome::CaughtUp);
+    caught_up.run_id = Some(catch_up_run.id);
+    repo.mark_schedule(id, &caught_up).await.unwrap();
+    let marked = repo.schedule(id).await.unwrap().unwrap();
+    assert_eq!(marked.last_outcome, Some(ScheduleOutcome::Started));
+    assert_eq!(marked.last_run_id, Some(run.id));
+    // A later or equal one replaces them; a mark without a run keeps it.
+    let mut skipped = ScheduleMark::new(later, ScheduleOutcome::SkippedRunning);
+    skipped.reason = Some("coalesced".to_owned());
+    repo.mark_schedule(id, &skipped).await.unwrap();
+    let marked = repo.schedule(id).await.unwrap().unwrap();
+    assert_eq!(marked.last_outcome, Some(ScheduleOutcome::SkippedRunning));
+    assert_eq!(marked.last_reason.as_deref(), Some("coalesced"));
     assert_eq!(
         marked.last_run_id,
         Some(run.id),
         "kept by a mark without a run"
     );
-    assert_eq!((marked.missed_count, marked.missed_last_at), (3, Some(T0)));
     // A pruned or deleted run leaves no dangling reference.
     sqlx::query("DELETE FROM runs WHERE id=?")
         .bind(run.id.to_string())

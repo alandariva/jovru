@@ -360,6 +360,36 @@ async fn run_once_submits_one_catch_up_for_the_latest_missed_time() {
 }
 
 #[tokio::test]
+async fn a_catch_up_after_an_on_time_run_leaves_the_line_on_the_later_time() {
+    let bench = Bench::new(Script::Rows(Vec::new(), Vec::new()), Limits::default()).await;
+    let job = bench.job().await;
+    let schedule = bench
+        .schedule(job, MissedPolicy::RunOnce, None, OverlapPolicy::Skip)
+        .await;
+    // Closed over 08:15, 08:30 and 08:45; back at 09:00:05, within 09:00's
+    // grace: 09:00 runs on time, then one catch-up for 08:45.
+    bench
+        .set(t0().plus(60 * MINUTE + Duration::from_secs(5)))
+        .await;
+    let runs = bench.wait_runs(job.0, 2).await;
+    bench.idle().await;
+    bench.next_pass().await;
+    let on_time = runs
+        .iter()
+        .find(|run| !run.catch_up)
+        .expect("the on-time run");
+    let catch_up = runs.iter().find(|run| run.catch_up).expect("the catch-up");
+    assert_eq!(on_time.due_at, Some(t0().plus(60 * MINUTE)));
+    assert_eq!(catch_up.due_at, Some(t0().plus(45 * MINUTE)));
+    // The line describes the latest due time, never 09:00 as a catch-up.
+    let stored = bench.stored(schedule).await;
+    assert_eq!(stored.last_due_at, Some(t0().plus(60 * MINUTE)));
+    assert_eq!(stored.last_outcome, Some(ScheduleOutcome::Started));
+    assert_eq!(stored.last_run_id, Some(on_time.id));
+    assert_eq!(stored.missed_count, 3);
+}
+
+#[tokio::test]
 async fn queue_up_to_n_catches_up_the_most_recent_one_at_a_time() {
     let release = Arc::new(Notify::new());
     let bench = Bench::new(Script::WaitsFor(release.clone()), Limits::default()).await;

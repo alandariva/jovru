@@ -1209,8 +1209,15 @@ impl Engine {
     ) -> bool {
         let mut wrote = false;
         // The run's owner writes its row: once it exists, the schedule names
-        // it (the latest submitted last).
+        // it (the latest submitted last). A catch-up for a time earlier than
+        // the latest one handled is not named: the schedule's line describes
+        // that latest time, and the catch-up shows in Runs.
+        let latest = schedule.last_due_at.max(slot.handled);
         for tracked in slot.runs.iter_mut().filter(|tracked| !tracked.linked) {
+            if latest.is_some_and(|latest| tracked.due_at < latest) {
+                tracked.linked = true;
+                continue;
+            }
             let (run, chain_run) = match &tracked.handle {
                 Handle::Run(handle) => (Some(handle.id), None),
                 Handle::Chain(handle) => (None, Some(handle.id)),
