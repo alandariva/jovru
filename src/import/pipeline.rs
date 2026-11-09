@@ -108,6 +108,34 @@ pub struct Progress {
     pub read: Option<f64>,
 }
 
+/// How long an import runs before its progress shows, and before its
+/// elapsed time and **Cancel** do ([User experience](../../docs/reference/ux.md#always-visible-states)).
+pub const PROGRESS_AFTER: Duration = Duration::from_millis(300);
+pub const CANCEL_AFTER: Duration = Duration::from_secs(2);
+
+/// What a running import shows after `elapsed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Shown {
+    /// Nothing yet: a short import never flickers.
+    Nothing,
+    /// The rows written and the share of the file read.
+    Progress,
+    /// The progress, the elapsed time and **Cancel**.
+    ProgressAndCancel,
+}
+
+impl Shown {
+    pub fn after(elapsed: Duration) -> Self {
+        if elapsed >= CANCEL_AFTER {
+            Self::ProgressAndCancel
+        } else if elapsed >= PROGRESS_AFTER {
+            Self::Progress
+        } else {
+            Self::Nothing
+        }
+    }
+}
+
 /// Reads the plan's file into batches of mapped rows and sends them, in
 /// order, through `sender`, publishing the rows read in `progress`. Waits
 /// whenever the channel is full, so it reads no faster than the writer

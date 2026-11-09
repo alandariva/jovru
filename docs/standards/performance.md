@@ -14,12 +14,12 @@ numbers.
 
 | Metric | Budget | Baseline (2026-11-02) | How to measure |
 | --- | --- | --- | --- |
-| Frame while scrolling, hovering or selecting in the result grid, any row count up to 100,000 | ≤ 8 ms p95 | 2.6 ms median, ≤ 6.4 ms p95 (1,000 × 15 columns to 100,000 × 5) | Frame probe |
-| Frame for any other interaction in the main window | ≤ 8 ms p95 | Not measured | Frame probe |
-| Longest UI-thread stall while a query runs | ≤ 16 ms | 12.8 ms during a 4 s `pg_sleep` (the Windows timer resolution is about 10–15 ms) | Heartbeat |
-| UI-thread work to publish a finished result | ≤ 2 ms at any size | 0.01 ms at 100,000 rows | Timing around the publish |
-| First frame after a result arrives | ≤ 16 ms | 7–10 ms | Frame probe |
-| Rebuilding the grid view after a filter keystroke or a header sort, 100,000 rows | ≤ 50 ms | In the app (release, Windows, 2026-11-07, 100,000 × 3 SQLite rows, `grid view` timing at `JYKRE_LOG=jykre::ui_thread=debug`): 13.4 ms and 14.1 ms per filter rebuild; the filter applies after a 150 ms pause, so six keystrokes typed together rebuilt once. The unit test builds it in under 80 ms in a debug build. Benchmark (release, 2026-11-04): 14 ms filtered, 5.0 ms sorted by a number, 3.3 ms sorted by text, on rows already in order | Unit test budget, `grid view` timing, frame probe |
+| Frame while scrolling, hovering or selecting in the result grid, any row count up to 100,000 | ≤ 8 ms p95 | 2.6 ms median, ≤ 6.4 ms p95 (1,000 × 15 columns to 100,000 × 5) | Frame probe; the [performance run](#automated-performance-run) (`grid`, `edit`) |
+| Frame for any other interaction in the main window | ≤ 8 ms p95 | Not measured | Frame probe; the [performance run](#automated-performance-run) (`editor`, `edit`, `columns`, `import`, `automation`) |
+| Longest UI-thread stall while a query runs | ≤ 16 ms | 12.8 ms during a 4 s `pg_sleep` (the Windows timer resolution is about 10–15 ms) | Heartbeat; the [performance run](#automated-performance-run) (`import`, `automation`) |
+| UI-thread work to publish a finished result | ≤ 2 ms at any size | 0.01 ms at 100,000 rows | Timing around the publish; the [performance run](#automated-performance-run) (`automation`: a job's result) |
+| First frame after a result arrives | ≤ 16 ms | 7–10 ms | Frame probe; the [performance run](#automated-performance-run) (`automation`) |
+| Rebuilding the grid view after a filter keystroke or a header sort, 100,000 rows | ≤ 50 ms | In the app (release, Windows, 2026-11-07, 100,000 × 3 SQLite rows, `grid view` timing at `JYKRE_LOG=jykre::ui_thread=debug`): 13.4 ms and 14.1 ms per filter rebuild; the filter applies after a 150 ms pause, so six keystrokes typed together rebuilt once. The unit test builds it in under 80 ms in a debug build. Benchmark (release, 2026-11-04): 14 ms filtered, 5.0 ms sorted by a number, 3.3 ms sorted by text, on rows already in order | Unit test budget, `grid view` timing, frame probe; the [performance run](#automated-performance-run) (`edit`: rebuilds after an edit) |
 | Copy of a selection | ≤ 100 ms for 500,000 cells; above that, show progress | About 85 ms for 100,000 × 5 cells | Heartbeat |
 | Cold start to an interactive window | ≤ 1.5 s | 835 ms to a window that accepts input (865 ms to the main window) on the first launch from an empty data folder; 241–254 ms on the next four launches (release, Windows, 2026-11-07; see [Startup, memory and export](#startup-memory-and-export-measurements)). Not measured after a reboot | Stopwatch and a startup timestamp |
 | Idle memory, no connection | ≤ 200 MB | 79.0 MB working set, 106.4 MB private bytes 15 s after start (release, Windows, 2026-11-07) | Task manager |
@@ -84,41 +84,61 @@ A change that introduces one of these is rejected in review:
 
 ## How to measure
 
-### Automated synthetic grid run
+### Automated performance run
 
-Run `cargo run --release --locked -- --test-performance` (or pass
-`--test-performance` to the packaged executable). This opens an isolated
-window containing the production result grid, without loading connections,
-workspace persistence, a vault or a database. It generates 1,000 and 100,000
-rows with five columns, then 1,000 rows with 400 columns of which the first
-three are frozen, off the UI thread. After a two-second warmup, each size
-runs idle (75 ticks), rectangular selection (250 ticks), selection near the
-final row (250 ticks), scrolling (125 ticks) and panning sideways back and
-forth over the whole width (`pan`, 125 ticks), with a nominal 40 ms timer per
-tick. Closing the window cancels the run at its next update. With
-`JYKRE_PROBE=1` the window also runs the frame probe below, so
-`JYKRE_PROBE=1 cargo run --release --locked -- --test-performance` logs
-`frame probe` lines for each phase; the status line names the phase, and the
-wide size's `pan` is the sideways scrolling with frozen columns that the
-grid's frame budget covers.
+`JYKRE_PROBE=1 cargo run --release --locked -- --test-performance` (or
+`--test-performance` passed to the packaged executable) opens an isolated
+window that drives the production views and writes a report. It loads no
+connection, workspace, vault or data folder of the user: every file and
+database it makes lives in one new folder under the system's temporary
+directory (`jykre-performance-<pid>-<time>`), removed at the end; if it
+cannot be removed, the report says so. It writes no log file, and no value
+of the synthetic data is logged. The status line names each phase, and
+closing the window stops the run at its next update (the import in
+progress is cancelled; a folder left by a closed window is removed as the
+application quits, when nothing still holds its files).
 
-The finished window shows the report path. A uniquely named
-`jykre-performance-<timestamp>-<pid>.json` is saved to the working directory.
-It contains elapsed wall time per phase, CPU percent (100% = one logical
-CPU), endpoint resident memory in bytes, dimensions, step counts, build
-profile and platform. Linux uses process CPU ticks and VmRSS; Windows uses
-background PowerShell process snapshots (hidden window). Snapshot overhead
-can affect short intervals, particularly on Windows. Counter failures are
-explicit errors and null measurements, not zero. Other platforms currently
-report counters unavailable. Memory is sampled at phase boundaries, not a
-peak-memory measurement. Time is phase duration, not frame latency.
+`--test-performance=grid,editor,edit,columns,import,automation` runs only
+the paths named, in that order, so one path can be measured again alone
+(for example `--test-performance=import`). An unknown name is refused in
+the window, and nothing runs.
 
-This calls the same selection/navigation methods as keyboard handling, but
-does not inject OS input, measure input delivery, or exercise the editor,
-explorer and workspace ancestors. Its numbers are not directly interchangeable
-with the earlier whole-workspace external-input measurements. Keep window
-size, graphics adapter, build and machine identical when comparing runs.
-The existing frame probe below remains the tool for the frame budget.
+| Path | What it drives | What it reports |
+| --- | --- | --- |
+| `grid` (A14) | The production `ResultGrid` with 1,000 and 100,000 rows of five columns, then 1,000 rows of 400 columns with the first three frozen. After a 2 s warmup, each size runs idle (75 ticks), rectangular selection (250), selection near the last row (250), scrolling (125) and panning sideways over the whole width (`pan`, 125), one tick every 40 ms, through the grid's own keyboard and scroll methods | Frame p95 per phase against the grid's frame budget; the wide size's `pan` is the sideways scrolling with frozen columns that budget covers |
+| `editor` (A9) | A real SQL editor (`EditorState` with the editor adapter and its **Go to line** prompt, as a query tab builds them) holding 1 MiB of numbered one-line `SELECT`s (about 12,800 lines, not wrapped). 60 jumps, 100 ms apart, each through the prompt as `Ctrl G`, typing and `Enter` do: the first and last lines, lines across the text, some with a column, and lines past the end | Opening's UI-thread time and longest frame; each jump's UI-thread time (p95 held to the frame budget, as A9 asks) and the frames while jumping |
+| `edit` (A10) | 100,000 synthetic rows made editable with the description a driver gives of a table (`grid_edit::EditSession` over it; nothing is written). 400 edits, 40 ms apart, through the grid's editing keys: a value typed into a cell, NULL over a block, a row inserted and given a value, a row marked for deletion; then selection and scrolling with the edits shown | Each grid view rebuilt after an edit (`grid view` timings, held to the 50 ms rebuild budget), each edit's UI-thread time, and the frames |
+| `columns` (A15) | A result of 10,000 columns named by words with accents. The production column search, opened as `Ctrl Shift F` does, its text typed a character every 120 ms (each change finds the matches again), then 20 matches chosen across the width and one column hidden by A14 searched for and chosen | Each keystroke's UI-thread time (p95 held to the frame budget, as A15 asks), choosing a match, whether the hidden match was shown, and the frames |
+| `import` (A11) | A CSV of 1,500,000 rows (about 85 MiB) and an `.xlsx` of 250,000 rows whose names all differ (a large shared strings table), written to the temporary folder and imported into a SQLite table through `import::session::run`, as **Import** runs it, with the dialog's own progress line (`running_status`) and redraws in the window. A third import of the CSV is cancelled after 3 s, as **Cancel import** does | Rows per second and MiB read per second; resident memory sampled every 100 ms during each import (its peak, and its growth over the memory before), not only at the ends; when the progress and then the elapsed time and **Cancel** were first drawn (300 ms and 2 s rules, with one 250 ms redraw of slack); the longest stall; rows left by the cancelled import (0, as ADR-0040 says) and the time from **Cancel** to the outcome |
+| `automation` (A6) | An engine of its own (`Engine::start` on the temporary folder, so its `automation.db` and lock are there), eleven SQL Jobs on a synthetic SQLite database of 100,000 rows, and 10,000 finished runs written through `AutomationRepository`. The production job tabs, their **Runs** lists and the global **Runs** list, with the engine's changes forwarded once a frame as the main window does. Five bursts of ten runs started together (two run, eight wait); a job with a 100,000-row result; 40 older pages of the first job's history, scrolled and chosen; the global list filtered by state, paged and shown during a burst | The automation specification's section 8.2 budgets: run status publication and the forwarded changes (`automation run status`, `automation changes`, at most 2 ms), a result published to a job's grid (`automation result`, 2 ms) and the first frames after it, history pages (`automation history page`, 2 ms), frame p95 and the longest stall. Jobs run against SQLite only: PostgreSQL, MySQL and Databricks are not measured here |
+
+The window and its probe follow the frame probe below: with `JYKRE_PROBE=1`
+each phase records its own frames and heartbeat stalls; without it, frame
+and stall metrics are reported as not measured, with that reason. UI-thread
+work is the application's own `UiTimer` timings (target `jykre::ui_thread`),
+collected in memory by the run, and the time of each update the run makes
+(a jump, a keystroke, an edit), effects included.
+
+The finished window shows the report's path. Two files are written to the
+working directory, `jykre-performance-<timestamp>-<pid>.json` and a Markdown
+summary with the same name (`.md`): the budgets table with this run's
+numbers, the build profile, the platform and the window size, and what was
+not measured and why. The JSON has a section per path (`paths`): each
+metric's value, unit, budget, the row the budget comes from and `pass`,
+`fail`, `not measured` (with a reason) or `info` (no budget), and each
+phase's elapsed time, CPU percent (100% = one logical CPU), resident memory
+at its ends, frames, stalls and UI-thread timings; `results` lists every
+phase as earlier reports did. Linux reads process CPU ticks and VmRSS;
+Windows uses PowerShell process snapshots (hidden window), whose overhead
+can affect short intervals. Counter failures are explicit errors and null
+measurements, not zero. Other platforms report counters unavailable.
+
+The run calls the same methods as the keys, buttons and fields; it does not
+inject OS input or measure input delivery, and it does not draw the
+explorer or the workspace around the views. Its numbers are not directly
+interchangeable with the whole-workspace external-input measurements below.
+Keep window size, graphics adapter, build and machine identical when
+comparing runs.
 
 - **Frame probe.** Run the application with `JYKRE_PROBE=1` (a release build
   for budgets: `JYKRE_PROBE=1 cargo run --release`). `src/app/probe.rs`
@@ -309,8 +329,9 @@ which a GPU does not have.
   line count and the target line's start (`lines_len`,
   `position_to_offset`, logarithmic in the text) once, then moves the
   cursor with the editor's own `set_cursor_position`, which scrolls it into
-  view. The text is never copied. Not yet measured in a file above
-  256 KiB; the move may meet the editor component's click cost noted in
+  view. The text is never copied. The [performance run](#automated-performance-run)'s
+  `editor` path measures it in a 1 MiB text; no numbers are recorded here
+  yet, and the move may meet the editor component's click cost noted in
   *Known deviations* below.
 
 #### On the reference machine, 2026-11-08

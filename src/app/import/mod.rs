@@ -12,7 +12,7 @@ use super::*;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use jykre::import::mapping::{Mapping, MatchBy, TargetColumn};
-use jykre::import::pipeline::{ImportPlan, Outcome, Progress, TimeLimit};
+use jykre::import::pipeline::{ImportPlan, Outcome, PROGRESS_AFTER, Progress, Shown, TimeLimit};
 use jykre::import::session::ImportJob;
 use jykre::import::{
     CsvOptions, Delimiter, EmptyFields, FileKind, ImportValue, Preview, ReadOptions, XlsxOptions,
@@ -816,26 +816,7 @@ impl ImportDialog {
     /// Redraws while the import runs: after 300 ms for its progress, then
     /// four times a second.
     fn tick_run(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |weak, cx| {
-            let mut wait = Duration::from_millis(300);
-            loop {
-                cx.background_executor().timer(wait).await;
-                wait = Duration::from_millis(250);
-                let running = weak
-                    .update(cx, |this, cx| {
-                        let running = this.is_running();
-                        if running {
-                            cx.notify();
-                        }
-                        running
-                    })
-                    .unwrap_or(false);
-                if !running {
-                    return;
-                }
-            }
-        })
-        .detach();
+        redraw_while(cx, Self::is_running);
     }
 
     fn close(&mut self, cx: &mut Context<Self>) {
@@ -1333,42 +1314,7 @@ impl ImportDialog {
             ImportRun::Idle => div().into_any_element(),
             ImportRun::Running {
                 started, progress, ..
-            } => {
-                let elapsed = started.elapsed();
-                if elapsed < Duration::from_millis(300) {
-                    return div().into_any_element();
-                }
-                let progress = *progress.borrow();
-                let rows = jykre::cell_format::count(progress.rows_written as usize);
-                let text = match progress.read {
-                    Some(share) => tr!(
-                        "Importing… {0} rows written, {1} % of the file read",
-                        rows,
-                        (share * 100.0).floor() as u32
-                    ),
-                    None => tr!("Importing… {0} rows written", rows),
-                };
-                row()
-                    .id("import-progress")
-                    .role(Role::Status)
-                    .gap_2()
-                    .child(spinning_icon(
-                        "import-run-spinner",
-                        I::LoaderCircle,
-                        colors().mint,
-                    ))
-                    .child(div().text_size(px(13.)).child(text))
-                    .when(elapsed >= Duration::from_secs(2), |s| {
-                        s.child(label(jykre::cell_format::duration(
-                            elapsed.as_millis() as u64
-                        )))
-                        .child(
-                            button("import-cancel", I::X, tr!("Cancel import"))
-                                .on_click(cx.listener(|this, _, _, cx| this.cancel_import(cx))),
-                        )
-                    })
-                    .into_any_element()
-            }
+            } => running_status(*started, *progress.borrow(), Self::cancel_import, cx),
             ImportRun::Finished { tone, text, detail } => column()
                 .id("import-outcome")
                 .role(if *tone == Tone::Error {
@@ -1460,6 +1406,78 @@ impl ImportDialog {
                     ),
             )
     }
+}
+
+/// What a running import shows: nothing for 300 ms, then the rows written
+/// and the share of the file read, and past 2 s the elapsed time and
+/// **Cancel import**, which calls `cancel`. The dialog draws it, and so
+/// does the performance run (`--test-performance`), which measures when it
+/// appears.
+pub(super) fn running_status<V: 'static>(
+    started: Instant,
+    progress: Progress,
+    cancel: fn(&mut V, &mut Context<V>),
+    cx: &mut Context<V>,
+) -> AnyElement {
+    let elapsed = started.elapsed();
+    let shown = Shown::after(elapsed);
+    if shown == Shown::Nothing {
+        return div().into_any_element();
+    }
+    let rows = jykre::cell_format::count(progress.rows_written as usize);
+    let text = match progress.read {
+        Some(share) => tr!(
+            "Importing… {0} rows written, {1} % of the file read",
+            rows,
+            (share * 100.0).floor() as u32
+        ),
+        None => tr!("Importing… {0} rows written", rows),
+    };
+    row()
+        .id("import-progress")
+        .role(Role::Status)
+        .gap_2()
+        .child(spinning_icon(
+            "import-run-spinner",
+            I::LoaderCircle,
+            colors().mint,
+        ))
+        .child(div().text_size(px(13.)).child(text))
+        .when(shown == Shown::ProgressAndCancel, |s| {
+            s.child(label(jykre::cell_format::duration(
+                elapsed.as_millis() as u64
+            )))
+            .child(
+                button("import-cancel", I::X, tr!("Cancel import"))
+                    .on_click(cx.listener(move |this, _, _, cx| cancel(this, cx))),
+            )
+        })
+        .into_any_element()
+}
+
+/// Redraws `V` while `running` says an import runs: after 300 ms for its
+/// progress, then four times a second.
+pub(super) fn redraw_while<V: 'static>(cx: &mut Context<V>, running: fn(&V) -> bool) {
+    cx.spawn(async move |weak, cx| {
+        let mut wait = PROGRESS_AFTER;
+        loop {
+            cx.background_executor().timer(wait).await;
+            wait = Duration::from_millis(250);
+            let running = weak
+                .update(cx, |this, cx| {
+                    let running = running(this);
+                    if running {
+                        cx.notify();
+                    }
+                    running
+                })
+                .unwrap_or(false);
+            if !running {
+                return;
+            }
+        }
+    })
+    .detach();
 }
 
 /// How an import ended, in words (ADR-0040, section 4).

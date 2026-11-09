@@ -5,8 +5,9 @@
 mod app;
 
 fn main() {
-    if std::env::args_os().any(|arg| arg == "--test-performance") {
-        app::performance::run();
+    // `--test-performance[=grid,editor,…]`: the isolated performance window.
+    if let Some(paths) = app::performance::requested() {
+        app::performance::run(paths);
         return;
     }
     // Without a writable data folder the application still runs, without logs.

@@ -1,5 +1,16 @@
-//! Synthetic grid workloads and process counters for the opt-in performance run.
+//! The opt-in performance run (`--test-performance`), outside its window:
+//! synthetic workloads, process counters, the budgets it checks and the
+//! report it writes ([Performance](../../docs/standards/performance.md#how-to-measure)).
+//! The window that drives the production views is `src/app/performance/`.
 use crate::result::{ResultColumn, ResultData};
+
+pub mod budget;
+pub mod data;
+pub mod memory;
+pub mod report;
+pub mod selection;
+pub mod temp;
+pub mod timings;
 use std::path::Path;
 #[cfg(any(windows, target_os = "linux"))]
 use std::process::Command;

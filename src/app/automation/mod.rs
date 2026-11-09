@@ -12,6 +12,7 @@
 //!
 //! Each job tab has a tab group of its own, as a report's does, which
 //! offers no new tab and takes no other tab.
+pub(super) mod benchmark;
 mod history;
 mod job_view;
 mod logic;

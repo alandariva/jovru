@@ -164,6 +164,30 @@ impl HistoryList {
         self.state
     }
 
+    /// **Load older runs**, for the performance run (`--test-performance`).
+    pub(super) fn benchmark_older(&mut self, cx: &mut Context<Self>) {
+        if !self.loading && self.more {
+            self.load(false, cx);
+        }
+    }
+
+    /// Whether a page is being read, the entries shown and whether more
+    /// can be read.
+    pub(super) fn benchmark_state(&self) -> (bool, usize, bool) {
+        (self.loading, self.entries.len(), self.more)
+    }
+
+    /// Scrolls the list to entry `index`, as the wheel or the arrows do.
+    pub(super) fn benchmark_scroll(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_item(index, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    /// Chooses entry `index`, as a click does: its details are read.
+    pub(super) fn benchmark_choose(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.read_detail(index, true, cx);
+    }
+
     /// Reads the pages shown again, after a run started or ended.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         self.load(true, cx);

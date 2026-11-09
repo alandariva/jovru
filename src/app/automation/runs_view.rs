@@ -46,6 +46,11 @@ impl RunsView {
         view
     }
 
+    /// Its history list, for the performance run (`--test-performance`).
+    pub(super) fn benchmark_history(&self) -> Entity<HistoryList> {
+        self.history.clone()
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
     }

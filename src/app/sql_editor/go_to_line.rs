@@ -64,6 +64,23 @@ impl GoToLine {
         cx.notify();
     }
 
+    /// The performance run's jump (`--test-performance`, A9): opens the
+    /// prompt as `Ctrl G` does, puts `text` in its field and goes there as
+    /// `Enter` does.
+    pub(in crate::app) fn benchmark_go(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(window, cx);
+        if let Some(input) = &self.input {
+            let text = text.to_owned();
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+        self.go(window, cx);
+    }
+
     /// Moves the editor's cursor to what was typed, or says it is not a line.
     fn go(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(input) = &self.input else {

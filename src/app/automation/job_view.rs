@@ -376,6 +376,27 @@ impl JobView {
         self.id
     }
 
+    /// Shows an inner tab, for the performance run (`--test-performance`).
+    pub(super) fn benchmark_show(
+        &mut self,
+        inner: Inner,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_inner(inner, window, cx);
+    }
+
+    /// The job's **Runs** list.
+    pub(super) fn benchmark_history(&self) -> Entity<HistoryList> {
+        self.history.clone()
+    }
+
+    /// Whether this tab's run is queued or active, and whether its result
+    /// is in the grid.
+    pub(super) fn benchmark_running(&self) -> (bool, bool) {
+        (self.running(), self.has_result)
+    }
+
     /// The job's name, for its tab group.
     pub fn name(&self) -> String {
         let name = self.definition.name.trim();

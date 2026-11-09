@@ -455,6 +455,128 @@ impl ResultGrid {
         );
     }
 
+    /// One edit of the performance run's editing phase (A10), through the
+    /// same methods as the editing keys and the edit bar: by turns, a value
+    /// typed into a cell, a block set to NULL, a row inserted and given a
+    /// value, and a row marked for deletion, spread over the result.
+    pub(super) fn benchmark_edit(
+        &mut self,
+        tick: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.result.row_count().max(1);
+        let last_column = self.result.column_count().saturating_sub(1);
+        let row = (tick.wrapping_mul(7_919)) % rows;
+        match tick % 4 {
+            0 => {
+                self.select(Some(CellSelection::cell(row, 1.min(last_column))), cx);
+                self.benchmark_type_cell(&format!("edited {tick}"), window, cx);
+            }
+            1 => {
+                let start = CellSelection::cell(row, 1.min(last_column));
+                let block = CellSelection::click(
+                    Some(start),
+                    (row + 2).min(rows - 1),
+                    2.min(last_column),
+                    true,
+                );
+                self.select(Some(block), cx);
+                self.edit(EditAction::Null, window, cx);
+            }
+            2 => {
+                // Inserting selects the new row's first column.
+                self.edit(EditAction::Insert, window, cx);
+                self.benchmark_type_cell(&format!("inserted {tick}"), window, cx);
+            }
+            _ => {
+                self.select(Some(CellSelection::cell(row, 0)), cx);
+                self.edit(EditAction::Delete, window, cx);
+            }
+        }
+    }
+
+    /// Opens the field over the focused cell, types `text` and leaves it
+    /// with Enter.
+    fn benchmark_type_cell(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Cell, window, cx);
+        if let Some(editor) = &self.cell_editor {
+            let input = editor.input.clone();
+            let text = text.to_owned();
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+            self.finish_cell_edit(true, window, cx);
+        }
+    }
+
+    /// The performance run's column search (A15): opens the field, as
+    /// `Ctrl Shift F` does, with its text selected.
+    pub(super) fn benchmark_find_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_column_search(window, cx);
+    }
+
+    /// Types `text` into the column search: replacing what is selected
+    /// (`replace`), or at the caret. The field's change finds the matches,
+    /// as typing does.
+    pub(super) fn benchmark_find_type(
+        &mut self,
+        text: &str,
+        replace: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(find) = &self.column_find {
+            let input = find.input.clone();
+            let text = text.to_owned();
+            input.update(cx, |input, cx| {
+                if replace {
+                    input.replace(text, window, cx);
+                } else {
+                    input.insert(text, window, cx);
+                }
+            });
+        }
+    }
+
+    /// How many columns the search found.
+    pub(super) fn benchmark_find_matches(&self) -> usize {
+        self.column_find
+            .as_ref()
+            .map_or(0, |find| find.matches.len())
+    }
+
+    /// Chooses the match for `column` (the first match without one), as
+    /// `↓` and `Enter` do. False when it is not among the matches.
+    pub(super) fn benchmark_find_choose(
+        &mut self,
+        column: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(find) = &mut self.column_find else {
+            return false;
+        };
+        let index = match column {
+            Some(column) => find.matches.iter().position(|found| found.column == column),
+            None => (!find.matches.is_empty()).then_some(0),
+        };
+        let Some(index) = index else {
+            return false;
+        };
+        find.highlighted = index;
+        self.choose_column_match(window, cx);
+        true
+    }
+
+    /// Hides `column`, as the header's menu does.
+    pub(super) fn benchmark_hide(&mut self, column: usize, cx: &mut Context<Self>) {
+        self.change_layout(|layout| layout.hide(column), cx);
+    }
+
+    /// Whether `column` is hidden.
+    pub(super) fn benchmark_hidden(&self, column: usize) -> bool {
+        self.layout.is_hidden(column)
+    }
+
     pub fn new(result: Arc<ResultData>, sales: bool, cx: &mut Context<Self>) -> Self {
         let layout = Arc::new(ColumnLayout::new(result.column_count()));
         Self {

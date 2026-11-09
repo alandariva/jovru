@@ -1244,3 +1244,15 @@ async fn a_commit_whose_answer_is_lost_is_neither_success_nor_rollback() {
         "{outcome:?}"
     );
 }
+
+#[test]
+fn a_running_import_shows_progress_after_300_ms_and_cancel_past_2_s() {
+    use super::pipeline::Shown;
+    assert_eq!(Shown::after(Duration::from_millis(299)), Shown::Nothing);
+    assert_eq!(Shown::after(Duration::from_millis(300)), Shown::Progress);
+    assert_eq!(Shown::after(Duration::from_millis(1999)), Shown::Progress);
+    assert_eq!(
+        Shown::after(Duration::from_secs(2)),
+        Shown::ProgressAndCancel
+    );
+}
