@@ -228,6 +228,31 @@ impl HistoryList {
         .detach();
     }
 
+    /// A scheduled entry's label and due time, in its schedule's zone when
+    /// the job still has that schedule (section 9.5.8).
+    fn scheduled(
+        &self,
+        job: Option<JobId>,
+        due: Option<UtcMillis>,
+        catch_up: bool,
+    ) -> Option<(&'static str, String)> {
+        let due = due?;
+        let zone = job
+            .and_then(|job| self.jobs.iter().find(|candidate| candidate.id == job))
+            .and_then(|job| job.schedule.as_ref())
+            .and_then(|schedule| jykre::automation::schedule::rule::time_zone(&schedule.zone))
+            .unwrap_or(jiff::tz::TimeZone::UTC);
+        let label = if catch_up {
+            tr!("Scheduled, catch-up")
+        } else {
+            tr!("Scheduled")
+        };
+        Some((
+            label,
+            tr!("due {0}", super::schedule_words::when(due, &zone)),
+        ))
+    }
+
     fn job_name(&self, job: Option<JobId>) -> Option<String> {
         let job = job?;
         self.jobs
@@ -503,13 +528,22 @@ impl HistoryList {
             ),
         };
         let _ = step_of;
+        let scheduled = match entry {
+            HistoryEntry::Run(run) => self.scheduled(run.job_id, run.due_at, run.catch_up),
+            HistoryEntry::Chain(chain) => {
+                self.scheduled(chain.job_id, chain.due_at, chain.catch_up)
+            }
+        };
         let name = self
             .job_name(job)
             .unwrap_or_else(|| tr!("Draft or deleted job").to_owned());
         let elapsed = finished.map(|end| end.since(started));
         let state_text = words::state_label(state, cause, elapsed);
         let ago = jykre::explorer::format_age(UtcMillis::now().since(started));
-        let detail = match elapsed {
+        let detail = match &scheduled {
+            Some((_, due)) => format!("{due} · "),
+            None => String::new(),
+        } + &match elapsed {
             Some(elapsed) => format!(
                 "{} · {} · {}",
                 words::kind_name(kind),
@@ -547,6 +581,9 @@ impl HistoryList {
                                 .child(div().flex_1().min_w_0().truncate().child(name))
                                 .when(draft && kind != JobKind::Chain, |s| {
                                     s.child(badge(tr!("Draft"), colors().amber))
+                                })
+                                .when_some(scheduled.as_ref(), |s, (label, _)| {
+                                    s.child(badge(*label, colors().blue))
                                 }),
                         )
                         .child(

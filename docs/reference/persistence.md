@@ -338,8 +338,10 @@ the only copy of the connection profiles
 | --- | --- |
 | `jobs` | A job's canonical-JSON definition (kind `sql`, `process` or `chain`) and its `revision`, which grows with every save |
 | `job_versions` | A published version of a job: its frozen definition and fingerprint ([ADR-0036](../adr/0036-published-versions-and-chain-runs.md)). Deleting a job is refused while a chain names any of its versions |
-| `runs` | One row per admitted run: the snapshot (no values), state, cause, `effect_unknown`, counters (rows delivered and discarded, rows affected, `truncated`), the SQLSTATE or vendor code, exit code or signal, a program's `fail` code, log sizes, the program's process group and start time, and the SHA-256 of the program's entrypoint ([ADR-0038](../adr/0038-external-program-runs.md)) |
+| `runs` | One row per admitted run: the origin (`manual` or `schedule`, with the schedule, the due time and the catch-up marker), the snapshot (no values), state, cause, `effect_unknown`, counters (rows delivered and discarded, rows affected, `truncated`), the SQLSTATE or vendor code, exit code or signal, a program's `fail` code, log sizes, the program's process group and start time, and the SHA-256 of the program's entrypoint ([ADR-0038](../adr/0038-external-program-runs.md)) |
 | `chain_runs` | One row per chain run, with the step that stopped it |
+| `schedules` | At most one per job or chain ([ADR-0041](../adr/0041-schedules-and-grants.md)): the published version it runs (none for a chain), the rule as canonical JSON, the IANA zone, the missed-time policy with its N, the overlap policy, the opt-in notification, `revision` (grows with the rule, the zone or a policy), whether it is on, why it is suspended, and the bookkeeping: the last handled due time, the last outcome and reason, the run it started, the missed count and the last missed time. The next due time is never stored. Its version cannot be deleted; deleting its job deletes it |
+| `grants` / `grant_connections` | A schedule's consent: the target's fingerprint (the version's, or the chain plan's), the chain's revision, the schedule revision consented to, whether a production confirmation was part of it, and each connection with its profile revision and environment label. Turning a schedule off or deleting it deletes the grant; a suspension keeps it to say what changed |
 | `run_outputs` | The declared outputs of a run whose job opted in: name, kind, size and, until it expires, the value ([ADR-0035](../adr/0035-persisted-declared-outputs.md)) |
 
 - **Configuration.** WAL, `foreign_keys=ON`, `synchronous=FULL` (it holds job
@@ -356,8 +358,11 @@ the only copy of the connection profiles
   and the program's columns, [ADR-0038](../adr/0038-external-program-runs.md);
   `jobs` and `runs` are rebuilt) and 4 (kind `chain`, `job_versions`,
   `chain_runs` and the chain columns of `runs`,
-  [ADR-0036](../adr/0036-published-versions-and-chain-runs.md)). A file whose
-  version is above 4 is refused untouched: automation is off with a message
+  [ADR-0036](../adr/0036-published-versions-and-chain-runs.md)) and 5
+  (`schedules`, `grants` and `grant_connections`; `runs` and `chain_runs`
+  rebuilt so the origin takes `schedule` with `schedule_id`, `due_at` and
+  `catch_up`, [ADR-0041](../adr/0041-schedules-and-grants.md)). A file whose
+  version is above 5 is refused untouched: automation is off with a message
   and the rest of the application works. There is no backup copy before a
   migration ([ADR-0034](../adr/0034-automation-database-service-and-lock.md)).
 - **Corruption.** A file that cannot be opened and is confirmed corrupt (not
@@ -387,7 +392,9 @@ the only copy of the connection profiles
   a leader with the recorded start time is listed as an **orphan** for the
   user to end; a PID with another start time is never touched. Other systems
   record no start time, so they list none; on Windows the Job Object ends the
-  tree with Studio.
+  tree with Studio. A scheduled run left `running` becomes `interrupted` like
+  any other and is never run again: a catch-up (ADR-0041) is always a new
+  run for a due time no run started for.
 - **Retention.** Pruned in the background about once an hour, in transactions
   of at most 500 rows that never block admission: output values are emptied
   7 days after their run ended (name, kind and size stay, and
@@ -395,7 +402,10 @@ the only copy of the connection profiles
   steps and outputs) are deleted 90 days after they ended; a program's log
   folder is deleted 7 days after its run ended, or when its run's row is gone
   (a log folder is never deleted while its run is active). **Delete logs**
-  removes one run's folder at once and forgets its sizes.
+  removes one run's folder at once and forgets its sizes. Schedules and grants
+  are never pruned; a pruned run leaves its schedule's `last_run_id` empty.
+  Missed, skipped and refused due times are counters and the last outcome on
+  the schedule, never a row per time.
 
 **What is never stored.** Input values, result cells, scalar results and
 server or program messages are written to no file of automation: not to
@@ -418,7 +428,7 @@ exceptions, each bounded and visible to the user:
 ## Migrations
 
 Each file's schema version is `PRAGMA user_version`. `config.db` is at
-version 1; `automation.db` is at version 4 ([above](#automation-automationdb)). The metadata files are at version 3
+version 1; `automation.db` is at version 5 ([above](#automation-automationdb)). The metadata files are at version 3
 ([ADR-0018](../adr/0018-metadata-cache-migrations.md)): a new file is created at
 version 1 and then migrated, and an older one gets only the steps it lacks.
 A file with a higher version is refused ("created by a newer version of the

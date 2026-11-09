@@ -4027,6 +4027,7 @@ dependencies = [
  "dirs 7.0.0",
  "flate2",
  "gpui-kit",
+ "jiff",
  "jykre-assistant",
  "jykre-core",
  "jykre-driver-databricks",

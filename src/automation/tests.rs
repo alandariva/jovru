@@ -894,6 +894,7 @@ async fn runs_left_running_are_interrupted_at_start_and_never_replayed() {
         connection_id: Some(ConnectionId::new()),
         connection_revision: Some(1),
         program_fingerprint: None,
+        scheduled: None,
         started_at: UtcMillis::now(),
     };
     let (write, read) = (left(false), left(true));
@@ -1960,3 +1961,6 @@ async fn a_connection_changed_while_its_step_waits_stops_the_chain() {
     );
     assert!(outcome.steps.is_empty(), "the step never started");
 }
+
+#[path = "schedule_tests.rs"]
+mod schedule_tests;

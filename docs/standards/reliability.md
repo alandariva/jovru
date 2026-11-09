@@ -101,6 +101,8 @@
 | Automation: a stopped SQL run bringing its session back | 11 s in all (the drivers' 5 s recovery plus the close's 5 s and a margin); past it the work is dropped, which drops the session |
 | Automation: a stopped program, from the request to end to the kill of its tree | 5 s; the pipes and the `jjp/1` connection then get 2 s to end and a killed leader 5 s to be reaped |
 | Automation: a `jjp/1` program saying `hello` | 30 s from its start; past it the run fails with `protocol` and the tree is killed |
+| Automation: the scheduler's sleep | At most 30 s between two readings of the wall clock, so a computer that slept is noticed on waking |
+| Automation: a scheduled due time | 60 s of grace: a due time the scheduler reaches later is missed and follows the schedule's missed-time policy |
 
 A new network operation gets an explicit timeout and a row in this table.
 
@@ -113,7 +115,10 @@ these rules; the specification explains why
 - **No replay, ever.** A run is not sent or started a second time after a
   failure, a timeout, a crash, a lost history write or a restart. There are no
   retries, no leases and no resume; the user starts a new run on purpose,
-  knowing from the history what the earlier one did.
+  knowing from the history what the earlier one did. A schedule's catch-up
+  (ADR-0041) does not break this rule: it is a **new run** for a due time no
+  run started for, marked `catch_up`, never a second sending of a run that
+  started; an `interrupted` run is never caught up.
 - **Completion rule (SQL).** A run succeeds only once the statement is
   confirmed complete. A statement that `reads_only` (by the dialect's tokens,
   a warning and not a boundary) keeps up to the job's row limit and the
@@ -179,6 +184,20 @@ these rules; the specification explains why
   instance can take over. With SQL runs that takes at most about 11 s, with
   programs the 5 s grace; the interface asks before quitting with runs
   active, and declining keeps the application open.
+- **Schedules.** The scheduler runs only in the lock holder and stops first
+  when quitting; catch-ups and a due time waiting under *queue one* live in
+  memory and are dropped by quitting, losing the lock, turning the schedule
+  off, editing it or a suspension (they stay counted as missed). Each
+  schedule remembers its last handled due time and never considers an
+  earlier one, so a wall clock set back repeats nothing. Before each run the
+  grant is checked against the connections' profile revisions and
+  environment labels, the chain's revision, the target's fingerprint and the
+  zone; any difference suspends the schedule and takes its queued run out of
+  the queue, as **Stop** does (an active run is not stopped). A scheduled run
+  opens no dialog: without a remembered password it is admitted and fails
+  with `authentication`, nothing sent; a chain fails before its first step.
+  A scheduled run refused by a full queue or past its wait leaves no run row;
+  the schedule records `refused` with the reason.
 - **Recovery and retention** are in
   [Persistence](../reference/persistence.md#automation-automationdb).
 

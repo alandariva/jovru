@@ -616,6 +616,9 @@ mod tests {
             log_bytes_stderr: None,
             log_bytes_jjp: None,
             outputs_stored: None,
+            schedule_id: None,
+            due_at: None,
+            catch_up: false,
             started_at: UtcMillis(0),
             finished_at: Some(UtcMillis(10)),
         }
@@ -633,6 +636,9 @@ mod tests {
             failed_step: Some("lookup".into()),
             effect_unknown: false,
             fingerprint: String::new(),
+            schedule_id: None,
+            due_at: None,
+            catch_up: false,
             started_at: UtcMillis(0),
             finished_at: Some(UtcMillis(20)),
         };

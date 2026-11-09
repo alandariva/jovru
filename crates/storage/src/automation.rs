@@ -12,8 +12,9 @@ use crate::{error, open_pool_with, sql_error};
 use jykre_core::{
     ConnectionId, DriverError, DriverResult, ErrorCode, ParameterKind,
     automation::{
-        Cause, ChainRunId, ChainRunRecord, JobId, JobKind, RunId, RunOrigin, RunOutput, RunRecord,
-        RunState, UtcMillis, parameter_kind_str, parse_parameter_kind,
+        Cause, ChainRunId, ChainRunRecord, GrantId, JobId, JobKind, MissedPolicy, OverlapPolicy,
+        RunId, RunOrigin, RunOutput, RunRecord, RunSchedule, RunState, ScheduleId, ScheduleOutcome,
+        UtcMillis, parameter_kind_str, parse_parameter_kind,
     },
 };
 use sha2::{Digest, Sha256};
@@ -203,7 +204,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 // ---------------------------------------------------------------------------
 
 /// The newest schema version this build writes.
-pub(crate) const LATEST_VERSION: i64 = 4;
+pub(crate) const LATEST_VERSION: i64 = 5;
 
 /// ADR-0034, migration 1.
 const STEP_1: &str = "
@@ -394,7 +395,170 @@ CREATE INDEX chain_runs_by_start ON chain_runs(started_at);
 CREATE INDEX chain_runs_open     ON chain_runs(state) WHERE state = 'running';
 ";
 
-const STEPS: [&str; 4] = [STEP_1, STEP_2, STEP_3, STEP_4];
+/// ADR-0041, migration 5: schedules and their grants; `runs` and
+/// `chain_runs` are rebuilt so the origin takes `schedule`, with the
+/// schedule, the due time and the catch-up marker. `schedules` comes first:
+/// the rebuilt tables reference it.
+const STEP_5: &str = "
+CREATE TABLE schedules (
+  id                TEXT PRIMARY KEY,
+  job_id            TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE CASCADE,
+  job_version       INTEGER,
+  rule_json         TEXT NOT NULL,
+  time_zone         TEXT NOT NULL,
+  missed_policy     TEXT NOT NULL DEFAULT 'ignore' CHECK (missed_policy IN
+                      ('ignore', 'run_once', 'queue')),
+  missed_limit      INTEGER CHECK (missed_limit BETWEEN 2 AND 24),
+  overlap_policy    TEXT NOT NULL DEFAULT 'skip' CHECK (overlap_policy IN
+                      ('skip', 'queue_one', 'concurrent')),
+  notify            INTEGER NOT NULL DEFAULT 0 CHECK (notify IN (0, 1)),
+  revision          INTEGER NOT NULL DEFAULT 1,
+  enabled           INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  suspended         TEXT,
+  last_due_at       TEXT,
+  last_outcome      TEXT CHECK (last_outcome IN
+                      ('started', 'caught_up', 'waiting', 'skipped_running',
+                       'missed', 'refused', 'suspended')),
+  last_reason       TEXT,
+  last_run_id       TEXT REFERENCES runs(id) ON DELETE SET NULL,
+  last_chain_run_id TEXT REFERENCES chain_runs(id) ON DELETE SET NULL,
+  missed_count      INTEGER NOT NULL DEFAULT 0 CHECK (missed_count >= 0),
+  missed_last_at    TEXT,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL,
+  FOREIGN KEY (job_id, job_version) REFERENCES job_versions(job_id, version) ON DELETE RESTRICT,
+  CHECK (enabled = 1 OR suspended IS NULL),
+  CHECK ((missed_policy = 'queue') = (missed_limit IS NOT NULL))
+);
+
+CREATE TABLE grants (
+  id                 TEXT PRIMARY KEY,
+  kind               TEXT NOT NULL CHECK (kind IN ('schedule')),
+  schedule_id        TEXT NOT NULL UNIQUE REFERENCES schedules(id) ON DELETE CASCADE,
+  schedule_revision  INTEGER NOT NULL,
+  target_fingerprint TEXT NOT NULL,
+  job_revision       INTEGER,
+  production         INTEGER NOT NULL CHECK (production IN (0, 1)),
+  granted_at         TEXT NOT NULL
+);
+
+CREATE TABLE grant_connections (
+  grant_id            TEXT NOT NULL REFERENCES grants(id) ON DELETE CASCADE,
+  connection_id       TEXT NOT NULL,
+  connection_revision INTEGER NOT NULL,
+  environment         TEXT NOT NULL CHECK (environment IN
+                        ('none', 'development', 'staging', 'production')),
+  PRIMARY KEY (grant_id, connection_id)
+);
+
+CREATE INDEX grant_connections_by_connection ON grant_connections(connection_id);
+
+CREATE TABLE runs_new (
+  id                  TEXT PRIMARY KEY,
+  kind                TEXT NOT NULL DEFAULT 'sql' CHECK (kind IN ('sql', 'process')),
+  job_id              TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+  job_revision        INTEGER,
+  origin              TEXT NOT NULL CHECK (origin IN ('manual', 'schedule')),
+  state               TEXT NOT NULL CHECK (state IN
+                        ('running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+  cause               TEXT,
+  effect_unknown      INTEGER NOT NULL DEFAULT 0 CHECK (effect_unknown IN (0, 1)),
+  reads_only          INTEGER NOT NULL CHECK (reads_only IN (0, 1)),
+  snapshot_json       TEXT NOT NULL,
+  fingerprint         TEXT NOT NULL,
+  connection_id       TEXT,
+  connection_revision INTEGER,
+  rows_delivered      INTEGER,
+  rows_discarded      INTEGER,
+  rows_affected       INTEGER,
+  truncated           INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+  server_code         TEXT,
+  exit_code           INTEGER,
+  exit_signal         INTEGER,
+  process_group       INTEGER,
+  process_started     TEXT,
+  program_fingerprint TEXT,
+  failure_code        TEXT,
+  log_bytes_stdout    INTEGER,
+  log_bytes_stderr    INTEGER,
+  log_bytes_jjp       INTEGER,
+  outputs_stored      INTEGER,
+  started_at          TEXT NOT NULL,
+  finished_at         TEXT,
+  chain_run_id        TEXT REFERENCES chain_runs(id) ON DELETE CASCADE,
+  step_index          INTEGER,
+  job_version         INTEGER,
+  schedule_id         TEXT REFERENCES schedules(id) ON DELETE SET NULL,
+  due_at              TEXT,
+  catch_up            INTEGER NOT NULL DEFAULT 0 CHECK (catch_up IN (0, 1)),
+  CHECK ((state = 'running') = (finished_at IS NULL)),
+  CHECK ((state = 'failed') = (cause IS NOT NULL)),
+  CHECK ((kind = 'sql') = (connection_id IS NOT NULL)),
+  CHECK ((kind = 'sql') = (connection_revision IS NOT NULL)),
+  CHECK (kind = 'process' OR (exit_code IS NULL AND exit_signal IS NULL
+         AND process_group IS NULL AND program_fingerprint IS NULL)),
+  CHECK ((origin = 'schedule') = (due_at IS NOT NULL)),
+  CHECK (origin = 'schedule' OR schedule_id IS NULL),
+  CHECK (catch_up = 0 OR origin = 'schedule')
+);
+INSERT INTO runs_new (id, kind, job_id, job_revision, origin, state, cause, effect_unknown,
+    reads_only, snapshot_json, fingerprint, connection_id, connection_revision,
+    rows_delivered, rows_discarded, rows_affected, truncated, server_code, exit_code,
+    exit_signal, process_group, process_started, program_fingerprint, failure_code,
+    log_bytes_stdout, log_bytes_stderr, log_bytes_jjp, outputs_stored, started_at,
+    finished_at, chain_run_id, step_index, job_version)
+  SELECT id, kind, job_id, job_revision, origin, state, cause, effect_unknown,
+    reads_only, snapshot_json, fingerprint, connection_id, connection_revision,
+    rows_delivered, rows_discarded, rows_affected, truncated, server_code, exit_code,
+    exit_signal, process_group, process_started, program_fingerprint, failure_code,
+    log_bytes_stdout, log_bytes_stderr, log_bytes_jjp, outputs_stored, started_at,
+    finished_at, chain_run_id, step_index, job_version FROM runs;
+
+CREATE TABLE chain_runs_new (
+  id             TEXT PRIMARY KEY,
+  job_id         TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+  job_revision   INTEGER,
+  origin         TEXT NOT NULL CHECK (origin IN ('manual', 'schedule')),
+  state          TEXT NOT NULL CHECK (state IN
+                   ('running', 'succeeded', 'failed', 'cancelled', 'interrupted')),
+  cause          TEXT,
+  failed_step    TEXT,
+  effect_unknown INTEGER NOT NULL DEFAULT 0 CHECK (effect_unknown IN (0, 1)),
+  snapshot_json  TEXT NOT NULL,
+  fingerprint    TEXT NOT NULL,
+  started_at     TEXT NOT NULL,
+  finished_at    TEXT,
+  schedule_id    TEXT REFERENCES schedules(id) ON DELETE SET NULL,
+  due_at         TEXT,
+  catch_up       INTEGER NOT NULL DEFAULT 0 CHECK (catch_up IN (0, 1)),
+  CHECK ((state = 'running') = (finished_at IS NULL)),
+  CHECK ((state = 'failed') = (cause IS NOT NULL)),
+  CHECK ((origin = 'schedule') = (due_at IS NOT NULL)),
+  CHECK (origin = 'schedule' OR schedule_id IS NULL),
+  CHECK (catch_up = 0 OR origin = 'schedule')
+);
+INSERT INTO chain_runs_new (id, job_id, job_revision, origin, state, cause, failed_step,
+    effect_unknown, snapshot_json, fingerprint, started_at, finished_at)
+  SELECT id, job_id, job_revision, origin, state, cause, failed_step,
+    effect_unknown, snapshot_json, fingerprint, started_at, finished_at FROM chain_runs;
+
+DROP TABLE chain_runs;
+ALTER TABLE chain_runs_new RENAME TO chain_runs;
+DROP TABLE runs;
+ALTER TABLE runs_new RENAME TO runs;
+
+CREATE INDEX runs_by_job            ON runs(job_id, started_at DESC);
+CREATE INDEX runs_by_start          ON runs(started_at);
+CREATE INDEX runs_open              ON runs(state) WHERE state = 'running';
+CREATE INDEX runs_by_chain          ON runs(chain_run_id, step_index) WHERE chain_run_id IS NOT NULL;
+CREATE INDEX runs_by_schedule       ON runs(schedule_id, started_at DESC) WHERE schedule_id IS NOT NULL;
+CREATE INDEX chain_runs_by_job      ON chain_runs(job_id, started_at DESC);
+CREATE INDEX chain_runs_by_start    ON chain_runs(started_at);
+CREATE INDEX chain_runs_open        ON chain_runs(state) WHERE state = 'running';
+CREATE INDEX chain_runs_by_schedule ON chain_runs(schedule_id, started_at DESC) WHERE schedule_id IS NOT NULL;
+";
+
+const STEPS: [&str; 5] = [STEP_1, STEP_2, STEP_3, STEP_4, STEP_5];
 
 /// Whether a file could be brought to the requested version.
 #[derive(Debug, PartialEq, Eq)]
@@ -448,7 +612,8 @@ pub(crate) async fn migrate(pool: &SqlitePool, target: i64) -> DriverResult<Migr
             1 => "PRAGMA user_version=1",
             2 => "PRAGMA user_version=2",
             3 => "PRAGMA user_version=3",
-            _ => "PRAGMA user_version=4",
+            4 => "PRAGMA user_version=4",
+            _ => "PRAGMA user_version=5",
         };
         sqlx::raw_sql(pragma)
             .execute(&mut *tx)
@@ -509,6 +674,9 @@ pub struct ChainRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InUse {
     pub chains: Vec<ChainRef>,
+    /// The job's schedule runs this version (ADR-0041); deleting the job
+    /// deletes its schedule instead.
+    pub schedule: Option<ScheduleId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,6 +696,9 @@ pub struct NewRun {
     pub connection_id: Option<ConnectionId>,
     pub connection_revision: Option<i64>,
     pub program_fingerprint: Option<String>,
+    /// The schedule, due time and catch-up marker of a scheduled run, or of
+    /// a scheduled chain's step (ADR-0041); `None` for a manual run.
+    pub scheduled: Option<RunSchedule>,
     pub started_at: UtcMillis,
 }
 
@@ -605,6 +776,8 @@ pub struct NewChainRun {
     pub job_revision: Option<i64>,
     pub origin: RunOrigin,
     pub snapshot_json: String,
+    /// As [`NewRun::scheduled`].
+    pub scheduled: Option<RunSchedule>,
     pub started_at: UtcMillis,
 }
 
@@ -703,6 +876,111 @@ pub struct Pruned {
     pub program_runs: Vec<RunId>,
 }
 
+/// What the user edits of a schedule (ADR-0041). The rule, the zone and the
+/// policies are what the consent covers; `notify` is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleDraft {
+    pub id: ScheduleId,
+    pub job_id: JobId,
+    /// The published version it runs; `None` for a chain.
+    pub job_version: Option<i64>,
+    /// Canonical JSON of the rule (specification, section 9.5.2).
+    pub rule_json: String,
+    /// An IANA name.
+    pub time_zone: String,
+    pub missed_policy: MissedPolicy,
+    /// N of [`MissedPolicy::Queue`], within `MISSED_LIMIT_RANGE`; `None`
+    /// with any other policy.
+    pub missed_limit: Option<i64>,
+    pub overlap_policy: OverlapPolicy,
+    /// An operating-system notification when a run ends badly (Q-40).
+    pub notify: bool,
+}
+
+/// A schedule as stored, with its bookkeeping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSchedule {
+    pub draft: ScheduleDraft,
+    /// Grows when the rule, the zone or a policy changes.
+    pub revision: i64,
+    pub enabled: bool,
+    /// The suspension's reason code; `None` when not suspended.
+    pub suspended: Option<String>,
+    /// The latest due time handled, whatever its outcome.
+    pub last_due_at: Option<UtcMillis>,
+    pub last_outcome: Option<ScheduleOutcome>,
+    pub last_reason: Option<String>,
+    pub last_run_id: Option<RunId>,
+    pub last_chain_run_id: Option<ChainRunId>,
+    pub missed_count: i64,
+    pub missed_last_at: Option<UtcMillis>,
+    pub created_at: UtcMillis,
+    pub updated_at: UtcMillis,
+}
+
+/// One connection a grant binds: its profile revision and environment label
+/// (`none`, `development`, `staging` or `production`) when consent was given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantConnection {
+    pub connection_id: ConnectionId,
+    pub connection_revision: i64,
+    pub environment: String,
+}
+
+/// The consent of one schedule (specification, section 9.5.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    pub id: GrantId,
+    pub schedule_id: ScheduleId,
+    /// The schedule's revision consented to.
+    pub schedule_revision: i64,
+    /// The version's fingerprint, or the chain plan's.
+    pub target_fingerprint: String,
+    /// A chain's revision; `None` for a version.
+    pub job_revision: Option<i64>,
+    /// A production confirmation was part of it.
+    pub production: bool,
+    pub connections: Vec<GrantConnection>,
+    pub granted_at: UtcMillis,
+}
+
+/// What a schedule's due time came to, for its bookkeeping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScheduleMark {
+    pub due_at: UtcMillis,
+    pub outcome: ScheduleOutcome,
+    /// A stable code (`queue_full`, `coalesced`, …); never a message.
+    pub reason: Option<String>,
+    pub run_id: Option<RunId>,
+    pub chain_run_id: Option<ChainRunId>,
+    /// Missed times to add to the count, and the latest of them.
+    pub missed: i64,
+    pub missed_last_at: Option<UtcMillis>,
+}
+
+impl ScheduleMark {
+    pub fn new(due_at: UtcMillis, outcome: ScheduleOutcome) -> Self {
+        Self {
+            due_at,
+            outcome,
+            reason: None,
+            run_id: None,
+            chain_run_id: None,
+            missed: 0,
+            missed_last_at: None,
+        }
+    }
+}
+
+/// Why a schedule could not be saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScheduleRefused {
+    /// The schedule changed since it was read, or is gone.
+    Changed,
+    /// The job already has another schedule.
+    Taken,
+}
+
 // ---------------------------------------------------------------------------
 // Row mapping
 // ---------------------------------------------------------------------------
@@ -713,15 +991,24 @@ macro_rules! run_columns {
          cause, effect_unknown, reads_only, fingerprint, connection_id, connection_revision, \
          rows_delivered, rows_discarded, rows_affected, truncated, server_code, exit_code, \
          exit_signal, process_group, process_started, program_fingerprint, failure_code, \
-         log_bytes_stdout, log_bytes_stderr, log_bytes_jjp, outputs_stored, started_at, \
-         finished_at"
+         log_bytes_stdout, log_bytes_stderr, log_bytes_jjp, outputs_stored, schedule_id, \
+         due_at, catch_up, started_at, finished_at"
     };
 }
 
 macro_rules! chain_columns {
     () => {
         "id, job_id, job_revision, origin, state, cause, failed_step, effect_unknown, \
-         fingerprint, started_at, finished_at"
+         fingerprint, schedule_id, due_at, catch_up, started_at, finished_at"
+    };
+}
+
+macro_rules! schedule_columns {
+    () => {
+        "id, job_id, job_version, rule_json, time_zone, missed_policy, missed_limit, \
+         overlap_policy, notify, revision, enabled, suspended, last_due_at, last_outcome, \
+         last_reason, last_run_id, last_chain_run_id, missed_count, missed_last_at, created_at, \
+         updated_at"
     };
 }
 
@@ -802,6 +1089,9 @@ fn run_record(row: &SqliteRow) -> DriverResult<RunRecord> {
         log_bytes_stderr: get(row, "log_bytes_stderr")?,
         log_bytes_jjp: get(row, "log_bytes_jjp")?,
         outputs_stored: get::<Option<i64>>(row, "outputs_stored")?.map(|stored| stored != 0),
+        schedule_id: optional_parsed(row, "schedule_id")?,
+        due_at: optional_time_of(row, "due_at")?,
+        catch_up: get::<i64>(row, "catch_up")? != 0,
         started_at: time_of(row, "started_at")?,
         finished_at: optional_time_of(row, "finished_at")?,
     })
@@ -818,8 +1108,43 @@ fn chain_record(row: &SqliteRow) -> DriverResult<ChainRunRecord> {
         failed_step: get(row, "failed_step")?,
         effect_unknown: get::<i64>(row, "effect_unknown")? != 0,
         fingerprint: get(row, "fingerprint")?,
+        schedule_id: optional_parsed(row, "schedule_id")?,
+        due_at: optional_time_of(row, "due_at")?,
+        catch_up: get::<i64>(row, "catch_up")? != 0,
         started_at: time_of(row, "started_at")?,
         finished_at: optional_time_of(row, "finished_at")?,
+    })
+}
+
+fn schedule_record(row: &SqliteRow) -> DriverResult<StoredSchedule> {
+    Ok(StoredSchedule {
+        draft: ScheduleDraft {
+            id: parsed(&get::<String>(row, "id")?)?,
+            job_id: parsed(&get::<String>(row, "job_id")?)?,
+            job_version: get(row, "job_version")?,
+            rule_json: get(row, "rule_json")?,
+            time_zone: get(row, "time_zone")?,
+            missed_policy: MissedPolicy::parse(&get::<String>(row, "missed_policy")?)
+                .ok_or_else(corrupt)?,
+            missed_limit: get(row, "missed_limit")?,
+            overlap_policy: OverlapPolicy::parse(&get::<String>(row, "overlap_policy")?)
+                .ok_or_else(corrupt)?,
+            notify: get::<i64>(row, "notify")? != 0,
+        },
+        revision: get(row, "revision")?,
+        enabled: get::<i64>(row, "enabled")? != 0,
+        suspended: get(row, "suspended")?,
+        last_due_at: optional_time_of(row, "last_due_at")?,
+        last_outcome: get::<Option<String>>(row, "last_outcome")?
+            .map(|code| ScheduleOutcome::parse(&code).ok_or_else(corrupt))
+            .transpose()?,
+        last_reason: get(row, "last_reason")?,
+        last_run_id: optional_parsed(row, "last_run_id")?,
+        last_chain_run_id: optional_parsed(row, "last_chain_run_id")?,
+        missed_count: get(row, "missed_count")?,
+        missed_last_at: optional_time_of(row, "missed_last_at")?,
+        created_at: time_of(row, "created_at")?,
+        updated_at: time_of(row, "updated_at")?,
     })
 }
 
@@ -1111,14 +1436,25 @@ impl AutomationRepository {
             .ok_or_else(|| error("Could not read the job back."))
     }
 
-    /// Deletes a job and its versions in one transaction, unless a chain
-    /// names any of its versions. Runs keep their rows with no job.
+    /// Deletes a job, its versions and its schedule with the schedule's
+    /// grant, in one transaction, unless a chain names any of its versions.
+    /// Runs keep their rows with no job and no schedule.
     pub async fn delete_job(&self, id: JobId) -> DriverResult<Result<(), InUse>> {
         let mut tx = self.write().await?;
         let chains = chains_using_in(&mut tx, id, None).await?;
         if !chains.is_empty() {
-            return Ok(Err(InUse { chains }));
+            return Ok(Err(InUse {
+                chains,
+                schedule: None,
+            }));
         }
+        // First: the schedule's key on its version would refuse the
+        // versions' deletion.
+        sqlx::query("DELETE FROM schedules WHERE job_id=?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
         sqlx::query("DELETE FROM job_versions WHERE job_id=?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -1222,7 +1558,8 @@ impl AutomationRepository {
         .transpose()
     }
 
-    /// Refused, naming the chains, while any chain uses the version.
+    /// Refused, naming the chains or the schedule, while any chain or the
+    /// job's schedule uses the version.
     pub async fn delete_version(
         &self,
         job: JobId,
@@ -1230,8 +1567,16 @@ impl AutomationRepository {
     ) -> DriverResult<Result<(), InUse>> {
         let mut tx = self.write().await?;
         let chains = chains_using_in(&mut tx, job, Some(version)).await?;
-        if !chains.is_empty() {
-            return Ok(Err(InUse { chains }));
+        let schedule: Option<String> =
+            sqlx::query_scalar("SELECT id FROM schedules WHERE job_id=? AND job_version=?")
+                .bind(job.to_string())
+                .bind(version)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(sql_error)?;
+        let schedule = schedule.map(|id| parsed::<ScheduleId>(&id)).transpose()?;
+        if !chains.is_empty() || schedule.is_some() {
+            return Ok(Err(InUse { chains, schedule }));
         }
         let deleted = sqlx::query("DELETE FROM job_versions WHERE job_id=? AND version=?")
             .bind(job.to_string())
@@ -1257,6 +1602,399 @@ impl AutomationRepository {
         chains_using_in(&mut connection, job, version).await
     }
 
+    // ----- schedules and grants (ADR-0041) -----
+
+    /// Every schedule, oldest first.
+    pub async fn schedules(&self) -> DriverResult<Vec<StoredSchedule>> {
+        sqlx::query(concat!(
+            "SELECT ",
+            schedule_columns!(),
+            " FROM schedules ORDER BY created_at, id"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sql_error)?
+        .iter()
+        .map(schedule_record)
+        .collect()
+    }
+
+    pub async fn schedule(&self, id: ScheduleId) -> DriverResult<Option<StoredSchedule>> {
+        sqlx::query(concat!(
+            "SELECT ",
+            schedule_columns!(),
+            " FROM schedules WHERE id=?"
+        ))
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sql_error)?
+        .as_ref()
+        .map(schedule_record)
+        .transpose()
+    }
+
+    /// The schedule of a job or chain, if it has one.
+    pub async fn schedule_of_job(&self, job: JobId) -> DriverResult<Option<StoredSchedule>> {
+        sqlx::query(concat!(
+            "SELECT ",
+            schedule_columns!(),
+            " FROM schedules WHERE job_id=?"
+        ))
+        .bind(job.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sql_error)?
+        .as_ref()
+        .map(schedule_record)
+        .transpose()
+    }
+
+    /// Saves a new schedule (`expected_revision` `None`), always off until
+    /// consent is given, or changes one at that revision. A change to what
+    /// the consent covers (the version, the rule, the zone, a policy or N)
+    /// raises the revision, turns it off and deletes its grant: it asks
+    /// again. A change of `notify` alone keeps both.
+    pub async fn save_schedule(
+        &self,
+        draft: &ScheduleDraft,
+        expected_revision: Option<i64>,
+        now: UtcMillis,
+    ) -> DriverResult<Result<StoredSchedule, ScheduleRefused>> {
+        check_json(&draft.rule_json)?;
+        let stamp = format_time(now);
+        let mut tx = self.write().await?;
+        match expected_revision {
+            None => {
+                let taken: Option<String> =
+                    sqlx::query_scalar("SELECT id FROM schedules WHERE job_id=?")
+                        .bind(draft.job_id.to_string())
+                        .fetch_optional(&mut *tx)
+                        .await
+                        .map_err(sql_error)?;
+                if taken.is_some() {
+                    return Ok(Err(ScheduleRefused::Taken));
+                }
+                sqlx::query(
+                    "INSERT INTO schedules (id, job_id, job_version, rule_json, time_zone, \
+                     missed_policy, missed_limit, overlap_policy, notify, revision, enabled, \
+                     created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)",
+                )
+                .bind(draft.id.to_string())
+                .bind(draft.job_id.to_string())
+                .bind(draft.job_version)
+                .bind(&draft.rule_json)
+                .bind(&draft.time_zone)
+                .bind(draft.missed_policy.as_str())
+                .bind(draft.missed_limit)
+                .bind(draft.overlap_policy.as_str())
+                .bind(flag(draft.notify))
+                .bind(&stamp)
+                .bind(&stamp)
+                .execute(&mut *tx)
+                .await
+                .map_err(sql_error)?;
+            }
+            Some(revision) => {
+                let stored = sqlx::query(concat!(
+                    "SELECT ",
+                    schedule_columns!(),
+                    " FROM schedules WHERE id=?"
+                ))
+                .bind(draft.id.to_string())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(sql_error)?
+                .as_ref()
+                .map(schedule_record)
+                .transpose()?;
+                let Some(stored) = stored.filter(|stored| {
+                    stored.revision == revision && stored.draft.job_id == draft.job_id
+                }) else {
+                    return Ok(Err(ScheduleRefused::Changed));
+                };
+                let consented = |draft: &ScheduleDraft| {
+                    (
+                        draft.job_version,
+                        draft.rule_json.clone(),
+                        draft.time_zone.clone(),
+                        draft.missed_policy,
+                        draft.missed_limit,
+                        draft.overlap_policy,
+                    )
+                };
+                if consented(&stored.draft) == consented(draft) {
+                    sqlx::query("UPDATE schedules SET notify=?, updated_at=? WHERE id=?")
+                        .bind(flag(draft.notify))
+                        .bind(&stamp)
+                        .bind(draft.id.to_string())
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(sql_error)?;
+                } else {
+                    sqlx::query(
+                        "UPDATE schedules SET job_version=?, rule_json=?, time_zone=?, \
+                         missed_policy=?, missed_limit=?, overlap_policy=?, notify=?, \
+                         revision=revision+1, enabled=0, suspended=NULL, updated_at=? WHERE id=?",
+                    )
+                    .bind(draft.job_version)
+                    .bind(&draft.rule_json)
+                    .bind(&draft.time_zone)
+                    .bind(draft.missed_policy.as_str())
+                    .bind(draft.missed_limit)
+                    .bind(draft.overlap_policy.as_str())
+                    .bind(flag(draft.notify))
+                    .bind(&stamp)
+                    .bind(draft.id.to_string())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(sql_error)?;
+                    sqlx::query("DELETE FROM grants WHERE schedule_id=?")
+                        .bind(draft.id.to_string())
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(sql_error)?;
+                }
+            }
+        }
+        tx.commit().await.map_err(sql_error)?;
+        let saved = self
+            .schedule(draft.id)
+            .await?
+            .ok_or_else(|| error("Could not read the schedule back."))?;
+        Ok(Ok(saved))
+    }
+
+    /// Records consent: replaces the schedule's grant with `grant` and turns
+    /// it on, no longer suspended. Refused when the schedule is not at the
+    /// revision the grant names.
+    pub async fn confirm_schedule(
+        &self,
+        grant: &Grant,
+        now: UtcMillis,
+    ) -> DriverResult<Result<StoredSchedule, ScheduleRefused>> {
+        let mut tx = self.write().await?;
+        let revision: Option<i64> = sqlx::query_scalar("SELECT revision FROM schedules WHERE id=?")
+            .bind(grant.schedule_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        if revision != Some(grant.schedule_revision) {
+            return Ok(Err(ScheduleRefused::Changed));
+        }
+        sqlx::query("DELETE FROM grants WHERE schedule_id=?")
+            .bind(grant.schedule_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        sqlx::query(
+            "INSERT INTO grants (id, kind, schedule_id, schedule_revision, target_fingerprint, \
+             job_revision, production, granted_at) VALUES (?, 'schedule', ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(grant.id.to_string())
+        .bind(grant.schedule_id.to_string())
+        .bind(grant.schedule_revision)
+        .bind(&grant.target_fingerprint)
+        .bind(grant.job_revision)
+        .bind(flag(grant.production))
+        .bind(format_time(grant.granted_at))
+        .execute(&mut *tx)
+        .await
+        .map_err(sql_error)?;
+        for connection in &grant.connections {
+            sqlx::query(
+                "INSERT INTO grant_connections (grant_id, connection_id, connection_revision, \
+                 environment) VALUES (?, ?, ?, ?)",
+            )
+            .bind(grant.id.to_string())
+            .bind(connection.connection_id.to_string())
+            .bind(connection.connection_revision)
+            .bind(&connection.environment)
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        }
+        sqlx::query("UPDATE schedules SET enabled=1, suspended=NULL, updated_at=? WHERE id=?")
+            .bind(format_time(now))
+            .bind(grant.schedule_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        tx.commit().await.map_err(sql_error)?;
+        let saved = self
+            .schedule(grant.schedule_id)
+            .await?
+            .ok_or_else(|| error("Could not read the schedule back."))?;
+        Ok(Ok(saved))
+    }
+
+    /// Turns a schedule off and revokes it: its grant is deleted (Q-38).
+    pub async fn disable_schedule(&self, id: ScheduleId, now: UtcMillis) -> DriverResult<()> {
+        let mut tx = self.write().await?;
+        sqlx::query("DELETE FROM grants WHERE schedule_id=?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        sqlx::query("UPDATE schedules SET enabled=0, suspended=NULL, updated_at=? WHERE id=?")
+            .bind(format_time(now))
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(sql_error)?;
+        tx.commit().await.map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Deletes a schedule and its grant. Its runs keep their rows, with no
+    /// schedule.
+    pub async fn delete_schedule(&self, id: ScheduleId) -> DriverResult<()> {
+        sqlx::query("DELETE FROM schedules WHERE id=?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Suspends an enabled schedule with a reason code, keeping its grant so
+    /// **Confirm again** can say what changed. `false` when it was off or
+    /// already suspended.
+    pub async fn suspend_schedule(
+        &self,
+        id: ScheduleId,
+        reason: &str,
+        now: UtcMillis,
+    ) -> DriverResult<bool> {
+        let changed = sqlx::query(
+            "UPDATE schedules SET suspended=?, last_outcome='suspended', last_reason=?, \
+             updated_at=? WHERE id=? AND enabled=1 AND suspended IS NULL",
+        )
+        .bind(reason)
+        .bind(reason)
+        .bind(format_time(now))
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(sql_error)?
+        .rows_affected();
+        Ok(changed > 0)
+    }
+
+    /// Records what a due time came to. The last handled due time only moves
+    /// forward, so a wall clock set back never makes a time new again. A run
+    /// not yet admitted (its row is written by its owner) is linked later by
+    /// [`AutomationRepository::link_schedule_run`]; the mark never waits for
+    /// it.
+    pub async fn mark_schedule(&self, id: ScheduleId, mark: &ScheduleMark) -> DriverResult<()> {
+        let due = format_time(mark.due_at);
+        sqlx::query(
+            "UPDATE schedules SET \
+             last_due_at=CASE WHEN last_due_at IS NULL OR last_due_at<?1 THEN ?1 ELSE last_due_at END, \
+             last_outcome=?2, last_reason=?3, \
+             last_run_id=COALESCE((SELECT id FROM runs WHERE id=?4), last_run_id), \
+             last_chain_run_id=COALESCE((SELECT id FROM chain_runs WHERE id=?5), last_chain_run_id), \
+             missed_count=missed_count+?6, \
+             missed_last_at=COALESCE(?7, missed_last_at) WHERE id=?8",
+        )
+        .bind(&due)
+        .bind(mark.outcome.as_str())
+        .bind(mark.reason.as_deref())
+        .bind(mark.run_id.map(|id| id.to_string()))
+        .bind(mark.chain_run_id.map(|id| id.to_string()))
+        .bind(mark.missed.max(0))
+        .bind(mark.missed_last_at.map(format_time))
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Points the schedule at the run or chain run it started, once that
+    /// run's row exists. `false` while it does not.
+    pub async fn link_schedule_run(
+        &self,
+        id: ScheduleId,
+        run: Option<RunId>,
+        chain_run: Option<ChainRunId>,
+    ) -> DriverResult<bool> {
+        let changed = sqlx::query(
+            "UPDATE schedules SET \
+             last_run_id=COALESCE((SELECT id FROM runs WHERE id=?1), last_run_id), \
+             last_chain_run_id=COALESCE((SELECT id FROM chain_runs WHERE id=?2), last_chain_run_id) \
+             WHERE id=?3 AND (EXISTS(SELECT 1 FROM runs WHERE id=?1) \
+               OR EXISTS(SELECT 1 FROM chain_runs WHERE id=?2))",
+        )
+        .bind(run.map(|id| id.to_string()))
+        .bind(chain_run.map(|id| id.to_string()))
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(sql_error)?
+        .rows_affected();
+        Ok(changed > 0)
+    }
+
+    /// The schedule's grant, with the connections it binds.
+    pub async fn grant(&self, schedule: ScheduleId) -> DriverResult<Option<Grant>> {
+        let Some(row) = sqlx::query(
+            "SELECT id, schedule_id, schedule_revision, target_fingerprint, job_revision, \
+             production, granted_at FROM grants WHERE schedule_id=?",
+        )
+        .bind(schedule.to_string())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(sql_error)?
+        else {
+            return Ok(None);
+        };
+        let id: String = get(&row, "id")?;
+        let connections = sqlx::query(
+            "SELECT connection_id, connection_revision, environment FROM grant_connections \
+             WHERE grant_id=? ORDER BY connection_id",
+        )
+        .bind(&id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sql_error)?
+        .iter()
+        .map(|row| {
+            Ok(GrantConnection {
+                connection_id: parsed(&get::<String>(row, "connection_id")?)?,
+                connection_revision: get(row, "connection_revision")?,
+                environment: get(row, "environment")?,
+            })
+        })
+        .collect::<DriverResult<Vec<_>>>()?;
+        Ok(Some(Grant {
+            id: parsed(&id)?,
+            schedule_id: parsed(&get::<String>(&row, "schedule_id")?)?,
+            schedule_revision: get(&row, "schedule_revision")?,
+            target_fingerprint: get(&row, "target_fingerprint")?,
+            job_revision: get(&row, "job_revision")?,
+            production: get::<i64>(&row, "production")? != 0,
+            connections,
+            granted_at: time_of(&row, "granted_at")?,
+        }))
+    }
+
+    /// The schedules whose grants bind `connection`, through its index.
+    pub async fn schedules_binding(
+        &self,
+        connection: ConnectionId,
+    ) -> DriverResult<Vec<ScheduleId>> {
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT g.schedule_id FROM grant_connections c JOIN grants g ON g.id=c.grant_id \
+             WHERE c.connection_id=? ORDER BY g.schedule_id",
+        )
+        .bind(connection.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(sql_error)?;
+        ids.iter().map(|id| parsed(id)).collect()
+    }
+
     // ----- runs -----
 
     /// Writes the `running` row with its snapshot before any I/O. The
@@ -1269,8 +2007,9 @@ impl AutomationRepository {
         sqlx::query(
             "INSERT INTO runs (id, kind, job_id, job_revision, job_version, chain_run_id, \
              step_index, origin, state, effect_unknown, reads_only, snapshot_json, fingerprint, \
-             connection_id, connection_revision, program_fingerprint, started_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, ?, ?, ?, ?, ?, ?, ?)",
+             connection_id, connection_revision, program_fingerprint, schedule_id, due_at, \
+             catch_up, started_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(run.id.to_string())
         .bind(run.kind.as_str())
@@ -1286,6 +2025,14 @@ impl AutomationRepository {
         .bind(run.connection_id.map(|id| id.to_string()))
         .bind(run.connection_revision)
         .bind(run.program_fingerprint.as_deref())
+        .bind(
+            run.scheduled
+                .map(|scheduled| scheduled.schedule.to_string()),
+        )
+        .bind(run.scheduled.map(|scheduled| format_time(scheduled.due_at)))
+        .bind(flag(
+            run.scheduled.is_some_and(|scheduled| scheduled.catch_up),
+        ))
         .bind(format_time(run.started_at))
         .execute(&self.pool)
         .await
@@ -1403,7 +2150,8 @@ impl AutomationRepository {
         check_json(&run.snapshot_json)?;
         sqlx::query(
             "INSERT INTO chain_runs (id, job_id, job_revision, origin, state, effect_unknown, \
-             snapshot_json, fingerprint, started_at) VALUES (?, ?, ?, ?, 'running', 0, ?, ?, ?)",
+             snapshot_json, fingerprint, schedule_id, due_at, catch_up, started_at) \
+             VALUES (?, ?, ?, ?, 'running', 0, ?, ?, ?, ?, ?, ?)",
         )
         .bind(run.id.to_string())
         .bind(run.job_id.map(|id| id.to_string()))
@@ -1411,6 +2159,14 @@ impl AutomationRepository {
         .bind(run.origin.as_str())
         .bind(&run.snapshot_json)
         .bind(fingerprint(run.snapshot_json.as_bytes()))
+        .bind(
+            run.scheduled
+                .map(|scheduled| scheduled.schedule.to_string()),
+        )
+        .bind(run.scheduled.map(|scheduled| format_time(scheduled.due_at)))
+        .bind(flag(
+            run.scheduled.is_some_and(|scheduled| scheduled.catch_up),
+        ))
         .bind(format_time(run.started_at))
         .execute(&self.pool)
         .await

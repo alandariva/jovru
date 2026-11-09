@@ -56,6 +56,14 @@ uuid_id!(
     /// Identity of one run of a chain, generated when its plan is confirmed.
     ChainRunId
 );
+uuid_id!(
+    /// Identity of a schedule (ADR-0041): at most one per job or chain.
+    ScheduleId
+);
+uuid_id!(
+    /// Identity of a grant: the consent of one schedule (ADR-0041).
+    GrantId
+);
 
 /// A point in time as milliseconds since the Unix epoch, UTC. Storage writes
 /// it as `YYYY-MM-DDTHH:MM:SS.mmmZ` text.
@@ -239,11 +247,75 @@ impl Cause {
 }
 
 codes!(
-    /// Who started a run. Only manual runs exist in 0.3.0.
+    /// Who started a run.
     RunOrigin {
         Manual => "manual",
+        /// A schedule, at a due time (ADR-0041).
+        Schedule => "schedule",
     }
 );
+
+codes!(
+    /// What a schedule does with the times it missed while the application
+    /// was closed, the computer slept, another instance held the lock or the
+    /// scheduler was past its grace (specification, section 9.5.5; Q-34).
+    MissedPolicy {
+        /// Never run them; they are counted and shown. The default.
+        Ignore => "ignore",
+        /// One catch-up run for all of them, due at the latest.
+        RunOnce => "run_once",
+        /// A catch-up run for each of the N most recent, one at a time.
+        Queue => "queue",
+    }
+);
+
+codes!(
+    /// What a due time does when the schedule still has a run queued or
+    /// active (section 9.5.5; Q-35).
+    OverlapPolicy {
+        /// Starts nothing; recorded as skipped. The default.
+        Skip => "skip",
+        /// Waits for the schedule's runs to end; at most one waits.
+        QueueOne => "queue_one",
+        /// Runs beside it, under the queue and the limits.
+        Concurrent => "concurrent",
+    }
+);
+
+codes!(
+    /// What happened at a schedule's last handled due time (ADR-0041).
+    ScheduleOutcome {
+        /// A run was submitted on time.
+        Started => "started",
+        /// A catch-up run was submitted for a missed time.
+        CaughtUp => "caught_up",
+        /// The due time waits for the active run to end (queue one).
+        Waiting => "waiting",
+        /// A run of the schedule was still queued or active.
+        SkippedRunning => "skipped_running",
+        /// The time passed while nothing could run it.
+        Missed => "missed",
+        /// The queue was full, the wait too long, or a default failed.
+        Refused => "refused",
+        /// What the consent binds changed.
+        Suspended => "suspended",
+    }
+);
+
+/// The fewest and the most catch-up runs of [`MissedPolicy::Queue`]: 1
+/// would be [`MissedPolicy::RunOnce`], and no calendar rule has more than 24
+/// times a day (Q-39).
+pub const MISSED_LIMIT_RANGE: std::ops::RangeInclusive<i64> = 2..=24;
+
+/// How a scheduled run or chain run was started: by which schedule, for
+/// which due time, and whether it stands for missed times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RunSchedule {
+    pub schedule: ScheduleId,
+    pub due_at: UtcMillis,
+    /// A catch-up (Q-34): a new run for a missed time, never a replay.
+    pub catch_up: bool,
+}
 
 /// What a run's history row says, for lists and the run's details. Never a
 /// value, a cell or a server message.
@@ -289,6 +361,13 @@ pub struct RunRecord {
     /// `None`: the job does not persist outputs; `Some(false)`: they
     /// exceeded the quota; `Some(true)`: stored (ADR-0035).
     pub outputs_stored: Option<bool>,
+    /// The schedule that started it; `None` for a manual run, or once the
+    /// schedule was deleted (ADR-0041).
+    pub schedule_id: Option<ScheduleId>,
+    /// The time it was due, exactly when the origin is `Schedule`.
+    pub due_at: Option<UtcMillis>,
+    /// A scheduled run that stands for a missed time (Q-34).
+    pub catch_up: bool,
     pub started_at: UtcMillis,
     /// `None` while `Running`.
     pub finished_at: Option<UtcMillis>,
@@ -307,6 +386,9 @@ pub struct ChainRunRecord {
     pub failed_step: Option<String>,
     pub effect_unknown: bool,
     pub fingerprint: String,
+    pub schedule_id: Option<ScheduleId>,
+    pub due_at: Option<UtcMillis>,
+    pub catch_up: bool,
     pub started_at: UtcMillis,
     pub finished_at: Option<UtcMillis>,
 }
@@ -381,6 +463,21 @@ mod tests {
         for kind in JobKind::ALL {
             assert_eq!(JobKind::parse(kind.as_str()), Some(*kind));
         }
+        for origin in RunOrigin::ALL {
+            assert_eq!(RunOrigin::parse(origin.as_str()), Some(*origin));
+        }
+        for policy in MissedPolicy::ALL {
+            assert_eq!(MissedPolicy::parse(policy.as_str()), Some(*policy));
+        }
+        for policy in OverlapPolicy::ALL {
+            assert_eq!(OverlapPolicy::parse(policy.as_str()), Some(*policy));
+        }
+        for outcome in ScheduleOutcome::ALL {
+            assert_eq!(ScheduleOutcome::parse(outcome.as_str()), Some(*outcome));
+        }
+        assert_eq!(RunOrigin::Schedule.as_str(), "schedule");
+        assert_eq!(MissedPolicy::RunOnce.as_str(), "run_once");
+        assert_eq!(OverlapPolicy::QueueOne.as_str(), "queue_one");
         assert_eq!(Cause::parse("Timeout"), None);
         assert_eq!(RunState::parse("queued"), None);
         assert_eq!(Cause::PlanChanged.as_str(), "plan_changed");

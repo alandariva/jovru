@@ -32,6 +32,7 @@ pub(super) async fn run(
         revision,
         version,
         chain,
+        scheduled,
         work,
     } = spec;
     let Work::Program { values } = work else {
@@ -72,12 +73,17 @@ pub(super) async fn run(
             job_version: version,
             chain_run_id: chain.map(|(chain, _)| chain),
             step_index: chain.and_then(|(_, step)| i64::try_from(step).ok()),
-            origin: RunOrigin::Manual,
+            origin: if scheduled.is_some() {
+                RunOrigin::Schedule
+            } else {
+                RunOrigin::Manual
+            },
             reads_only: false,
             snapshot_json: snapshot::program(&definition, launch),
             connection_id: None,
             connection_revision: None,
             program_fingerprint: launch.and_then(|launch| launch.fingerprint.clone()),
+            scheduled,
             started_at: UtcMillis::from(started_at),
         })
         .await;

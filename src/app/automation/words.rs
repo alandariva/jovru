@@ -665,6 +665,10 @@ pub fn save_error(error: &SaveError) -> String {
             "Refused: the chains {0} use it. Change those chains first.",
             chain_names(chains)
         ),
+        SaveError::Scheduled => tr!(
+            "Refused: the job's schedule runs this version. Point the schedule at another version, or delete it, first."
+        )
+        .to_owned(),
         SaveError::Conflict => tr!(
             "The job changed or was deleted elsewhere since it was opened. Close the tab and open it again."
         )
@@ -920,6 +924,9 @@ mod tests {
             log_bytes_stderr: None,
             log_bytes_jjp: None,
             outputs_stored: None,
+            schedule_id: None,
+            due_at: None,
+            catch_up: false,
             started_at: UtcMillis(0),
             finished_at: Some(UtcMillis(300_000)),
         }

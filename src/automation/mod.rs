@@ -12,7 +12,9 @@
 //! Three kinds of job run through it: a SQL Job (one statement on a session
 //! of its own, [`executor`]), an external program ([`process`], with
 //! [`jjp`] for programs that take inputs and return outputs) and a linear
-//! chain of published versions ([`chain`]).
+//! chain of published versions ([`chain`]). A [`schedule`] runs a published
+//! version or a chain by a rule in a time zone while the application is
+//! open, in the instance holding the lock (ADR-0041).
 
 pub mod chain;
 mod chain_run;
@@ -25,6 +27,7 @@ pub mod outputs;
 pub mod process;
 mod program_run;
 pub mod queue;
+pub mod schedule;
 mod snapshot;
 mod sql_run;
 #[cfg(test)]
@@ -36,8 +39,8 @@ pub use engine::{
 };
 pub use executor::{PrepareError, Prepared, prepare};
 pub use jykre_core::automation::{
-    Cause, ChainRunId, ChainRunRecord, JobId, JobKind, RunId, RunOrigin, RunRecord, RunState,
-    UtcMillis,
+    Cause, ChainRunId, ChainRunRecord, JobId, JobKind, MissedPolicy, OverlapPolicy, RunId,
+    RunOrigin, RunRecord, RunState, ScheduleId, ScheduleOutcome, UtcMillis,
 };
 
 use crate::reports::ParameterSpec;

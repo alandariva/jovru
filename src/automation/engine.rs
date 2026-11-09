@@ -5,11 +5,13 @@ use super::chain::{InputProblem, form_values};
 use super::definition::{self, ChainProblem, JobBody, JobDefinition, PinnedFile, Problem};
 use super::executor::{self, Prepared};
 use super::queue::{Admission, Blocked, Decision, Limits};
+use super::schedule::{self, Clock};
 use super::{
     Cause, ChainRunId, ChainStatus, JobId, JobKind, Phase, Progress, Refusal, RunId, RunStatus,
     SqlJob, UtcMillis, chain_run, jjp, logs, process, program_run, sql_run,
 };
 use crate::result::DEFAULT_MEMORY_CEILING;
+use jykre_core::automation::RunSchedule;
 use jykre_core::{CancellationToken, ConnectionId, Driver, DriverResult, ResolvedConnection};
 use jykre_storage::{
     AutomationLock, AutomationRepository, ChainRef, InUse, Opened, Orphan, StoredJob, StoredVersion,
@@ -164,6 +166,8 @@ pub enum SaveError {
     Chain(Vec<ChainProblem>),
     /// The job or version is named by these chains.
     InUse(Vec<ChainRef>),
+    /// The version is the one the job's schedule runs (ADR-0041).
+    Scheduled,
     /// Someone else saved the job meanwhile, or it is gone.
     Conflict,
     Storage(String),
@@ -257,6 +261,9 @@ pub(super) struct Inner {
     recovery: Mutex<Option<Recovery>>,
     registry: Mutex<Registry>,
     revisions: Mutex<HashMap<ConnectionId, i64>>,
+    /// Schedules: the clock, the connections they may use, and what the
+    /// scheduler tells the views (ADR-0041).
+    pub schedules: schedule::Shared,
     /// One `open` at a time: a second **Try again** waits for the first.
     opening: tokio::sync::Mutex<()>,
     /// One shutdown at a time; the lock is released only after it.
@@ -331,6 +338,20 @@ pub(super) struct SqlWork {
     pub connection: ConnectionInput,
 }
 
+/// What [`Engine::submit_run`] starts.
+pub(super) struct Submission {
+    pub definition: JobDefinition,
+    /// The stored job; `None` for a draft run.
+    pub job: Option<JobId>,
+    /// The job's revision, for a job run by hand.
+    pub revision: Option<i64>,
+    /// The published version a schedule runs.
+    pub version: Option<i64>,
+    pub values: HashMap<String, String>,
+    pub connection: Option<ConnectionInput>,
+    pub scheduled: Option<RunSchedule>,
+}
+
 /// A chain step's run, registered by its chain.
 pub(super) struct StepRun {
     pub id: RunId,
@@ -354,6 +375,8 @@ pub(super) struct RunSpec {
     /// The published version a chain step runs.
     pub version: Option<i64>,
     pub chain: Option<(ChainRunId, usize)>,
+    /// The schedule that started it, or its chain (ADR-0041).
+    pub scheduled: Option<RunSchedule>,
     pub work: Work,
 }
 
@@ -386,6 +409,26 @@ impl Engine {
         memory_ceiling: usize,
         timings: process::Timings,
     ) -> Self {
+        Self::with_clock(
+            runtime,
+            data_dir,
+            limits,
+            memory_ceiling,
+            timings,
+            Clock::System,
+        )
+    }
+
+    /// [`Engine::with_limits`] with the clock schedules read: the system's,
+    /// or one a test moves (specification, section 9.5.10).
+    pub fn with_clock(
+        runtime: Handle,
+        data_dir: PathBuf,
+        limits: Limits,
+        memory_ceiling: usize,
+        timings: process::Timings,
+        clock: Clock,
+    ) -> Self {
         let engine = Self {
             inner: Arc::new(Inner {
                 runtime,
@@ -408,6 +451,7 @@ impl Engine {
                     chains: Vec::new(),
                 }),
                 revisions: Mutex::new(HashMap::new()),
+                schedules: schedule::Shared::new(clock),
                 opening: tokio::sync::Mutex::new(()),
                 closing: tokio::sync::Mutex::new(()),
             }),
@@ -595,6 +639,8 @@ impl Engine {
                 .runtime
                 .spawn(async move { Engine::prune_loop(pruning).await }),
         );
+        // Schedules run only in the lock holder, from now on (section 9.5.4).
+        schedule::start(&self.inner);
     }
 
     /// Ends the programs a previous session left running, each only while
@@ -759,7 +805,8 @@ impl Engine {
         Ok(versions)
     }
 
-    /// Deletes a job, refused while a chain names any of its versions.
+    /// Deletes a job with its versions and its schedule (whose grant goes
+    /// with it), refused while a chain names any of its versions.
     pub async fn delete_job(&self, job: JobId) -> Result<(), SaveError> {
         let repository = self.writable()?;
         match repository.delete_job(job).await {
@@ -767,12 +814,13 @@ impl Engine {
                 self.inner.changed();
                 Ok(())
             }
-            Ok(Err(InUse { chains })) => Err(SaveError::InUse(chains)),
+            Ok(Err(InUse { chains, .. })) => Err(SaveError::InUse(chains)),
             Err(error) => Err(SaveError::Storage(error.message)),
         }
     }
 
-    /// Deletes a published version, refused while a chain names it.
+    /// Deletes a published version, refused while a chain or the job's
+    /// schedule names it.
     pub async fn delete_version(&self, job: JobId, version: i64) -> Result<(), SaveError> {
         let repository = self.writable()?;
         match repository.delete_version(job, version).await {
@@ -780,7 +828,13 @@ impl Engine {
                 self.inner.changed();
                 Ok(())
             }
-            Ok(Err(InUse { chains })) => Err(SaveError::InUse(chains)),
+            Ok(Err(InUse { chains, schedule })) => {
+                Err(if chains.is_empty() && schedule.is_some() {
+                    SaveError::Scheduled
+                } else {
+                    SaveError::InUse(chains)
+                })
+            }
             Err(error) => Err(SaveError::Storage(error.message)),
         }
     }
@@ -839,15 +893,38 @@ impl Engine {
     /// the limits full waits in the queue; one that cannot even wait is
     /// refused at once, with the reason.
     pub fn submit(&self, request: JobRequest) -> Result<RunHandle, Refusal> {
-        if self.availability() != Availability::Ready {
-            return Err(Refusal::Unavailable);
-        }
         let JobRequest {
             definition,
             stored,
             values,
             connection,
         } = request;
+        self.submit_run(Submission {
+            definition,
+            job: stored.map(|(job, _)| job),
+            revision: stored.map(|(_, revision)| revision),
+            version: None,
+            values,
+            connection,
+            scheduled: None,
+        })
+    }
+
+    /// [`Engine::submit`] for a job, its draft or one of its published
+    /// versions, by hand or by a schedule.
+    pub(super) fn submit_run(&self, submission: Submission) -> Result<RunHandle, Refusal> {
+        if self.availability() != Availability::Ready {
+            return Err(Refusal::Unavailable);
+        }
+        let Submission {
+            definition,
+            job,
+            revision,
+            version,
+            values,
+            connection,
+            scheduled,
+        } = submission;
         let (work, connection_id) = match &definition.body {
             JobBody::Sql(body) => {
                 let connection = connection.ok_or(Refusal::NoConnection)?;
@@ -878,14 +955,14 @@ impl Engine {
         let id = RunId::new();
         let name = definition.name.clone();
         let kind = definition.kind();
-        let job = stored.map(|(job, _)| job);
         let spec = RunSpec {
             id,
             definition,
             job,
-            revision: stored.map(|(_, revision)| revision),
-            version: None,
+            revision,
+            version,
             chain: None,
+            scheduled,
             work,
         };
         let stop = CancellationToken::new();
@@ -1127,6 +1204,15 @@ impl Engine {
 
     /// Starts a confirmed chain plan. Exactly the confirmed plan runs.
     pub fn submit_chain(&self, request: ChainRequest) -> Result<ChainHandle, Refusal> {
+        self.submit_chain_with(request, None)
+    }
+
+    /// [`Engine::submit_chain`], by hand or by a schedule.
+    pub(super) fn submit_chain_with(
+        &self,
+        request: ChainRequest,
+        scheduled: Option<RunSchedule>,
+    ) -> Result<ChainHandle, Refusal> {
         if self.availability() != Availability::Ready {
             return Err(Refusal::Unavailable);
         }
@@ -1157,7 +1243,18 @@ impl Engine {
         let owner = self.clone();
         let chain_stop = stop.clone();
         let task = self.inner.runtime.spawn(async move {
-            let ended = chain_run::run(&owner, id, request, values, &chain_stop, &sender).await;
+            let ended = chain_run::run(
+                &owner,
+                chain_run::Started {
+                    id,
+                    request,
+                    values,
+                    scheduled,
+                },
+                &chain_stop,
+                &sender,
+            )
+            .await;
             owner.inner.forget_chain(id);
             sender.send_replace(ended);
             owner.inner.changed();
@@ -1295,6 +1392,8 @@ impl Engine {
         let tasks: Vec<JoinHandle<()>> = {
             let mut registry = self.inner.registry();
             registry.shutting_down = true;
+            // The scheduler stops first: nothing new starts while closing.
+            self.inner.schedules.wake();
             for ticket in registry.admission.drain_queue() {
                 registry.waiters.remove(&ticket);
             }
@@ -1331,6 +1430,10 @@ impl Inner {
     /// every update leaves it consistent.
     fn registry(&self) -> MutexGuard<'_, Registry> {
         lock(&self.registry)
+    }
+
+    pub(super) fn shutting_down(&self) -> bool {
+        self.registry().shutting_down
     }
 
     pub(super) fn changed(&self) {

@@ -283,6 +283,34 @@ secrets, and the interface warns the user of it. They are read back only when
 the user opens a run's log. Declared outputs the user chose to persist are
 the other exception ([ADR-0035](../adr/0035-persisted-declared-outputs.md)).
 
+## Automation: schedules and their consent
+
+A schedule runs unattended while the application is open
+([ADR-0041](../adr/0041-schedules-and-grants.md), specification section
+9.5.6), so its consent is a durable **grant**, explicit and revocable:
+
+- It is given in one consent dialog that states what will run (the version,
+  or each step of the chain), the rule and zone with the next times, the
+  missed-time and overlap policies, each connection with its environment
+  label, the risks of each SQL step on a **Production** connection, each
+  program's file and hash, and the defaults it will use. A manual run's
+  confirmation, password or trusted-code warning is never promoted to a
+  grant (P-15).
+- The grant binds the target's fingerprint, the chain's revision, the
+  schedule's revision (rule, zone and both policies) and each connection's
+  profile revision and environment label. Any difference, a deleted
+  connection, a changed program file or an unknown zone suspends the
+  schedule until it is confirmed again. Turning it off deletes the grant.
+- A scheduled run never asks for a password: it uses one only when the
+  profile remembers it (the vault's), and otherwise fails with
+  `authentication` before anything is sent. A password typed for this
+  session is never handed to the scheduler.
+- It uses the version's defaults only (Q-36); no input value is stored with
+  a schedule. A grant stores IDs, revisions, labels and fingerprints, never
+  a value, a password or a result.
+- The opt-in notification of a bad end (Q-40) names the job, the outcome and
+  the cause, never a value or a server message.
+
 ## Untrusted content
 
 Values from databases, error messages from servers and metadata names are

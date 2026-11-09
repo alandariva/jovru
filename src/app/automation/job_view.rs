@@ -11,6 +11,7 @@
 //! query tab never run a job.
 mod editor;
 mod inputs;
+mod schedule;
 
 use super::history::{HistoryEvent, HistoryList};
 use super::words::{self, Level, Line};
@@ -71,6 +72,9 @@ pub enum Ask {
     DeleteVersion(i64),
     /// Storing the outputs of a job on a production connection (ADR-0035).
     StoreOutputs,
+    /// The consent dialog of the job's schedule (section 9.5.6).
+    ScheduleConsent,
+    DeleteSchedule,
 }
 
 /// The tab's inner tabs.
@@ -79,6 +83,8 @@ pub enum Inner {
     Editor,
     Inputs,
     Runs,
+    /// A saved job's schedule (section 9.5).
+    Schedule,
 }
 
 /// What a new view starts from.
@@ -234,6 +240,9 @@ pub struct JobView {
     busy: bool,
     editor_scroll: ScrollHandle,
     inputs_scroll: ScrollHandle,
+    schedule_scroll: ScrollHandle,
+    /// The Schedule tab, made when first opened.
+    schedule: Option<schedule::ScheduleFields>,
     focus: FocusHandle,
     field_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -344,6 +353,8 @@ impl JobView {
             busy: false,
             editor_scroll: ScrollHandle::new(),
             inputs_scroll: ScrollHandle::new(),
+            schedule_scroll: ScrollHandle::new(),
+            schedule: None,
             focus: cx.focus_handle(),
             field_subscriptions: Vec::new(),
             _subscriptions: subscriptions,
@@ -421,6 +432,10 @@ impl JobView {
             Inner::Runs => self
                 .history
                 .update(cx, |history, cx| history.focus(window, cx)),
+            Inner::Schedule => match &self.schedule {
+                Some(fields) => fields.times.update(cx, |input, cx| input.focus(window, cx)),
+                None => window.focus(&self.focus, cx),
+            },
         }
     }
 
@@ -444,6 +459,7 @@ impl JobView {
 
     /// The engine changed: versions and the history are read again.
     pub fn engine_changed(&mut self, cx: &mut Context<Self>) {
+        self.refresh_schedule(cx);
         self.load_versions(cx);
         self.refresh_plan(cx);
         self.history.update(cx, |history, cx| history.refresh(cx));
@@ -457,6 +473,9 @@ impl JobView {
         self.inner = inner;
         if inner == Inner::Runs {
             self.history.update(cx, |history, cx| history.refresh(cx));
+        }
+        if inner == Inner::Schedule && self.schedule.is_none() {
+            self.load_schedule(window, cx);
         }
         self.focus(window, cx);
         cx.notify();
@@ -1295,6 +1314,8 @@ impl JobView {
             Ask::DeleteJob => self.delete(cx),
             Ask::DeleteVersion(version) => self.delete_version(version, cx),
             Ask::StoreOutputs => self.set_store_outputs(true, window, cx),
+            Ask::ScheduleConsent => self.consented(cx),
+            Ask::DeleteSchedule => self.delete_schedule(cx),
         }
     }
 
@@ -2072,6 +2093,7 @@ impl Render for JobView {
                 Inner::Editor => self.editor_panel(window, cx).into_any_element(),
                 Inner::Inputs => self.inputs_panel(cx).into_any_element(),
                 Inner::Runs => self.runs_panel(cx).into_any_element(),
+                Inner::Schedule => self.schedule_panel(cx).into_any_element(),
             })
     }
 }

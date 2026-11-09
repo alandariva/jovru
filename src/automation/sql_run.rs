@@ -38,6 +38,7 @@ pub(super) async fn run(
         revision,
         version,
         chain,
+        scheduled,
         work,
     } = spec;
     let Work::Sql(work) = work else {
@@ -70,18 +71,49 @@ pub(super) async fn run(
             job_version: version,
             chain_run_id: chain.map(|(chain, _)| chain),
             step_index: chain.and_then(|(_, step)| i64::try_from(step).ok()),
-            origin: RunOrigin::Manual,
+            origin: if scheduled.is_some() {
+                RunOrigin::Schedule
+            } else {
+                RunOrigin::Manual
+            },
             reads_only: prepared.reads_only(),
             snapshot_json: snapshot,
             connection_id: Some(connection.id),
             connection_revision: Some(connection.revision),
             program_fingerprint: None,
+            scheduled,
             started_at: UtcMillis::from(started_at),
         })
         .await;
     if let Err(error) = admitted {
         tracing::warn!(run = %id, error_code = ?error.code, "automation run not admitted: history unavailable");
         return Ended::Refused(Refusal::History);
+    }
+    // A schedule opens no dialog: without a remembered password the run
+    // fails before anything is sent, its effect known (section 9.5.7).
+    if scheduled.is_some() && crate::connection_store::needs_password(&connection.resolved) {
+        return finish(
+            repository,
+            id,
+            Ending {
+                outcome: Outcome::new(RunState::Failed, Some(Cause::Authentication), false),
+                done: Execution {
+                    error: Some(jykre_core::DriverError::new(
+                        jykre_core::ErrorCode::Authentication,
+                        crate::tr!(
+                            "The connection does not remember its password, and a scheduled run never asks for one."
+                        ),
+                    )),
+                    ..Execution::default()
+                },
+                reads_only: prepared.reads_only(),
+                produced: None,
+                persists: definition.persists_outputs(),
+                started_at,
+                started: Instant::now(),
+            },
+        )
+        .await;
     }
     if stop.is_cancelled() {
         // Stopped before anything was sent: nothing can have taken effect.

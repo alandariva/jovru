@@ -126,7 +126,7 @@ impl JobView {
                         cx.emit(JobEvent::Confirm {
                             title: tr!("Delete {0}?", name),
                             description: tr!(
-                                "The job and its published versions are deleted; its runs stay in the history. Refused while a chain uses it, naming the chains."
+                                "The job, its published versions and its schedule, if it has one, are deleted; its runs stay in the history. Refused while a chain uses it, naming the chains."
                             )
                             .to_owned(),
                             ok: tr!("Delete"),
@@ -205,6 +205,15 @@ impl JobView {
                     cx.listener(|this, _, window, cx| this.set_inner(Inner::Runs, window, cx)),
                 ),
             )
+            .when(self.revision.is_some(), |s| {
+                s.child(
+                    tab("job-tab-schedule", Inner::Schedule, tr!("Schedule"), self).on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.set_inner(Inner::Schedule, window, cx)
+                        }),
+                    ),
+                )
+            })
     }
 
     pub(super) fn editor_panel(

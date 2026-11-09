@@ -100,14 +100,17 @@ Report tabs are not reopened after a restart.
 **Automation** ([specification](../plans/automation-engine-specification.md),
 section 8.1; [ADR-0034](../adr/0034-automation-database-service-and-lock.md) to
 [ADR-0038](../adr/0038-external-program-runs.md)) is a section of the rail.
-It lists the jobs and chains (kind icon, name and kind, virtualized), with a
+It lists the jobs and chains (kind icon, name and kind, or for a scheduled
+job its next run in the schedule's zone, **Suspended** in amber or
+**Schedule off**, virtualized), with a
 **+** menu (**New SQL Job**, **New program**, **New chain**) and a **Runs**
 entry, with the number of runs active, that opens the global runs list. A
 job opens in a tab of its own, in a grey tab group of its own named after
 the job, as a report's does; the tab's title ends with `●` while the job is
 not saved. Its toolbar holds the kind, save, **Publish** (not for a chain),
 **Duplicate**, **Delete** and **Run**, which turns into **Stop** while the
-job's run is active; under it, three inner tabs:
+job's run is active; under it, three inner tabs, and a fourth,
+**Schedule**, once the job is saved:
 
 - **Editor**, a form. A SQL Job: name, description, the connection and where
   unqualified names resolve (a menu of the connections, each with
@@ -137,6 +140,32 @@ job's run is active; under it, three inner tabs:
   result in a grid while the tab is open. A job that differs from what is
   saved runs as a draft, and the form says so.
 - **Runs**: the job's history (below).
+- **Schedule** ([specification](../plans/automation-engine-specification.md),
+  section 9.5; [ADR-0041](../adr/0041-schedules-and-grants.md)): the
+  schedule's state (off, on with its **next run** in its zone, abbreviation
+  and offset and this computer's time when it differs, or **Suspended** with
+  the reason and **Confirm again**), its last outcome, its missed count and
+  last missed time, then the form: the published version it runs (not for a
+  chain), **At times of day** (times `HH:MM`, every day, days of the week or
+  days of the month with `last`, and months) or **Every N minutes** (with the
+  note that an interval counts absolute time), the zone as an IANA name
+  (default the system's), the rule in one sentence and the next three times
+  with what daylight saving does to each; the missed-time policy (**Do not
+  run them**, **Run once for all of them**, **Run up to N of the most
+  recent** with N from 2 to 24) and the overlap policy (**Skip it and record
+  it**, **Wait for the run to end**, **Run beside it**), each with what it
+  does; **Notify me when a scheduled run ends badly**; and **Save the
+  schedule**, which opens the **consent dialog**. **Turn on**, **Turn off**
+  and **Delete the schedule** follow its state. The tab says that schedules
+  run only while Jykre Studio is open, in the window holding automation (a
+  second window says the schedule runs in the other one), and a job with a
+  required input without a default says why it cannot be scheduled.
+  The consent dialog states what runs, the rule and the next times, that it
+  runs only while the application is open, both policies, each connection
+  with its environment label and a warning when it does not remember its
+  password, each Production step's risks (it is the production
+  confirmation), each program's file and hash, and the defaults; confirming
+  again first says why it was suspended and which connections changed.
 
 The rules the engine follows are stated where they apply (section 8.1.1):
 the limits and the queue beside the timeout, one statement per job, the
@@ -153,7 +182,9 @@ that fails. Shortcuts that run SQL in a query tab never run a job.
 The history (a job's **Runs**, and the global **Runs** list) lists runs and
 chain runs newest first, virtualized and read 50 at a time
 (**Load older runs**), each with its state icon, job, kind, how long ago and
-how long it took (a run without a job reads as a draft or a deleted job).
+how long it took (a run without a job reads as a draft or a deleted job);
+a scheduled run or chain run has a **Scheduled** or **Scheduled, catch-up**
+badge and its due time in the schedule's zone.
 Choosing one shows what ran and how it ended: its state and cause in words,
 **Timed out after …** apart from **Stopped**, `effect_unknown`
 ("The change may or may not have been applied; it was not run again"), the
@@ -334,6 +365,8 @@ Each state has one consistent representation.
 | Automation available | The Automation section | Nothing while it works. **Starting automation…** while the engine opens its file; **Read-only** when another Jykre Studio holds the data folder's automation lock (its jobs and history can be read, nothing runs or is saved), with **Try again**, also tried each time the section opens; **Automation is off** when `automation.db` comes from a newer version or the file or the lock cannot be opened, the rest of the application working. At start, what recovery found is said once: runs marked interrupted, and a damaged file set aside (job definitions lost, also in the explorer's notice) |
 | A job's run | The job's Inputs, toolbar and tab | **Queued, place N**: which limit it waits for (2 runs at once, 1 per connection), the runs that hold it and the time left before it leaves the queue (redrawn each second); then its phase (opening a session, running the statement, reading the rest of a write's result, the program running with its percent and stage), rows read, **Stopping…**, and how it ended: state and cause, `effect_unknown`, the database's message, a transaction rolled back, rows kept and discarded or left unread, whether the program ended on its own after Stop or was killed, outputs stored or why not. A run that did not start says why in place, with that refused runs are not recorded; a program refused because its file changed names it and offers **Publish**. A chain shows the step running ("step 2 of 3") with that step's state. The tab shows a spinner, then a check, a cross or a ban sign, as a query tab's |
 | Active runs | The Automation section's **Runs** entry | "N active" while runs or chains are active or queued |
+| A schedule | The job's **Schedule** tab, the sidebar's job entry | Off, on with its next run in the schedule's zone (abbreviation, offset, and this computer's time when it differs), or **Suspended** with the reason and **Confirm again**; the last outcome (started, a catch-up started, waiting for the run still going, skipped, missed, refused with the reason, suspended) and how many times were missed, with the last |
+| Scheduled runs that ended badly | The rail's Automation icon and the status bar | A red count of scheduled runs that failed or did not run since the Automation section or **Runs** was last opened; the status bar names the latest (the job, the outcome and the cause) and opens its job. A schedule that asked for it also shows an operating-system notification with the same words, never a value or a server message |
 | Plan of a statement | **Explain** in the editor toolbar | The dialect's `EXPLAIN` of the statement at the cursor (or of the one selected) runs into a new result tab; the statement itself does not run. Only queries and data changes are explained |
 
 Rules:

@@ -6,7 +6,7 @@
 Q-01…Q-32 ([section 12](#12-decisions-required-from-the-maintainer)),
 ADR-0034 to ADR-0038 accepted, `process-wrap` approved (Q-11), and the
 phase 3, 4 and 5 revisions (sections 9.1–9.3) approved
-**Implementation:** Implemented for 0.3.0 on Linux. Phases 1, 3, 4 and 5 are in `src/automation/`,
+**Implementation:** Implemented for 0.3.0 on Linux; schedules (sections 9.5.1–9.5.10, A13) are implemented and wait for the gate and the check in the application. Phases 1, 3, 4 and 5 are in `src/automation/`,
 `crates/storage` and `crates/core` (A2–A5 of [0.3.0](releases/0.3.0.md)), and phase 2, the
 interface, in `src/app/automation/` (A6). Windows is not validated yet
 ([checklist](releases/0.3.0-windows-checklist.md)). Where the code differs from this text, see
@@ -1580,6 +1580,17 @@ section 12 are not rewritten.
 | Recovery of programs left running | Linux and other Unix systems (9.1.6) | Only Linux records a start time (`/proc`), so only Linux lists orphans; on Windows the Job Object ends the tree with Studio | A process ID without a start time cannot be told from a reused one |
 | `effect_unknown` after a failed `jjp/1` output check | Not specified | A program whose `complete` fails the declared outputs is `Failed` with `Output` and `effect_unknown` | Studio cannot know what a program that ran did |
 | Phase 2, the interface | Section 8 | In progress on the same branch (`src/app/automation/`); [User experience](../reference/ux.md) describes it | |
+| Schedules (A13) | Sections 9.5.1–9.5.10 | `src/automation/schedule/` (the scheduler, `rule` over `jiff`, `form`), migration 5 in `crates/storage`, the **Schedule** tab in `src/app/automation/job_view/schedule.rs`. Engine tests with a manual clock in `src/automation/schedule_tests.rs`, rules against real zones in `src/automation/schedule/rule_tests.rs` | |
+| A schedule's outcomes | Started, skipped, missed, refused, suspended (9.5.8) | Also `caught_up` (a catch-up run started) and `waiting` (a due time held by *queue one*); a due time coalesced into the waiting one is `skipped_running` with the reason `coalesced` | The two policies need words of their own in the schedule's line |
+| *Run once* when more times are missed before its catch-up was submitted | One run for all of them (9.5.5) | The catch-up still waiting is replaced by one for the latest missed time | Still one run for all of them |
+| A schedule's run in its bookkeeping | The run it started (9.5.8) | Linked once the run's owner has written the run's row (`link_schedule_run`); a run refused before admission has none | The due time is recorded at once, so it is never handled twice, while the row is written by the run's owner |
+| A chain's own defaults that no longer pass | Fails the run with `Input` before the step (9.5.7) | Refused before admission, as a job's: no chain run row, the schedule records `refused` with the reason `input`. A step's mapped value that fails still fails the admitted chain with `Input` before that step | The chain checks its form before it is admitted, as a manual chain does |
+| A program's changed file | Suspends the schedule (9.5.6) | Found when its due time comes: the run is refused before admission (Q-16) and the schedule is suspended with `program_changed`; the file is not hashed between due times | Hashing the entrypoint at every pass would read the file every 30 s |
+| Missed times of a calendar rule after a long closure | Counted (9.5.5) | Counted over at most the last 3,660 days (about ten years) | Keeps a pass bounded |
+| A connection the application cannot read now | Not specified | A profile without a usable configuration is not handed to the scheduler, so a schedule that binds it is suspended with `connection_deleted` | The scheduler cannot tell it from a deleted one, and must not run on it |
+| Before the connections are known | Not specified | The scheduler does nothing until the application root has handed it the connections once (`Engine::set_connections`) | Otherwise every grant would look like it names deleted connections at start |
+| A suspended schedule's grant | Confirm again opens the consent with what changed (9.5.6) | The grant is kept while suspended, so the dialog names the connections whose revision or label changed; turning off or deleting deletes it | |
+| Notification (Q-40) | Opt-in per schedule | `schedules.notify`, not part of the revision (it changes nothing that runs); shown through GPUI's `show_system_notification` for a run that failed or did not run | Windows delivery is on the [checklist](releases/0.3.0-windows-checklist.md) (W-26) |
 
 Where the interface, once finished, differs from sections 8 and 8.1.1, it is
 recorded in [User experience](../reference/ux.md), not here.

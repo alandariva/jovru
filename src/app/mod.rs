@@ -2160,6 +2160,10 @@ impl AppView {
                     colors().faint
                 },
             ))
+            // Scheduled runs that ended badly since the user last looked.
+            .when(section == Section::Automation, |s| {
+                s.relative().children(self.automation_rail_badge())
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.section == section {
                     this.sidebar_open = !this.sidebar_open;
@@ -3672,6 +3676,7 @@ impl Render for AppView {
                                 ))),
                         )
                     })
+                    .children(self.automation_news_line(cx))
                     .child(
                         row()
                             .gap_3()

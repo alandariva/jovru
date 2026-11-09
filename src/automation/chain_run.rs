@@ -18,7 +18,7 @@ use super::{
     RunState, RunStatus, SqlJob, UtcMillis,
 };
 use jykre_core::CancellationToken;
-use jykre_core::automation::RunOrigin;
+use jykre_core::automation::{RunOrigin, RunSchedule};
 use jykre_storage::{ChainFinish, NewChainRun};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,14 +53,28 @@ impl Stopped {
     }
 }
 
+/// A chain run the engine admitted to start.
+pub(super) struct Started {
+    pub id: ChainRunId,
+    pub request: ChainRequest,
+    /// The chain's form, checked.
+    pub values: Vec<(String, Option<String>)>,
+    /// The schedule that started it (ADR-0041); its steps carry it too.
+    pub scheduled: Option<RunSchedule>,
+}
+
 pub(super) async fn run(
     engine: &Engine,
-    id: ChainRunId,
-    request: ChainRequest,
-    values: Vec<(String, Option<String>)>,
+    started: Started,
     stop: &CancellationToken,
     status: &watch::Sender<ChainStatus>,
 ) -> ChainStatus {
+    let Started {
+        id,
+        request,
+        values,
+        scheduled,
+    } = started;
     let Some(repository) = engine.repository() else {
         return ChainStatus::Refused(Refusal::Unavailable);
     };
@@ -96,8 +110,13 @@ pub(super) async fn run(
             id,
             job_id: plan.stored.map(|(job, _)| job),
             job_revision: plan.stored.map(|(_, revision)| revision),
-            origin: RunOrigin::Manual,
+            origin: if scheduled.is_some() {
+                RunOrigin::Schedule
+            } else {
+                RunOrigin::Manual
+            },
             snapshot_json: snapshot::chain(&plan.chain, &planned),
+            scheduled,
             started_at: UtcMillis::from(started_at),
         })
         .await;
@@ -108,8 +127,24 @@ pub(super) async fn run(
     let deadline = started + Duration::from_millis(body.timeout_ms.max(1));
     let mut steps: Vec<Arc<RunOutcome>> = Vec::new();
     let mut earlier: HashMap<String, Vec<Output>> = HashMap::new();
-    let mut stopped = None;
+    // A schedule opens no dialog: a connection whose password is not
+    // remembered fails the chain before its first step (section 9.5.7).
+    let mut stopped = scheduled.and_then(|_| {
+        plan.steps
+            .iter()
+            .find_map(|step| match &step.definition.body {
+                JobBody::Sql(sql) => sql
+                    .connection
+                    .and_then(|connection| connections.get(&connection))
+                    .filter(|input| crate::connection_store::needs_password(&input.resolved))
+                    .map(|_| Stopped::failed(Cause::Authentication, &step.id)),
+                _ => None,
+            })
+    });
     for (index, (step, planned)) in body.steps.iter().zip(&plan.steps).enumerate() {
+        if stopped.is_some() {
+            break;
+        }
         status.send_replace(ChainStatus::Running {
             step: index,
             run: None,
@@ -125,6 +160,7 @@ pub(super) async fn run(
         let context = Context {
             engine,
             chain: id,
+            scheduled,
             chain_values: &values,
             connections: &connections,
             stop,
@@ -214,6 +250,7 @@ pub(super) async fn run(
 struct Context<'a> {
     engine: &'a Engine,
     chain: ChainRunId,
+    scheduled: Option<RunSchedule>,
     chain_values: &'a [(String, Option<String>)],
     connections: &'a HashMap<jykre_core::ConnectionId, ConnectionInput>,
     stop: &'a CancellationToken,
@@ -233,6 +270,7 @@ async fn run_step(
     let Context {
         engine,
         chain,
+        scheduled,
         chain_values,
         connections,
         stop,
@@ -335,6 +373,7 @@ async fn run_step(
         revision: None,
         version: Some(planned.version),
         chain: Some((chain, index)),
+        scheduled,
         work,
     };
     let execution = engine.execute(spec, &step_stop, &sender);

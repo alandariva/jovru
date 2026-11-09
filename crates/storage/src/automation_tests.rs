@@ -50,6 +50,7 @@ fn sql_run(job: Option<JobId>, at: UtcMillis) -> NewRun {
         connection_id: Some(ConnectionId::new()),
         connection_revision: Some(1),
         program_fingerprint: None,
+        scheduled: None,
         started_at: at,
     }
 }
@@ -79,6 +80,7 @@ fn chain_run(job: Option<JobId>, at: UtcMillis) -> NewChainRun {
         job_revision: job.map(|_| 1),
         origin: RunOrigin::Manual,
         snapshot_json: r#"{"kind":"chain"}"#.to_owned(),
+        scheduled: None,
         started_at: at,
     }
 }
@@ -165,7 +167,16 @@ async fn a_fresh_file_reaches_the_latest_version() {
     let dir = dir();
     let repo = ready(&dir).await;
     assert_eq!(count(&repo, "PRAGMA user_version").await, LATEST_VERSION);
-    for table in ["jobs", "runs", "run_outputs", "job_versions", "chain_runs"] {
+    for table in [
+        "jobs",
+        "runs",
+        "run_outputs",
+        "job_versions",
+        "chain_runs",
+        "schedules",
+        "grants",
+        "grant_connections",
+    ] {
         let found: i64 =
             sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?")
                 .bind(table)
@@ -277,6 +288,48 @@ async fn each_migration_keeps_every_row() {
             .await
             .unwrap();
         }
+        // Migration 4's tables: a version, a chain run and its step.
+        let mut chain_step = None;
+        if stopped_at >= 4 {
+            sqlx::query(
+                "INSERT INTO job_versions (job_id, version, definition_json, fingerprint, \
+                 published_at) VALUES (?, 1, '{\"kind\":\"sql\"}', 'sha256:v', ?)",
+            )
+            .bind(&job)
+            .bind(CREATED)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let chain = ChainRunId::new().to_string();
+            sqlx::query(
+                "INSERT INTO chain_runs (id, origin, state, cause, failed_step, effect_unknown, \
+                 snapshot_json, fingerprint, started_at, finished_at) VALUES \
+                 (?, 'manual', 'failed', 'database', 's0', 1, '{}', 'sha256:c', ?, ?)",
+            )
+            .bind(&chain)
+            .bind(CREATED)
+            .bind("2026-01-01T00:00:09.000Z")
+            .execute(&pool)
+            .await
+            .unwrap();
+            let step = RunId::new().to_string();
+            sqlx::query(
+                "INSERT INTO runs (id, kind, job_id, origin, state, cause, effect_unknown, \
+                 reads_only, snapshot_json, fingerprint, connection_id, connection_revision, \
+                 started_at, finished_at, chain_run_id, step_index, job_version) VALUES \
+                 (?, 'sql', ?, 'manual', 'failed', 'database', 1, 0, '{}', 'sha256:s', ?, 1, ?, ?, ?, 0, 1)",
+            )
+            .bind(&step)
+            .bind(&job)
+            .bind(ConnectionId::new().to_string())
+            .bind(CREATED)
+            .bind("2026-01-01T00:00:08.000Z")
+            .bind(&chain)
+            .execute(&pool)
+            .await
+            .unwrap();
+            chain_step = Some((chain, step));
+        }
         let before: i64 = sqlx::query_scalar("SELECT count(*) FROM runs")
             .fetch_one(&pool)
             .await
@@ -309,6 +362,42 @@ async fn each_migration_keeps_every_row() {
             assert_eq!(run.chain_run_id, None);
             assert_eq!(run.exit_code, None);
             assert_eq!(run.effect_unknown, *state == "interrupted");
+            assert_eq!(run.origin, RunOrigin::Manual);
+            assert_eq!(
+                (run.schedule_id, run.due_at, run.catch_up),
+                (None, None, false)
+            );
+        }
+        if let Some((chain, step)) = &chain_step {
+            let chain_run = repo
+                .chain_run(chain.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(chain_run.state, RunState::Failed);
+            assert_eq!(chain_run.failed_step.as_deref(), Some("s0"));
+            assert!(chain_run.effect_unknown);
+            assert_eq!(chain_run.origin, RunOrigin::Manual);
+            assert_eq!(chain_run.due_at, None);
+            let steps = repo.chain_steps(chain_run.id).await.unwrap();
+            assert_eq!(steps.len(), 1);
+            assert_eq!(steps[0].id.to_string(), *step);
+            assert_eq!(steps[0].job_version, Some(1));
+            assert_eq!(
+                repo.version(stored.id, 1)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .fingerprint,
+                "sha256:v"
+            );
+            // The step's key still points at the rebuilt `chain_runs`.
+            sqlx::query("DELETE FROM chain_runs WHERE id=?")
+                .bind(chain)
+                .execute(&repo.pool)
+                .await
+                .unwrap();
+            assert!(repo.run(step.parse().unwrap()).await.unwrap().is_none());
         }
         let done = repo.run(runs[1].0.parse().unwrap()).await.unwrap().unwrap();
         assert_eq!(done.finished_at, parse_time("2026-01-01T00:00:05.250Z"));
@@ -338,7 +427,7 @@ async fn each_migration_keeps_every_row() {
         }
         let leftovers: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM sqlite_master WHERE sql LIKE '%jobs_new%' OR sql LIKE '%runs_new%' \
-             OR name IN ('jobs_new', 'runs_new')",
+             OR name IN ('jobs_new', 'runs_new', 'chain_runs_new')",
         )
         .fetch_one(&repo.pool)
         .await
@@ -577,12 +666,16 @@ async fn publishing_freezes_versions_and_chains_pin_them() {
     assert_eq!(
         repo.delete_version(id, 1).await.unwrap(),
         Err(InUse {
-            chains: named.clone()
+            chains: named.clone(),
+            schedule: None,
         })
     );
     assert_eq!(
         repo.delete_job(id).await.unwrap(),
-        Err(InUse { chains: named })
+        Err(InUse {
+            chains: named,
+            schedule: None,
+        })
     );
     repo.delete_version(id, 2).await.unwrap().unwrap();
     assert_eq!(repo.versions(id).await.unwrap().len(), 1);
@@ -1618,4 +1711,473 @@ async fn a_version_number_that_runs_still_name_is_never_given_again() {
         value: Some("secret-value-1".into()),
     };
     assert!(!format!("{value:?}").contains("secret-value-1"));
+}
+
+// ----- schedules and grants (ADR-0041) -----
+
+fn draft(job: JobId, version: Option<i64>) -> ScheduleDraft {
+    ScheduleDraft {
+        id: ScheduleId::new(),
+        job_id: job,
+        job_version: version,
+        rule_json: r#"{"every_minutes":15,"kind":"interval"}"#.to_owned(),
+        time_zone: "Europe/Berlin".to_owned(),
+        missed_policy: MissedPolicy::Ignore,
+        missed_limit: None,
+        overlap_policy: OverlapPolicy::Skip,
+        notify: false,
+    }
+}
+
+fn grant_of(schedule: &StoredSchedule, connections: &[ConnectionId]) -> Grant {
+    Grant {
+        id: GrantId::new(),
+        schedule_id: schedule.draft.id,
+        schedule_revision: schedule.revision,
+        target_fingerprint: fingerprint(b"target"),
+        job_revision: None,
+        production: true,
+        connections: connections
+            .iter()
+            .map(|id| GrantConnection {
+                connection_id: *id,
+                connection_revision: 4,
+                environment: "production".to_owned(),
+            })
+            .collect(),
+        granted_at: T0,
+    }
+}
+
+async fn published_job(repo: &AutomationRepository) -> JobId {
+    let job = JobId::new();
+    repo.insert_job(job, JobKind::Sql, &sql_def("scheduled"), T0)
+        .await
+        .unwrap();
+    repo.publish(job, &sql_def("v1"), T0).await.unwrap();
+    job
+}
+
+#[tokio::test]
+async fn schedules_are_saved_off_and_turned_on_by_consent() {
+    let dir = dir();
+    let repo = ready(&dir).await;
+    let job = published_job(&repo).await;
+    let first = draft(job, Some(1));
+    let saved = repo.save_schedule(&first, None, T0).await.unwrap().unwrap();
+    assert!(!saved.enabled, "nothing is scheduled before consent");
+    assert_eq!((saved.revision, saved.missed_count), (1, 0));
+    assert_eq!(saved.draft, first);
+    // One schedule per job (Q-39).
+    assert_eq!(
+        repo.save_schedule(&draft(job, Some(1)), None, T0)
+            .await
+            .unwrap(),
+        Err(ScheduleRefused::Taken)
+    );
+    assert_eq!(
+        repo.schedule_of_job(job).await.unwrap(),
+        Some(saved.clone())
+    );
+
+    let (a, b) = (ConnectionId::new(), ConnectionId::new());
+    let grant = grant_of(&saved, &[a, b]);
+    let on = repo.confirm_schedule(&grant, T0).await.unwrap().unwrap();
+    assert!(on.enabled);
+    assert_eq!(on.suspended, None);
+    let mut read = repo.grant(first.id).await.unwrap().unwrap();
+    read.connections
+        .sort_by_key(|c| c.connection_id.to_string());
+    let mut expected = grant.clone();
+    expected
+        .connections
+        .sort_by_key(|c| c.connection_id.to_string());
+    assert_eq!(read, expected);
+    assert_eq!(repo.schedules_binding(a).await.unwrap(), vec![first.id]);
+    assert_eq!(
+        repo.schedules_binding(ConnectionId::new()).await.unwrap(),
+        vec![]
+    );
+
+    // The notification is not part of the consent.
+    let mut notify = first.clone();
+    notify.notify = true;
+    let kept = repo
+        .save_schedule(&notify, Some(1), T0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(kept.enabled && kept.draft.notify);
+    assert_eq!(kept.revision, 1);
+    assert!(repo.grant(first.id).await.unwrap().is_some());
+
+    // A policy is: a new revision, off, the grant gone.
+    let mut policy = notify.clone();
+    policy.missed_policy = MissedPolicy::Queue;
+    policy.missed_limit = Some(3);
+    let changed = repo
+        .save_schedule(&policy, Some(1), T0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((changed.revision, changed.enabled), (2, false));
+    assert_eq!(repo.grant(first.id).await.unwrap(), None);
+    assert_eq!(repo.schedules_binding(a).await.unwrap(), vec![]);
+    // A stale revision is refused, by saving and by consenting.
+    assert_eq!(
+        repo.save_schedule(&policy, Some(1), T0).await.unwrap(),
+        Err(ScheduleRefused::Changed)
+    );
+    assert_eq!(
+        repo.confirm_schedule(&grant, T0).await.unwrap(),
+        Err(ScheduleRefused::Changed)
+    );
+    let again = repo
+        .confirm_schedule(&grant_of(&changed, &[a]), T0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(again.enabled);
+    for kind in [OverlapPolicy::QueueOne, OverlapPolicy::Concurrent] {
+        let mut overlap = policy.clone();
+        overlap.overlap_policy = kind;
+        let stored = repo.schedule(first.id).await.unwrap().unwrap();
+        let saved = repo
+            .save_schedule(&overlap, Some(stored.revision), T0)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.draft.overlap_policy, kind);
+        assert_eq!(saved.revision, stored.revision + 1);
+    }
+}
+
+#[tokio::test]
+async fn suspension_revocation_and_bookkeeping() {
+    let dir = dir();
+    let repo = ready(&dir).await;
+    let job = published_job(&repo).await;
+    let saved = repo
+        .save_schedule(&draft(job, Some(1)), None, T0)
+        .await
+        .unwrap()
+        .unwrap();
+    let id = saved.draft.id;
+    // An off schedule cannot be suspended.
+    assert!(
+        !repo
+            .suspend_schedule(id, "connection_changed", T0)
+            .await
+            .unwrap()
+    );
+    repo.confirm_schedule(&grant_of(&saved, &[ConnectionId::new()]), T0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        repo.suspend_schedule(id, "connection_changed", T0)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !repo
+            .suspend_schedule(id, "environment_changed", T0)
+            .await
+            .unwrap()
+    );
+    let suspended = repo.schedule(id).await.unwrap().unwrap();
+    assert_eq!(suspended.suspended.as_deref(), Some("connection_changed"));
+    assert_eq!(suspended.last_outcome, Some(ScheduleOutcome::Suspended));
+    // The grant stays, so Confirm again can say what changed.
+    assert!(repo.grant(id).await.unwrap().is_some());
+    // Turning off revokes: the grant goes, the suspension with it.
+    repo.disable_schedule(id, T0).await.unwrap();
+    let off = repo.schedule(id).await.unwrap().unwrap();
+    assert!(!off.enabled);
+    assert_eq!(off.suspended, None);
+    assert_eq!(repo.grant(id).await.unwrap(), None);
+
+    // The last handled due time only moves forward.
+    let later = T0.plus(Duration::from_secs(600));
+    let run = sql_run(Some(job), later);
+    repo.admit_run(&run).await.unwrap();
+    let mut started = ScheduleMark::new(later, ScheduleOutcome::Started);
+    started.run_id = Some(run.id);
+    repo.mark_schedule(id, &started).await.unwrap();
+    let mut missed = ScheduleMark::new(T0, ScheduleOutcome::Missed);
+    missed.missed = 3;
+    missed.missed_last_at = Some(T0);
+    repo.mark_schedule(id, &missed).await.unwrap();
+    let marked = repo.schedule(id).await.unwrap().unwrap();
+    assert_eq!(marked.last_due_at, Some(later));
+    assert_eq!(marked.last_outcome, Some(ScheduleOutcome::Missed));
+    assert_eq!(
+        marked.last_run_id,
+        Some(run.id),
+        "kept by a mark without a run"
+    );
+    assert_eq!((marked.missed_count, marked.missed_last_at), (3, Some(T0)));
+    // A pruned or deleted run leaves no dangling reference.
+    sqlx::query("DELETE FROM runs WHERE id=?")
+        .bind(run.id.to_string())
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+    assert_eq!(repo.schedule(id).await.unwrap().unwrap().last_run_id, None);
+}
+
+#[tokio::test]
+async fn a_scheduled_version_and_its_runs_outlive_or_follow_their_schedule() {
+    let dir = dir();
+    let repo = ready(&dir).await;
+    let job = published_job(&repo).await;
+    let saved = repo
+        .save_schedule(&draft(job, Some(1)), None, T0)
+        .await
+        .unwrap()
+        .unwrap();
+    let id = saved.draft.id;
+    // The version it runs cannot be deleted; the refusal names it.
+    assert_eq!(
+        repo.delete_version(job, 1).await.unwrap(),
+        Err(InUse {
+            chains: vec![],
+            schedule: Some(id),
+        })
+    );
+    // A version it does not name can be.
+    repo.publish(job, &sql_def("v2"), T0).await.unwrap();
+    repo.delete_version(job, 2).await.unwrap().unwrap();
+    // The key refuses it structurally too.
+    assert!(
+        sqlx::query("DELETE FROM job_versions WHERE job_id=? AND version=1")
+            .bind(job.to_string())
+            .execute(&repo.pool)
+            .await
+            .is_err()
+    );
+
+    // Runs record the schedule, the due time and the catch-up marker.
+    let due = T0.plus(Duration::from_secs(60));
+    let mut run = sql_run(Some(job), T0);
+    run.origin = RunOrigin::Schedule;
+    run.scheduled = Some(RunSchedule {
+        schedule: id,
+        due_at: due,
+        catch_up: true,
+    });
+    repo.admit_run(&run).await.unwrap();
+    let record = repo.run(run.id).await.unwrap().unwrap();
+    assert_eq!(record.origin, RunOrigin::Schedule);
+    assert_eq!(
+        (record.schedule_id, record.due_at, record.catch_up),
+        (Some(id), Some(due), true)
+    );
+    let mut chain = chain_run(None, T0);
+    chain.origin = RunOrigin::Schedule;
+    chain.scheduled = Some(RunSchedule {
+        schedule: id,
+        due_at: due,
+        catch_up: false,
+    });
+    repo.admit_chain_run(&chain).await.unwrap();
+    let chain_record = repo.chain_run(chain.id).await.unwrap().unwrap();
+    assert_eq!(
+        (chain_record.schedule_id, chain_record.due_at),
+        (Some(id), Some(due))
+    );
+    assert!(!chain_record.catch_up);
+
+    // Deleting the schedule keeps its runs, without the schedule.
+    repo.delete_schedule(id).await.unwrap();
+    let kept = repo.run(run.id).await.unwrap().unwrap();
+    assert_eq!(
+        (kept.schedule_id, kept.due_at, kept.catch_up),
+        (None, Some(due), true)
+    );
+    assert_eq!(
+        repo.chain_run(chain.id).await.unwrap().unwrap().schedule_id,
+        None
+    );
+
+    // Deleting the job deletes its schedule and grant with it.
+    let again = repo
+        .save_schedule(&draft(job, Some(1)), None, T0)
+        .await
+        .unwrap()
+        .unwrap();
+    repo.confirm_schedule(&grant_of(&again, &[ConnectionId::new()]), T0)
+        .await
+        .unwrap()
+        .unwrap();
+    repo.delete_job(job).await.unwrap().unwrap();
+    assert_eq!(count(&repo, "SELECT count(*) FROM schedules").await, 0);
+    assert_eq!(count(&repo, "SELECT count(*) FROM grants").await, 0);
+    assert_eq!(
+        count(&repo, "SELECT count(*) FROM grant_connections").await,
+        0
+    );
+    assert!(
+        sqlx::query("PRAGMA foreign_key_check")
+            .fetch_all(&repo.pool)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn migration_5_checks_policies_origins_and_catch_ups() {
+    let dir = dir();
+    let repo = ready(&dir).await;
+    let job = published_job(&repo).await;
+    let insert = |policy: &'static str,
+                  limit: Option<i64>,
+                  overlap: &'static str,
+                  enabled: i64,
+                  suspended: Option<&'static str>| {
+        let pool = repo.pool.clone();
+        let job = job.to_string();
+        async move {
+            sqlx::query(
+                "INSERT INTO schedules (id, job_id, job_version, rule_json, time_zone, \
+                 missed_policy, missed_limit, overlap_policy, enabled, suspended, created_at, \
+                 updated_at) VALUES (?, ?, 1, '{}', 'UTC', ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(ScheduleId::new().to_string())
+            .bind(job)
+            .bind(policy)
+            .bind(limit)
+            .bind(overlap)
+            .bind(enabled)
+            .bind(suspended)
+            .bind(CREATED)
+            .bind(CREATED)
+            .execute(&pool)
+            .await
+        }
+    };
+    for (policy, limit, overlap, enabled, suspended) in [
+        ("queue", None, "skip", 1, None),
+        ("queue", Some(1), "skip", 1, None),
+        ("queue", Some(25), "skip", 1, None),
+        ("run_once", Some(3), "skip", 1, None),
+        ("ignore", Some(3), "skip", 1, None),
+        ("later", None, "skip", 1, None),
+        ("ignore", None, "parallel", 1, None),
+        ("ignore", None, "skip", 0, Some("connection_changed")),
+        ("ignore", None, "skip", 2, None),
+    ] {
+        assert!(
+            insert(policy, limit, overlap, enabled, suspended)
+                .await
+                .is_err(),
+            "{policy} {limit:?} {overlap} {enabled} {suspended:?}"
+        );
+    }
+    for limit in [2, 24] {
+        insert("queue", Some(limit), "queue_one", 1, None)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM schedules")
+            .execute(&repo.pool)
+            .await
+            .unwrap();
+    }
+    insert("ignore", None, "concurrent", 1, Some("time_zone_unknown"))
+        .await
+        .unwrap();
+    let id: String = sqlx::query_scalar("SELECT id FROM schedules")
+        .fetch_one(&repo.pool)
+        .await
+        .unwrap();
+    let schedule_id: ScheduleId = id.parse().unwrap();
+
+    let scheduled = |catch_up: bool| RunSchedule {
+        schedule: schedule_id,
+        due_at: T0,
+        catch_up,
+    };
+    // A scheduled run without its due time, a manual run with a schedule or
+    // marked catch-up: refused.
+    let mut manual_with_schedule = sql_run(None, T0);
+    manual_with_schedule.scheduled = Some(scheduled(false));
+    assert!(repo.admit_run(&manual_with_schedule).await.is_err());
+    let mut manual_catch_up = sql_run(None, T0);
+    manual_catch_up.scheduled = Some(scheduled(true));
+    assert!(repo.admit_run(&manual_catch_up).await.is_err());
+    let mut without_due = sql_run(None, T0);
+    without_due.origin = RunOrigin::Schedule;
+    assert!(repo.admit_run(&without_due).await.is_err());
+    let mut chain_without_due = chain_run(None, T0);
+    chain_without_due.origin = RunOrigin::Schedule;
+    assert!(repo.admit_chain_run(&chain_without_due).await.is_err());
+    let mut manual_chain = chain_run(None, T0);
+    manual_chain.scheduled = Some(scheduled(true));
+    assert!(repo.admit_chain_run(&manual_chain).await.is_err());
+    assert!(
+        sqlx::query(
+            "INSERT INTO runs (id, kind, origin, state, reads_only, snapshot_json, fingerprint, \
+             connection_id, connection_revision, started_at, catch_up) VALUES \
+             (?, 'sql', 'manual', 'running', 0, '{}', 'x', ?, 1, ?, 1)",
+        )
+        .bind(RunId::new().to_string())
+        .bind(ConnectionId::new().to_string())
+        .bind(CREATED)
+        .execute(&repo.pool)
+        .await
+        .is_err()
+    );
+    // A scheduled one, catch-up or not, is taken.
+    for catch_up in [false, true] {
+        let mut ok = sql_run(None, T0);
+        ok.origin = RunOrigin::Schedule;
+        ok.scheduled = Some(scheduled(catch_up));
+        repo.admit_run(&ok).await.unwrap();
+    }
+    // A grant binds known environments only.
+    assert!(
+        sqlx::query(
+            "INSERT INTO grants (id, kind, schedule_id, schedule_revision, target_fingerprint, \
+             production, granted_at) VALUES ('g', 'capability', ?, 1, 'x', 0, ?)",
+        )
+        .bind(&id)
+        .bind(CREATED)
+        .execute(&repo.pool)
+        .await
+        .is_err()
+    );
+    sqlx::query(
+        "INSERT INTO grants (id, kind, schedule_id, schedule_revision, target_fingerprint, \
+         production, granted_at) VALUES ('g', 'schedule', ?, 1, 'x', 0, ?)",
+    )
+    .bind(&id)
+    .bind(CREATED)
+    .execute(&repo.pool)
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query(
+            "INSERT INTO grant_connections (grant_id, connection_id, connection_revision, \
+             environment) VALUES ('g', 'c', 1, 'qa')",
+        )
+        .execute(&repo.pool)
+        .await
+        .is_err()
+    );
+    for index in [
+        "grant_connections_by_connection",
+        "runs_by_schedule",
+        "chain_runs_by_schedule",
+        "runs_by_chain",
+        "chain_runs_open",
+    ] {
+        let found: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE type='index' AND name=?")
+                .bind(index)
+                .fetch_one(&repo.pool)
+                .await
+                .unwrap();
+        assert_eq!(found, 1, "{index}");
+    }
 }

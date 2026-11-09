@@ -17,6 +17,7 @@ mod job_view;
 mod logic;
 mod program_bits;
 mod runs_view;
+mod schedule_words;
 mod words;
 
 use super::report_panel::{ReportSource, Sources};
@@ -25,7 +26,10 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use history::HistoryEvent;
 use job_view::{JobEvent, JobView};
 use jykre::automation::definition::JobDefinition;
-use jykre::automation::{Availability, Engine, JobId, JobKind, OffReason, Recovery};
+use jykre::automation::schedule::{ScheduleConnection, ScheduleNews};
+use jykre::automation::{
+    Availability, ConnectionInput, Engine, JobId, JobKind, OffReason, Recovery,
+};
 use runs_view::RunsView;
 use std::rc::Rc;
 use std::time::Duration;
@@ -41,6 +45,20 @@ pub(super) struct JobItem {
     pub name: String,
     pub revision: i64,
     pub definition: JobDefinition,
+    /// Its schedule, as the list shows it.
+    pub schedule: Option<ScheduleLine>,
+}
+
+/// A job's schedule in the sidebar: its next run in its zone, or its state.
+#[derive(Clone)]
+pub(super) struct ScheduleLine {
+    /// Few words: `Next 09:00 CET`, `Suspended`, `Off`.
+    pub short: String,
+    /// The sentence for the accessible label.
+    pub full: String,
+    pub suspended: bool,
+    /// Its IANA zone, for the due times of its runs.
+    pub zone: String,
 }
 
 /// The stored jobs, sorted by name.
@@ -83,6 +101,10 @@ pub(super) struct Host {
     /// The user agreed to stop the active runs and they stopped: the window
     /// closes without asking again.
     pub(super) quit_settled: bool,
+    /// Scheduled runs that ended badly (Q-40), and how many the user has
+    /// seen: the rail and the status bar show the difference.
+    news: ScheduleNews,
+    news_seen: u64,
 }
 
 impl Host {
@@ -136,6 +158,21 @@ impl AppView {
                     })
                     .is_ok();
                 if !alive || availability.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // Scheduled runs that ended badly: the indicator, and a notification
+        // for the schedules that asked for one (Q-40).
+        let mut news = engine.watch_schedule_news();
+        cx.spawn(async move |weak, cx| {
+            while news.changed().await.is_ok() {
+                let latest = news.borrow_and_update().clone();
+                if weak
+                    .update(cx, |this, cx| this.schedule_news(latest, cx))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -284,6 +321,7 @@ impl AppView {
         cx.spawn(async move |weak, cx| {
             let read = backend::run(async move {
                 let stored = repository.jobs().await?;
+                let schedules = repository.schedules().await?;
                 let mut jobs: Vec<JobItem> = stored
                     .into_iter()
                     .filter_map(|job| {
@@ -294,6 +332,10 @@ impl AppView {
                             name: definition.name.clone(),
                             revision: job.revision,
                             definition,
+                            schedule: schedules
+                                .iter()
+                                .find(|schedule| schedule.draft.job_id == job.id)
+                                .map(schedule_line),
                         })
                     })
                     .collect();
@@ -347,6 +389,8 @@ impl AppView {
             .map(|profile| (profile.id, profile.revision))
             .collect();
         if let Some(engine) = &self.automation.engine {
+            engine.set_connections(self.schedule_connections());
+            // Every profile's revision, those that cannot run now included.
             engine.set_connection_revisions(revisions.clone());
         }
         if self.automation.tabs.is_empty() {
@@ -367,6 +411,126 @@ impl AppView {
                 view.update(cx, |view, cx| view.set_connections(connections, cx));
             }
         }
+    }
+
+    /// The connections schedules may use (section 9.5.7): each profile with
+    /// its revision and environment label, and its password only when the
+    /// profile remembers it, so a schedule never uses one typed for this
+    /// session.
+    fn schedule_connections(&self) -> Vec<ScheduleConnection> {
+        self.connections
+            .iter()
+            .filter_map(|connection| {
+                let profile = connection.profile.as_ref()?;
+                let mut resolved = connection.input.clone()?;
+                if !profile.remember_password {
+                    resolved.credentials.password = None;
+                }
+                let driver = builtin_registry()
+                    .and_then(|registry| registry.get(resolved.config.driver))
+                    .ok()?;
+                Some(ScheduleConnection {
+                    input: ConnectionInput {
+                        id: profile.id,
+                        driver,
+                        resolved,
+                        revision: profile.revision,
+                    },
+                    name: connection.name.clone(),
+                    environment: connection.appearance.environment,
+                })
+            })
+            .collect()
+    }
+
+    /// A scheduled run ended badly: counted for the indicator, and told by
+    /// the operating system when its schedule asked (Q-40). Only the job's
+    /// name, the outcome and the cause; never a value or a server message.
+    fn schedule_news(&mut self, news: ScheduleNews, cx: &mut Context<Self>) {
+        let new = news.bad_ends > self.automation.news.bad_ends;
+        if new && let Some(end) = news.latest.as_ref().filter(|end| end.notify) {
+            let (title, body) = schedule_words::bad_end(end);
+            cx.show_system_notification(SystemNotification {
+                tag: format!("jykre-schedule-{}", end.schedule).into(),
+                title: title.into(),
+                body: body.into(),
+                actions: Vec::new(),
+            });
+        }
+        self.automation.news = news;
+        cx.notify();
+    }
+
+    /// How many scheduled runs ended badly since the user last looked.
+    fn automation_unseen(&self) -> u64 {
+        self.automation
+            .news
+            .bad_ends
+            .saturating_sub(self.automation.news_seen)
+    }
+
+    /// The user looked at Automation: the indicator clears.
+    fn automation_seen(&mut self) {
+        self.automation.news_seen = self.automation.news.bad_ends;
+    }
+
+    /// The rail's mark on Automation: the count of scheduled runs that ended
+    /// badly since the section was last opened.
+    pub(super) fn automation_rail_badge(&self) -> Option<Div> {
+        let unseen = self.automation_unseen();
+        (unseen > 0).then(|| {
+            div()
+                .absolute()
+                .top(px(-2.))
+                .right(px(-2.))
+                .min_w(px(16.))
+                .h(px(16.))
+                .px_1()
+                .rounded(px(8.))
+                .bg(rgb(colors().red))
+                .text_color(rgb(colors().bg))
+                .text_size(px(10.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(if unseen > 99 {
+                    "99+".to_owned()
+                } else {
+                    unseen.to_string()
+                })
+        })
+    }
+
+    /// The status bar names the latest scheduled run that ended badly while
+    /// the user has not looked.
+    pub(super) fn automation_news_line(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        if self.automation_unseen() == 0 {
+            return None;
+        }
+        let end = self.automation.news.latest.as_ref()?;
+        let (title, body) = schedule_words::bad_end(end);
+        let job = end.job;
+        Some(
+            row()
+                .id("automation-news")
+                .role(Role::Status)
+                .aria_label(format!("{title}: {body}"))
+                .focusable()
+                .tab_index(0)
+                .focus_visible(|s| s.bg(rgb(colors().hover)))
+                .gap_1()
+                .px_1()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(colors().hover)))
+                .child(icon(I::TriangleAlert, colors().red))
+                .child(label(format!("{title}: {body}")))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.automation_seen();
+                    this.open_job(job, window, cx);
+                    cx.notify();
+                })),
+        )
     }
 
     /// Each connection's name and dialect, for history lines.
@@ -570,6 +734,7 @@ impl AppView {
 
     /// The global **Runs** list: every run and chain run, in one tab.
     fn open_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.automation_seen();
         let open = self
             .automation
             .tabs
@@ -1014,6 +1179,7 @@ impl AppView {
     /// Opening the section tries the lock again when another window held
     /// it (ADR-0034).
     pub(super) fn automation_shown(&mut self, cx: &mut Context<Self>) {
+        self.automation_seen();
         if self.automation.availability == Some(Availability::ReadOnly) {
             self.retry_automation(cx);
         }
@@ -1027,7 +1193,15 @@ impl AppView {
             row()
                 .id(("automation-entry", index))
                 .role(Role::ListItem)
-                .aria_label(tr!("Open {0}: {1}", words::kind_name(job.kind), job.name))
+                .aria_label(match &job.schedule {
+                    Some(schedule) => tr!(
+                        "Open {0}: {1}. {2}",
+                        words::kind_name(job.kind),
+                        job.name,
+                        schedule.full
+                    ),
+                    None => tr!("Open {0}: {1}", words::kind_name(job.kind), job.name),
+                })
                 .focusable()
                 .tab_index(0)
                 .focus_visible(|s| s.bg(rgb(colors().hover)))
@@ -1046,12 +1220,33 @@ impl AppView {
                         .text_size(px(14.))
                         .child(job.name.clone()),
                 )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(rgb(colors().faint))
-                        .child(words::kind_name(job.kind)),
-                )
+                .map(|s| match &job.schedule {
+                    Some(schedule) => s
+                        .child(icon(
+                            I::Clock,
+                            if schedule.suspended {
+                                colors().amber
+                            } else {
+                                colors().faint
+                            },
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(if schedule.suspended {
+                                    colors().amber
+                                } else {
+                                    colors().faint
+                                }))
+                                .child(schedule.short.clone()),
+                        ),
+                    None => s.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(colors().faint))
+                            .child(words::kind_name(job.kind)),
+                    ),
+                })
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_job(id, window, cx);
                 })),
@@ -1087,6 +1282,60 @@ impl AppView {
                 }
                 menu
             })
+    }
+}
+
+/// What the sidebar says of a schedule, computed when the jobs are read.
+fn schedule_line(schedule: &jykre_storage::StoredSchedule) -> ScheduleLine {
+    use jykre::automation::schedule::rule::{self, Rule};
+    let zone = rule::time_zone(&schedule.draft.time_zone);
+    let (short, full) = if !schedule.enabled {
+        (
+            tr!("Schedule off").to_owned(),
+            tr!("Its schedule is off.").to_owned(),
+        )
+    } else if let Some(reason) = &schedule.suspended {
+        (
+            tr!("Suspended").to_owned(),
+            tr!(
+                "Its schedule is suspended: {0}.",
+                schedule_words::suspended_reason(reason)
+            ),
+        )
+    } else {
+        let now = jykre::automation::UtcMillis::now();
+        let next = zone
+            .as_ref()
+            .zip(Rule::from_json(&schedule.draft.rule_json).ok())
+            .and_then(|(zone, rule)| {
+                let after = schedule.last_due_at.map_or(now, |last| last.max(now));
+                rule.next_after(zone, after).map(|at| (at, zone))
+            });
+        match next {
+            Some((at, zone)) => {
+                let local = rule::local(at, zone);
+                (
+                    local.map_or_else(String::new, |local| {
+                        tr!(
+                            "Next {0} {1}",
+                            format!("{:02}:{:02}", local.hour, local.minute),
+                            local.abbreviation
+                        )
+                    }),
+                    tr!("Next scheduled run: {0}.", schedule_words::when(at, zone)),
+                )
+            }
+            None => (
+                tr!("Scheduled").to_owned(),
+                tr!("It is scheduled.").to_owned(),
+            ),
+        }
+    };
+    ScheduleLine {
+        short,
+        full,
+        suspended: schedule.suspended.is_some(),
+        zone: schedule.draft.time_zone.clone(),
     }
 }
 

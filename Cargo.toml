@@ -80,6 +80,11 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # `jykre::automation`'s program executor; no `tracing` feature, whose spans
 # would carry fields outside the telemetry allowlist.
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop", "process-group", "creation-flags"] }
+# Time zones of automation schedules (Q-33, approved 2026-11-08,
+# docs/plans/schedule-time-zone-dependency.md): the version already in
+# Cargo.lock, default features (the system's zone database on Unix, the
+# bundled one on Windows). No cron or RRULE crate: the rule is our own form.
+jiff = "0.2.39"
 # SHA-256 fingerprints of automation snapshots (ADR-0034, approved
 # 2026-11-08): a direct dependency of jykre-storage only.
 sha2 = "0.10"
@@ -137,6 +142,8 @@ rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["
 self_update.workspace = true
 # External programs of automation (Q-11); only `jykre::automation`.
 process-wrap.workspace = true
+# Schedules' time zones (Q-33): the scheduler and the schedule views only.
+jiff.workspace = true
 
 [build-dependencies]
 winresource.workspace = true

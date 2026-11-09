@@ -5,9 +5,10 @@ mod config;
 mod metadata;
 pub use automation::{
     AUTOMATION_FILE, AUTOMATION_LOCK_FILE, AutomationLock, AutomationRepository, ChainFinish,
-    ChainRef, Fingerprinter, HistoryEntry, HistoryFilter, InUse, NewChainRun, NewRun,
-    OUTPUT_QUOTA_BYTES, OUTPUT_VALUE_RETENTION, Opened, Orphan, OutputValue, Pruned, RUN_RETENTION,
-    Recovered, RunFinish, StoredJob, StoredVersion, fingerprint,
+    ChainRef, Fingerprinter, Grant, GrantConnection, HistoryEntry, HistoryFilter, InUse,
+    NewChainRun, NewRun, OUTPUT_QUOTA_BYTES, OUTPUT_VALUE_RETENTION, Opened, Orphan, OutputValue,
+    Pruned, RUN_RETENTION, Recovered, RunFinish, ScheduleDraft, ScheduleMark, ScheduleRefused,
+    StoredJob, StoredSchedule, StoredVersion, fingerprint,
 };
 pub use config::{
     CONFIG_BACKUPS_KEPT, ConfigRepository, UnreadableProfile, config_backup_time, config_backups,

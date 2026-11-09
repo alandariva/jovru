@@ -4,7 +4,10 @@
 **Approval:** Approved by the maintainer on 2026-11-08 (Q-33, option (a), of
 the [specification's scheduling revision](automation-engine-specification.md#959-decisions-for-the-maintainer)),
 together with [ADR-0041](../adr/0041-schedules-and-grants.md).
-**Implementation:** Not started.
+**Implementation:** Complete (2026-11-08): `jiff = "0.2.39"` in the workspace
+dependencies, used by `jykre::automation::schedule` and the schedule views; no
+new crate in `Cargo.lock`. `cargo deny` with it as a direct dependency is
+not run yet.
 **For:** [0.3.0](releases/0.3.0.md), milestone A13 (schedules while the
 application is open)
 
