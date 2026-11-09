@@ -498,6 +498,95 @@ async fn a_corrupt_file_is_set_aside_and_recreated() {
     ready(&dir).await;
 }
 
+#[tokio::test]
+async fn a_recovery_cut_short_is_finished_and_still_reported() {
+    let corrupt = b"this is not a sqlite database, just text padding padding padding padding padding padding padding padding padding padding";
+    let marker = |dir: &Path| dir.join(format!("{AUTOMATION_FILE}.recovering"));
+    let aside = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("automation.db.corrupt-")
+            })
+            .count()
+    };
+
+    // Cut short after the corrupt file was set aside, before the new one
+    // was made: the next open makes it and says the jobs were lost.
+    let dir = dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{AUTOMATION_FILE}.corrupt-1")), corrupt).unwrap();
+    std::fs::write(marker(&dir), b"").unwrap();
+    let Opened::Recreated(repo) = AutomationRepository::open(&dir).await.unwrap() else {
+        unreachable!("a recovery cut short is reported");
+    };
+    assert_eq!(repo.jobs().await.unwrap(), vec![]);
+    assert!(!marker(&dir).exists());
+    repo.pool.close().await;
+    // Once reported, the file is ready like any other.
+    ready(&dir).await.pool.close().await;
+
+    // Cut short before the corrupt file moved (its journal file did): it
+    // is set aside now, with the same report.
+    let dir = self::dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(AUTOMATION_FILE), corrupt).unwrap();
+    std::fs::write(dir.join(format!("{AUTOMATION_FILE}.corrupt-1-wal")), b"wal").unwrap();
+    std::fs::write(marker(&dir), b"").unwrap();
+    let Opened::Recreated(repo) = AutomationRepository::open(&dir).await.unwrap() else {
+        unreachable!("a recovery cut short is reported");
+    };
+    assert_eq!(aside(&dir), 2);
+    assert!(!marker(&dir).exists());
+    repo.pool.close().await;
+
+    // A recovery that completes leaves no marker either.
+    let dir = self::dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(AUTOMATION_FILE), corrupt).unwrap();
+    let Opened::Recreated(repo) = AutomationRepository::open(&dir).await.unwrap() else {
+        unreachable!("expected a recreated file");
+    };
+    assert!(!marker(&dir).exists());
+    assert_eq!(aside(&dir), 1);
+    repo.pool.close().await;
+    ready(&dir).await.pool.close().await;
+}
+
+#[tokio::test]
+async fn a_read_only_open_refuses_a_file_that_fails_its_check() {
+    let dir = dir();
+    let repo = ready(&dir).await;
+    for index in 0..2_000 {
+        repo.insert_job(
+            JobId::new(),
+            JobKind::Sql,
+            &sql_def(&format!("job {index}")),
+            T0,
+        )
+        .await
+        .unwrap();
+    }
+    repo.pool.close().await;
+    // Damage a page in the middle of the file, past its header.
+    let path = dir.join(AUTOMATION_FILE);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let page = 4096;
+    assert!(bytes.len() > 8 * page);
+    let middle = (bytes.len() / page / 2) * page;
+    for byte in &mut bytes[middle + 8..middle + page] {
+        *byte = 0xA5;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(AutomationRepository::open_read_only(&dir).await.is_err());
+    // Left where it is, for the lock holder.
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
 // ----- the lock -----
 
 #[test]

@@ -315,6 +315,14 @@ fn definitions_that_cannot_run_are_refused_before_anything_starts() {
         with(&|body| body.program = "deploy.CMD".into()),
         Err(Refused::ShellScript)
     );
+    // Windows reads `deploy.bat.` as `deploy.bat`.
+    for program in ["C:\\jobs\\deploy.bat.", "deploy.bat..", "deploy.cmd. "] {
+        assert_eq!(
+            with(&|body| body.program = program.into()),
+            Err(Refused::ShellScript),
+            "{program}"
+        );
+    }
     assert_eq!(
         with(&|body| body.program = "bin/tool".into()),
         Err(Refused::ProgramPath)

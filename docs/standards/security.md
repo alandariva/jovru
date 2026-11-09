@@ -241,7 +241,9 @@ there is no import or export of jobs that could bring code in unseen.
 - The program is started **without a shell**: `Command::new(program)` with
   the arguments as a vector, so no argument is parsed by `sh` or `cmd.exe`.
   A `.bat` or `.cmd` file, which Windows would run through `cmd.exe`, is
-  refused before the run, whether it is named or found on `PATH`.
+  refused before the run, whether it is named or found on `PATH`. The name
+  is read as Windows reads it: trailing dots and spaces are dropped
+  (`deploy.bat.` is `deploy.bat`), as is a `::$DATA` suffix.
 - A program is an absolute path or a bare name looked up on `PATH` (and
   `PATHEXT` on Windows, so `tool` finds `tool.exe`). A relative path such as
   `bin/tool` is refused, as is a relative working directory: nothing depends

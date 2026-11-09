@@ -424,6 +424,38 @@ fn an_abandoned_file_leaves_nothing_and_the_destination_untouched() {
 }
 
 #[test]
+fn a_sealed_file_replaces_the_destination_only_when_placed() {
+    let dir = scratch("sealed");
+    let target = dir.join("people.csv");
+    std::fs::write(&target, "previous export").unwrap();
+    let data = data();
+    let mut file =
+        ExportFile::create(&target, &ExportOptions::default(), data.columns(), &sql()).unwrap();
+    file.write(&data).unwrap();
+    // Sealing writes and syncs the whole file, and leaves the destination
+    // alone: an export abandoned meanwhile drops it, which removes it.
+    let sealed = file.seal().unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "previous export");
+    assert_eq!(names(&dir).len(), 2);
+    drop(sealed);
+    assert_eq!(names(&dir), ["people.csv"]);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "previous export");
+
+    // A sealed file that is placed replaces it.
+    let mut file =
+        ExportFile::create(&target, &ExportOptions::default(), data.columns(), &sql()).unwrap();
+    file.write(&data).unwrap();
+    let written = file.seal().unwrap().place().unwrap();
+    assert_eq!(written.rows, 6);
+    assert_eq!(names(&dir), ["people.csv"]);
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        result_csv(&data) + "\n"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn a_missing_folder_fails_before_anything_is_read() {
     let dir = scratch("missing");
     let target = dir.join("not-there").join("people.csv");

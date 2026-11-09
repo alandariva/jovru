@@ -514,6 +514,10 @@ impl Workspace {
             path,
             statement,
         } = ended;
+        // A run that never came back lost its session, and the open result
+        // with it.
+        let rest_read = run.as_ref().map_or(true, |run| run.rest_read);
+        let target_unknown = run.as_ref().is_ok_and(|run| run.target_unknown);
         let outcome = match run {
             Ok(run) => {
                 match lease {
@@ -553,8 +557,9 @@ impl Workspace {
             }
             Err(error) => Err(error),
         };
-        // What the export read went to the file, not to this tab (D4).
-        if mode == Mode::Rest {
+        // What the export read went to the file, not to this tab (D4). An
+        // export that failed before reading leaves the result open.
+        if mode == Mode::Rest && rest_read {
             self.results.rest_exported(id);
             self.show_active(cx);
         }
@@ -625,6 +630,17 @@ impl Workspace {
                     Tone::Info,
                     tr!(
                         "Export cancelled. No file was written, and {0} was left as it was.",
+                        name
+                    ),
+                ),
+                path: None,
+            },
+            Err(error) if target_unknown => ExportState::Ended {
+                feedback: Feedback::new(
+                    Tone::Error,
+                    tr!(
+                        "The export failed: {0} {1} may still be replaced by the exported file; check it before using it or exporting to it again.",
+                        error,
                         name
                     ),
                 ),

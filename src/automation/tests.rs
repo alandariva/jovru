@@ -1303,6 +1303,53 @@ async fn a_failed_step_stops_the_chain_and_later_steps_do_not_run() {
 }
 
 #[tokio::test]
+async fn the_chain_deadline_keeps_a_cancelled_write_effect_unknown() {
+    let file = SqliteFile::new(&[NUMBERS, TEN_THOUSAND]).await;
+    let engine = engine().await;
+    engine.set_connection_revisions(HashMap::from([(file.id, 1)]));
+    // Each returned row scans the table again: seconds of work, far past
+    // the chain's deadline but within the step's own.
+    let mut slow = file.job(
+        "UPDATE t SET v = v + 1 RETURNING (SELECT count(*) FROM t AS a, t AS b WHERE a.id = b.id AND a.v >= t.v - 1)",
+    );
+    slow.name = "slow".into();
+    let (slow_id, slow_version) = saved(&engine, &slow).await;
+    let mut after = file.job("SELECT 1");
+    after.name = "after".into();
+    let (after_id, after_version) = saved(&engine, &after).await;
+    let mut chain = chain_of(
+        vec![
+            ChainStep::new("slow", slow_id, slow_version),
+            ChainStep::new("after", after_id, after_version),
+        ],
+        Vec::new(),
+    );
+    if let JobBody::Chain(body) = &mut chain.body {
+        body.timeout_ms = 300;
+    }
+    let outcome = chain_run(&engine, &file, &chain, "").await;
+    assert_eq!(
+        (outcome.state, outcome.cause, outcome.failed_step.as_deref()),
+        (RunState::Failed, Some(Cause::Timeout), Some("slow"))
+    );
+    // The step was sent and cancelled: what it did is unknown, and the
+    // chain says so.
+    assert_eq!(outcome.steps.len(), 1);
+    assert_eq!(outcome.steps[0].state, RunState::Cancelled);
+    assert!(outcome.steps[0].effect_unknown);
+    assert!(outcome.effect_unknown);
+    let repository = engine.repository().unwrap();
+    let recorded = repository.chain_run(outcome.id).await.unwrap().unwrap();
+    assert_eq!(
+        (recorded.state, recorded.cause, recorded.effect_unknown),
+        (RunState::Failed, Some(Cause::Timeout), true)
+    );
+    let steps = repository.chain_steps(outcome.id).await.unwrap();
+    assert_eq!(steps.len(), 1);
+    assert!(steps[0].effect_unknown);
+}
+
+#[tokio::test]
 async fn a_connection_changed_after_the_plan_stops_its_step() {
     let file = SqliteFile::new(&chain_file_setup()).await;
     let engine = engine().await;

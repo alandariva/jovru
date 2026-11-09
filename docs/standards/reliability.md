@@ -77,7 +77,7 @@
 | Databricks CLI token reuse | At most 5 min or 30 s before reported expiry; shared by auth identity, one coordinated forced refresh on 401 |
 | Databricks CLI (token resolution) | 60 s |
 | Export: each part read from the session | `ExecutionOptions.timeout` of the tab, as any page |
-| Export: creating, writing one part (about 16 MB) or finishing the file | 60 s (`backend::FILE_TIMEOUT`), so a network share that stops answering fails the export |
+| Export: creating, writing one part (about 16 MB) or finishing the file | 60 s (`backend::FILE_TIMEOUT`), so a network share that stops answering fails the export; finishing is sealing the file (flush and sync), then the rename, each within its own 60 s |
 | Clipboard: estimating or encoding a grid selection/query page | 60 s per phase, checked between rows/cells on the blocking pool; cancellable, with no partial clipboard update |
 | AI assistant: connecting to the provider | 15 s |
 | AI assistant: first byte of an answer | 120 s |

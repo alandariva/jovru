@@ -1631,3 +1631,96 @@ async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_a_write_left_open_is_not_undone_by_the_next_statement() {
+    /// Takes the first rows, then stops reading.
+    struct Few(usize);
+    impl RowSink for Few {
+        fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+            SinkControl::Continue
+        }
+        fn row(&mut self, _: Row) -> SinkControl {
+            self.0 += 1;
+            if self.0 >= 10 {
+                SinkControl::Stop
+            } else {
+                SinkControl::Continue
+            }
+        }
+    }
+    async fn run(session: &mut Box<dyn Session>, sql: &str, sink: &mut dyn RowSink) -> bool {
+        session
+            .execute(
+                &QueryRequest {
+                    parameters: Vec::new(),
+                    sql: sql.into(),
+                    options: ExecutionOptions {
+                        max_rows: 100,
+                        ..ExecutionOptions::default()
+                    },
+                },
+                sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .has_more
+    }
+    async fn total(session: &mut Box<dyn Session>) -> Row {
+        let mut sink = Sink::default();
+        run(
+            session,
+            "SELECT sum(n)::text FROM live_cut_write",
+            &mut sink,
+        )
+        .await;
+        sink.rows.remove(0)
+    }
+    let driver = PostgresDriver;
+    let input = input();
+    let mut session = driver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    for sql in [
+        "DROP TABLE IF EXISTS live_cut_write",
+        "CREATE TABLE live_cut_write AS SELECT 0 AS n FROM generate_series(1, 5000)",
+        "CREATE OR REPLACE FUNCTION live_cut_log(i int) RETURNS text LANGUAGE sql AS \
+         $$ INSERT INTO live_cut_write VALUES (1) RETURNING repeat('x', 10000) $$",
+    ] {
+        run(&mut session, sql, &mut Sink::default()).await;
+    }
+    // About 50 MB of returned rows each, so the server is still sending
+    // them when the next statement arrives. PostgreSQL finishes an `UPDATE
+    // … RETURNING` before it sends its first row, but a `SELECT` that writes
+    // as it goes (here, a row per call) is still running.
+    let update = "UPDATE live_cut_write SET n = n + 1 RETURNING n, repeat('x', 10000)";
+    let select = "SELECT live_cut_log(i) FROM generate_series(1, 5000) AS i";
+
+    // A page of each write is shown, then the tab runs something else.
+    assert!(run(&mut session, update, &mut Sink::default()).await);
+    assert_eq!(total(&mut session).await, vec![Cell::Text("5000".into())]);
+    assert!(run(&mut session, select, &mut Sink::default()).await);
+    assert_eq!(total(&mut session).await, vec![Cell::Text("10000".into())]);
+
+    // The sink stops reading (as the memory ceiling does).
+    run(&mut session, select, &mut Few(0)).await;
+    assert_eq!(total(&mut session).await, vec![Cell::Text("15000".into())]);
+
+    // Another session sees the writes committed.
+    let mut other = driver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(total(&mut other).await, vec![Cell::Text("15000".into())]);
+    for sql in [
+        "DROP FUNCTION live_cut_log(int)",
+        "DROP TABLE live_cut_write",
+    ] {
+        run(&mut other, sql, &mut Sink::default()).await;
+    }
+    other.close().await.unwrap();
+    session.close().await.unwrap();
+}

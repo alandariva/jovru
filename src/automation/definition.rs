@@ -897,10 +897,21 @@ pub fn problems(definition: &JobDefinition) -> Vec<Problem> {
     found
 }
 
-/// Whether `program` names a `.bat` or `.cmd` file.
+/// Whether `program` names a `.bat` or `.cmd` file, as Windows reads the
+/// name: it drops trailing dots and spaces (`deploy.bat.` opens
+/// `deploy.bat`, and Rust's standard library then starts it through
+/// `cmd.exe`), and `::$DATA` names a file's own contents.
 pub fn is_shell_script(program: &str) -> bool {
-    let lower = program.trim().to_ascii_lowercase();
-    lower.ends_with(".bat") || lower.ends_with(".cmd")
+    let mut name = program.trim().to_ascii_lowercase();
+    loop {
+        let trimmed = name.trim_end_matches(['.', ' ']);
+        let trimmed = trimmed.strip_suffix("::$data").unwrap_or(trimmed);
+        if trimmed.len() == name.len() {
+            break;
+        }
+        name.truncate(trimmed.len());
+    }
+    name.ends_with(".bat") || name.ends_with(".cmd")
 }
 
 /// Lowercase ASCII letters, digits and `_`, at most 64.
@@ -1181,6 +1192,21 @@ mod tests {
         let found = problems(&job);
         assert!(found.contains(&Problem::ShellScript));
         assert!(found.contains(&Problem::NeedsProtocol));
+        // Windows drops trailing dots and spaces, and `::$DATA` names the
+        // file itself: the same scripts.
+        for program in [
+            "C:\\jobs\\deploy.bat.",
+            "deploy.bat..",
+            "deploy.cmd. ",
+            "deploy.Bat . .",
+            "C:\\jobs\\deploy.bat::$DATA",
+            "deploy.cmd::$data.",
+        ] {
+            assert!(is_shell_script(program), "{program}");
+        }
+        for program in ["deploy.exe", "deploy.bat.exe", "batch", "deploy.cmdx"] {
+            assert!(!is_shell_script(program), "{program}");
+        }
     }
 
     #[test]

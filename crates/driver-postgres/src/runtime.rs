@@ -1124,8 +1124,9 @@ impl Server {
                         ..DriverOutcome::default()
                     };
                     if events.send(Event::Done(Ok(outcome))).await.is_err() {
+                        let drained = drain(&mut stream, RECOVERY, || self.cancel_server()).await;
                         drop(stream);
-                        return self.recover(connection, true).await;
+                        return self.cut(connection, drained).await;
                     }
                     // The result stays open until the next command.
                     match commands.recv().await {
@@ -1139,14 +1140,21 @@ impl Server {
                             cancel = next_cancel;
                         }
                         Some(other) => {
+                            let drained =
+                                drain(&mut stream, RECOVERY, || self.cancel_server()).await;
                             drop(stream);
-                            return match self.recover(connection, true).await {
+                            return match self.cut(connection, drained).await {
                                 Flow::Ready => Flow::Next(other),
                                 flow => flow,
                             };
                         }
                         None => return Flow::Closed,
                     }
+                }
+                Ok(PageEnd::Gone) if !cancel.is_cancelled() => {
+                    let drained = drain(&mut stream, RECOVERY, || self.cancel_server()).await;
+                    drop(stream);
+                    return self.cut(connection, drained).await;
                 }
                 Ok(PageEnd::Gone) => {
                     drop(stream);
@@ -1407,22 +1415,38 @@ impl Server {
     /// reports that the connection must be closed.
     async fn recover(&self, connection: &mut PgConnection, running: bool) -> Flow {
         if running {
-            // A cancel request that reaches an idle backend is ignored.
-            let cancel_server = async {
-                let mut control = connect(&self.input, &CancellationToken::new()).await?;
-                sqlx::query("SELECT pg_cancel_backend($1)")
-                    .bind(self.backend as i32)
-                    .execute(&mut control)
-                    .await
-                    .map_err(map_error)?;
-                Ok::<_, DriverError>(())
-            };
-            let _ = tokio::time::timeout(RECOVERY, cancel_server).await;
+            self.cancel_server().await;
         }
         match tokio::time::timeout(RECOVERY, resynchronize(connection)).await {
             Ok(Ok(())) => Flow::Ready,
             _ => Flow::Broken,
         }
+    }
+
+    /// Asks the server, from another connection, to cancel what the
+    /// session's backend runs. A cancel request that reaches an idle backend
+    /// is ignored.
+    async fn cancel_server(&self) {
+        let cancel_server = async {
+            let mut control = connect(&self.input, &CancellationToken::new()).await?;
+            sqlx::query("SELECT pg_cancel_backend($1)")
+                .bind(self.backend as i32)
+                .execute(&mut control)
+                .await
+                .map_err(map_error)?;
+            Ok::<_, DriverError>(())
+        };
+        let _ = tokio::time::timeout(RECOVERY, cancel_server).await;
+    }
+
+    /// Recovers after the reader left a result before its end (another
+    /// command arrived, or the sink stopped) and [`drain`] read what was
+    /// left of it: `drained` when the result ended.
+    async fn cut(&self, connection: &mut PgConnection, drained: bool) -> Flow {
+        if !drained {
+            return Flow::Broken;
+        }
+        self.recover(connection, false).await
     }
 
     /// Recovers after a failed statement and reports the error. A database
@@ -1447,6 +1471,49 @@ impl Server {
         }
         let _ = events.send(Event::Done(Err(error))).await;
         flow
+    }
+}
+
+/// Reads and drops the rest of a result the reader left before its end. Its
+/// statement may already be done, or still writing as it returns rows (a
+/// `SELECT` of a function that writes), and cancelling it would roll back
+/// its implicit transaction with the writes whose rows were shown. So the
+/// result is read until it ends, for at most `window` ([`RECOVERY`]); past
+/// it, `cancel` is called once and what is left is read for another
+/// `window`. Each read is bounded by the clock as well as by the timer
+/// ([`Limit::passed`] says why). `true` when the result ended, with or
+/// without a database error (the cancellation's); `false` when the
+/// connection must be closed.
+async fn drain<S, C>(stream: &mut S, window: Duration, cancel: impl FnOnce() -> C) -> bool
+where
+    S: futures_util::Stream<
+            Item = Result<
+                sqlx::Either<sqlx::postgres::PgQueryResult, sqlx::postgres::PgRow>,
+                sqlx::Error,
+            >,
+        > + Unpin,
+    C: Future<Output = ()>,
+{
+    let mut until = tokio::time::Instant::now() + window;
+    let mut cancel = Some(cancel);
+    loop {
+        let next = if tokio::time::Instant::now() < until {
+            tokio::time::timeout_at(until, stream.try_next()).await.ok()
+        } else {
+            None
+        };
+        match next {
+            Some(Ok(Some(_))) => {}
+            Some(Ok(None) | Err(sqlx::Error::Database(_))) => return true,
+            Some(Err(_)) => return false,
+            None => match cancel.take() {
+                Some(cancel) => {
+                    cancel().await;
+                    until = tokio::time::Instant::now() + window;
+                }
+                None => return false,
+            },
+        }
     }
 }
 
@@ -2054,8 +2121,8 @@ ORDER BY n.nspname, c.relname, k.conname"#;
 #[cfg(test)]
 mod tests {
     use super::{
-        EVENT_BUFFER, Limit, SnapshotEffect, parameter_reference, parameter_settings, read_page,
-        snapshot_effect,
+        EVENT_BUFFER, Limit, SnapshotEffect, drain, parameter_reference, parameter_settings,
+        read_page, snapshot_effect,
     };
     use futures_util::Stream as _;
     use jykre_core::{
@@ -2204,5 +2271,67 @@ mod tests {
             ))
             .await;
         assert_eq!(page.err().map(|error| error.code), Some(ErrorCode::Timeout));
+    }
+
+    /// A stream of `items` that then waits until `ends` is notified.
+    fn waiting(
+        items: usize,
+        ends: std::sync::Arc<tokio::sync::Notify>,
+    ) -> impl futures_util::Stream<Item = Result<sqlx::Either<PgQueryResult, PgRow>, sqlx::Error>> + Unpin
+    {
+        let rows = futures_util::stream::iter(
+            (0..items).map(|_| Ok(sqlx::Either::Left(PgQueryResult::default()))),
+        );
+        let end = futures_util::stream::once(async move {
+            ends.notified().await;
+            Ok(sqlx::Either::Left(PgQueryResult::default()))
+        });
+        Box::pin(futures_util::StreamExt::chain(rows, end))
+    }
+
+    #[tokio::test]
+    async fn a_cut_result_is_drained_and_cancelled_only_when_it_does_not_end() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let window = Duration::from_millis(50);
+
+        // A result that ends on its own is read to its end: its statement
+        // may be a write already done, and is never cancelled.
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let mut stream = futures_util::stream::iter(
+            (0..1_000).map(|_| Ok(sqlx::Either::<_, PgRow>::Left(PgQueryResult::default()))),
+        );
+        let counted = cancels.clone();
+        let drained = drain(&mut stream, window, || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert!(drained);
+        assert_eq!(cancels.load(Ordering::SeqCst), 0);
+        assert_eq!(stream.size_hint().0, 0, "read to the end");
+
+        // One that does not end in time is cancelled, and what is left of
+        // it is then read.
+        let ends = Arc::new(tokio::sync::Notify::new());
+        let mut stream = waiting(10, ends.clone());
+        let counted = cancels.clone();
+        let drained = drain(&mut stream, window, || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+            ends.notify_one();
+        })
+        .await;
+        assert!(drained);
+        assert_eq!(cancels.load(Ordering::SeqCst), 1);
+
+        // One that does not end even after the cancellation closes the
+        // connection.
+        let mut stream = waiting(0, Arc::new(tokio::sync::Notify::new()));
+        let counted = cancels.clone();
+        let drained = drain(&mut stream, window, || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert!(!drained);
+        assert_eq!(cancels.load(Ordering::SeqCst), 2);
     }
 }

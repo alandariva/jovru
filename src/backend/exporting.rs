@@ -105,6 +105,14 @@ pub struct ExportRun {
     pub reopened: bool,
     /// The session was lost during the export.
     pub ended: bool,
+    /// The export read from the open result ([`ExportRead::Rest`]): what
+    /// it read went to the file, so the tab can no longer page past what it
+    /// holds. `false` when it failed or was cancelled before its first read,
+    /// and the result is still open for the tab.
+    pub rest_read: bool,
+    /// The export failed while putting the file in the destination's place:
+    /// the rename may still happen, so the chosen file may be replaced.
+    pub target_unknown: bool,
 }
 
 /// Writes the result of `request` to its file. The file appears only when
@@ -144,6 +152,8 @@ pub async fn export_with(
         transaction: None,
         reopened: false,
         ended: false,
+        rest_read: false,
+        target_unknown: false,
     };
     let outcome = write(
         driver,
@@ -236,6 +246,7 @@ async fn write(
         memory_ceiling,
         cancel,
         progress,
+        fetched: false,
     };
     let truncated = match read {
         ExportRead::Held => {
@@ -251,6 +262,7 @@ async fn write(
                 Ok(()) => parts.rest(&mut **session, &options, rows).await,
                 Err(error) => Err(error),
             };
+            run.rest_read = parts.fetched;
             finish_session(run, read.is_ok(), cancel).await;
             read?
         }
@@ -285,7 +297,7 @@ async fn write(
             read?
         }
     };
-    let written = parts.finish().await?;
+    let written = parts.finish(&mut run.target_unknown).await?;
     Ok(Exported {
         rows: written.rows,
         bytes: written.bytes,
@@ -321,6 +333,8 @@ struct Parts<'a> {
     memory_ceiling: usize,
     cancel: &'a CancellationToken,
     progress: Option<&'a watch::Sender<ExportProgress>>,
+    /// A part was asked from the session's open result.
+    fetched: bool,
 }
 
 impl Parts<'_> {
@@ -350,6 +364,7 @@ impl Parts<'_> {
                 ..options.clone()
             };
             let mut builder = ResultBuilder::page(self.columns.clone(), rows, self.memory_ceiling);
+            self.fetched = true;
             let outcome = session
                 .fetch(&part, &mut builder, self.cancel.clone())
                 .await?;
@@ -444,12 +459,45 @@ impl Parts<'_> {
         Ok(())
     }
 
-    async fn finish(mut self) -> DriverResult<Written> {
+    /// Seals the file, then puts it in the destination's place. Until the
+    /// rename starts, a failure, a cancellation or the time limit leaves the
+    /// destination as it was: a sealing abandoned past [`FILE_TIMEOUT`]
+    /// removes its file when it ends, and never renames it. A rename that
+    /// outlives its own limit may still happen; `target_unknown` says so.
+    async fn finish(mut self, target_unknown: &mut bool) -> DriverResult<Written> {
         if self.cancel.is_cancelled() {
             return Err(DriverError::cancelled());
         }
         let file = self.file.take().ok_or_else(gone)?;
-        on_disk(move || file.finish()).await
+        let sealed = on_disk(move || file.seal()).await?;
+        if self.cancel.is_cancelled() {
+            // Removing the file is disk work too.
+            drop(tokio::task::spawn_blocking(move || drop(sealed)));
+            return Err(DriverError::cancelled());
+        }
+        match tokio::time::timeout(
+            FILE_TIMEOUT,
+            tokio::task::spawn_blocking(move || sealed.place()),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                tracing::error!(panicked = error.is_panic(), "export rename failed");
+                *target_unknown = true;
+                Err(gone())
+            }
+            Err(_) => {
+                *target_unknown = true;
+                Err(DriverError::new(
+                    ErrorCode::Timeout,
+                    tr!(
+                        "Putting the file in place took longer than {0} s. Check the disk.",
+                        FILE_TIMEOUT.as_secs()
+                    ),
+                ))
+            }
+        }
     }
 }
 

@@ -740,7 +740,9 @@ impl MetadataRepository {
                     return Err(error("Could not open the metadata cache."));
                 }
                 let stamp = ConnectionId::new();
-                for suffix in ["", "-wal", "-shm"] {
+                // The journal files first: left beside a new cache, SQLite
+                // would read them as its own. The file itself goes last.
+                for suffix in ["-wal", "-shm", ""] {
                     let from = dir.join(format!("{id}.db{suffix}"));
                     if tokio::fs::try_exists(&from)
                         .await

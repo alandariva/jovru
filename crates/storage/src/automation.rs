@@ -1243,20 +1243,36 @@ async fn connect_plain(path: &Path) -> Result<SqliteConnection, sqlx::Error> {
 impl AutomationRepository {
     /// Opens (creating, migrating or recovering) `dir/automation.db`. The
     /// caller holds the [`AutomationLock`] first.
+    ///
+    /// A confirmed corrupt file is set aside and a new one created
+    /// ([`Opened::Recreated`]). A marker, `automation.db.recovering`, is
+    /// written before anything moves and removed once the new file opened,
+    /// so a recovery cut short by a failure or a crash (the file already set
+    /// aside, the new one not yet made) is finished at the next open and
+    /// still reported as recreated, never as a ready, empty file.
     pub async fn open(dir: &Path) -> DriverResult<Opened> {
         tokio::fs::create_dir_all(dir)
             .await
             .map_err(|_| error("Could not create the data folder."))?;
         let path = dir.join(AUTOMATION_FILE);
-        let mut recreated = false;
+        let marker = dir.join(format!("{AUTOMATION_FILE}.recovering"));
+        let mut recreated = tokio::fs::try_exists(&marker)
+            .await
+            .map_err(|_| error("Could not verify the automation file."))?;
         let pool = match open_pool_with(&path, true, true).await {
             Ok(pool) => pool,
             Err(_) => {
                 if !confirmed_corrupt(&path).await {
                     return Err(error("Could not open the automation file."));
                 }
+                tokio::fs::write(&marker, b"")
+                    .await
+                    .map_err(|_| error("Could not preserve the corrupted file."))?;
+                recreated = true;
                 let stamp = UtcMillis::now().0;
-                for suffix in ["", "-wal", "-shm"] {
+                // The journal files first: left beside a new file, SQLite
+                // would read them as its own. The file itself goes last.
+                for suffix in ["-wal", "-shm", ""] {
                     let from = dir.join(format!("{AUTOMATION_FILE}{suffix}"));
                     if tokio::fs::try_exists(&from)
                         .await
@@ -1270,13 +1286,17 @@ impl AutomationRepository {
                         .map_err(|_| error("Could not preserve the corrupted file."))?;
                     }
                 }
-                recreated = true;
                 open_pool_with(&path, true, true).await?
             }
         };
         if migrate(&pool, LATEST_VERSION).await? == Migrated::Newer {
             pool.close().await;
             return Ok(Opened::Newer);
+        }
+        if recreated {
+            // Left behind, the next open says again that the jobs were
+            // lost, which is still true of this file.
+            let _ = tokio::fs::remove_file(&marker).await;
         }
         let repository = Self { pool };
         Ok(if recreated {
@@ -1309,6 +1329,15 @@ impl AutomationRepository {
             )
             .await
             .map_err(sql_error)?;
+        // Read only after the same check as the lock holder's open; a file
+        // that fails it is left where it is, for the holder to set aside.
+        let checked = sqlx::query_scalar::<_, String>("PRAGMA quick_check")
+            .fetch_one(&pool)
+            .await;
+        if !matches!(checked, Ok(ref value) if value == "ok") {
+            pool.close().await;
+            return Err(error("Invalid or corrupted SQLite file."));
+        }
         let version: i64 = sqlx::query_scalar("PRAGMA user_version")
             .fetch_one(&pool)
             .await

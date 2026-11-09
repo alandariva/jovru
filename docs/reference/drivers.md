@@ -628,10 +628,14 @@ seconds; if that fails the session is closed, so an incomplete protocol is
 never reused. Both drivers check the cancellation and the time limit before
 reading each row, the time limit against the clock, so a result that arrives
 faster than it is read still stops at its next row: SQLx's reads do not wait
-while data is ready, and Tokio's timer may not fire meanwhile. MySQL first
-reads and drops the rest of a result interrupted by
-a limit, and kills the statement only when that takes too long, because the
-statement may already be done. MySQL never abandons a read on a session's
+while data is ready, and Tokio's timer may not fire meanwhile. Both drivers
+first read and drop the rest of a result the reader left (interrupted by a
+limit or the sink, or left open for paging when the tab runs anything else),
+and cancel or kill the statement only when that takes longer than 5 seconds,
+because the statement may already be done: cancelling it would roll back its
+implicit transaction, and with it a write whose returned rows were shown (in
+PostgreSQL, a `SELECT` that writes as it returns rows; an `UPDATE …
+RETURNING` finishes before it sends its first row). MySQL never abandons a read on a session's
 connection halfway: SQLx reads a packet's header and its payload in separate
 steps, and a read dropped between them would put the protocol out of step.
 When a cancellation, a timeout or the drain's limit arrives during a read,

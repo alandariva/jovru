@@ -599,8 +599,8 @@ enum Output {
 }
 
 /// An export being written: a temporary file in the destination's folder
-/// that becomes the destination in [`ExportFile::finish`]. Dropped before
-/// that, it removes the temporary file.
+/// that becomes the destination in [`Sealed::place`]. Dropped before that,
+/// it removes the temporary file.
 pub struct ExportFile {
     target: PathBuf,
     temp: PathBuf,
@@ -768,9 +768,17 @@ impl ExportFile {
         self.bytes
     }
 
-    /// Writes what comes after the rows, flushes and syncs the file and puts
-    /// it in the destination's place, replacing the file there.
-    pub fn finish(mut self) -> DriverResult<Written> {
+    /// Seals the file ([`ExportFile::seal`]) and puts it in the
+    /// destination's place ([`Sealed::place`]), replacing the file there.
+    pub fn finish(self) -> DriverResult<Written> {
+        self.seal()?.place()
+    }
+
+    /// Writes what comes after the rows, then flushes and syncs the file.
+    /// The destination keeps what it had until [`Sealed::place`]: work that
+    /// is abandoned while it seals (past its time limit) drops the file
+    /// when it ends, which removes it.
+    pub fn seal(mut self) -> DriverResult<Sealed> {
         match self.output.take() {
             Some(Output::Text {
                 mut file,
@@ -801,6 +809,38 @@ impl ExportFile {
             }
             None => return Err(finished()),
         }
+        // The sealed file removes the temporary file from now on.
+        Ok(Sealed {
+            target: std::mem::take(&mut self.target),
+            temp: std::mem::take(&mut self.temp),
+            rows: self.rows,
+            bytes: self.bytes,
+        })
+    }
+}
+
+/// A complete export in its temporary file, not yet in the destination's
+/// place. Dropped before [`Sealed::place`], it removes the temporary file
+/// and the destination keeps what it had.
+pub struct Sealed {
+    target: PathBuf,
+    temp: PathBuf,
+    rows: u64,
+    bytes: u64,
+}
+
+impl std::fmt::Debug for Sealed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sealed")
+            .field("rows", &self.rows)
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Sealed {
+    /// Puts the file in the destination's place, replacing the file there.
+    pub fn place(mut self) -> DriverResult<Written> {
         std::fs::rename(&self.temp, &self.target).map_err(|error| file_error(&error))?;
         // Nothing is left to remove.
         self.temp = PathBuf::new();
@@ -808,6 +848,14 @@ impl ExportFile {
             rows: self.rows,
             bytes: self.bytes,
         })
+    }
+}
+
+impl Drop for Sealed {
+    fn drop(&mut self) {
+        if !self.temp.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.temp);
+        }
     }
 }
 

@@ -1332,6 +1332,16 @@ impl Workspace {
                 let Some(result) = pending.take() else {
                     return;
                 };
+                // The read was abandoned (the connection changed, or was
+                // deleted): a page that still arrived belongs to a result
+                // the tab gave up, and is dropped with its session, before
+                // it can reopen that result's paging or reach another.
+                if this.session_lease != Some(lease) {
+                    if let Ok(run) = result {
+                        this.return_session(lease, run.session);
+                    }
+                    return;
+                }
                 this.fetching = false;
                 let page = match result {
                     Ok(run) => {

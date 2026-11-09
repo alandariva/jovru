@@ -31,6 +31,10 @@ struct Stopped {
     cause: Option<Cause>,
     step: Option<String>,
     input: Option<InputProblem>,
+    /// The step that ran before the chain stopped, when its own outcome
+    /// is not the chain's (a step the chain's deadline cancelled): it
+    /// still counts, for `effect_unknown` above all.
+    ran: Option<Arc<RunOutcome>>,
 }
 
 impl Stopped {
@@ -40,6 +44,7 @@ impl Stopped {
             cause: Some(cause),
             step: Some(step.to_owned()),
             input: None,
+            ran: None,
         }
     }
 
@@ -49,6 +54,7 @@ impl Stopped {
             cause: None,
             step: step.map(str::to_owned),
             input: None,
+            ran: None,
         }
     }
 }
@@ -168,7 +174,8 @@ pub(super) async fn run(
             status,
         };
         match run_step(&context, index, step, planned, &earlier).await {
-            Err(halt) => {
+            Err(mut halt) => {
+                steps.extend(halt.ran.take());
                 stopped = Some(halt);
                 break;
             }
@@ -284,6 +291,7 @@ async fn run_step(
             cause: Some(Cause::Input),
             step: Some(step.id.clone()),
             input: Some(problem),
+            ran: None,
         })?;
     let (work, connection_id) = match &definition.body {
         JobBody::Sql(sql) => {
@@ -394,7 +402,10 @@ async fn run_step(
         Ended::Finished(outcome) => {
             sender.send_replace(RunStatus::Finished(outcome.clone()));
             if timed_out && outcome.state == RunState::Cancelled {
-                return Err(Stopped::failed(Cause::Timeout, &step.id));
+                return Err(Stopped {
+                    ran: Some(outcome),
+                    ..Stopped::failed(Cause::Timeout, &step.id)
+                });
             }
             Ok(outcome)
         }

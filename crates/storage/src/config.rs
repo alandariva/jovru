@@ -373,38 +373,84 @@ pub fn config_backup_time(path: &Path) -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::from_millis(millis)
 }
 
-/// Puts `backup` in place of `config.db`, which is renamed (with its `-wal`
-/// and `-shm` files) to `config.db.broken-<millis>` and kept for diagnosis.
-/// The copy is checked before anything moves. Returns where the previous
-/// file went.
+/// Puts `backup` in place of `config.db`. The previous file is kept for
+/// diagnosis as `config.db.broken-<millis>` (with its `-wal` and `-shm`
+/// files). The copy is made beside `config.db` and checked there first, and
+/// then replaces it in one rename, so `config.db` is never missing: a
+/// failure on the way leaves it as it was, and nothing creates an empty one
+/// in its place. Returns where the previous file went.
 pub async fn restore_config_backup(dir: &Path, backup: &Path) -> DriverResult<PathBuf> {
     if !is_backup(backup) || backup.parent() != Some(dir.join(BACKUP_FOLDER).as_path()) {
         return Err(DriverError::validation("Not a configuration backup."));
     }
-    // A copy that does not open is never put in place.
-    open_pool(backup, false).await?.close().await;
     let stamp = now_millis();
     let current = dir.join("config.db");
     let aside = dir.join(format!("config.db.broken-{stamp}"));
-    if tokio::fs::try_exists(&current).await.unwrap_or(false) {
-        tokio::fs::rename(&current, &aside)
-            .await
-            .map_err(|_| error("Could not set the damaged configuration aside."))?;
+    let copy = dir.join(format!("config.db.restoring-{stamp}"));
+    let restored = restore_over(&current, &aside, &copy, backup).await;
+    // What is left of the copy: all of it after a failure, its journal
+    // files after a success.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = tokio::fs::remove_file(format!("{}{suffix}", copy.display())).await;
     }
-    for suffix in ["-wal", "-shm"] {
-        let companion = dir.join(format!("config.db{suffix}"));
-        if tokio::fs::try_exists(&companion).await.unwrap_or(false) {
-            let _ = tokio::fs::rename(
-                &companion,
-                dir.join(format!("config.db.broken-{stamp}{suffix}")),
-            )
-            .await;
-        }
-    }
-    tokio::fs::copy(backup, &current)
+    restored.map(|()| aside)
+}
+
+/// [`restore_config_backup`] once the names are chosen.
+async fn restore_over(
+    current: &Path,
+    aside: &Path,
+    copy: &Path,
+    backup: &Path,
+) -> DriverResult<()> {
+    let restore_failed = || error("Could not restore the configuration backup.");
+    let set_aside_failed = || error("Could not set the damaged configuration aside.");
+    tokio::fs::copy(backup, copy)
         .await
-        .map_err(|_| error("Could not restore the configuration backup."))?;
-    Ok(aside)
+        .map_err(|_| restore_failed())?;
+    // A copy that does not open is never put in place.
+    open_pool(copy, false).await?.close().await;
+    // The damaged file is kept without moving it: a second name for it
+    // (or, where links are not supported, a copy).
+    let kept = tokio::fs::try_exists(current).await.unwrap_or(false);
+    if kept
+        && tokio::fs::hard_link(current, aside).await.is_err()
+        && tokio::fs::copy(current, aside).await.is_err()
+    {
+        return Err(set_aside_failed());
+    }
+    let give_up = |moved: Vec<(PathBuf, PathBuf)>, failure: DriverError| async move {
+        undo(&moved).await;
+        if kept {
+            let _ = tokio::fs::remove_file(aside).await;
+        }
+        Err(failure)
+    };
+    // Its journal files go with it: beside the copy, SQLite would read them
+    // as the copy's own.
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        let from = PathBuf::from(format!("{}{suffix}", current.display()));
+        if !tokio::fs::try_exists(&from).await.unwrap_or(false) {
+            continue;
+        }
+        let to = PathBuf::from(format!("{}{suffix}", aside.display()));
+        if tokio::fs::rename(&from, &to).await.is_err() {
+            return give_up(moved, set_aside_failed()).await;
+        }
+        moved.push((from, to));
+    }
+    if tokio::fs::rename(copy, current).await.is_err() {
+        return give_up(moved, restore_failed()).await;
+    }
+    Ok(())
+}
+
+/// Moves journal files set aside back where they were.
+async fn undo(moved: &[(PathBuf, PathBuf)]) {
+    for (from, to) in moved {
+        let _ = tokio::fs::rename(to, from).await;
+    }
 }
 
 /// A name [`ConfigRepository::back_up`] writes: `config-v<n>-<millis>.db`.

@@ -478,7 +478,8 @@ system's save dialog (`jykre::export`, `backend::export`).
   - the session keeps the rest open: the pages held, then the rest, read in
     parts of about 16 MB (whatever the row limit). What the export reads goes
     to the file only, so afterwards the tab no longer pages past what it
-    holds, and the bar says so;
+    holds, and the bar says so. An export that fails or is cancelled before
+    it asks the session for its first part leaves the rest open for the tab;
   - part of the result can no longer be read (pages released for memory,
     the rest closed by another statement, a limit or the server): the bar
     offers **Run again and export**, which runs the statement again in the
@@ -496,7 +497,12 @@ system's save dialog (`jykre::export`, `backend::export`).
 - **The file appears only once it is complete.** Rows are written to a
   temporary file next to the chosen one, which replaces it after every row is
   written, flushed and synced. A failure or a cancellation removes the
-  temporary file and leaves the chosen file as it was; the bar says so. A
+  temporary file and leaves the chosen file as it was; the bar says so.
+  Writing and syncing that outlive the time limit go on in the background
+  and then remove the file, never renaming it; only the rename replaces the
+  chosen file. A rename that itself outlives the limit may still happen, and
+  the bar then says the chosen file may be replaced instead of saying it was
+  left as it was. A
   finished export says how many rows, the size and the time, with **Show in
   folder**.
 - Each part is converted and written on the runtime's blocking pool, never

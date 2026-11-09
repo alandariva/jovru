@@ -367,9 +367,13 @@ the only copy of the connection profiles
   migration ([ADR-0034](../adr/0034-automation-database-service-and-lock.md)).
 - **Corruption.** A file that cannot be opened and is confirmed corrupt (not
   a database, or `quick_check` fails) is set aside with its `-wal` and `-shm`
-  files as `automation.db.corrupt-<millis>` and an empty one is created; the
-  job definitions in it are lost and the application says so
+  files (those first) as `automation.db.corrupt-<millis>` and an empty one is
+  created; the job definitions in it are lost and the application says so
   (`Recovery::recreated`). Permission and I/O errors never trigger this.
+  An empty marker, `automation.db.recovering`, is written before anything
+  moves and removed once the new file opened: a recovery cut short by a
+  failure or a crash is finished at the next open and still reported as
+  recreated, never as a ready, empty file.
 - **The lock.** `automation.lock` holds an exclusive operating-system lock
   (`std::fs::File::try_lock`: `flock` on Unix, `LockFileEx` on Windows) for as
   long as the engine lives. The system releases it when the process ends,
@@ -378,8 +382,9 @@ the only copy of the connection profiles
   second instance on the same folder cannot run or save anything: its
   automation is read-only until the first one ends and **Try again** takes the
   lock over. It opens `automation.db` read-only
-  (`AutomationRepository::open_read_only`) and never creates, migrates or
-  sets the file aside; a file it finds missing or not yet migrated shows no
+  (`AutomationRepository::open_read_only`), after the same `quick_check` (a
+  file that fails it is an error and stays where it is), and never creates,
+  migrates or sets the file aside; a file it finds missing or not yet migrated shows no
   history until the lock holder has prepared it. A process that is alive but hung keeps the lock, which is
   correct. **Network file systems may not honour the lock**, so keep the
   data folder on a local disk; when it is not, two instances could both
@@ -457,8 +462,8 @@ The standard for schema changes:
 ## Corruption and recovery
 
 - **Metadata cache:** when opening fails and `quick_check` (or SQLite codes 11
-  or 26) confirms corruption, the file and its `-wal`/`-shm` companions are
-  renamed to `*.corrupt-<stamp>`, an empty cache is created and the UI tells
+  or 26) confirms corruption, the file and its `-wal`/`-shm` companions (those
+  first) are renamed to `*.corrupt-<stamp>`, an empty cache is created and the UI tells
   the user to refresh. Permission and I/O errors never trigger this, so a
   valid cache is not set aside by mistake.
 - **`automation.db`:** set aside as `automation.db.corrupt-<millis>` and
@@ -474,9 +479,12 @@ The standard for schema changes:
 - **`config.db`:** never recreated automatically. The application reports the
   error; with backups in place it offers to restore the latest one
   (**Restore the backup** in the explorer, after a confirmation). The file
-  that could not be opened is renamed to `config.db.broken-<millis>` (with
-  its `-wal`/`-shm` files), the copy takes its place once it opens, and the
-  connections are loaded again.
+  that could not be opened is kept as `config.db.broken-<millis>` (a second
+  name for it, or a copy), with its `-wal`/`-shm` files moved next to it.
+  The copy is made beside it as `config.db.restoring-<millis>`, opened there,
+  and then replaces `config.db` in one rename, so `config.db` is never
+  missing: a failure on the way puts the journal files back and leaves
+  `config.db` as it was. The connections are then loaded again.
 
 ## Rules
 
