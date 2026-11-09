@@ -264,39 +264,104 @@ impl ColumnLayout {
     }
 }
 
-/// The scrolling columns (display positions from `frozen` on, with
-/// `widths` in display order) that a viewport `viewport` px wide shows
-/// when panned `pan` px, the first starting `lead` px from the content's
-/// left (the row numbers and frozen columns): their range and the width of
-/// the scrolling columns before it. Only these are built, so a frame costs
-/// the columns on screen, not the result's. A viewport not measured yet
-/// (zero) is taken as 4,096 px wide.
-pub fn shown_columns(
-    widths: &[f32],
+/// The widths the grid lays its columns out with: by result column, and
+/// for the shown columns in display order with where each one starts.
+/// Built when the widths or the layout change, never per frame, so finding
+/// the columns in view does not grow with the result's columns.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ColumnWidths {
+    /// By result column.
+    by_column: Vec<f32>,
+    /// Of the shown columns, in display order.
+    display: Vec<f32>,
+    /// `starts[position]` is the width of the shown columns before display
+    /// `position`; the last entry is the width of them all.
+    starts: Vec<f32>,
+    /// Display positions `0..frozen` are frozen.
     frozen: usize,
-    lead: f32,
-    pan: f32,
-    viewport: f32,
-) -> (Range<usize>, f32) {
-    let viewport = if viewport > 0. { viewport } else { 4096. };
-    let (right, mut x) = (pan + viewport, lead);
-    let (mut first, mut before) = (None, 0.);
-    let mut end = frozen.min(widths.len());
-    for (position, width) in widths.iter().enumerate().skip(frozen) {
-        if x >= right {
-            break;
+}
+
+impl ColumnWidths {
+    /// From each result column's width (`by_column`; a column past its end
+    /// takes `missing`) and the layout.
+    pub fn new(by_column: Vec<f32>, layout: &ColumnLayout, missing: f32) -> Self {
+        let display: Vec<f32> = layout
+            .visible()
+            .iter()
+            .map(|column| by_column.get(*column).copied().unwrap_or(missing))
+            .collect();
+        let mut starts = Vec::with_capacity(display.len() + 1);
+        let mut x = 0.;
+        starts.push(x);
+        for width in &display {
+            x += width;
+            starts.push(x);
         }
-        if x + width > pan {
-            if first.is_none() {
-                first = Some(position);
-                before = x - lead;
-            }
-            end = position + 1;
+        let frozen = layout.frozen().min(display.len());
+        Self {
+            by_column,
+            display,
+            starts,
+            frozen,
         }
-        x += width;
     }
-    let first = first.unwrap_or(end);
-    (first..end, before)
+
+    /// Each result column's width.
+    pub fn by_column(&self) -> &[f32] {
+        &self.by_column
+    }
+
+    /// The shown columns' widths, in display order.
+    pub fn display(&self) -> &[f32] {
+        &self.display
+    }
+
+    /// How many shown columns are frozen: display positions `0..frozen()`.
+    pub fn frozen(&self) -> usize {
+        self.frozen
+    }
+
+    /// The width of the shown columns at display `positions`.
+    pub fn span(&self, positions: Range<usize>) -> f32 {
+        let end = positions.end.min(self.display.len());
+        let start = positions.start.min(end);
+        self.starts[end] - self.starts[start]
+    }
+
+    /// The width of every shown column.
+    pub fn total(&self) -> f32 {
+        self.starts.last().copied().unwrap_or_default()
+    }
+
+    /// The scrolling columns (display positions from [`Self::frozen`] on)
+    /// that a viewport `viewport` px wide shows when panned `pan` px, the
+    /// first starting `lead` px from the content's left (the row numbers
+    /// and frozen columns): their range and the width of the scrolling
+    /// columns before it. Only these are built, so a frame costs the
+    /// columns on screen, not the result's. With frozen columns, the row
+    /// numbers and frozen columns stay over the viewport's first `lead` px,
+    /// so the scrolling columns wholly under them are not built either. A
+    /// viewport not measured yet (zero) is taken as 4,096 px wide.
+    pub fn shown(&self, lead: f32, pan: f32, viewport: f32) -> (Range<usize>, f32) {
+        let viewport = if viewport > 0. { viewport } else { 4096. };
+        let (frozen, count) = (self.frozen, self.display.len());
+        // Without frozen columns the row numbers pan with the rest.
+        let left = if frozen > 0 { pan + lead } else { pan };
+        let right = pan + viewport;
+        // Where an edge of a scrolling column lies in the content.
+        let base = self.starts[frozen];
+        let at = |edge: f32| lead + (edge - base);
+        // The first column ending past `left`, and the first one starting
+        // at or past `right`.
+        let first =
+            frozen + self.starts[frozen + 1..=count].partition_point(|end| at(*end) <= left);
+        let end = frozen + self.starts[frozen..count].partition_point(|start| at(*start) < right);
+        if first < end {
+            (first..end, self.starts[first] - base)
+        } else {
+            (frozen..frozen, 0.)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -415,17 +480,111 @@ mod tests {
 
     #[test]
     fn only_the_scrolling_columns_in_the_viewport_are_built() {
-        let widths = [100., 100., 100., 100., 100., 100.];
+        let widths = ColumnWidths::new(vec![100.; 6], &ColumnLayout::new(6), 48.);
         // No frozen columns, 35 px of row numbers, 250 px viewport.
-        assert_eq!(shown_columns(&widths, 0, 35., 0., 250.), (0..3, 0.));
+        assert_eq!(widths.shown(35., 0., 250.), (0..3, 0.));
         // Panned 260 px: the content from 260 to 510 holds columns 2..5.
-        assert_eq!(shown_columns(&widths, 0, 35., 260., 250.), (2..5, 200.));
-        // Two frozen columns: scrolling ones start after them.
-        assert_eq!(shown_columns(&widths, 2, 235., 100., 250.), (2..4, 0.));
-        assert_eq!(shown_columns(&widths, 2, 235., 340., 250.), (3..6, 100.));
-        // Past the end, or nothing scrolling.
-        assert_eq!(shown_columns(&widths, 6, 635., 0., 250.), (6..6, 0.));
+        assert_eq!(widths.shown(35., 260., 250.), (2..5, 200.));
         // A viewport not measured yet is taken as wide.
-        assert_eq!(shown_columns(&widths, 0, 35., 0., 0.), (0..6, 0.));
+        assert_eq!(widths.shown(35., 0., 0.), (0..6, 0.));
+        // Panned past the end.
+        assert_eq!(widths.shown(35., 900., 250.), (0..0, 0.));
+    }
+
+    fn frozen(columns: usize, frozen: usize) -> ColumnLayout {
+        let mut layout = ColumnLayout::new(columns);
+        for column in 0..frozen {
+            layout.freeze(column);
+        }
+        layout
+    }
+
+    #[test]
+    fn scrolling_columns_under_the_frozen_ones_are_not_built() {
+        let widths = ColumnWidths::new(vec![100.; 6], &frozen(6, 2), 48.);
+        assert_eq!((widths.frozen(), widths.span(0..2)), (2, 200.));
+        // Scrolling columns start after the frozen ones.
+        assert_eq!(widths.shown(235., 0., 250.), (2..3, 0.));
+        assert_eq!(widths.shown(235., 0., 400.), (2..4, 0.));
+        // The row numbers and frozen columns stay over the first 235 px.
+        // Panned 100 px, they cover the content from 100 to 335: column 2
+        // (235 to 335) is wholly under them; one pixel less and it shows.
+        assert_eq!(widths.shown(235., 100., 250.), (3..4, 100.));
+        assert_eq!(widths.shown(235., 100., 400.), (3..5, 100.));
+        assert_eq!(widths.shown(235., 99., 400.), (2..5, 0.));
+        assert_eq!(widths.shown(235., 340., 250.), (5..6, 300.));
+        // Nothing scrolls.
+        let all = ColumnWidths::new(vec![100.; 6], &frozen(6, 6), 48.);
+        assert_eq!(all.shown(635., 0., 250.), (6..6, 0.));
+    }
+
+    #[test]
+    fn widths_follow_the_display_order_and_hidden_columns() {
+        let mut layout = ColumnLayout::new(4);
+        layout.freeze(2);
+        layout.hide(1);
+        // [2 | 0, 3]; column 3 has no width of its own.
+        let widths = ColumnWidths::new(vec![10., 20., 30.], &layout, 48.);
+        assert_eq!(widths.by_column(), [10., 20., 30.]);
+        assert_eq!(widths.display(), [30., 10., 48.]);
+        assert_eq!((widths.frozen(), widths.total()), (1, 88.));
+        assert_eq!(widths.span(1..3), 58.);
+        assert_eq!(widths.span(2..9), 48.);
+        let empty = ColumnWidths::new(Vec::new(), &ColumnLayout::new(0), 48.);
+        assert_eq!(
+            (empty.total(), empty.shown(35., 0., 250.)),
+            (0., (0..0, 0.))
+        );
+    }
+
+    /// The columns in view, found one by one from the left.
+    fn shown_by_walking(
+        display: &[f32],
+        frozen: usize,
+        lead: f32,
+        pan: f32,
+        viewport: f32,
+    ) -> (Range<usize>, f32) {
+        let viewport = if viewport > 0. { viewport } else { 4096. };
+        let left = if frozen > 0 { pan + lead } else { pan };
+        let (right, mut x) = (pan + viewport, lead);
+        let (mut first, mut before) = (None, 0.);
+        let mut end = frozen.min(display.len());
+        for (position, width) in display.iter().enumerate().skip(frozen) {
+            if x >= right {
+                break;
+            }
+            if x + width > left {
+                if first.is_none() {
+                    first = Some(position);
+                    before = x - lead;
+                }
+                end = position + 1;
+            }
+            x += width;
+        }
+        (first.unwrap_or(end)..end, before)
+    }
+
+    #[test]
+    fn the_columns_in_view_are_those_found_by_walking_the_widths() {
+        // Whole widths of 48 to 300 px, in a fixed scrambled order.
+        let by_column: Vec<f32> = (0..400u16)
+            .map(|n| 48. + f32::from((n * 37) % 253))
+            .collect();
+        for frozen_columns in [0, 1, 3, 400] {
+            let layout = frozen(400, frozen_columns);
+            let widths = ColumnWidths::new(by_column.clone(), &layout, 48.);
+            let lead = 35. + widths.span(0..widths.frozen());
+            for pan in (0..71u16).map(|step| f32::from(step) * 997.) {
+                for viewport in [0., 1., 250., 1480.] {
+                    assert_eq!(
+                        widths.shown(lead, pan, viewport),
+                        shown_by_walking(widths.display(), widths.frozen(), lead, pan, viewport),
+                        "{frozen_columns} frozen, panned {pan}, {viewport} px"
+                    );
+                }
+            }
+        }
     }
 }

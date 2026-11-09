@@ -16,11 +16,12 @@ use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
-use jykre::column_layout::{self, ColumnLayout};
+use jykre::column_layout::{ColumnLayout, ColumnWidths};
 use jykre::column_search::{self, ColumnMatch};
 use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
 use jykre::grid::{
-    self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, selection_block,
+    self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, WidthsCache,
+    selection_block,
 };
 use jykre::grid_edit::{self, EditSession, EditValue, Overlay, RowMark};
 use jykre::result::ResultData;
@@ -193,8 +194,7 @@ const FIND_BAR_HEIGHT: f32 = 40.;
 /// What the rows on screen share while they are built.
 struct RowsContext {
     grid: Arc<GridView>,
-    /// By result column.
-    widths: Vec<f32>,
+    widths: Rc<ColumnWidths>,
     /// The selection's display rows and columns.
     block: Option<(
         std::ops::RangeInclusive<usize>,
@@ -203,6 +203,84 @@ struct RowsContext {
     /// The focused cell, as (data row, result column).
     focus: Option<(usize, usize)>,
     flexible: bool,
+}
+
+/// Paints its child as one layer of the scene: everything the child draws
+/// shares one place in the drawing order, found once, instead of each quad
+/// finding its own among everything drawn before it. A row of the grid
+/// draws four border strips per cell, its backgrounds and its values; as a
+/// layer, finding their order costs one look-up per row, not one per
+/// primitive. Inside a layer, backgrounds and borders are drawn before
+/// text, as they already are within a cell, whose text never overlaps its
+/// border; a nested layer (each line of text, the frozen part of a row)
+/// is drawn over what it covers, as before.
+struct Layer(AnyElement);
+
+impl Layer {
+    /// `child` as one layer when `layered`, as it is otherwise.
+    fn of(child: impl IntoElement, layered: bool) -> AnyElement {
+        if layered {
+            Self(child.into_any_element()).into_any_element()
+        } else {
+            child.into_any_element()
+        }
+    }
+}
+
+impl IntoElement for Layer {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Layer {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.0.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.paint_layer(bounds, |window| self.0.paint(window, cx));
+    }
 }
 
 /// The demo result's column proportions.
@@ -323,6 +401,8 @@ pub struct ResultGrid {
     /// numbers.
     first_row: usize,
     cache: GridCache,
+    /// The columns' widths for the grid view, the layout and `widths`.
+    widths_cache: WidthsCache,
     selection: Option<CellSelection>,
     /// The selected count last reported, so unchanged counts are not sent.
     reported: usize,
@@ -429,8 +509,7 @@ impl ResultGrid {
             cx.notify();
         } else if phase == "pan" {
             // Sideways, back and forth over the whole width.
-            let widths = self.column_widths(&self.view());
-            let total = self.display_widths(&widths).iter().sum::<f32>() + ROW_NUMBERS;
+            let total = self.column_widths(&self.view()).total() + ROW_NUMBERS;
             let room = (total - self.viewport.get()).max(1.);
             let pan = (tick as f32 * 157.) % room;
             let offset = self.columns_scroll.offset();
@@ -591,6 +670,7 @@ impl ResultGrid {
             reported_rows: None,
             numbers_pt_br: false,
             cache: GridCache::default(),
+            widths_cache: WidthsCache::default(),
             selection: None,
             reported: 0,
             focus: cx.focus_handle(),
@@ -856,14 +936,12 @@ impl ResultGrid {
         self.cache.get(&self.result, key)
     }
 
-    /// The width of each column, by result column: the user's where they
-    /// set one, otherwise the measured one.
-    fn column_widths(&self, grid: &GridView) -> Vec<f32> {
-        grid.widths
-            .iter()
-            .enumerate()
-            .map(|(column, width)| self.widths.get(&column).copied().unwrap_or(*width))
-            .collect()
+    /// The width of each column (the user's where they set one, otherwise
+    /// the measured one), by result column and in display order; computed
+    /// when the view, the layout or the widths change, not per frame.
+    fn column_widths(&self, grid: &GridView) -> Rc<ColumnWidths> {
+        self.widths_cache
+            .get(grid, &self.layout, self.layout_version, &self.widths)
     }
 
     /// The columns' layout, shared with what copies, exports and summarizes
@@ -1004,35 +1082,20 @@ impl ResultGrid {
         cx.notify();
     }
 
-    /// The column widths in display order.
-    fn display_widths(&self, widths: &[f32]) -> Vec<f32> {
-        self.layout
-            .visible()
-            .iter()
-            .map(|column| {
-                widths
-                    .get(*column)
-                    .copied()
-                    .unwrap_or(grid::MIN_COLUMN_WIDTH)
-            })
-            .collect()
-    }
-
     /// What the table lays out sideways this frame, from the columns'
-    /// widths by result column, the pan and the viewport.
-    fn strip(&self, widths: &[f32]) -> Strip {
-        let display = self.display_widths(widths);
-        let frozen = self.layout.frozen().min(display.len());
+    /// widths, the pan and the viewport.
+    fn strip(&self, widths: &ColumnWidths) -> Strip {
+        let frozen = widths.frozen();
         let sticky = frozen > 0;
-        let lead = ROW_NUMBERS + display[..frozen].iter().sum::<f32>();
+        let lead = ROW_NUMBERS + widths.span(0..frozen);
         let pan = (-f32::from(self.columns_scroll.offset().x)).max(0.);
         let viewport = self.viewport.get();
         // The demo's columns grow to fill the grid, so all of them are built.
         let flexible = self.sales && self.layout.is_identity() && self.widths.is_empty();
         let (shown, before) = if flexible {
-            (frozen..display.len(), 0.)
+            (frozen..widths.display().len(), 0.)
         } else {
-            column_layout::shown_columns(&display, frozen, lead, pan, viewport)
+            widths.shown(lead, pan, viewport)
         };
         Strip {
             frozen,
@@ -1117,8 +1180,9 @@ impl ResultGrid {
         }
         let bounds = self.columns_scroll.bounds();
         let pan = -f32::from(self.columns_scroll.offset().x);
-        let display = self.display_widths(&self.column_widths(view));
-        let lead = ROW_NUMBERS + display.iter().take(frozen).sum::<f32>();
+        let widths = self.column_widths(view);
+        let display = widths.display();
+        let lead = ROW_NUMBERS + widths.span(0..frozen);
         if let Some(pan) = grid::pan_to_column(
             display.get(frozen..).unwrap_or_default(),
             column - frozen,
@@ -1305,7 +1369,12 @@ impl ResultGrid {
                 if this.summary_generation == generation {
                     this.report_summary(Summary::Ready(block.selection()), cx);
                     this.selection_block = Some((generation, block));
-                    cx.notify();
+                    // The footer learns it from the event; the grid draws it
+                    // only in the panel's selection statistics, so a large
+                    // selection does not draw the table again for nothing.
+                    if this.shows_stats(StatsScope::Selection) {
+                        cx.notify();
+                    }
                 }
             });
         }));
@@ -1926,7 +1995,7 @@ impl ResultGrid {
         let grid = self.view();
         let widths = self.column_widths(&grid);
         let strip = self.strip(&widths);
-        let grid_width = self.display_widths(&widths).iter().sum::<f32>() + ROW_NUMBERS;
+        let grid_width = widths.total() + ROW_NUMBERS;
         let has_rows = !grid.rows.is_empty();
         let visible = self.layout.visible();
         let corner = || {
@@ -1956,6 +2025,7 @@ impl ResultGrid {
         for position in strip.shown.clone() {
             if let Some(column) = visible.get(position).copied() {
                 let width = widths
+                    .by_column()
                     .get(column)
                     .copied()
                     .unwrap_or(grid::MIN_COLUMN_WIDTH);
@@ -1970,6 +2040,7 @@ impl ResultGrid {
             for position in 0..strip.frozen {
                 if let Some(column) = visible.get(position).copied() {
                     let width = widths
+                        .by_column()
                         .get(column)
                         .copied()
                         .unwrap_or(grid::MIN_COLUMN_WIDTH);
@@ -2302,12 +2373,11 @@ impl ResultGrid {
         self.reveal(None, position, &view);
         let widths = self.column_widths(&view);
         let strip = self.strip(&widths);
-        let display = self.display_widths(&widths);
-        let width = display.get(position).copied().unwrap_or_default();
+        let width = widths.display().get(position).copied().unwrap_or_default();
         let x = if position < strip.frozen {
-            ROW_NUMBERS + display[..position].iter().sum::<f32>()
+            ROW_NUMBERS + widths.span(0..position)
         } else {
-            strip.lead + display[strip.frozen..position].iter().sum::<f32>() - strip.pan
+            strip.lead + widths.span(strip.frozen..position) - strip.pan
         } + width / 2.;
         let bounds = self.columns_scroll.bounds();
         let x = x.clamp(8., (f32::from(bounds.size.width) - 8.).max(8.));
@@ -2355,7 +2425,7 @@ impl ResultGrid {
     }
 
     /// The data rows at `range` of the displayed order.
-    fn result_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+    fn result_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let grid = self.view();
         let widths = self.column_widths(&grid);
         let strip = self.strip(&widths);
@@ -2377,6 +2447,12 @@ impl ResultGrid {
                     block_rows.contains(&position) && *cols.start() == 0 && *cols.end() + 1 == shown
                 });
                 let built: Vec<usize> = (0..strip.frozen).chain(strip.shown.clone()).collect();
+                // The field a cell is typed in draws its caret over its
+                // text, so the row holding it is not one layer.
+                let editing = self
+                    .cell_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.cell.0 == index);
                 let mut line = row()
                     .id(("data-row", index))
                     .role(Role::Row)
@@ -2418,9 +2494,11 @@ impl ResultGrid {
                                 .child(self.cell(&rows, position, index, display, column, cx));
                         }
                     }
-                    line = line.child(frozen);
+                    // Its own layer, over the values of the columns that
+                    // pan under it.
+                    line = line.child(Layer::of(frozen, !editing));
                 }
-                line
+                Layer::of(line, !editing)
             })
             .collect()
     }
@@ -2511,6 +2589,7 @@ impl ResultGrid {
             .unwrap_or(ValueFamily::Text);
         let width = rows
             .widths
+            .by_column()
             .get(col)
             .copied()
             .unwrap_or(grid::MIN_COLUMN_WIDTH);

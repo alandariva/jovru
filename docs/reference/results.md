@@ -232,10 +232,18 @@ alignment only; the value itself is never converted.
   focused cell into a scrolling column pans it into the room the frozen
   ones leave.
 - Only the columns in view are built: a row draws its frozen columns and
-  the scrolling ones that cross the viewport, with the width of the others
-  kept as room (`column_layout::shown_columns`), so a frame costs the
-  columns on screen, not the result's. The demo result, whose five columns
-  share the width in proportion, draws them all.
+  the scrolling ones that cross the viewport, not those panned wholly under
+  the frozen ones, with the width of the others kept as room
+  (`column_layout::ColumnWidths::shown`), so a frame costs the columns on
+  screen, not the result's. The widths in display order and where each
+  column starts are kept from one frame to the next and computed again only
+  when the view, the layout or a width changes (`grid::WidthsCache`). Each
+  row, and its frozen part over it, is painted as one layer of the scene,
+  so ordering a row's borders, backgrounds and values costs one look-up
+  instead of one per border strip and background; the row with a cell
+  being typed in is not, so the field's caret stays over its text. The
+  demo result, whose five columns share the width in proportion, draws them
+  all.
 - A header's right edge resizes its column (48 to 1,600 px); a double click on
   it, or **Fit the column to its values** in the menu, fits the column to its
   header and the values of the first 5,000 displayed rows. **Reset column

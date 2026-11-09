@@ -7,9 +7,11 @@
 //! data rows and result columns, so filtering, sorting or laying out the
 //! columns ([`ColumnLayout`]) does not change what is selected.
 use crate::cell_format::{self, ValueFamily};
-use crate::column_layout::ColumnLayout;
+use crate::column_layout::{ColumnLayout, ColumnWidths};
 use crate::decimal::compare_numbers;
 use crate::result::ResultData;
+use std::collections::HashMap;
+use std::rc::Rc;
 use std::{cell::RefCell, ops::RangeInclusive, sync::Arc};
 
 /// A rectangular block of result cells, from the cell clicked first (anchor)
@@ -203,6 +205,55 @@ impl GridCache {
                 cached.insert(Arc::new(GridView::new(result, key))).clone()
             }
         }
+    }
+}
+
+/// The last [`ColumnWidths`], reused while the grid view, the column
+/// layout and the widths the user set are unchanged: a frame reads them and
+/// never computes them for every column of the result.
+#[derive(Default)]
+pub struct WidthsCache(RefCell<Option<CachedWidths>>);
+
+struct CachedWidths {
+    view: GridKey,
+    layout: u64,
+    set: HashMap<usize, f32>,
+    widths: Rc<ColumnWidths>,
+}
+
+impl WidthsCache {
+    /// The widths of `view`'s columns, with `set` (the widths the user set,
+    /// by result column) over the measured ones, laid out by `layout`.
+    /// `layout_version` changes with every change of `layout`.
+    pub fn get(
+        &self,
+        view: &GridView,
+        layout: &ColumnLayout,
+        layout_version: u64,
+        set: &HashMap<usize, f32>,
+    ) -> Rc<ColumnWidths> {
+        let mut cached = self.0.borrow_mut();
+        if let Some(cached) = cached.as_ref()
+            && cached.view == view.key
+            && cached.layout == layout_version
+            && cached.set == *set
+        {
+            return cached.widths.clone();
+        }
+        let by_column = view
+            .widths
+            .iter()
+            .enumerate()
+            .map(|(column, width)| set.get(&column).copied().unwrap_or(*width))
+            .collect();
+        let widths = Rc::new(ColumnWidths::new(by_column, layout, MIN_COLUMN_WIDTH));
+        *cached = Some(CachedWidths {
+            view: view.key.clone(),
+            layout: layout_version,
+            set: set.clone(),
+            widths: widths.clone(),
+        });
+        widths
     }
 }
 
@@ -628,6 +679,36 @@ mod tests {
             edits: 0,
             inserted: 0,
         }
+    }
+
+    #[test]
+    fn widths_are_computed_again_only_when_what_they_follow_changes() {
+        let result = event_log(10);
+        let view = GridView::new(&result, key(1, "", None));
+        let mut layout = ColumnLayout::new(5);
+        let mut set = HashMap::new();
+        let cache = WidthsCache::default();
+        let first = cache.get(&view, &layout, 0, &set);
+        assert_eq!(first.by_column(), view.widths);
+        // The same view, layout and widths: the same widths, not a copy.
+        assert!(Rc::ptr_eq(&first, &cache.get(&view, &layout, 0, &set)));
+        // A width the user set takes the place of the measured one.
+        set.insert(2, 300.);
+        let resized = cache.get(&view, &layout, 0, &set);
+        assert!(!Rc::ptr_eq(&first, &resized));
+        assert_eq!(resized.by_column()[2], 300.);
+        assert_eq!(resized.by_column()[1], view.widths[1]);
+        // A change of the layout lays them out again.
+        layout.freeze(2);
+        let frozen = cache.get(&view, &layout, 1, &set);
+        assert_eq!((frozen.frozen(), frozen.display()[0]), (1, 300.));
+        assert!(Rc::ptr_eq(&frozen, &cache.get(&view, &layout, 1, &set)));
+        // So does another view: a filter, a sort, another result.
+        let filtered = GridView::new(&result, key(1, "info", None));
+        assert!(!Rc::ptr_eq(
+            &frozen,
+            &cache.get(&filtered, &layout, 1, &set)
+        ));
     }
 
     #[test]
