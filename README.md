@@ -9,9 +9,11 @@ A native desktop workspace written in Rust and [GPUI](https://www.gpui.rs/) to
 register PostgreSQL, MySQL, Databricks and SQLite connections, explore metadata
 and run real SQL.
 
-> **Status:** early prototype; `0.2.0` makes daily use reliable, updates
-> itself from signed releases, and adds saved queries as `.sql` files, reopening closed tabs and
-> explorer favorites. Windows is the primary platform; Linux is validated
+> **Status:** early prototype; `0.3.0` adds automation (SQL Jobs, external
+> programs, chains and schedules while the application is open), editing data
+> in the result grid, importing CSV and Excel files into a table, shortcuts
+> you choose, and grid columns that can be hidden, moved, frozen and found.
+> `0.2.0` made daily use reliable, with updates from signed releases. Windows is the primary platform; Linux is validated
 > since 0.2.0 (Ubuntu 24.04 on X11). The AI assistant talks to Anthropic, OpenAI, an
 > OpenAI-compatible server or Ollama, once set up in Preferences; it sees
 > SQL, errors, row counts and structure, and values only from a query it
@@ -178,6 +180,34 @@ zipsign verify tar jykre-studio-v0.2.1-linux-x86_64.tar.gz release-key.pub
   spreadsheets; the context menu also copies it with headers. **pt-BR
   numbers** groups digits without converting decimals or integers to floating
   point. CSV copy keeps the original values regardless of presentation.
+- **Editing results.** In a query tab, a result read from one table with a
+  primary key (or a unique key on NOT NULL columns) can be edited: `F2`
+  edits a cell, `Ctrl Shift N` sets it to NULL, `Alt Insert` adds a row and
+  `Delete` marks rows to delete. Nothing is written until **Write…**
+  (`Ctrl Alt S`) shows every change with its statements; values are bound by
+  the driver, each change must touch exactly one row or the whole write rolls
+  back, and inside an open transaction the changes stay uncommitted. On a
+  connection marked Production it asks first. On Databricks, **Generate
+  SQL…** opens the statements in a new tab instead. Any other result says why
+  it is read-only. See [Results](docs/reference/results.md#editing).
+- **Import from file…** in the explorer's menu of a table reads a CSV or an
+  `.xlsx` sheet: choose the delimiter, encoding and header row, map the
+  file's columns to the table's with a preview, and run it, all or nothing,
+  with progress and **Cancel**. **New table from this file…** drafts a
+  `CREATE TABLE` in a new tab. Not offered on Databricks.
+- **Grid columns.** `Shift F10` on a header (or a right click) hides, moves
+  or freezes a column at the left edge; dragging a header moves it, and a
+  line says how many columns are hidden. `Ctrl Shift F` finds a column by
+  name, ignoring case and accents. Copying, exporting, the records view and
+  the statistics follow the visible columns in their order; the layout
+  belongs to the result tab.
+- **SQL editor.** `Ctrl F` searches, `Ctrl H` replaces, `Ctrl Alt ↑`/`↓`
+  (`Shift Alt ↑`/`↓` on Linux) adds a cursor, and `Ctrl G` goes to a line
+  (`12` or `12:5`). Errors are marked where PostgreSQL, MySQL or Databricks
+  say they are.
+- **Shortcuts you choose.** **Preferences › Shortcuts** changes the key of
+  any action by pressing it, names the action that already uses a key before
+  taking it, and resets one action or all of them.
 - **Reports** (a section of the rail) gather panels, each on its own
   connection and database (schema, catalog, or another PostgreSQL database
   when the connection offers them), chosen from the panel's header. A panel
@@ -225,6 +255,14 @@ ones active or queued on top.
 - **History.** Every run records its state, cause, counters and times in
   `automation.db`, per job and in a list of all runs, for 90 days. It never
   stores input values, result cells or server messages.
+- **Schedules.** A job or chain can run every few minutes or hours, or at
+  times of the day on chosen days, in the time zone you choose, after you
+  consent to what it runs, on which connection and environment; any change
+  to them suspends it until you confirm again. Times missed while the
+  application was closed are not run unless you choose to catch them up
+  once or up to N times, and a time that finds the previous run still going
+  is skipped unless you choose otherwise. A scheduled run never asks for a
+  password: one that is not remembered fails it.
 - Up to 2 runs are active at a time (1 per connection); more wait in a queue
   of at most 8 for up to 60 s.
 

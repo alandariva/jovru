@@ -106,8 +106,8 @@ pub async fn log_runs(data_dir: &Path) -> io::Result<Vec<RunId>> {
     Ok(runs)
 }
 
-/// A log read back for the user: the bytes decoded as UTF-8 with
-/// replacement, never interpreted. Its `Debug` output shows sizes only.
+/// A log read back for the user: the bytes decoded as text, never
+/// interpreted ([`decode`]). Its `Debug` output shows sizes only.
 #[derive(Clone, PartialEq, Eq)]
 pub struct LogText {
     pub text: String,
@@ -142,10 +142,54 @@ pub async fn read_log(data_dir: &Path, run: RunId, stream: Stream) -> io::Result
     file.take(LOG_LIMIT).read_to_end(&mut content).await?;
     let complete = u64::try_from(content.len()).is_ok_and(|read| read >= bytes);
     Ok(Some(LogText {
-        text: String::from_utf8_lossy(&content).into_owned(),
+        text: decode(&content, stream, legacy_code_page),
         bytes,
         complete,
     }))
+}
+
+/// Decodes a log for display (ADR-0037, amended 2026-11-09). Bytes on disk
+/// are never changed. `jjp.log` is Studio's own UTF-8. A program's stdout or
+/// stderr is read as UTF-8 when it is valid UTF-8 (a character cut by the
+/// 1 MiB limit at the very end included); otherwise `legacy` decodes it in
+/// the console's code page (on Windows, the OEM code page: CP437, CP850…),
+/// and UTF-8 with replacement is the last resort.
+fn decode(bytes: &[u8], stream: Stream, legacy: fn(&[u8]) -> Option<String>) -> String {
+    let lossy = || String::from_utf8_lossy(bytes).into_owned();
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        // Only the last character is incomplete: the file was cut there.
+        Err(error) if error.error_len().is_none() => lossy(),
+        Err(_) if stream == Stream::Jjp => lossy(),
+        Err(_) => legacy(bytes).unwrap_or_else(lossy),
+    }
+}
+
+/// The console's code page decodes a program's output that is not UTF-8. On
+/// Windows that is the OEM code page the registry names; elsewhere there is
+/// none, and UTF-8 with replacement stays.
+#[cfg(windows)]
+fn legacy_code_page(bytes: &[u8]) -> Option<String> {
+    static OEM: std::sync::OnceLock<Option<u16>> = std::sync::OnceLock::new();
+    let page = (*OEM.get_or_init(oem_code_page))?;
+    oem_cp::code_table::DECODING_TABLE_CP_MAP
+        .get(&page)
+        .map(|table| table.decode_string_lossy(bytes))
+}
+
+#[cfg(not(windows))]
+fn legacy_code_page(_: &[u8]) -> Option<String> {
+    None
+}
+
+/// The OEM code page the console uses, as Windows records it.
+#[cfg(windows)]
+fn oem_code_page() -> Option<u16> {
+    windows_registry::LOCAL_MACHINE
+        .open(r"SYSTEM\CurrentControlSet\Control\Nls\CodePage")
+        .and_then(|key| key.get_string("OEMCP"))
+        .ok()
+        .and_then(|page| page.trim().parse().ok())
 }
 
 /// What a finished [`LogWriter`] left on disk.
@@ -343,6 +387,47 @@ impl LogWriter {
 mod tests {
     use super::*;
 
+    fn no_legacy(_: &[u8]) -> Option<String> {
+        None
+    }
+
+    fn latin1(bytes: &[u8]) -> Option<String> {
+        Some(bytes.iter().map(|&byte| char::from(byte)).collect())
+    }
+
+    #[test]
+    fn valid_utf8_is_shown_as_written_and_never_through_the_code_page() {
+        let text = "ação → 100 %".as_bytes();
+        assert_eq!(decode(text, Stream::Stdout, latin1), "ação → 100 %");
+        // Cut by the 1 MiB limit inside its last character: still UTF-8.
+        let cut = "ação →".as_bytes();
+        let cut = &cut[..cut.len() - 1];
+        assert_eq!(decode(cut, Stream::Stderr, latin1), "ação \u{fffd}");
+    }
+
+    #[test]
+    fn output_that_is_not_utf8_is_read_in_the_console_code_page() {
+        // "Média" in a single-byte code page: 0xE9 alone is not UTF-8.
+        let bytes = b"M\xe9dia";
+        assert_eq!(decode(bytes, Stream::Stdout, latin1), "Média");
+        // Without a code page, UTF-8 with replacement stays.
+        assert_eq!(decode(bytes, Stream::Stdout, no_legacy), "M\u{fffd}dia");
+        // Studio's own jjp.log is always UTF-8.
+        assert_eq!(decode(bytes, Stream::Jjp, latin1), "M\u{fffd}dia");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_names_its_oem_code_page_and_decodes_it() {
+        let page = oem_code_page().expect("Windows records an OEM code page");
+        let decoded = legacy_code_page(b"M\x82dia");
+        assert!(decoded.is_some(), "no decoding table for CP{page}");
+        if matches!(page, 437 | 850 | 858 | 860 | 863 | 865) {
+            // 0x82 is "é" in these pages, as `ping` writes it on pt-BR.
+            assert_eq!(decoded.as_deref(), Some("Média"));
+        }
+    }
+
     pub(crate) fn temp_data_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("jykre-automation-{label}-{}", RunId::new()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -389,6 +474,12 @@ mod tests {
             b"line one\n\xff\xfe partial"
         );
         let read = read_log(&data, run, Stream::Stderr).await.unwrap().unwrap();
+        // Not UTF-8, so shown in the console's code page where there is one
+        // (Windows), with replacement otherwise; the file is unchanged.
+        let expected = legacy_code_page(b"line one\n\xff\xfe partial")
+            .unwrap_or_else(|| "line one\n\u{fffd}\u{fffd} partial".to_owned());
+        assert_eq!(read.text, expected);
+        #[cfg(not(windows))]
         assert_eq!(read.text, "line one\n\u{fffd}\u{fffd} partial");
         assert!(read.complete);
         assert!(!format!("{read:?}").contains("line one"));

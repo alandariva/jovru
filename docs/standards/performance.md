@@ -15,7 +15,7 @@ numbers.
 | Metric | Budget | Baseline (2026-11-02) | How to measure |
 | --- | --- | --- | --- |
 | Frame while scrolling, hovering or selecting in the result grid, any row count up to 100,000 | ≤ 8 ms p95 | 2.6 ms median, ≤ 6.4 ms p95 (1,000 × 15 columns to 100,000 × 5) | Frame probe; the [performance run](#automated-performance-run) (`grid`, `edit`) |
-| Frame for any other interaction in the main window | ≤ 8 ms p95 | Not measured | Frame probe; the [performance run](#automated-performance-run) (`editor`, `edit`, `columns`, `import`, `automation`) |
+| Frame for any other interaction in the main window | ≤ 8 ms p95 | 0.3–5.7 ms p95 for go to a line, editing, finding a column, importing and the Automation views (release, Windows, 2026-11-09; see [Version 0.3.0](#version-030-measurements)) | Frame probe; the [performance run](#automated-performance-run) (`editor`, `edit`, `columns`, `import`, `automation`) |
 | Longest UI-thread stall while a query runs | ≤ 16 ms | 12.8 ms during a 4 s `pg_sleep` (the Windows timer resolution is about 10–15 ms) | Heartbeat; the [performance run](#automated-performance-run) (`import`, `automation`) |
 | UI-thread work to publish a finished result | ≤ 2 ms at any size | 0.01 ms at 100,000 rows | Timing around the publish; the [performance run](#automated-performance-run) (`automation`: a job's result) |
 | First frame after a result arrives | ≤ 16 ms | 7–10 ms | Frame probe; the [performance run](#automated-performance-run) (`automation`) |
@@ -230,6 +230,51 @@ only for the measurement.
   of the click, while the native dialog opens (15.8 ms the first time),
   and when it closes; while the file is written the longest was 6.3 ms.
   The budget holds. Opening the export bar itself took up to 10.9 ms.
+
+### Version 0.3.0 measurements
+
+Taken on the reference machine (Windows 11, 20 logical CPUs, window
+1480 × 920 at 100% scaling) with the [performance run](#automated-performance-run)
+of a release build, `JYKRE_PROBE=1`, on 2026-11-08 and 2026-11-09. The
+machine was in use: runs where other activity doubled the frame times are
+left out of the medians and said so. No budget changed.
+
+**Result grid (`grid`), frame p95, median of five runs after the
+wide-grid fix** (before it, four runs):
+
+| Size | Selection | Selection at the end | Scroll | Pan |
+| --- | --- | --- | --- | --- |
+| 1,000 × 5 | 3.96 ms (4.89) | 3.83 ms (4.52) | 4.31 ms (5.01) | 3.63 ms (4.46) |
+| 100,000 × 5 | 3.93 ms (4.68) | 3.62 ms (3.40) | 4.26 ms (4.86) | 3.72 ms (4.13) |
+| 1,000 × 400, 3 frozen | 7.41 ms (7.90) | 7.23 ms (8.47) | 7.43 ms (9.43) | 6.87 ms (9.29) |
+
+The wide grid's margin is small: its clean runs reach 6.1–7.7 ms, and a busy
+machine takes scroll and pan over 8 ms. Most of its frame is GPUI laying out
+and painting the cells in view (about 25 rows × 16 columns plus the frozen
+layer); the 0.2.0 build is as slow with the same cells on screen.
+
+**Other paths:**
+
+| Path | Metric | Value | Budget |
+| --- | --- | --- | --- |
+| Go to a line (A9), 1 MiB, 12,617 lines | UI-thread time per jump, p95 / longest | 0.43 / 0.52 ms | ≤ 8 ms |
+| Editing in the grid (A10), 100,000 rows, 400 edits | Grid view rebuilt after an edit, longest | 1.87 ms | ≤ 50 ms |
+| | Frame p95 editing / selecting / scrolling with 600 rows edited | 4.30 / 3.74 / 4.24 ms | ≤ 8 ms |
+| Finding a column (A15), 10,000 columns | UI-thread time per keystroke, p95 | 2.90 ms | ≤ 8 ms |
+| | Frame p95 typing / choosing matches | 5.65 / 5.39 ms | ≤ 8 ms |
+| Importing (A11), CSV of 1.5 M rows (84.6 MiB) into SQLite | Rows per second / peak resident memory / growth | 52,062 / 125 MiB / 11 MiB | — |
+| | Progress shown / elapsed time and Cancel shown | 305 ms / 2,006 ms | after 300 ms / past 2 s |
+| | Longest UI-thread stall / frame p95 | 12.0 / 0.34 ms | ≤ 16 / ≤ 8 ms |
+| Importing (A11), `.xlsx` of 250,000 rows | Rows per second / peak resident memory / growth | 48,711 / 115 MiB / 22 MiB | — |
+| | Longest UI-thread stall | 11.9 ms | ≤ 16 ms |
+| Importing (A11), a CSV cancelled after 3 s | Rows left in the table | 0 | 0 (all or nothing) |
+| Automation (A6), SQLite, 10,000 runs in history | Run status published, longest / a 100,000-row result published | 0.06 / 0.45 ms | ≤ 2 ms |
+| | History page shown, longest (a job's / the global list) | 0.06 / 0.19 ms | ≤ 2 ms |
+| | Frame p95 (bursts, result, history, global list) / longest stall | 2.0–3.0 / 12.2 ms | ≤ 8 / ≤ 16 ms |
+| | First frame after the 100,000-row result | 2.78 ms | ≤ 16 ms |
+
+The Automation views were measured against SQLite connections only;
+PostgreSQL, MySQL and Databricks are not measured by the run.
 
 ### The editor with a large `.sql` file
 

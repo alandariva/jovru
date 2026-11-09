@@ -17,7 +17,7 @@ resolver = "3"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -161,6 +161,13 @@ encoding_rs.workspace = true
 # `rust_xlsxwriter` and `self_update`; the update tests also write archives.
 zip = { version = "9", default-features = false }
 
+# A program's stdout and stderr in the console's OEM code page (CP437, CP850…)
+# are shown as text (ADR-0037, amended 2026-11-09): `windows-registry` reads
+# that code page, `oem_cp` decodes it. Both safe; no `unsafe` in our code.
+[target.'cfg(windows)'.dependencies]
+oem_cp = "2.1.2"
+windows-registry = "0.6.1"
+
 [build-dependencies]
 winresource.workspace = true
 
@@ -207,10 +214,10 @@ overflow-checks = true
 # is patched, so the tree keeps one `sqlx-core`; the revision is allowed in
 # `deny.toml`.
 [patch.crates-io]
-sqlx = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
-sqlx-core = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
-sqlx-macros = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
-sqlx-macros-core = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
-sqlx-mysql = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
-sqlx-postgres = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
-sqlx-sqlite = { git = "https://github.com/alandariva/sqlx", rev = "e538af09c6df345aedd232d132b99f5b6491d486" }
+sqlx = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-core = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-macros = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-macros-core = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-mysql = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-postgres = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-sqlite = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }

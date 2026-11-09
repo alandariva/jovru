@@ -2,6 +2,11 @@
 
 - **Status:** Accepted (implemented on 2026-11-07; accepted by the
   maintainer on 2026-11-07)
+- **Amended:** 2026-11-09, with the maintainer's approval: the pinned
+  revision is now `8ddadbe8083766320e8ca1417c62ce3c8a689658`, one more
+  commit on the same branch that lets `sqlx-sqlite` take `libsqlite3-sys`
+  0.39 (bundled SQLite 3.54.1), for RUSTSEC-2026-0459. Nothing else in the
+  fork changed
 - **Date:** 2026-11-07
 - **Authors:** Alan de Oliveira (with an AI agent)
 

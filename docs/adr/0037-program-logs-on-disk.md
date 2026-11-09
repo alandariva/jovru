@@ -1,6 +1,10 @@
 # ADR-0037: External programs' logs kept on disk for 7 days
 
 - **Status:** Accepted (by the maintainer on 2026-11-08; implemented in 0.3.0)
+- **Amended:** 2026-11-09, with the maintainer's approval: the viewer shows
+  a program's stdout or stderr that is not UTF-8 in the console's code page
+  (on Windows, the OEM code page, read from the registry and decoded by
+  `oem_cp`); see item 2
 - **Date:** 2026-11-08
 - **Authors:** Alan de Oliveira (decision Q-15), Claude (draft)
 
@@ -25,7 +29,12 @@ logs are **always kept on disk**, at most 1 MiB per stream, deleted after
 2. **Bounded.** At most **1 MiB per file**. Past it the stream is still read
    and discarded, and the file ends with one marker line giving the bytes
    dropped. Bytes are written as received; the viewer decodes them as UTF-8
-   with replacement and never interprets them.
+   with replacement and never interprets them. *Amended 2026-11-09:* a
+   program's stdout or stderr that is not valid UTF-8 is shown in the
+   console's code page instead (on Windows, the OEM code page, such as
+   CP850 on pt-BR, read from the registry's `OEMCP` and decoded by
+   `oem_cp`), so a console program's accents read as written; `jjp.log`
+   stays UTF-8, and a file is never rewritten.
 3. **Short-lived.** A run's log folder is deleted **7 days** after the run
    finished, by the same background pruning as runs, and with the run's row
    if that is pruned first. A run's history offers **Delete logs** to remove

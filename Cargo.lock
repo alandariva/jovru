@@ -4090,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "jykre"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "calamine",
  "criterion",
@@ -4111,6 +4111,7 @@ dependencies = [
  "jykre-sql-language",
  "jykre-storage",
  "lsp-types",
+ "oem_cp",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -4131,6 +4132,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+ "windows-registry 0.6.1",
  "winresource",
  "zip",
  "zipsign-api",
@@ -4138,7 +4140,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-assistant"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "genai",
@@ -4154,7 +4156,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -4168,7 +4170,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-databricks"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jykre-core",
  "reqwest 0.12.28",
@@ -4181,7 +4183,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-mysql"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4194,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-postgres"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4207,7 +4209,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-sqlite"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4219,7 +4221,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-secrets"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jykre-core",
  "keyring",
@@ -4229,14 +4231,14 @@ dependencies = [
 
 [[package]]
 name = "jykre-sql"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jykre-core",
 ]
 
 [[package]]
 name = "jykre-sql-language"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jykre-core",
  "jykre-sql",
@@ -4247,7 +4249,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-storage"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jykre-core",
  "serde_json",
@@ -4419,9 +4421,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.37.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f111c8c41e7c61a49cd34e44c7619462967221a6443b0ec299e0ac30cfb9b1"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -5428,6 +5430,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "oem_cp"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c7959d3349f484aec36462f98226983578bf7d33f9b034c32967489c7000e1f"
+dependencies = [
+ "phf 0.11.3",
 ]
 
 [[package]]
@@ -7551,7 +7562,7 @@ dependencies = [
 [[package]]
 name = "sqlx"
 version = "0.9.0"
-source = "git+https://github.com/alandariva/sqlx?rev=e538af09c6df345aedd232d132b99f5b6491d486#e538af09c6df345aedd232d132b99f5b6491d486"
+source = "git+https://github.com/alandariva/sqlx?rev=8ddadbe8083766320e8ca1417c62ce3c8a689658#8ddadbe8083766320e8ca1417c62ce3c8a689658"
 dependencies = [
  "sqlx-core",
  "sqlx-macros",
@@ -7563,7 +7574,7 @@ dependencies = [
 [[package]]
 name = "sqlx-core"
 version = "0.9.0"
-source = "git+https://github.com/alandariva/sqlx?rev=e538af09c6df345aedd232d132b99f5b6491d486#e538af09c6df345aedd232d132b99f5b6491d486"
+source = "git+https://github.com/alandariva/sqlx?rev=8ddadbe8083766320e8ca1417c62ce3c8a689658#8ddadbe8083766320e8ca1417c62ce3c8a689658"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7598,7 +7609,7 @@ dependencies = [
 [[package]]
 name = "sqlx-macros"
 version = "0.9.0"
-source = "git+https://github.com/alandariva/sqlx?rev=e538af09c6df345aedd232d132b99f5b6491d486#e538af09c6df345aedd232d132b99f5b6491d486"
+source = "git+https://github.com/alandariva/sqlx?rev=8ddadbe8083766320e8ca1417c62ce3c8a689658#8ddadbe8083766320e8ca1417c62ce3c8a689658"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7610,7 +7621,7 @@ dependencies = [
 [[package]]
 name = "sqlx-macros-core"
 version = "0.9.0"
-source = "git+https://github.com/alandariva/sqlx?rev=e538af09c6df345aedd232d132b99f5b6491d486#e538af09c6df345aedd232d132b99f5b6491d486"
+source = "git+https://github.com/alandariva/sqlx?rev=8ddadbe8083766320e8ca1417c62ce3c8a689658#8ddadbe8083766320e8ca1417c62ce3c8a689658"
 dependencies = [
  "cfg-if",
  "dotenvy",
@@ -7634,7 +7645,7 @@ dependencies = [
 [[package]]
 name = "sqlx-mysql"
 version = "0.9.0"
-source = "git+https://github.com/alandariva/sqlx?rev=e538af09c6df345aedd232d132b99f5b6491d486#e538af09c6df345aedd232d132b99f5b6491d486"
+source = "git+https://github.com/alandariva/sqlx?rev=8ddadbe8083766320e8ca1417c62ce3c8a689658#8ddadbe8083766320e8ca1417c62ce3c8a689658"
 dependencies = [
  "bitflags 2.13.2",
  "byteorder",
@@ -7659,7 +7670,7 @@ dependencies = [
 [[package]]
 name = "sqlx-postgres"
 version = "0.9.0"
-source = "git+https://github.com/alandariva/sqlx?rev=e538af09c6df345aedd232d132b99f5b6491d486#e538af09c6df345aedd232d132b99f5b6491d486"
+source = "git+https://github.com/alandariva/sqlx?rev=8ddadbe8083766320e8ca1417c62ce3c8a689658#8ddadbe8083766320e8ca1417c62ce3c8a689658"
 dependencies = [
  "atoi",
  "base64 0.22.1",
@@ -7693,7 +7704,7 @@ dependencies = [
 [[package]]
 name = "sqlx-sqlite"
 version = "0.9.0"
-source = "git+https://github.com/alandariva/sqlx?rev=e538af09c6df345aedd232d132b99f5b6491d486#e538af09c6df345aedd232d132b99f5b6491d486"
+source = "git+https://github.com/alandariva/sqlx?rev=8ddadbe8083766320e8ca1417c62ce3c8a689658#8ddadbe8083766320e8ca1417c62ce3c8a689658"
 dependencies = [
  "atoi",
  "flume",
@@ -10221,7 +10232,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde_json",
 ]
