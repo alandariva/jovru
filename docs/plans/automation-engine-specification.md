@@ -33,14 +33,15 @@ design IDs (`Dxx`) and question IDs (`Q-xx`) refer to the review.
 > [0.3.0 plan](releases/0.3.0.md) were accepted on 2026-11-08, and the
 > process-supervision dependency was approved the same day (Q-11).
 
-> **Proposed, not approved:** sections
-> [9.5.1–9.5.10](#951-schedules-while-the-application-is-open-proposed-revision)
+> **Approved on 2026-11-08:** sections
+> [9.5.1–9.5.10](#951-schedules-while-the-application-is-open-approved-revision)
 > specify the scheduling part of phase 7 for milestone A13 of
-> [0.3.0](releases/0.3.0.md) (2026-11-08). They come with
+> [0.3.0](releases/0.3.0.md). The maintainer approved them with
 > [ADR-0041](../adr/0041-schedules-and-grants.md) and the
-> [`jiff` proposal](schedule-time-zone-dependency.md). They are not normative
-> until the maintainer approves them. The approved text, section 9.5
-> included, is unchanged.
+> [`jiff` proposal](schedule-time-zone-dependency.md), taking every
+> recommendation of [section 9.5.9](#959-decisions-for-the-maintainer)
+> except Q-34 and Q-35: missed times and overlap are a policy chosen per
+> schedule ([section 9.5.5](#955-missed-times-and-overlap)).
 
 ## Contents
 
@@ -1070,25 +1071,26 @@ HTTP, palette, SDK, other transports, sandboxing and an agent that runs
 while the application is closed. Each completes its semantics before a
 schema or protocol becomes stable.
 
-#### 9.5.1 Schedules while the application is open (proposed revision)
+#### 9.5.1 Schedules while the application is open (approved revision)
 
-**Revision of 2026-11-08: proposed, awaiting the maintainer's approval.**
+**Revision of 2026-11-08: approved by the maintainer on 2026-11-08**, with
+Q-34 and Q-35 changed to per-schedule policies (section 9.5.9).
 This revision specifies the scheduling part of phase 7 for milestone A13 of
 [0.3.0](releases/0.3.0.md), as sections 9.1–9.3 did for phases 3–5.
 [ADR-0041](../adr/0041-schedules-and-grants.md) holds its schema, and the
 [`jiff` proposal](schedule-time-zone-dependency.md) holds its dependency.
-The decisions it needs are in [section 9.5.9](#959-decisions-for-the-maintainer).
-Until it is approved, the paragraph above is the only normative text on
-schedules. The rest of phase 7 (cache, secret broker, HTTP, palette, SDK,
+The decisions are recorded in [section 9.5.9](#959-decisions-for-the-maintainer).
+The rest of phase 7 (cache, secret broker, HTTP, palette, SDK,
 transports) stays outside 0.3.0.
 
 Scope:
 
 - A **schedule** runs one target by a rule, in a time zone, **only while
   Jykre Studio is open and only in the instance that holds the automation
-  lock** (section 6.6). Nothing runs while the application is closed, and
-  nothing is caught up when it opens (Q-14, section 9.5.5). The interface
-  and the documentation say this plainly.
+  lock** (section 6.6). Nothing runs while the application is closed (Q-14).
+  Times missed meanwhile follow the schedule's missed-time policy
+  (section 9.5.5): by default they are not run. The interface and the
+  documentation say this plainly.
 - The target is a **published version** of a SQL Job or an
   external-program job, or a **chain**: its definition at a given revision,
   with the versions its steps name. A draft never runs on a schedule.
@@ -1175,45 +1177,87 @@ and the form shows the next three times.
   holds the lock (`Availability` ready).
 - A second instance shows schedules read-only, says they run in the other
   instance, and runs none. When **Try again** takes the lock over, its
-  scheduler starts. Times that passed meanwhile follow section 9.5.5.
+  scheduler starts. Times that passed meanwhile are missed and follow each
+  schedule's missed-time policy (section 9.5.5).
 - The scheduler keeps the next due time of each enabled, unsuspended
   schedule. It sleeps until the earliest one, and **at most 30 s**, because
   a sleeping computer stops the monotonic clock. On waking it compares the
   **wall clock** (UTC) to each due time.
 - A due time is **on time** while the wall clock is less than **60 s** past
-  it (Q-39). The scheduler then submits the run. Past that grace the time is
-  **missed** (section 9.5.5).
+  it (Q-39). The scheduler then submits the run, or applies the overlap
+  policy when the schedule still has a run queued or active. Past that
+  grace the time is **missed**, and the missed-time policy applies (section
+  9.5.5). The scheduler applies it wherever it finds missed times: when it
+  starts, when it wakes from a sleep, when it takes the lock over, or when
+  it was late.
 - A wall clock that moves backwards (a manual change, a correction) never
   repeats a time that was already handled: each schedule remembers its last
-  handled due time (ADR-0041) and only considers later ones.
+  handled due time (ADR-0041) and only considers later ones. It never
+  considers a time before its consent either.
 - Quitting with scheduled runs active asks as for manual runs (section 5.2).
   The scheduler stops first, so nothing new starts while the application
-  closes.
+  closes; catch-ups and a due time waiting under *queue one* that were not
+  submitted are dropped.
 
 #### 9.5.5 Missed times and overlap
 
-**Missed times are never run** (Q-34). Times can be missed because:
+**Missed times** (Q-34) follow a **policy chosen per schedule**. Since a job
+or a chain has at most one schedule, it is in effect a choice per job or
+chain. A time is missed because:
 
 - the application was closed;
 - the computer slept;
 - another instance held the lock;
 - the scheduler was later than the grace.
 
-For each such time, the scheduler:
+| Policy | What it does with the times missed since the last time handled |
+| --- | --- |
+| **Ignore** (the default) | Runs nothing, now or later |
+| **Run once** | Submits **one** catch-up run for all of them when the scheduler finds them (at start, on waking, on taking the lock). Its due time is the latest missed time |
+| **Queue up to N** | Submits a catch-up run for each of the **N most recent** missed times, oldest first, one after another through the normal queue. N is between **2 and 24** (Q-39: at most 24 times a day; 1 would be *run once*). The editor proposes 3. Older missed times are only counted |
 
-- **does not start a run**, now or later;
-- records it on the schedule: how many times were missed and the last one
+Whatever the policy, the scheduler:
+
+- records the missed times on the schedule: how many and the last one
   (ADR-0041);
+- never considers a time before the consent (the grant) or before the last
+  time it handled;
 - computes the next due time from now.
 
-The Automation section says, for example, "Missed 3 times while Jykre
-Studio was closed (last: today 09:00 CET); next run tomorrow 09:00 CET". A
-run is never replayed, and a time is never caught up.
+A **catch-up run is a new run.** It goes through the same admission, queue
+(8, 4 per connection, 60 s), limits and history as any other, recorded with
+origin `schedule`, the schedule, the missed time as its `due_at` and the
+**catch-up marker** (`catch_up`, ADR-0041). It never re-executes, resumes or
+changes a run that started: a run is never replayed, and a run left
+`Interrupted` by recovery stays as it is (section 6.6). Catch-ups not yet
+submitted live in memory only. Quitting, losing the lock, turning the
+schedule off, editing it or a suspension drops them, and they stay counted
+as missed; nothing about them is caught up at the next start.
 
-**Overlap** (Q-35): a due time that finds the schedule's previous run or
-chain run still **queued or active** starts nothing. It is recorded on the
-schedule as **skipped, still running**, and the next due time is computed.
-A schedule never has two runs at once.
+The Automation section says, for example, "Missed 3 times while Jykre
+Studio was closed (last: today 09:00 CET); next run tomorrow 09:00 CET",
+and with a catch-up policy "1 catch-up run started for 09:00 CET".
+
+**Overlap** (Q-35) follows a second **policy chosen per schedule**. It
+applies to a due time that finds a run or chain run of the same schedule
+still **queued or active**, a catch-up included:
+
+| Policy | What the due time does |
+| --- | --- |
+| **Skip and record** (the default) | Starts nothing. It is recorded as **skipped, still running** |
+| **Queue one** | Waits, in memory, until the schedule's runs have ended, then is submitted. At most one waits: a due time that finds one already waiting is coalesced into it, recorded as **skipped** with the reason `coalesced`. The waiting one is recorded as **waiting** |
+| **Allow concurrent runs** | Is submitted at once, beside the active run, under the queue (8, 4 per connection, 60 s) and the limits (2 at once, 1 per connection) as any run. Two runs on the same connection therefore still run one after the other |
+
+**Catch-ups and overlap.** Catch-up runs are submitted **one at a time**: the
+next is submitted only when the schedule has no run queued or active, under
+every overlap policy. A normal due time that arrives while a catch-up is
+queued or active follows the overlap policy: skipped, waiting (and then
+submitted before the remaining catch-ups), or run beside it. When one check
+finds both missed times and an on-time due time, the on-time run is
+submitted first and the catch-ups follow it.
+
+The policies are part of what the consent covers (section 9.5.6): they are
+in the schedule's revision, and the consent dialog states them.
 
 #### 9.5.6 Consent
 
@@ -1229,8 +1273,11 @@ confirmed. The dialog shows:
 - the target: the job and version, or the chain with each step's job and
   version (as in section 9.3.4);
 - the rule's sentence, its zone and its next three times;
-- that it runs **only while Jykre Studio is open**, in this instance, and
-  that missed times are not run;
+- that it runs **only while Jykre Studio is open**, in this instance;
+- its **missed-time policy** (with N) and its **overlap policy**, in words:
+  whether a time missed while closed runs later, and whether a time can
+  run beside, or wait for, a run still going. They are stated the same way
+  for a **Production** connection, beside its risks;
 - each connection with its environment label (**Development**,
   **Staging**, **Production** or none) and its pinned context;
 - for each SQL step on a **Production** connection, its `guard::risk`
@@ -1247,7 +1294,7 @@ On confirmation the grant records (ADR-0041):
 
 - the target's **fingerprint**: the version's, or for a chain the plan's
   (the chain at its revision and every step's version fingerprint);
-- the schedule's revision (rule and zone);
+- the schedule's revision (rule, zone, and both policies with N);
 - each connection's **ID, profile revision and environment label**;
 - whether a production confirmation was part of it.
 
@@ -1270,7 +1317,7 @@ engine checks the grant eagerly when it learns new connection revisions
 (`Engine::set_connection_revisions`) and again before each admission, so a
 change between two times is never run.
 
-Editing the rule or the zone is a new consent. **Turning a schedule off**
+Editing the rule, the zone or a policy is a new consent. **Turning a schedule off**
 revokes its grant. Turning it on again asks again (Q-38). **Deleting** a
 schedule deletes its grant. A version a schedule names cannot be deleted:
 the refusal names the schedule, as for chains (section 9.3.1). Deleting its
@@ -1308,38 +1355,41 @@ A scheduled run never opens a dialog (section 7.1):
   it. A chain step past its wait fails the chain with `queue_timeout`, as
   in section 9.3.6.
 - History: `runs` and `chain_runs` record `origin = 'schedule'`, the
-  schedule's ID and the time it was due (ADR-0041). The step runs of a
-  scheduled chain carry the same origin. The **Runs** lists show
-  "Scheduled", the due time in the schedule's zone and the outcome. Nothing
-  else about values changes (section 6.4, CA-13).
-- Each schedule keeps its **last outcome** (started, skipped while still
-  running, missed, refused, suspended), with the time it was due and the
-  run it started. The Automation section shows the outcome with the next
-  run. Revoking or suspending a schedule whose run is queued removes that
-  run from the queue, as **Stop** does. A run already active is not stopped
-  by a revocation.
-- Rules the interface states where they apply (proposed additions to
-  section 8.1.1):
+  schedule's ID, the time it was due and, for a catch-up, the catch-up
+  marker (ADR-0041). The step runs of a scheduled chain carry the same
+  origin. The **Runs** lists show "Scheduled" (or "Scheduled, catch-up"),
+  the due time in the schedule's zone and the outcome. Nothing else about
+  values changes (section 6.4, CA-13).
+- Each schedule keeps its **last outcome** (started, caught up, waiting,
+  skipped while still running, missed, refused, suspended), with the time
+  it was due and the run it started. The Automation section shows the
+  outcome with the next run. Revoking or suspending a schedule whose run
+  is queued removes that run from the queue, as **Stop** does, and drops
+  its catch-ups and its waiting due time. A run already active is not
+  stopped by a revocation.
+- Rules the interface states where they apply (additions to section
+  8.1.1):
 
   | Rule | Where the user sees it |
   | --- | --- |
   | Schedules run only while the application is open, in the instance holding the lock (9.5.4) | The schedule editor, the consent dialog and the Automation section; a second instance says the schedule runs in the other one |
   | Next run in the schedule's zone (9.5.3) | Each schedule, with its offset and the local equivalent |
-  | Missed times are not run (9.5.5) | The consent dialog; each schedule's missed count and last missed time |
-  | Overlap is skipped (9.5.5) | The consent dialog; the last outcome **Skipped: still running** |
+  | Missed-time policy: ignore, run once, or queue up to N (9.5.5) | The schedule editor offers the three, with N from 2 to 24 and what each does; the consent dialog and the schedule's line state the one chosen, also for Production connections; each schedule's missed count and last missed time; catch-up runs say **Catch-up** in the Runs lists |
+  | Overlap policy: skip, queue one, or allow concurrent runs (9.5.5) | The schedule editor offers the three, with what each does; the consent dialog and the schedule's line state the one chosen; the last outcome **Skipped: still running** or **Waiting for the run to end** |
+  | Catch-ups go one at a time and a time due meanwhile follows the overlap policy (9.5.5) | The schedule editor, under both policies |
   | Consent is bound and suspends on change (9.5.6) | **Suspended** with the reason and **Confirm again** |
   | Only defaults are used (9.5.6) | The consent dialog lists them; a job with a required input without a default cannot be scheduled, and the form says why |
   | No password prompt (9.5.7) | The consent dialog warns when a connection does not remember its password; such runs end `Authentication` |
   | DST (9.5.2) | The form's sentence for a time in a gap or a fold on the next three dates; the interval form's note about absolute time |
 
-- **Notification beyond the history** (open decision of A13, Q-40):
+- **Notification beyond the history** (Q-40, decided (c) on 2026-11-08):
   - (a) The history only, plus an indicator. The Automation entry of the
     sidebar shows the count of scheduled runs that ended badly since the
     user last looked, and the status bar names the latest. No dependency.
   - (b) Option (a), plus an operating-system notification for every bad
     end.
-  - (c) Option (a), plus an operating-system notification **opt-in per
-    schedule**.
+  - **(c), chosen:** option (a), plus an operating-system notification
+    **opt-in per schedule**.
 
   The release plan assumed a notification needs a dependency of its own.
   It does not: GPUI, already our UI, has
@@ -1353,16 +1403,18 @@ A scheduled run never opens a dialog (section 7.1):
 
 #### 9.5.9 Decisions for the maintainer
 
-| ID | Question | Options | Recommendation |
-| --- | --- | --- | --- |
-| Q-33 | Grammar and time zones | (a) A structured rule from a form (9.5.2), evaluated with `jiff` ([proposal](schedule-time-zone-dependency.md)). (b) Cron strings through `croner` with its `jiff` feature. (c) `cron` or `jiff-cron`. (d) `rrule`. (e) `cronexpr` | **(a)**. `jiff` is already in `Cargo.lock`; the form shows every rule in words; no DST policy depends on a recently fixed cron crate |
-| Q-34 | Times missed while closed, asleep or without the lock | **(a) Never run; counted and shown.** (b) Run once at start or resume for the latest missed time, within a window. (c) Run every missed time | **(a)**. A run at an unexpected moment, perhaps on Production, is worse than a missed one, and (b) is a catch-up the user did not schedule |
-| Q-35 | Overlap | **(a) Skip and record.** (b) Queue one run for when the active one ends (coalescing). (c) Allow concurrent runs, limited anyway to 1 per connection | **(a)** |
-| Q-36 | Inputs of scheduled runs | **(a) The version's defaults only.** (b) Values stored with the schedule, as a chain step's constants are stored in its definition | **(a)**. Section 6.4 keeps input values out of `automation.db`, and a chain already offers constants when needed |
-| Q-37 | What "environment" in the consent binds | **(a) The connection's environment label** (Development, Staging, Production, none). (b) Also the external program's process environment. It changes between starts (`PATH`, variables), so it would suspend schedules at random | **(a)**. A program's environment stays as Q-27 decided |
-| Q-38 | Turning a schedule off and on | **(a) Off revokes; on asks again.** (b) The grant survives while off | **(a)**. Consent is given at the moment it is used |
-| Q-39 | Limits | Minimum interval **1 min**, maximum **24 h**; grace **60 s**; at most **24** times a day in a calendar rule; **one** schedule per job or chain | As listed. Revisit after measurement, as section 5.3 does |
-| Q-40 | Notification beyond the history (A13's open decision) | (a), (b) or (c) of section 9.5.8 | **(c)**, through GPUI's existing API, with no new dependency. Windows delivery is to be verified by the [checklist](releases/0.3.0-windows-checklist.md) |
+The maintainer decided every question on 2026-11-08.
+
+| ID | Question | Options | Recommendation | Decision (2026-11-08) |
+| --- | --- | --- | --- | --- |
+| Q-33 | Grammar and time zones | (a) A structured rule from a form (9.5.2), evaluated with `jiff` ([proposal](schedule-time-zone-dependency.md)). (b) Cron strings through `croner` with its `jiff` feature. (c) `cron` or `jiff-cron`. (d) `rrule`. (e) `cronexpr` | **(a)**. `jiff` is already in `Cargo.lock`; the form shows every rule in words; no DST policy depends on a recently fixed cron crate | **(a)**, as recommended; the `jiff` proposal is approved |
+| Q-34 | Times missed while closed, asleep or without the lock | (a) Never run; counted and shown. (b) Run once at start or resume for the latest missed time, within a window. (c) Run every missed time | (a). A run at an unexpected moment, perhaps on Production, is worse than a missed one, and (b) is a catch-up the user did not schedule | **Changed: a policy per schedule** (section 9.5.5): (1) **ignore**, the default, as (a); (2) **run once**, one catch-up for all of them when the scheduler starts or resumes; (3) **queue up to N** most recent, N from 2 to 24. A catch-up is a new run marked as such, never a replay; the policy is under consent |
+| Q-35 | Overlap | (a) Skip and record. (b) Queue one run for when the active one ends (coalescing). (c) Allow concurrent runs, limited anyway to 1 per connection | (a) | **Changed: a policy per schedule** (section 9.5.5): (a) **skip and record**, the default; (b) **queue one**, coalescing, at most one waiting; (c) **allow concurrent runs**, under the queue and connection limits. Catch-ups go one at a time; a due time meanwhile follows this policy |
+| Q-36 | Inputs of scheduled runs | **(a) The version's defaults only.** (b) Values stored with the schedule, as a chain step's constants are stored in its definition | **(a)**. Section 6.4 keeps input values out of `automation.db`, and a chain already offers constants when needed | **(a)**, as recommended |
+| Q-37 | What "environment" in the consent binds | **(a) The connection's environment label** (Development, Staging, Production, none). (b) Also the external program's process environment. It changes between starts (`PATH`, variables), so it would suspend schedules at random | **(a)**. A program's environment stays as Q-27 decided | **(a)**, as recommended |
+| Q-38 | Turning a schedule off and on | **(a) Off revokes; on asks again.** (b) The grant survives while off | **(a)**. Consent is given at the moment it is used | **(a)**, as recommended |
+| Q-39 | Limits | Minimum interval **1 min**, maximum **24 h**; grace **60 s**; at most **24** times a day in a calendar rule; **one** schedule per job or chain | As listed. Revisit after measurement, as section 5.3 does | **As listed**; Q-34's N is bounded by the same 24 |
+| Q-40 | Notification beyond the history (A13's open decision) | (a), (b) or (c) of section 9.5.8 | **(c)**, through GPUI's existing API, with no new dependency. Windows delivery is to be verified by the [checklist](releases/0.3.0-windows-checklist.md) | **(c)**, as recommended |
 
 #### 9.5.10 Tests and acceptance
 
@@ -1374,23 +1426,24 @@ use real zones from `jiff`'s database and synthetic SQLite files.
 | --- | --- |
 | Rules | Interval due times across a DST change stay N apart in UTC. Calendar times in `Europe/Berlin` and `America/New_York` across both DST changes. A time in the gap runs once, shifted by the gap. A time in the fold runs once, at the earlier instant. `Australia/Lord_Howe` (a 30-minute DST shift). `month_days` 31 in a 30-day month (no run) and `last`. `months`. The next three times. An unknown zone suspends |
 | Clock | A wall clock moved backwards repeats nothing. A jump forward past the grace counts as missed. A sleep longer than 30 s is noticed on waking |
-| Missed times | A closed period of three due times: none runs, the count is three, the next run is in the future. Taking the lock over from another instance |
-| Overlap | A due time while the previous run is active or queued is skipped and recorded. It never starts a second run |
+| Missed times | A closed period of three due times, under each policy. **Ignore:** none runs, the count is three, the next run is in the future. **Run once:** exactly one catch-up run, due at the latest missed time, marked catch-up, origin `schedule`. **Queue up to N:** with N = 2, two catch-ups for the two most recent times, oldest first, the second submitted only after the first ended, the oldest only counted. Taking the lock over from another instance applies the policy. Catch-ups not yet submitted are dropped by turning off, a suspension and quitting. A run left `Interrupted` is never run again, under every policy |
+| Overlap | Under each policy, a due time while the previous run is active or queued. **Skip:** skipped and recorded; no second run. **Queue one:** waits and is submitted when the run ends; a second due time meanwhile is coalesced (skipped, `coalesced`), so at most one waits. **Concurrent:** a second run is submitted at once and still meets the queue and the per-connection limit. A due time while a catch-up is active follows the overlap policy; catch-ups never overlap one another |
 | Queue and limits | A scheduled run behind a manual one at limit 1 waits. A full queue records **refused** without a run row. A chain step past 60 s fails the chain with `queue_timeout` |
-| Consent | Each binding suspends: connection revision, environment label, chain revision, program hash, deleted connection. **Confirm again** restores it. A manual confirmation creates no grant. Turning off revokes. A revoked or suspended schedule's queued run leaves the queue |
+| Consent | Each binding suspends: connection revision, environment label, chain revision, program hash, deleted connection. **Confirm again** restores it. A manual confirmation creates no grant. Turning off revokes. Changing a policy or N raises the revision and asks again. A revoked or suspended schedule's queued run leaves the queue |
 | No dialogs | A connection without a remembered password: `Failed`/`Authentication`, effect known, nothing sent. A chain fails before its first step. A default that fails its kind: `Input` |
 | Instances | A second instance on the same folder runs no schedule. Quitting stops the scheduler before the runs |
-| History | `origin = 'schedule'`, the schedule's ID and the due time on runs, chain runs and their steps. No value in `automation.db`, logs or telemetry (CA-13) |
-| Storage | Migration 5 on an empty file and on a version-4 fixture with runs and chain runs keeps every row and passes `foreign_key_check` (ADR-0041) |
+| History | `origin = 'schedule'`, the schedule's ID, the due time and the catch-up marker on runs, chain runs and their steps. No value in `automation.db`, logs or telemetry (CA-13) |
+| Storage | Migration 5 on an empty file and on a version-4 fixture with runs and chain runs keeps every row and passes `foreign_key_check` (ADR-0041). The policies' and the catch-up marker's `CHECK`s |
 
-Proposed acceptance criterion, replacing CA-10's "non-normative until
-phase 7 is specified":
+Acceptance criterion, replacing CA-10's "non-normative until phase 7 is
+specified" (approved 2026-11-08):
 
 **CA-10 (phase 7, schedules).** A schedule runs a published version or a
 chain, by an interval or a calendar rule in its time zone, only while the
 application is open and in the instance holding the lock. It never opens a
-dialog, never replays a run and never runs a missed time. Overlap is
-skipped. Any change to what its consent binds suspends it until confirmed
+dialog and never replays a run. Missed times and overlap follow the
+policies the user chose and consented to; a catch-up is a new run, marked
+as one. Any change to what its consent binds suspends it until confirmed
 again. Its runs share the queue, limits and history of manual runs, with
 the origin `schedule`. The flow is checked in the application.
 
@@ -1418,7 +1471,7 @@ alternative transports and execution while the application is closed.
 | CA-09 | 5 | A SQL output feeds a later SQL step and an external program; exactly the confirmed plan runs; cancellation and failure cascade and leave later steps not run; a global limit of 1 still progresses; the queue's limits and 60 s wait hold. |
 | CA-06 | 6 | `ask` enters `WaitingInput` and its timeout applies the job's policy. |
 | CA-08 | 6 | Artifacts are copied through verified handles, within quotas, and survive a crash between copy and index. |
-| CA-10 | 7 | Non-normative until phase 7 is specified (Appendix A). |
+| CA-10 | 7 | Schedules (section 9.5.10, approved 2026-11-08): a published version or a chain runs by its rule and zone only while the application is open, in the lock holder, without dialogs or replays; missed times and overlap follow the consented policies; any change to the consent's bindings suspends it; scheduled runs share the queue, limits and history. The rest of phase 7 stays non-normative (Appendix A). |
 | CA-12 | All | Each phase is validated on Windows, Linux and macOS separately. For 0.3.0, Windows and Linux only (maintainer, 2026-11-08). |
 
 ## 11. Test matrix

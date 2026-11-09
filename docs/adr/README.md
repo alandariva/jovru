@@ -63,4 +63,4 @@ something is the way it is, and so a decision is not undone by accident.
 | [0038](0038-external-program-runs.md) | External program runs in `automation.db` | Accepted (implemented) |
 | [0039](0039-editing-result-data-through-the-driver.md) | Editing result data through the driver, which reports each column's source and the row key (amends the `Session` contract) | Proposed |
 | [0040](0040-importing-files-into-a-table.md) | Importing CSV and XLSX files into a table, streamed through the driver's write path (amends the `Session` contract and the stack) | Accepted |
-| [0041](0041-schedules-and-grants.md) | Schedules and their grants in `automation.db`, with runs that record the schedule that started them | Proposed |
+| [0041](0041-schedules-and-grants.md) | Schedules and their grants in `automation.db`, with runs that record the schedule that started them; missed times and overlap as policies chosen per schedule | Accepted |

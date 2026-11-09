@@ -1,8 +1,8 @@
 # Proposal: `jiff` for schedules' time zones, with a structured rule instead of a cron grammar
 
 **Date:** November 8, 2026
-**Approval:** Proposed. It awaits the maintainer's decision (Q-33 of the
-[specification's scheduling revision](automation-engine-specification.md#959-decisions-for-the-maintainer)),
+**Approval:** Approved by the maintainer on 2026-11-08 (Q-33, option (a), of
+the [specification's scheduling revision](automation-engine-specification.md#959-decisions-for-the-maintainer)),
 together with [ADR-0041](../adr/0041-schedules-and-grants.md).
 **Implementation:** Not started.
 **For:** [0.3.0](releases/0.3.0.md), milestone A13 (schedules while the
