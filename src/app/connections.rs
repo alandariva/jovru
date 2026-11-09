@@ -738,7 +738,6 @@ impl AppView {
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
-                this.connections_loading = false;
                 let (
                     connections,
                     font_size,
@@ -811,6 +810,11 @@ impl AppView {
                         problems.push(tr!("Could not load the saved connections: {0}", error))
                     }
                 }
+                // Loaded only once all of them are in: automation gets the
+                // whole list once, never a partial one that would suspend
+                // the schedules of the connections not inserted yet.
+                this.connections_loading = false;
+                this.sync_automation(cx);
                 // The saved queries' local data, which the tabs' files are
                 // found in. The demo keeps none.
                 if !super::demo::enabled()

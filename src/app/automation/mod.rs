@@ -390,7 +390,14 @@ impl AppView {
             .map(|profile| (profile.id, profile.revision))
             .collect();
         if let Some(engine) = &self.automation.engine {
-            engine.set_connections(self.schedule_connections());
+            // Until the saved connections are read, the engine has none to
+            // check grants against, rather than an empty list that would
+            // suspend every schedule as if its connections were deleted.
+            if let Some(connections) =
+                known_connections(self.connections_loading, || self.schedule_connections())
+            {
+                engine.set_connections(connections);
+            }
             // Every profile's revision, those that cannot run now included.
             engine.set_connection_revisions(revisions.clone());
         }
@@ -1359,4 +1366,40 @@ pub(super) fn source_of(sources: &[ReportSource], id: ConnectionId) -> Option<&R
     sources
         .iter()
         .find(|source| source.connection.id == Some(id))
+}
+
+/// The connections to hand the scheduler: none while the saved ones are
+/// still being read (the scheduler then waits), else the list as it is,
+/// empty included, so a profile that was deleted still suspends its
+/// schedules.
+fn known_connections<T>(loading: bool, list: impl FnOnce() -> Vec<T>) -> Option<Vec<T>> {
+    (!loading).then(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::known_connections;
+
+    #[test]
+    fn the_scheduler_gets_no_connections_while_they_load() {
+        crate::app::source_text();
+        assert_eq!(known_connections(true, || vec![1, 2]), None);
+        let mut asked = false;
+        assert_eq!(
+            known_connections::<i32>(true, || {
+                asked = true;
+                Vec::new()
+            }),
+            None
+        );
+        assert!(!asked, "the list is not built while connections load");
+    }
+
+    #[test]
+    fn once_loaded_the_list_is_handed_whole_even_when_empty() {
+        crate::app::source_text();
+        assert_eq!(known_connections(false, || vec![1, 2]), Some(vec![1, 2]));
+        // Every profile deleted: an empty list, so their schedules suspend.
+        assert_eq!(known_connections::<i32>(false, Vec::new), Some(Vec::new()));
+    }
 }
