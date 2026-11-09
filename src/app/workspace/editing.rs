@@ -107,6 +107,7 @@ impl Workspace {
         }
         // The session still keeps the rest of the result open for paging.
         if tab.more_rows() && !tab.rest_closed() {
+            let one = tab.rows_read() == 1;
             let rows = cell_format::count(tab.rows_read());
             let workspace = cx.entity().downgrade();
             let cancelled = workspace.clone();
@@ -115,10 +116,17 @@ impl Workspace {
                 let cancelled = cancelled.clone();
                 alert
                     .title(tr!("Edit the rows read so far?"))
-                    .description(tr!(
-                        "Editing reads the table's key from the database in this tab's session, which closes the rest of this result: only the {0} rows read so far can be edited. Run the query again to read the others.",
-                        rows
-                    ))
+                    .description(if one {
+                        tr!(
+                            "Editing reads the table's key from the database in this tab's session, which closes the rest of this result: only the 1 row read so far can be edited. Run the query again to read the others."
+                        )
+                        .to_owned()
+                    } else {
+                        tr!(
+                            "Editing reads the table's key from the database in this tab's session, which closes the rest of this result: only the {0} rows read so far can be edited. Run the query again to read the others.",
+                            rows
+                        )
+                    })
                     .confirm()
                     .ok_text(tr!("Edit"))
                     .cancel_text(tr!("Cancel"))
@@ -383,11 +391,15 @@ impl Workspace {
             let workspace = workspace.clone();
             let request = request.clone();
             alert
-                .title(tr!(
-                    "Write {0} changes to {1}?",
-                    cell_format::count(preview.changes),
-                    preview.table
-                ))
+                .title(if preview.changes == 1 {
+                    tr!("Write 1 change to {0}?", preview.table)
+                } else {
+                    tr!(
+                        "Write {0} changes to {1}?",
+                        cell_format::count(preview.changes),
+                        preview.table
+                    )
+                })
                 .description(write_preview(&preview))
                 .confirm()
                 .ok_text(if preview.production {
@@ -433,21 +445,29 @@ impl Workspace {
             .map(|driver| driver.relation_name(&request.target.table))
             .unwrap_or_default();
         let changes = request.changes.len();
-        let label = tr!(
-            "Write to {0}: {1} changes",
-            table,
-            cell_format::count(changes)
-        );
+        let label = if changes == 1 {
+            tr!("Write to {0}: 1 change", table)
+        } else {
+            tr!(
+                "Write to {0}: {1} changes",
+                table,
+                cell_format::count(changes)
+            )
+        };
         self.edit_job = Some(EditJob::Writing);
         self.cancellation = CancellationToken::new();
         let cancel = self.cancellation.clone();
         self.notice = Some(Feedback::new(
             Tone::Info,
-            tr!(
-                "Writing {0} changes to {1}…",
-                cell_format::count(changes),
-                table
-            ),
+            if changes == 1 {
+                tr!("Writing 1 change to {0}…", table)
+            } else {
+                tr!(
+                    "Writing {0} changes to {1}…",
+                    cell_format::count(changes),
+                    table
+                )
+            },
         ));
         self.start_clock(cx);
         let started = Instant::now();
@@ -484,18 +504,25 @@ impl Workspace {
                         this.ran(&label, LogOutcome::Affected(rows), elapsed, false, cx);
                         this.notice = Some(Feedback::new(
                             Tone::Success,
-                            if committed {
-                                tr!(
+                            match (committed, rows == 1) {
+                                (true, true) => tr!(
+                                    "Wrote 1 row to {0}. The grid shows what was written; ↻ reads the row back as the database stored it.",
+                                    table
+                                ),
+                                (true, false) => tr!(
                                     "Wrote {0} rows to {1}. The grid shows what was written; ↻ reads the rows back as the database stored them.",
                                     cell_format::count(rows as usize),
                                     table
-                                )
-                            } else {
-                                tr!(
+                                ),
+                                (false, true) => tr!(
+                                    "Wrote 1 row to {0} in the open transaction. It is not committed: commit or roll back in the toolbar.",
+                                    table
+                                ),
+                                (false, false) => tr!(
                                     "Wrote {0} rows to {1} in the open transaction. They are not committed: commit or roll back in the toolbar.",
                                     cell_format::count(rows as usize),
                                     table
-                                )
+                                ),
                             },
                         ));
                     }
@@ -586,11 +613,18 @@ impl Workspace {
             .collect::<Vec<_>>()
             .join(", ");
         let header = [
-            tr!(
-                "{0}: {1} changes generated from a result, to review and run.",
-                table,
-                cell_format::count(script.statements.len())
-            ),
+            if script.statements.len() == 1 {
+                tr!(
+                    "{0}: 1 change generated from a result, to review and run.",
+                    table
+                )
+            } else {
+                tr!(
+                    "{0}: {1} changes generated from a result, to review and run.",
+                    table,
+                    cell_format::count(script.statements.len())
+                )
+            },
             tr!(
                 "Each statement is its own commit: there is no transaction around them, so if one fails the statements before it stay written."
             )
@@ -670,10 +704,11 @@ impl Workspace {
         window.open_alert_dialog(cx, move |alert, _, _| {
             let workspace = workspace.clone();
             alert
-                .title(tr!(
-                    "Discard {0} pending changes?",
-                    cell_format::count(pending)
-                ))
+                .title(if pending == 1 {
+                    tr!("Discard 1 pending change?").to_owned()
+                } else {
+                    tr!("Discard {0} pending changes?", cell_format::count(pending))
+                })
                 .description(tr!("Nothing was written; the edits are lost."))
                 .confirm()
                 .ok_text(tr!("Discard"))
@@ -773,6 +808,8 @@ impl Workspace {
                     )
                 } else if pending == 0 {
                     tr!("Editing {0}. No pending changes.", table)
+                } else if pending == 1 {
+                    tr!("Editing {0}. 1 pending change, not written.", table)
                 } else {
                     tr!(
                         "Editing {0}. {1} pending changes, not written.",
@@ -929,10 +966,11 @@ fn write_preview(preview: &WritePreview) -> Stateful<Div> {
     }
     let more = preview.changes.saturating_sub(preview.lines.len());
     if more > 0 {
-        body = body.child(label(tr!(
-            "And {0} more changes.",
-            cell_format::count(more)
-        )));
+        body = body.child(label(if more == 1 {
+            tr!("And 1 more change.").to_owned()
+        } else {
+            tr!("And {0} more changes.", cell_format::count(more))
+        }));
     }
     body = body.child(heading(
         tr!("Statements, with the values above bound apart from the SQL").to_owned(),
@@ -941,10 +979,15 @@ fn write_preview(preview: &WritePreview) -> Stateful<Div> {
         body = body.child(mono(statement.clone()));
     }
     if preview.changes > preview.statements.len() {
-        body = body.child(label(tr!(
-            "And {0} more statements of the same shapes.",
-            cell_format::count(preview.changes - preview.statements.len())
-        )));
+        let more = preview.changes - preview.statements.len();
+        body = body.child(label(if more == 1 {
+            tr!("And 1 more statement of the same shapes.").to_owned()
+        } else {
+            tr!(
+                "And {0} more statements of the same shapes.",
+                cell_format::count(more)
+            )
+        }));
     }
     if !preview.side_effects.is_empty() {
         body = body.child(heading(tr!("What else the write can change").to_owned()));

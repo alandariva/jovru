@@ -1712,6 +1712,49 @@ async fn programs_remember_their_versions_and_logs_are_forgotten() {
 }
 
 #[tokio::test]
+async fn a_program_that_ran_is_known_to_the_next_instance() {
+    // The trusted-code warning shows on the first run of a revision or a
+    // version (Q-10): that is read from the history in automation.db, so a
+    // second instance, or the next start, does not warn again.
+    let dir = dir();
+    let repo = ready(&dir).await;
+    let job = JobId::new();
+    repo.insert_job(job, JobKind::Process, r#"{"kind":"process"}"#, T0)
+        .await
+        .unwrap();
+    let finished_run = process_run(Some(job), T0);
+    repo.admit_run(&finished_run).await.unwrap();
+    repo.finish_run(finished_run.id, &finished(RunState::Succeeded, T0))
+        .await
+        .unwrap();
+    // A chain step at version 2, left running when the instance ended.
+    let chain = chain_run(None, T0);
+    repo.admit_chain_run(&chain).await.unwrap();
+    repo.admit_run(&step_of(process_run(Some(job), T0), chain.id, 0, 2))
+        .await
+        .unwrap();
+    repo.pool.close().await;
+
+    // A second instance while the lock is held reads the file as it is.
+    let Some(Opened::Ready(reader)) = AutomationRepository::open_read_only(&dir).await.unwrap()
+    else {
+        unreachable!("expected a readable repository");
+    };
+    assert!(reader.program_has_run(job, Some(1), None).await.unwrap());
+    assert!(reader.program_has_run(job, None, Some(2)).await.unwrap());
+    assert!(!reader.program_has_run(job, Some(2), None).await.unwrap());
+    reader.pool.close().await;
+
+    // The next instance that takes the lock recovers the running step,
+    // which still counts as run.
+    let next = ready(&dir).await;
+    next.recover(T0).await.unwrap();
+    assert!(next.program_has_run(job, Some(1), None).await.unwrap());
+    assert!(next.program_has_run(job, None, Some(2)).await.unwrap());
+    assert!(!next.program_has_run(job, None, Some(3)).await.unwrap());
+    next.pool.close().await;
+}
+#[tokio::test]
 async fn deleted_values_are_overwritten_in_the_file() {
     // ADR-0035: an expired value must not linger in free pages.
     let dir = dir();

@@ -567,6 +567,23 @@ pub fn environment_name(environment: jykre::connection_appearance::Environment) 
     }
 }
 
+/// The backdrop of a modal dialog: it covers and dims the window and takes
+/// every pointer event (`occlude`), so a click, a hover or a wheel over it
+/// never reaches what lies behind the dialog (the explorer, the tabs). A
+/// GPUI element without it only paints over them: their own listeners still
+/// see the pointer. The dialog itself is its child, drawn above it.
+pub fn modal_backdrop(id: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .absolute()
+        .inset_0()
+        .flex()
+        .justify_center()
+        .items_start()
+        .bg(rgba(colors().scrim))
+        .occlude()
+}
+
 #[cfg(test)]
 mod tests {
     // Not `super::*`: GPUI's `test` attribute would replace the standard one.

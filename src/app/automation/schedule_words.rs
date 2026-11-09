@@ -8,7 +8,7 @@ use jykre::automation::schedule::rule::{
     Days, Local, MonthDay, Occurrence, Rule, RuleProblem, Shift, local,
 };
 use jykre::automation::schedule::{BadEnd, Consent, ScheduleError};
-use jykre::automation::{Cause, JobKind, MissedPolicy, OverlapPolicy, ScheduleOutcome, UtcMillis};
+use jykre::automation::{JobKind, MissedPolicy, OverlapPolicy, ScheduleOutcome, UtcMillis};
 use jykre::tr;
 use jykre_storage::StoredSchedule;
 
@@ -216,6 +216,10 @@ pub fn missed_policy(policy: MissedPolicy, limit: Option<i64>) -> String {
             "Times missed while Jykre Studio was closed, the computer slept or another window held automation run once, as one catch-up run, when it can run again."
         )
         .to_owned(),
+        MissedPolicy::Queue if limit == Some(1) => tr!(
+            "The most recent time missed while Jykre Studio was closed, the computer slept or another window held automation runs as a catch-up run; older ones are only counted."
+        )
+        .to_owned(),
         MissedPolicy::Queue => tr!(
             "The {0} most recent times missed while Jykre Studio was closed, the computer slept or another window held automation run as catch-up runs, one after another; older ones are only counted.",
             limit.unwrap_or(0)
@@ -302,13 +306,19 @@ pub fn status_lines(schedule: &StoredSchedule, zone: Option<&TimeZone>) -> Vec<S
         });
     }
     if schedule.missed_count > 0 {
-        lines.push(tr!(
-            "Missed {0} times while Jykre Studio was closed, asleep or without automation (last: {1}).",
-            schedule.missed_count,
-            schedule
-                .missed_last_at
-                .map_or_else(String::new, when_due)
-        ));
+        let last = schedule.missed_last_at.map_or_else(String::new, when_due);
+        lines.push(if schedule.missed_count == 1 {
+            tr!(
+                "Missed once while Jykre Studio was closed, asleep or without automation ({0}).",
+                last
+            )
+        } else {
+            tr!(
+                "Missed {0} times while Jykre Studio was closed, asleep or without automation (last: {1}).",
+                schedule.missed_count,
+                last
+            )
+        });
     }
     lines
 }
@@ -474,23 +484,47 @@ pub fn consent(consent: &Consent, here: &TimeZone, risks: &[(String, String)]) -
 /// A scheduled run that ended badly, for the notification and the status
 /// bar: the schedule's name, the outcome and the cause, never a value or a
 /// server message (Q-40).
-pub fn bad_end(end: &BadEnd) -> (String, String) {
+/// Said once the user consented: the schedule is on.
+pub fn scheduled() -> &'static str {
+    tr!("Scheduled. It runs only while Jykre Studio is open.")
+}
+
+/// Said once the user turned the schedule off.
+pub fn turned_off() -> &'static str {
+    tr!("Turned off: its consent was revoked. Turning it on asks again.")
+}
+
+/// Whether the Schedule tab's last notice still holds for the stored
+/// schedule's state (`on`, `suspended`), read again after the engine
+/// changed it: **Scheduled** only while it is on and not suspended,
+/// **Turned off** only while it is off. Any other notice (saved, deleted,
+/// an error) stays until the next action.
+pub fn notice_holds(notice: &str, on: bool, suspended: bool) -> bool {
+    if notice == scheduled() {
+        on && !suspended
+    } else if notice == turned_off() {
+        !on
+    } else {
+        true
+    }
+}
+
+/// `kind` is the scheduled job's, when the list of jobs knows it.
+pub fn bad_end(end: &BadEnd, kind: Option<JobKind>) -> (String, String) {
     let title = tr!("Scheduled run of {0}", end.name);
     let body = match (end.refused, end.cause) {
         (Some(reason), _) => tr!("Did not run: {0}.", refused_reason(reason)),
-        (None, Some(cause)) => tr!("Failed: {0}.", cause_word(cause)),
+        // The cause's sentence, which names no value (Q-40).
+        (None, Some(cause)) => tr!("Failed: {0}", super::words::cause_sentence(cause, kind)),
         (None, None) => tr!("Ended badly.").to_owned(),
     };
     (title, body)
 }
 
-fn cause_word(cause: Cause) -> String {
-    super::words::state_label(jykre::automation::RunState::Failed, Some(cause), None)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jykre::automation::Cause;
     use jykre::automation::schedule::rule::{LocalTime, time_zone};
 
     fn at(text: &str) -> UtcMillis {
@@ -562,6 +596,10 @@ mod tests {
             .contains("runs once")
         );
         assert!(missed_policy(MissedPolicy::Queue, Some(3)).contains("The 3 most recent"));
+        assert!(
+            missed_policy(MissedPolicy::Queue, Some(1))
+                .starts_with("The most recent time missed while")
+        );
         assert!(missed_policy(MissedPolicy::Ignore, None).contains("are not run"));
         assert!(overlap_policy(OverlapPolicy::Concurrent).contains("1 per connection"));
         assert_eq!(
@@ -569,5 +607,69 @@ mod tests {
             "its connection was edited since you consented"
         );
         assert_eq!(suspended_reason("later"), "something it depends on changed");
+    }
+
+    #[test]
+    fn a_state_notice_holds_only_while_the_state_does() {
+        crate::app::source_text();
+        // Scheduled: on and not suspended.
+        assert!(notice_holds(scheduled(), true, false));
+        assert!(!notice_holds(scheduled(), true, true));
+        assert!(!notice_holds(scheduled(), false, false));
+        // Turned off: while off.
+        assert!(notice_holds(turned_off(), false, false));
+        assert!(!notice_holds(turned_off(), true, false));
+        // Other notices stay.
+        assert!(notice_holds("Saved.", true, true));
+        assert!(notice_holds("The schedule was deleted.", false, false));
+    }
+
+    #[test]
+    fn a_bad_end_names_its_cause_never_failed_twice() {
+        crate::app::source_text();
+        let mut end = BadEnd {
+            schedule: jykre::automation::ScheduleId::new(),
+            job: jykre::automation::JobId::new(),
+            name: "SchedJob".into(),
+            due_at: at("2026-11-09T08:00:00Z"),
+            cause: Some(Cause::Database),
+            refused: None,
+            notify: true,
+        };
+        let (title, body) = bad_end(&end, Some(JobKind::Sql));
+        assert_eq!(title, "Scheduled run of SchedJob");
+        assert_eq!(body, "Failed: The database reported an error.");
+        end.cause = Some(Cause::Timeout);
+        assert_eq!(
+            bad_end(&end, Some(JobKind::Sql)).1,
+            "Failed: It reached its timeout and was stopped."
+        );
+        end.cause = Some(Cause::Protocol);
+        let program = bad_end(&end, Some(JobKind::Process)).1;
+        assert!(program.contains("jjp/1"), "{program}");
+        assert!(!program.contains("driver"), "{program}");
+        end.cause = Some(Cause::Exit);
+        assert_eq!(
+            bad_end(&end, None).1,
+            "Failed: The program exited with a nonzero code or a signal."
+        );
+        // Every cause reads as a sentence of its own.
+        for cause in [
+            Cause::Validation,
+            Cause::Connection,
+            Cause::Authentication,
+            Cause::PermissionDenied,
+            Cause::NotFound,
+            Cause::Internal,
+            Cause::Program,
+            Cause::Output,
+            Cause::Input,
+            Cause::QueueFull,
+        ] {
+            end.cause = Some(cause);
+            let body = bad_end(&end, Some(JobKind::Process)).1;
+            assert_ne!(body, "Failed: Failed.", "{cause:?}");
+            assert!(body.len() > "Failed: ".len() + 8, "{body}");
+        }
     }
 }

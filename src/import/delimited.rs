@@ -420,7 +420,7 @@ pub(super) fn read_from(
         };
         if record.len() != expected {
             return Err(DriverError::validation(tr!(
-                "Line {0} has {1} fields, but the file has {2} columns. Check the delimiter, or fix that line.",
+                "Line {0} has a different number of fields ({1}) than the file has columns ({2}). Check the delimiter, or fix that line.",
                 line,
                 record.len(),
                 expected
@@ -450,7 +450,7 @@ pub(super) fn read_from(
             && index > 0
         {
             return Err(DriverError::validation(tr!(
-                "The file has {0} rows, so row {1} cannot be its header.",
+                "The file ends at row {0}, so row {1} cannot be its header.",
                 index,
                 header
             )));

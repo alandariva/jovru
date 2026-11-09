@@ -342,12 +342,19 @@ panels, jobs and the assistant's results stay read-only.
   `config.db`, logs or telemetry, and they go with the result tab.
 - **Values.** `F2` (or the pencil) opens a field over the focused cell with
   its value; `Enter` or leaving the field keeps what was typed as pending,
-  `Esc` drops it. **Set to NULL** (`Ctrl Shift N`) sets the selected cells
+  `Esc` drops it. The field keeps the keys it lets through: `Enter` there
+  never opens the side panel, and an arrow at the end of the text never
+  moves the selection; **Write…** keeps what was typed first. The side
+  panel shows a cell's pending (or written) value, as the cell does. **Set to NULL** (`Ctrl Shift N`) sets the selected cells
   to NULL; typing `NULL` gives the four-letter text and clearing a cell the
   empty text. A binary column takes `0x` followed by hexadecimal digits.
   A value equal to the one read is no change. Computed, generated and
   identity-always columns, and a column whose cells arrived both as bytes and
   as text, cannot be edited and say so.
+- **Where.** Only a query tab's result can be edited. The grid of a report
+  panel or of a job's result shows the menu's editing items disabled, under
+  a line that says so; a query tab's result known to be read-only shows its
+  reason there the same way.
 - **Rows.** **Insert a row** (`Alt Insert`) adds a row whose columns take the
   table's default until given a value. `Delete` marks the selected rows for
   deletion, which drops their pending values, or takes the mark away; an
@@ -557,7 +564,11 @@ through the driver's write path ([Drivers](drivers.md#importing-rows)).
 - **The preview** shows the first 50 rows as they would be bound, for the
   mapped columns, NULL in its own style. **New table from this file…** opens
   a `CREATE TABLE` drafted from the header (every column the dialect's text
-  type, names quoted by the driver) in a new query tab, not run.
+  type, names quoted by the driver) in a new query tab, not run. The table
+  is named after the file, followed by `_2`, `_3`… when a relation the
+  metadata cache knows in that namespace has the name (ignoring case); the
+  draft's comment then says which name was taken. The cache may be behind
+  the database, so the draft stays the user's to check and edit.
 - **Writing.** The import opens a session of its own in the table's
   context, never a tab's, reads the table from the driver (which decides
   what is required and generated) and writes every row in **one

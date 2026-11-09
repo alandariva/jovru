@@ -1512,13 +1512,7 @@ impl JobView {
     ) -> Div {
         let (index, position) = at;
         let current = step.source(&spec.name).map(logic::SourceKind::of);
-        let shown = choices
-            .iter()
-            .find(|choice| choice.source == current)
-            .map_or_else(
-                || tr!("Its default, or NULL").to_owned(),
-                |choice| choice.label.clone(),
-            );
+        let shown = logic::shown_source(current.as_ref(), choices);
         let view = cx.entity().downgrade();
         let choices = choices.to_vec();
         let name = spec.name.clone();

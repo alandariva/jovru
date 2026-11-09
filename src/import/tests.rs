@@ -188,7 +188,9 @@ fn rows_know_their_line_past_blank_lines_and_either_line_ending() {
     let path = folder.file("late.csv", b"a,b\r\n1,2\r\n\r\n3\r\n");
     let error = events(&path, &csv(CsvOptions::default())).unwrap_err();
     assert!(
-        error.message.contains("Line 4 has 1 fields"),
+        error
+            .message
+            .contains("Line 4 has a different number of fields (1)"),
         "{}",
         error.message
     );
@@ -201,7 +203,9 @@ fn a_ragged_row_is_refused_at_its_line() {
     let error = events(&path, &csv(CsvOptions::default())).unwrap_err();
     assert_eq!(error.code, ErrorCode::Validation);
     assert!(
-        error.message.contains("Line 3 has 1 fields"),
+        error
+            .message
+            .contains("Line 3 has a different number of fields (1)"),
         "{}",
         error.message
     );
@@ -1008,7 +1012,7 @@ fn a_draft_table_quotes_by_the_driver_and_types_every_column_as_text() {
     let columns: Vec<String> = ["id", "", "Name", "name", "say \"hi\""]
         .map(String::from)
         .into();
-    let sql = draft::create_table(&PostgresDriver, &path, "orders 2024", &columns);
+    let sql = draft::create_table(&PostgresDriver, &path, "orders 2024", &columns, None);
     assert!(sql.starts_with("-- "));
     assert!(
         sql.ends_with(concat!(
@@ -1023,14 +1027,57 @@ fn a_draft_table_quotes_by_the_driver_and_types_every_column_as_text() {
         "{sql}"
     );
     let mysql = ObjectPath::default().child(ObjectKind::Database, "shop");
-    let sql = draft::create_table(&MySqlDriver, &mysql, "t`x", &["a".into()]);
+    let sql = draft::create_table(&MySqlDriver, &mysql, "t`x", &["a".into()], None);
     assert!(
         sql.contains("CREATE TABLE `shop`.`t``x` (\n    `a` TEXT\n);"),
         "{sql}"
     );
-    assert_eq!(draft::table_name("  "), "imported");
-    assert_eq!(draft::table_name("orders"), "orders");
+    assert_eq!(draft::table_name("  ", &[]), "imported");
+    assert_eq!(draft::table_name("orders", &[]), "orders");
     assert_eq!(draft::text_type(MySqlDriver.descriptor().dialect), "TEXT");
+}
+
+#[test]
+fn a_draft_table_never_takes_the_name_of_a_known_table() {
+    // `people` and `People_2` are known (case is ignored), `people_3` is free.
+    let taken = ["People", "people_2", "orders"];
+    assert_eq!(draft::table_name("people", &taken), "people_3");
+    assert_eq!(draft::table_name(" people ", &taken), "people_3");
+    assert_eq!(draft::table_name("customers", &taken), "customers");
+    assert_eq!(draft::table_name("", &["imported"]), "imported_2");
+    // The draft says which name was taken, and stays a draft to edit.
+    let path = ObjectPath::default().child(ObjectKind::Schema, "main");
+    let sql = draft::create_table(
+        &PostgresDriver,
+        &path,
+        "people_3",
+        &["id".into()],
+        Some("people"),
+    );
+    let comments: Vec<&str> = sql.lines().filter(|line| line.starts_with("-- ")).collect();
+    assert_eq!(comments.len(), 2, "{sql}");
+    assert_eq!(
+        comments[1],
+        "-- A table named people already exists here, so this draft names the new one people_3."
+    );
+    assert!(
+        sql.contains("CREATE TABLE \"main\".\"people_3\" (\n    \"id\" TEXT\n);"),
+        "{sql}"
+    );
+    // A line break in a name never ends the comment early.
+    let sql = draft::create_table(&PostgresDriver, &path, "a_2", &["id".into()], Some("a\nb"));
+    assert!(
+        sql.lines()
+            .nth(1)
+            .is_some_and(|line| line.starts_with("-- ")),
+        "{sql}"
+    );
+    assert!(
+        sql.lines()
+            .nth(2)
+            .is_some_and(|line| line.starts_with("CREATE")),
+        "{sql}"
+    );
 }
 
 #[test]
@@ -1185,6 +1232,10 @@ async fn an_import_commits_once_every_row_is_written() {
     assert_eq!(
         outcome.message("sales.t"),
         "Imported 2005 rows into sales.t."
+    );
+    assert_eq!(
+        Outcome::Imported { rows: 1 }.message("sales.t"),
+        "Imported 1 row into sales.t."
     );
     let calls = writer.calls.lock().unwrap().clone();
     assert_eq!(calls, ["begin", "write", "write", "write", "commit"]);

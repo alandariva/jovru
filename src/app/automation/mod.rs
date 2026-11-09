@@ -204,6 +204,7 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let ready = state == Availability::Ready;
+        self.automation.notice = logic::notice_after(self.automation.notice.take(), &state, false);
         self.automation.availability = Some(state.clone());
         if ready || state == Availability::ReadOnly {
             self.reload_jobs(cx);
@@ -237,10 +238,7 @@ impl AppView {
             );
         }
         if recovery.interrupted > 0 {
-            parts.push(tr!(
-                "{0} runs were active when Jykre Studio last closed; they are marked interrupted and were not run again.",
-                recovery.interrupted
-            ));
+            parts.push(words::interrupted_runs(recovery.interrupted));
         }
         if !parts.is_empty() {
             let tone = if recovery.recreated {
@@ -457,7 +455,7 @@ impl AppView {
     fn schedule_news(&mut self, news: ScheduleNews, cx: &mut Context<Self>) {
         let new = news.bad_ends > self.automation.news.bad_ends;
         if new && let Some(end) = news.latest.as_ref().filter(|end| end.notify) {
-            let (title, body) = schedule_words::bad_end(end);
+            let (title, body) = schedule_words::bad_end(end, self.job_kind(end.job));
             cx.show_system_notification(SystemNotification {
                 tag: format!("jykre-schedule-{}", end.schedule).into(),
                 title: title.into(),
@@ -467,6 +465,15 @@ impl AppView {
         }
         self.automation.news = news;
         cx.notify();
+    }
+
+    /// The kind of stored job `job`, when the list holds it.
+    fn job_kind(&self, job: JobId) -> Option<JobKind> {
+        self.automation
+            .jobs
+            .iter()
+            .find(|item| item.id == job)
+            .map(|item| item.kind)
     }
 
     /// How many scheduled runs ended badly since the user last looked.
@@ -516,7 +523,7 @@ impl AppView {
             return None;
         }
         let end = self.automation.news.latest.as_ref()?;
-        let (title, body) = schedule_words::bad_end(end);
+        let (title, body) = schedule_words::bad_end(end, self.job_kind(end.job));
         let job = end.job;
         Some(
             row()
@@ -1170,13 +1177,9 @@ impl AppView {
             let state = backend::run(async move { Ok(engine.retry().await) }).await;
             let _ = weak.update(cx, |this, cx| {
                 this.automation.retrying = false;
-                if let Ok(state) = state
-                    && state == Availability::ReadOnly
-                {
-                    this.automation.notice = Some(Feedback::new(
-                        Tone::Info,
-                        tr!("Another window still holds automation."),
-                    ));
+                if let Ok(state) = state {
+                    this.automation.notice =
+                        logic::notice_after(this.automation.notice.take(), &state, true);
                 }
                 cx.notify();
             });

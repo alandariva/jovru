@@ -280,6 +280,18 @@ impl JobView {
                 &jykre::automation::schedule::ScheduleError::MissedLimit,
             ));
         }
+        // A notice about the state goes once the state is another (the
+        // engine suspended it, or it was turned off or on elsewhere).
+        let (on, suspended) = fields.stored.as_ref().map_or((false, false), |stored| {
+            (stored.enabled, stored.suspended.is_some())
+        });
+        if fields
+            .notice
+            .as_ref()
+            .is_some_and(|notice| !says::notice_holds(&notice.text, on, suspended))
+        {
+            fields.notice = None;
+        }
         if let Some(stored) = &fields.stored {
             let stored_zone = rule::time_zone(&stored.draft.time_zone);
             preview.status = says::status_lines(stored, stored_zone.as_ref());
@@ -473,11 +485,7 @@ impl JobView {
                     if let Some(fields) = this.schedule.as_mut() {
                         fields.stored = Some(stored);
                     }
-                    this.schedule_notice(
-                        Tone::Success,
-                        tr!("Scheduled. It runs only while Jykre Studio is open.").to_owned(),
-                        cx,
-                    );
+                    this.schedule_notice(Tone::Success, says::scheduled().to_owned(), cx);
                     this.schedule_changed(cx);
                 }
                 Ok(Err(error)) => {
@@ -497,12 +505,7 @@ impl JobView {
         cx.spawn(async move |weak, cx| {
             let done = backend::run(async move { Ok(engine.disable_schedule(id).await) }).await;
             let _ = weak.update(cx, |this, cx| match done {
-                Ok(Ok(())) => this.schedule_notice(
-                    Tone::Info,
-                    tr!("Turned off: its consent was revoked. Turning it on asks again.")
-                        .to_owned(),
-                    cx,
-                ),
+                Ok(Ok(())) => this.schedule_notice(Tone::Info, says::turned_off().to_owned(), cx),
                 Ok(Err(error)) => {
                     this.schedule_notice(Tone::Error, says::schedule_error(&error), cx)
                 }

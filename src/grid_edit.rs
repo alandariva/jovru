@@ -532,6 +532,23 @@ impl EditSession {
             .map(Overlay::Written)
     }
 
+    /// What page row `row` shows in `column` over the value read: a page of
+    /// `read_rows` rows starting at result row `first_row`, followed by the
+    /// inserted rows. The grid's cells and its value panel both read it, so
+    /// the panel shows the value the cell shows.
+    pub fn cell_overlay(
+        &self,
+        first_row: usize,
+        read_rows: usize,
+        row: usize,
+        column: usize,
+    ) -> Option<Overlay<'_>> {
+        match row.checked_sub(read_rows) {
+            Some(inserted) => self.inserted_value(inserted, column),
+            None => self.overlay(first_row + row, column),
+        }
+    }
+
     /// Inserted rows drawn after the result's: pending, then written.
     pub fn drawn_inserted(&self) -> usize {
         self.inserted.len() + self.written_inserted.len()
@@ -793,6 +810,28 @@ mod tests {
             edits.overlay(0, 1),
             Some(Overlay::Pending(&EditValue::Null))
         );
+    }
+
+    #[test]
+    fn a_cell_of_a_later_page_or_an_inserted_row_shows_its_pending_value() {
+        let mut edits = session();
+        // Result row 51 is the second row of a page of 50 starting at row 50.
+        let read = row(&[Some("51"), Some("a"), None, None]);
+        edits.set(51, &read, 1, text("typed")).unwrap();
+        assert_eq!(
+            edits.cell_overlay(50, 50, 1, 1).map(Overlay::value),
+            Some(&text("typed"))
+        );
+        assert_eq!(edits.cell_overlay(50, 50, 1, 0), None);
+        assert_eq!(edits.cell_overlay(0, 50, 1, 1), None);
+        // Past the 50 rows read come the inserted ones.
+        let inserted = edits.insert_row();
+        edits.set_inserted(inserted, 1, EditValue::Null).unwrap();
+        assert_eq!(
+            edits.cell_overlay(50, 50, 50, 1).map(Overlay::value),
+            Some(&EditValue::Null)
+        );
+        assert_eq!(edits.cell_overlay(50, 50, 50, 0), None);
     }
 
     #[test]

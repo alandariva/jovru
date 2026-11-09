@@ -71,9 +71,22 @@ pub fn state_label(state: RunState, cause: Option<Cause>, elapsed: Option<Durati
     }
 }
 
-/// Why a run failed, in words.
-pub fn cause_sentence(cause: Cause) -> &'static str {
+/// Why a run of a `kind` job failed, in words (`None` when the kind is not
+/// known). A protocol failure is a program's `jjp/1` for a program, the
+/// database driver's for a SQL Job, and either for a chain's step.
+pub fn cause_sentence(cause: Cause, kind: Option<JobKind>) -> &'static str {
     match cause {
+        Cause::Protocol => match kind {
+            Some(JobKind::Process) => {
+                tr!("The program broke the jjp/1 protocol or ended without a terminal message.")
+            }
+            Some(JobKind::Sql) => {
+                tr!("The database's answer could not be read: the driver's protocol failed.")
+            }
+            Some(JobKind::Chain) | None => {
+                tr!("A step broke its protocol: a program's jjp/1, or the database driver's.")
+            }
+        },
         Cause::Validation => tr!("The database refused the statement."),
         Cause::Connection => tr!("The connection to the database failed or was lost."),
         Cause::Authentication => tr!("The database refused the sign-in."),
@@ -81,9 +94,7 @@ pub fn cause_sentence(cause: Cause) -> &'static str {
         Cause::Database => tr!("The database reported an error."),
         Cause::Timeout => tr!("It reached its timeout and was stopped."),
         Cause::NotFound => tr!("The program or a file it needs was not found."),
-        Cause::Protocol => tr!(
-            "The program broke the jjp/1 protocol or ended without a terminal message, or the driver's protocol failed."
-        ),
+
         Cause::Unsupported => tr!("The driver does not support this."),
         Cause::Internal => tr!("Jykre Studio failed internally."),
         Cause::Exit => tr!("The program exited with a nonzero code or a signal."),
@@ -142,26 +153,68 @@ fn counters(
 ) -> Vec<Line> {
     let mut lines = Vec::new();
     if let Some(kept) = kept {
+        let discarded = discarded.unwrap_or(0);
         let text = if truncated && reads_only {
-            tr!(
-                "Kept {0} rows; the query had more, which were left unread at the row limit.",
-                kept
-            )
-        } else if discarded.is_some_and(|discarded| discarded > 0) {
-            tr!(
-                "Kept {0} rows; {1} more were read and discarded to confirm that the statement finished.",
-                kept,
-                discarded.unwrap_or(0)
-            )
+            if kept == 1 {
+                tr!("Kept 1 row; the query had more, which were left unread at the row limit.")
+                    .to_owned()
+            } else {
+                tr!(
+                    "Kept {0} rows; the query had more, which were left unread at the row limit.",
+                    kept
+                )
+            }
+        } else if discarded > 0 {
+            match (kept == 1, discarded == 1) {
+                (true, true) => tr!(
+                    "Kept 1 row; 1 more was read and discarded to confirm that the statement finished."
+                )
+                .to_owned(),
+                (true, false) => tr!(
+                    "Kept 1 row; {0} more were read and discarded to confirm that the statement finished.",
+                    discarded
+                ),
+                (false, true) => tr!(
+                    "Kept {0} rows; 1 more was read and discarded to confirm that the statement finished.",
+                    kept
+                ),
+                (false, false) => tr!(
+                    "Kept {0} rows; {1} more were read and discarded to confirm that the statement finished.",
+                    kept,
+                    discarded
+                ),
+            }
+        } else if kept == 1 {
+            tr!("Kept 1 row.").to_owned()
         } else {
             tr!("Kept {0} rows.", kept)
         };
         lines.push(Line::new(Level::Info, text));
     }
     if let Some(affected) = affected {
-        lines.push(Line::new(Level::Info, tr!("{0} rows affected.", affected)));
+        let text = if affected == 1 {
+            tr!("1 row affected.").to_owned()
+        } else {
+            tr!("{0} rows affected.", affected)
+        };
+        lines.push(Line::new(Level::Info, text));
     }
     lines
+}
+
+/// What recovery says about the runs it marked interrupted.
+pub fn interrupted_runs(count: usize) -> String {
+    if count == 1 {
+        tr!(
+            "1 run was active when Jykre Studio last closed; it is marked interrupted and was not run again."
+        )
+        .to_owned()
+    } else {
+        tr!(
+            "{0} runs were active when Jykre Studio last closed; they are marked interrupted and were not run again.",
+            count
+        )
+    }
 }
 
 fn program_lines(
@@ -225,7 +278,9 @@ pub fn record_lines(record: &RunRecord, dialect: Option<SqlDialect>) -> Vec<Line
     match record.state {
         RunState::Failed => {
             let state = state_label(record.state, record.cause, elapsed);
-            let cause = record.cause.map_or("", cause_sentence);
+            let cause = record
+                .cause
+                .map_or("", |cause| cause_sentence(cause, Some(record.kind)));
             lines.push(Line::new(Level::Error, format!("{state}. {cause}")));
         }
         RunState::Cancelled => lines.push(Line::new(
@@ -288,7 +343,9 @@ pub fn outcome_lines(outcome: &RunOutcome, dialect: Option<SqlDialect>) -> Vec<L
     match outcome.state {
         RunState::Failed => {
             let state = state_label(outcome.state, outcome.cause, Some(outcome.elapsed));
-            let cause = outcome.cause.map_or("", cause_sentence);
+            let cause = outcome
+                .cause
+                .map_or("", |cause| cause_sentence(cause, Some(outcome.kind)));
             lines.push(Line::new(Level::Error, format!("{state}. {cause}")));
         }
         RunState::Cancelled => lines.push(Line::new(
@@ -406,6 +463,7 @@ pub fn output_problem(problem: &OutputProblem) -> String {
 /// time it may still wait (section 9.3.6).
 pub fn queued(position: usize, left: Duration, blocked: &Blocked, holders: &[String]) -> String {
     let limit = match blocked {
+        Blocked::Global { limit: 1, .. } => tr!("at most 1 run at once").to_owned(),
         Blocked::Global { limit, .. } => tr!("at most {0} runs at once", limit),
         Blocked::Connection { .. } => tr!("at most 1 run per connection").to_owned(),
     };
@@ -442,7 +500,11 @@ pub fn progress(progress: &Progress, kind: JobKind) -> String {
     let mut text = phase.to_owned();
     if progress.rows > 0 {
         text.push(' ');
-        text.push_str(&tr!("{0} rows read.", progress.rows));
+        if progress.rows == 1 {
+            text.push_str(tr!("1 row read."));
+        } else {
+            text.push_str(&tr!("{0} rows read.", progress.rows));
+        }
     }
     if let Some(percent) = progress.percent {
         text.push(' ');
@@ -509,10 +571,17 @@ pub fn refusal(refusal: &Refusal) -> String {
         Refusal::NoConnection => {
             tr!("The job's connection is not available. Choose one in the editor.").to_owned()
         }
+        Refusal::QueueFull(QueueFull::Global { limit: 1 }) => {
+            tr!("The queue is full: 1 run already waits. Try again when it has started.")
+                .to_owned()
+        }
         Refusal::QueueFull(QueueFull::Global { limit }) => tr!(
             "The queue is full: {0} runs already wait. Try again when one has started.",
             limit
         ),
+        Refusal::QueueFull(QueueFull::Connection { limit: 1, .. }) => {
+            tr!("The queue is full for this connection: 1 run already waits for it.").to_owned()
+        }
         Refusal::QueueFull(QueueFull::Connection { limit, .. }) => tr!(
             "The queue is full for this connection: {0} runs already wait for it.",
             limit
@@ -578,7 +647,7 @@ pub fn problem(problem: &Problem) -> String {
             "The step ID {0} must be unique and use lowercase letters, digits and _.",
             id
         ),
-        Problem::StepVersion(id) => tr!("Choose a published version for the step {0}.", id),
+        Problem::StepVersion(id) => tr!("Choose a published version for {0}.", id),
     }
 }
 
@@ -588,25 +657,25 @@ pub fn chain_problem(problem: &ChainProblem) -> String {
             tr!("Each step needs a job and a published version.").to_owned()
         }
         ChainProblem::UnknownVersion { step } => {
-            tr!("Step {0}: its job or version no longer exists.", step)
+            tr!("{0}: its job or version no longer exists.", step)
         }
         ChainProblem::NestedChain { step } => {
-            tr!("Step {0}: a chain cannot be a step of another chain.", step)
+            tr!("{0}: a chain cannot be a step of another chain.", step)
         }
         ChainProblem::Unbound { step, input } => tr!(
-            "Step {0}: the required input {1} has no source and no default.",
+            "{0}: the required input {1} has no source and no default.",
             step,
             input
         ),
         ChainProblem::UnknownInput { step, input } => {
-            tr!("Step {0}: the version has no input {1}.", step, input)
+            tr!("{0}: the version has no input {1}.", step, input)
         }
         ChainProblem::UnknownChainInput {
             step,
             input,
             source,
         } => tr!(
-            "Step {0}: the input {1} reads the chain input {2}, which does not exist.",
+            "{0}: the input {1} reads the chain input {2}, which does not exist.",
             step,
             input,
             source
@@ -616,7 +685,7 @@ pub fn chain_problem(problem: &ChainProblem) -> String {
             input,
             source,
         } => tr!(
-            "Step {0}: the input {1} reads the step {2}, which is not an earlier step.",
+            "{0}: the input {1} reads {2}, which is not an earlier step.",
             step,
             input,
             source
@@ -627,19 +696,19 @@ pub fn chain_problem(problem: &ChainProblem) -> String {
             source,
             output,
         } => tr!(
-            "Step {0}: the input {1} reads the output {3} of {2}, which that version does not declare.",
+            "{0}: the input {1} reads the output {3} of {2}, which that version does not declare.",
             step,
             input,
             source,
             output
         ),
         ChainProblem::KindMismatch { step, input } => tr!(
-            "Step {0}: the source of {1} is of another type (only a text input takes any type).",
+            "{0}: the source of {1} is of another type (only a text input takes any type).",
             step,
             input
         ),
         ChainProblem::InvalidConstant { step, input } => tr!(
-            "Step {0}: the constant of {1} is not a value of its type or one of its choices.",
+            "{0}: the constant of {1} is not a value of its type or one of its choices.",
             step,
             input
         ),
@@ -991,6 +1060,105 @@ mod tests {
             &"Kept 1000 rows; 250 more were read and discarded to confirm that the statement finished."
         ));
         assert!(texts(&lines).contains(&"1250 rows affected."));
+    }
+
+    #[test]
+    fn a_protocol_failure_names_the_program_s_protocol_or_the_driver_s() {
+        crate::app::source_text();
+        let program = cause_sentence(Cause::Protocol, Some(JobKind::Process));
+        assert_eq!(
+            program,
+            "The program broke the jjp/1 protocol or ended without a terminal message."
+        );
+        let sql = cause_sentence(Cause::Protocol, Some(JobKind::Sql));
+        assert!(sql.contains("driver") && !sql.contains("jjp/1"), "{sql}");
+        let mut run = record(JobKind::Process);
+        run.state = RunState::Failed;
+        run.cause = Some(Cause::Protocol);
+        let lines = record_lines(&run, None);
+        assert!(!lines[0].text.contains("driver"), "{}", lines[0].text);
+    }
+
+    #[test]
+    fn chain_problems_name_a_step_once() {
+        crate::app::source_text();
+        let text = chain_problem(&ChainProblem::Unbound {
+            step: "step_1".into(),
+            input: "rows".into(),
+        });
+        assert_eq!(
+            text,
+            "step_1: the required input rows has no source and no default."
+        );
+        let text = chain_problem(&ChainProblem::ForwardReference {
+            step: "step_1".into(),
+            input: "rows".into(),
+            source: "step_2".into(),
+        });
+        assert_eq!(
+            text,
+            "step_1: the input rows reads step_2, which is not an earlier step."
+        );
+        assert!(!text.contains("step step"), "{text}");
+    }
+
+    #[test]
+    fn a_count_of_one_reads_in_the_singular() {
+        crate::app::source_text();
+        assert_eq!(
+            interrupted_runs(1),
+            "1 run was active when Jykre Studio last closed; it is marked interrupted and was not run again."
+        );
+        assert_eq!(
+            interrupted_runs(2),
+            "2 runs were active when Jykre Studio last closed; they are marked interrupted and were not run again."
+        );
+        let mut one = record(JobKind::Sql);
+        one.reads_only = false;
+        one.rows_delivered = Some(1);
+        one.rows_discarded = Some(1);
+        one.rows_affected = Some(1);
+        let lines = record_lines(&one, None);
+        assert!(texts(&lines).contains(
+            &"Kept 1 row; 1 more was read and discarded to confirm that the statement finished."
+        ));
+        assert!(texts(&lines).contains(&"1 row affected."));
+        one.rows_discarded = Some(3);
+        assert!(texts(&record_lines(&one, None)).contains(
+            &"Kept 1 row; 3 more were read and discarded to confirm that the statement finished."
+        ));
+        one.rows_delivered = Some(5);
+        one.rows_discarded = Some(1);
+        assert!(texts(&record_lines(&one, None)).contains(
+            &"Kept 5 rows; 1 more was read and discarded to confirm that the statement finished."
+        ));
+        one.rows_discarded = None;
+        one.rows_delivered = Some(1);
+        assert!(texts(&record_lines(&one, None)).contains(&"Kept 1 row."));
+        let mut truncated = record(JobKind::Sql);
+        truncated.rows_delivered = Some(1);
+        truncated.truncated = true;
+        assert!(
+            texts(&record_lines(&truncated, None)).contains(
+                &"Kept 1 row; the query had more, which were left unread at the row limit."
+            )
+        );
+        assert_eq!(
+            refusal(&Refusal::QueueFull(QueueFull::Global { limit: 1 })),
+            "Not run: The queue is full: 1 run already waits. Try again when it has started. Refused runs are not recorded."
+        );
+        assert!(
+            queued(
+                1,
+                Duration::from_secs(1),
+                &Blocked::Global {
+                    limit: 1,
+                    holders: vec![1],
+                },
+                &[],
+            )
+            .contains("waiting for at most 1 run at once.")
+        );
     }
 
     #[test]

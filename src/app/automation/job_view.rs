@@ -1684,6 +1684,8 @@ impl JobView {
         self.pending = None;
         match self.engine.submit(request) {
             Ok(handle) => {
+                // The last run's result is not this run's.
+                self.has_result = false;
                 self.inner = Inner::Inputs;
                 self.watch_run(handle, dialect, cx);
             }
@@ -2028,11 +2030,11 @@ fn chain_outcome_lines(
     let mut first = state;
     if let Some(cause) = outcome.cause {
         first.push_str(". ");
-        first.push_str(words::cause_sentence(cause));
+        first.push_str(words::cause_sentence(cause, Some(JobKind::Chain)));
     }
     if let Some(step) = &outcome.failed_step {
         first.push(' ');
-        first.push_str(&tr!("It stopped at step {0}.", step));
+        first.push_str(&tr!("It stopped at {0}.", step));
     }
     lines.push(Line { level, text: first });
     if outcome.cause == Some(jykre::automation::Cause::PlanChanged)
@@ -2059,11 +2061,11 @@ fn chain_outcome_lines(
     for (index, id) in outcome.step_ids.iter().enumerate() {
         let text = match outcome.steps.get(index) {
             Some(step) => tr!(
-                "Step {0}: {1}",
+                "{0}: {1}",
                 id,
                 words::state_label(step.state, step.cause, Some(step.elapsed))
             ),
-            None => tr!("Step {0}: Not run.", id),
+            None => tr!("{0}: Not run.", id),
         };
         lines.push(Line {
             level: Level::Info,

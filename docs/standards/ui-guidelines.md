@@ -154,6 +154,10 @@ See [Performance](performance.md) for budgets and how to measure.
   own key handler and never reacts to the mouse only.
 - Status regions use `Role::Status` (or `Role::Alert` for errors) so changes
   are announced.
+- A modal dialog drawn by the application sits on `ui::modal_backdrop`,
+  which occludes the window behind it: in GPUI an element that only paints
+  over others does not stop their listeners from seeing the pointer. The
+  component kit's dialogs (`open_alert_dialog`) occlude on their own.
 
 ## Tests
 

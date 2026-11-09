@@ -672,7 +672,7 @@ impl HistoryList {
                         Some(cause) => format!(
                             "{}. {}",
                             words::state_label(record.state, Some(cause), elapsed),
-                            words::cause_sentence(cause)
+                            words::cause_sentence(cause, Some(JobKind::Chain))
                         ),
                         None => words::state_label(record.state, None, elapsed),
                     },

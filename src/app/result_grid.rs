@@ -421,6 +421,8 @@ pub struct ResultGrid {
     /// The menu Shift F10 opened acts on `menu_column`, whatever the
     /// synthesized click lands on.
     menu_locked: bool,
+    /// The grid's menu is open: no tooltip of the grid is drawn over it.
+    menu_open: bool,
     /// The table's width at the last layout, which decides the columns in
     /// view.
     viewport: Rc<Cell<f32>>,
@@ -447,8 +449,9 @@ pub struct ResultGrid {
     /// cell, or the one double-clicked in the records view.
     inspected: Option<(usize, usize)>,
     value_input: Option<Entity<TextareaState>>,
-    /// What `value_input` holds: (result version, data row, column).
-    value_shown: Option<(u64, usize, usize)>,
+    /// What `value_input` holds: (result version, edits version, data row,
+    /// column).
+    value_shown: Option<(u64, u64, usize, usize)>,
     column_stats: Option<ColumnStats>,
     column_task: Option<Task<()>>,
     /// Bumped with every selection, so a summary of an older one is dropped.
@@ -680,6 +683,7 @@ impl ResultGrid {
             layout,
             layout_version: 0,
             menu_locked: false,
+            menu_open: false,
             viewport: Rc::default(),
             column_find: None,
             gesture: None,
@@ -1588,20 +1592,34 @@ impl ResultGrid {
         }));
     }
 
-    /// Shows the inspected cell's value in the viewer, once per cell.
+    /// The text page row `row` shows in `column`: its pending or written
+    /// edit, else the value read; `None` for NULL.
+    fn shown_value(&self, row: usize, column: usize) -> Option<&str> {
+        let overlay = self.session().and_then(|session| {
+            session.cell_overlay(self.first_row, self.result.row_count(), row, column)
+        });
+        match overlay {
+            Some(overlay) => overlay.value().text(),
+            None => self.result.value(row, column),
+        }
+    }
+
+    /// Shows the inspected cell's value in the viewer, once per cell and
+    /// change: a pending edit's value over the one read, as the cell does.
     fn sync_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.inspector != Some(Inspector::Value) {
             return;
         }
+        let edits = self.session().map_or(0, EditSession::version);
         let target = self
             .inspected
-            .map(|(row, column)| (self.version, row, column));
+            .map(|(row, column)| (self.version, edits, row, column));
         if self.value_shown == target && self.value_input.is_some() {
             return;
         }
         self.value_shown = target;
         let text = target
-            .and_then(|(_, row, column)| self.result.value(row, column))
+            .and_then(|(_, _, row, column)| self.shown_value(row, column))
             .map(viewer_text)
             .unwrap_or_default();
         let input = self.value_input.get_or_insert_with(|| {
@@ -1737,6 +1755,25 @@ impl ResultGrid {
     /// A key of the grid's keymap ([`super::shortcuts`]), on the table that
     /// has the keyboard. `Enter` with no cell to show lets the key through.
     fn grid_key(&mut self, key: KeyAction, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cell_editor.is_some() {
+            // The cell's field has the keyboard. A key reaches the grid
+            // only when the field lets it through: Enter, which the field
+            // commits itself (`InputEvent::PressEnter`), or an arrow at the
+            // end of its text. Neither may open the panel or move the
+            // selection under the field.
+            match while_editing(key) {
+                WhileEditing::Nothing => {}
+                WhileEditing::CommitAndWrite => {
+                    self.finish_cell_edit(true, window, cx);
+                    cx.emit(ResultGridEvent::WriteRequested);
+                }
+                WhileEditing::DropAndDiscard => {
+                    self.finish_cell_edit(false, window, cx);
+                    cx.emit(ResultGridEvent::DiscardRequested);
+                }
+            }
+            return;
+        }
         match key {
             KeyAction::Copy { names } => self.copy_selection(names, window, cx),
             KeyAction::SelectAll => self.select_all(cx),
@@ -2246,7 +2283,11 @@ impl ResultGrid {
             .tab_index(0)
             .focus_visible(|s| s.bg(rgb(colors().hover)))
             .hover(|s| s.bg(rgb(colors().grid_hover)))
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            // GPUI draws a tooltip over every layer, so none is set while the
+            // grid's menu is open.
+            .when(tooltips_shown(self.menu_open), |s| {
+                s.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            })
             .child(
                 div()
                     .flex_shrink(1.)
@@ -2719,9 +2760,12 @@ impl ResultGrid {
             .text_size(px(13.))
             .when(is_null || default, |s| s.italic())
             .when(family == ValueFamily::Boolean, |s| s.justify_center())
-            .when_some(tooltip, |s, tooltip| {
-                s.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            })
+            .when_some(
+                tooltip.filter(|_| tooltips_shown(self.menu_open)),
+                |s, tooltip| {
+                    s.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                },
+            )
             .when(family == ValueFamily::Number, |s| s.justify_end())
             .text_color(rgb(if deleted {
                 colors().red
@@ -3841,24 +3885,53 @@ impl ResultGrid {
         window: &mut Window,
         cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
-        let (has_selection, records, inspector, has_column, column_stats) = weak
+        // GPUI draws tooltips over every layer: the grid sets none while its
+        // menu is open, until the menu is dismissed.
+        let _ = weak.update(cx, |this, cx| {
+            this.menu_open = true;
+            cx.notify();
+        });
+        let closed = weak.clone();
+        cx.subscribe_self(move |_, _: &DismissEvent, cx| {
+            let _ = closed.update(cx, |this, cx| {
+                this.menu_open = false;
+                cx.notify();
+            });
+        })
+        .detach();
+        let (has_selection, records, inspector, has_column, column_stats, edits) = weak
             .upgrade()
             .map(|this| {
                 let this = this.read(cx);
+                let read_only = this.shown.and_then(|(id, _)| match this.editing.get(&id) {
+                    Some(Editing::ReadOnly(reason)) => Some(grid_edit::read_only_text(reason)),
+                    _ => None,
+                });
                 (
                     this.selection.is_some(),
                     this.records,
                     this.inspector,
                     this.stats_column().is_some(),
                     this.shows_stats(StatsScope::Column),
+                    edit_items(this.shown.is_some(), read_only, this.selection.is_some()),
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                (
+                    false,
+                    false,
+                    None,
+                    false,
+                    false,
+                    edit_items(false, None, false),
+                )
+            });
         let action =
             |weak: WeakEntity<ResultGrid>,
              run: fn(&mut ResultGrid, &mut Window, &mut Context<ResultGrid>)| {
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let _ = weak.update(cx, |this, cx| {
+                        this.keyboard_back(window, cx);
                         run(this, window, cx);
                         cx.notify();
                     });
@@ -3897,8 +3970,9 @@ impl ResultGrid {
         let hidden_count = layout.hidden();
         let column_action =
             move |weak: WeakEntity<ResultGrid>, change: fn(&mut ColumnLayout, usize) -> bool| {
-                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let _ = weak.update(cx, |this, cx| {
+                        this.keyboard_back(window, cx);
                         if let Some(column) = column {
                             this.change_layout(|layout| change(layout, column), cx);
                         }
@@ -3927,7 +4001,10 @@ impl ResultGrid {
                     PopupMenuItem::new(format_name(format))
                         .disabled(!has_selection)
                         .on_click(move |_, window, cx| {
-                            let _ = weak.update(cx, |this, cx| this.copy_as(format, window, cx));
+                            let _ = weak.update(cx, |this, cx| {
+                                this.keyboard_back(window, cx);
+                                this.copy_as(format, window, cx)
+                            });
                         }),
                 )
             })
@@ -4046,11 +4123,14 @@ impl ResultGrid {
                 };
                 let menu = hidden.iter().fold(menu, |menu, (column, name)| {
                     let (weak, column) = (show_weak.clone(), *column);
-                    menu.item(PopupMenuItem::new(name.clone()).on_click(move |_, _, cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            this.change_layout(|layout| layout.show(column), cx)
-                        });
-                    }))
+                    menu.item(
+                        PopupMenuItem::new(name.clone()).on_click(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.keyboard_back(window, cx);
+                                this.change_layout(|layout| layout.show(column), cx)
+                            });
+                        }),
+                    )
                 });
                 if more > 0 {
                     menu.item(
@@ -4084,12 +4164,15 @@ impl ResultGrid {
                 })),
         )
         .separator()
+        .when_some(edits.reason.clone(), |menu, reason| {
+            menu.item(PopupMenuItem::new(reason).disabled(true))
+        })
         .item(
             PopupMenuItem::new(tr!(
                 "Edit the cell ({0})",
                 super::shortcuts::label::<super::shortcuts::GridEditCell>(cx)
             ))
-            .disabled(!has_selection)
+            .disabled(!edits.cell)
             .on_click(action(weak.clone(), |this, window, cx| {
                 this.edit(EditAction::Cell, window, cx)
             })),
@@ -4099,7 +4182,7 @@ impl ResultGrid {
                 "Set to NULL ({0})",
                 super::shortcuts::label::<super::shortcuts::GridSetNull>(cx)
             ))
-            .disabled(!has_selection)
+            .disabled(!edits.null)
             .on_click(action(weak.clone(), |this, window, cx| {
                 this.edit(EditAction::Null, window, cx)
             })),
@@ -4109,6 +4192,7 @@ impl ResultGrid {
                 "Insert a row ({0})",
                 super::shortcuts::label::<super::shortcuts::GridInsertRow>(cx)
             ))
+            .disabled(!edits.insert)
             .on_click(action(weak.clone(), |this, window, cx| {
                 this.edit(EditAction::Insert, window, cx)
             })),
@@ -4118,7 +4202,7 @@ impl ResultGrid {
                 "Delete the rows ({0})",
                 super::shortcuts::label::<super::shortcuts::GridDeleteRows>(cx)
             ))
-            .disabled(!has_selection)
+            .disabled(!edits.delete)
             .on_click(action(weak.clone(), |this, window, cx| {
                 this.edit(EditAction::Delete, window, cx)
             })),
@@ -4128,6 +4212,16 @@ impl ResultGrid {
             PopupMenuItem::new(tr!("Select all"))
                 .on_click(action(weak.clone(), |this, _, cx| this.select_all(cx))),
         )
+    }
+
+    /// Gives the grid the keyboard back before an item of its menu acts.
+    /// The menu would hand it back to what had it when the menu opened,
+    /// and after Shift F10 that is the column's header, which **Hide** or
+    /// a move takes away or redraws: the keyboard then went nowhere and the
+    /// grid's next key (Ctrl Shift F) did nothing. An action that moves the
+    /// keyboard on (the column search) still does, since it runs after.
+    fn keyboard_back(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
     }
 
     /// Starts editing the focused cell (the toolbar's **Edit**).
@@ -4503,6 +4597,65 @@ enum KeyAction {
     Discard,
 }
 
+/// What a grid key does while a cell's field is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WhileEditing {
+    /// Nothing: the field has the keyboard. Its Enter commits the edit
+    /// itself, and an arrow at the end of its text stays in it.
+    Nothing,
+    /// Keep what was typed, then ask to write.
+    CommitAndWrite,
+    /// Drop what was typed, then ask to discard.
+    DropAndDiscard,
+}
+
+/// The single-line field lets Enter, and an arrow at the end of its text,
+/// through to the grid. Those keys must neither open the value panel on the
+/// value read nor move the selection under the field.
+fn while_editing(key: KeyAction) -> WhileEditing {
+    match key {
+        KeyAction::Write => WhileEditing::CommitAndWrite,
+        KeyAction::Discard => WhileEditing::DropAndDiscard,
+        _ => WhileEditing::Nothing,
+    }
+}
+
+/// Whether the menu's editing items act, and why not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EditItems {
+    cell: bool,
+    null: bool,
+    insert: bool,
+    delete: bool,
+    /// Why the result cannot be edited, shown as a disabled item.
+    reason: Option<String>,
+}
+
+/// The menu's editing items: only a query tab's result can be edited
+/// (ADR-0039, section 1), so a report panel's or a job's grid shows them
+/// disabled with the reason, as does a query tab known to be read-only.
+fn edit_items(query_tab: bool, read_only: Option<String>, has_selection: bool) -> EditItems {
+    let reason = if query_tab {
+        read_only
+    } else {
+        Some(tr!("Only a query tab's result can be edited.").into())
+    };
+    let can = reason.is_none();
+    EditItems {
+        cell: can && has_selection,
+        null: can && has_selection,
+        insert: can,
+        delete: can && has_selection,
+        reason,
+    }
+}
+
+/// Whether the grid's cells and headers carry tooltips: not while its menu
+/// is open, since GPUI draws a tooltip over every layer, the menu included.
+fn tooltips_shown(menu_open: bool) -> bool {
+    !menu_open
+}
+
 /// The grid's actions on the table: each one is a key of the keymap.
 fn grid_keys(grid: Stateful<Div>, cx: &mut Context<ResultGrid>) -> Stateful<Div> {
     use super::shortcuts::*;
@@ -4573,4 +4726,104 @@ fn grid_keys(grid: Stateful<Div>, cx: &mut Context<ResultGrid>) -> Stateful<Div>
     let grid = on::<GridWriteEdits>(grid, KeyAction::Write, cx);
     let grid = on::<GridDiscardEdits>(grid, KeyAction::Discard, cx);
     on::<GridInspect>(grid, KeyAction::Inspect, cx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EditAction, EditItems, Jump, KeyAction, WhileEditing, edit_items, tooltips_shown,
+        while_editing,
+    };
+
+    #[test]
+    fn keys_the_cell_field_lets_through_never_act_on_the_grid() {
+        crate::app::source_text();
+        // Enter (Inspect by default) and the arrows at the end of the text
+        // reach the grid only through the field; none of them may open the
+        // value panel or move the selection under it.
+        for key in [
+            KeyAction::Inspect,
+            KeyAction::Move {
+                rows: 1,
+                cols: 0,
+                extend: false,
+            },
+            KeyAction::Move {
+                rows: 0,
+                cols: -1,
+                extend: true,
+            },
+            KeyAction::Jump {
+                jump: Jump::RowEnd,
+                extend: false,
+            },
+            KeyAction::Page {
+                down: true,
+                extend: false,
+            },
+            KeyAction::SelectAll,
+            KeyAction::Copy { names: false },
+            KeyAction::Edit(EditAction::Cell),
+            KeyAction::Edit(EditAction::Null),
+            KeyAction::Edit(EditAction::Insert),
+            KeyAction::Edit(EditAction::Delete),
+        ] {
+            assert_eq!(while_editing(key), WhileEditing::Nothing, "{key:?}");
+        }
+        // Writing keeps what was typed; discarding drops it.
+        assert_eq!(
+            while_editing(KeyAction::Write),
+            WhileEditing::CommitAndWrite
+        );
+        assert_eq!(
+            while_editing(KeyAction::Discard),
+            WhileEditing::DropAndDiscard
+        );
+    }
+
+    #[test]
+    fn only_a_query_tab_offers_the_editing_items() {
+        crate::app::source_text();
+        // A report panel's or a job's grid: disabled, and the menu says why.
+        for selected in [false, true] {
+            let items = edit_items(false, None, selected);
+            assert!(!items.cell && !items.null && !items.insert && !items.delete);
+            assert_eq!(
+                items.reason.as_deref(),
+                Some("Only a query tab's result can be edited.")
+            );
+        }
+        // A query tab known to be read-only gives its own reason.
+        let items = edit_items(true, Some("Computed columns only".into()), true);
+        assert!(!items.cell && !items.null && !items.insert && !items.delete);
+        assert_eq!(items.reason.as_deref(), Some("Computed columns only"));
+        // A query tab: inserting needs no selection, the others do.
+        assert_eq!(
+            edit_items(true, None, false),
+            EditItems {
+                cell: false,
+                null: false,
+                insert: true,
+                delete: false,
+                reason: None,
+            }
+        );
+        assert_eq!(
+            edit_items(true, None, true),
+            EditItems {
+                cell: true,
+                null: true,
+                insert: true,
+                delete: true,
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn no_tooltip_is_drawn_while_the_menu_is_open() {
+        crate::app::source_text();
+        assert!(!tooltips_shown(true));
+        assert!(tooltips_shown(false));
+    }
 }

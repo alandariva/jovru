@@ -85,7 +85,9 @@ the share of the file read after 300 ms, then the elapsed time and
 **Cancel import** past 2 s; closing the dialog or `Esc` cancels it too.
 Then it says, in words, what the table holds: every row imported, nothing
 imported (with the reason, a rejected value naming its line), or that the
-commit's answer was lost. `Esc` (or the key chosen to close a dialog) closes it; Tab stays inside while it is open.
+commit's answer was lost. That outcome goes as soon as the file, its
+options, the sheet, the table or the mapping change: it was about another
+import. `Esc` (or the key chosen to close a dialog) closes it; Tab stays inside while it is open.
 
 A **report** ([ADR-0024](../adr/0024-reports.md),
 [ADR-0025](../adr/0025-report-panels.md)) opens in a tab of its own, in a tab
@@ -685,6 +687,12 @@ stack traces and modal dialogs for query errors.
 Every essential flow works with the keyboard, focus is always visible, and
 interactive elements expose a role, a label and their state. Details are in
 [UI guidelines](../standards/ui-guidelines.md#accessibility-and-keyboard).
+
+A dialog over the window (Preferences, the connection form, **Import from
+file…**, the command palette and the others) is modal: its backdrop takes
+every click, hover and wheel, so nothing behind it (the explorer, the tabs)
+reacts until it closes. A menu that is open is never covered by a tooltip:
+the result grid draws none while its menu is open.
 
 ## Known deviations
 

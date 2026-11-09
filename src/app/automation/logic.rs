@@ -4,11 +4,12 @@
 //! again on its own is prefilled with, and how a chain run's steps read in
 //! its history. Tested here; the views only call these.
 use super::words;
+use crate::app::ui::{Feedback, Tone};
 use jykre::automation::JobId;
 use jykre::automation::definition::{
     ChainBody, ChainStep, JobBody, JobDefinition, Protocol, Source,
 };
-use jykre::automation::{Cause, JobKind, RunState};
+use jykre::automation::{Availability, Cause, JobKind, RunState};
 use jykre::sql::SqlDialect;
 use jykre::tr;
 use jykre_core::automation::{ChainRunRecord, RunOutput, RunRecord};
@@ -181,34 +182,59 @@ pub fn source_choices(
     versions: &[Option<JobDefinition>],
 ) -> Vec<SourceChoice> {
     let mut choices = vec![SourceChoice {
-        label: tr!("Its default, or NULL").to_owned(),
+        label: source_label(None),
         source: None,
     }];
-    for input in &chain.inputs {
+    let mut offer = |kind: SourceKind| {
         choices.push(SourceChoice {
-            label: tr!("Chain input {0}", input.name),
-            source: Some(SourceKind::Input(input.name.clone())),
+            label: source_label(Some(&kind)),
+            source: Some(kind),
         });
+    };
+    for input in &chain.inputs {
+        offer(SourceKind::Input(input.name.clone()));
     }
     for (earlier, step) in chain.steps.iter().enumerate().take(index) {
         let Some(Some(definition)) = versions.get(earlier) else {
             continue;
         };
         for output in definition.outputs() {
-            choices.push(SourceChoice {
-                label: tr!("Output {0} of step {1}", output.name, step.id),
-                source: Some(SourceKind::Step {
-                    step: step.id.clone(),
-                    output: output.name.clone(),
-                }),
+            offer(SourceKind::Step {
+                step: step.id.clone(),
+                output: output.name.clone(),
             });
         }
     }
-    choices.push(SourceChoice {
-        label: tr!("A constant").to_owned(),
-        source: Some(SourceKind::Constant),
-    });
+    offer(SourceKind::Constant);
     choices
+}
+
+/// How a source reads in a step input's list; `None` is no source.
+fn source_label(source: Option<&SourceKind>) -> String {
+    match source {
+        None => tr!("Its default, or NULL").to_owned(),
+        Some(SourceKind::Input(name)) => tr!("Chain input {0}", name),
+        Some(SourceKind::Step { step, output }) => tr!("Output {0} of {1}", output, step),
+        Some(SourceKind::Constant) => tr!("A constant").to_owned(),
+    }
+}
+
+/// What a step input's button shows: the source the chain's definition
+/// holds, also when the list no longer offers it (an earlier step renamed,
+/// removed or moved after it, or its version no longer declaring that
+/// output). The step still reads that source, and its problem says so, so
+/// the button never reads as the default.
+pub fn shown_source(current: Option<&SourceKind>, choices: &[SourceChoice]) -> String {
+    match current {
+        Some(kind)
+            if !choices
+                .iter()
+                .any(|choice| choice.source.as_ref() == Some(kind)) =>
+        {
+            tr!("{0} (not available)", source_label(Some(kind)))
+        }
+        current => source_label(current),
+    }
 }
 
 /// Whether a step's version is a program without a protocol, whose outputs
@@ -289,11 +315,17 @@ pub fn chain_steps(
             .filter_map(|index| steps.get(index).map(|(id, _)| id.clone()))
             .next()
     });
-    let cause = match (chain.state, chain.cause) {
-        (RunState::Failed, Some(cause)) => words::cause_sentence(cause).to_owned(),
-        (RunState::Cancelled, _) => tr!("the chain was stopped.").to_owned(),
-        (RunState::Interrupted, _) => tr!("Jykre Studio closed while it ran.").to_owned(),
-        _ => String::new(),
+    let not_run = |step: &str| match (chain.state, chain.cause) {
+        (RunState::Failed, Some(cause)) => tr!(
+            "Not run: the chain stopped at {0}. {1}",
+            step,
+            words::cause_sentence(cause, Some(JobKind::Chain))
+        ),
+        (RunState::Cancelled, _) => tr!("Not run: the chain was stopped at {0}.", step),
+        (RunState::Interrupted, _) => {
+            tr!("Not run: Jykre Studio closed while {0} ran.", step)
+        }
+        _ => tr!("Not run: the chain stopped at {0}.", step),
     };
     steps
         .iter()
@@ -309,7 +341,7 @@ pub fn chain_steps(
                     words::state_label(run.state, run.cause, elapsed)
                 }
                 None => match &stopped_by {
-                    Some(step) => tr!("Not run: the chain stopped at step {0}. {1}", step, cause),
+                    Some(step) => not_run(step),
                     None => tr!("Not run.").to_owned(),
                 },
             };
@@ -340,7 +372,7 @@ pub fn plan_changed(
 /// Which connection changed and which step did not start (`PlanChanged`).
 pub fn plan_changed_text(connection: &str, step: &str) -> String {
     tr!(
-        "The settings of {0} changed after the plan was confirmed, so step {1} did not start.",
+        "The settings of {0} changed after the plan was confirmed, so {1} did not start.",
         connection,
         step
     )
@@ -382,9 +414,39 @@ pub fn chain_snapshot(snapshot: &str) -> Option<(JobDefinition, Vec<SnapshotStep
     Some((chain, steps))
 }
 
+/// Whether a job's **Inputs** shows the result grid: only a finished run's
+/// result. A run that is queued or running has none yet, and the previous
+/// run's would read as its own; the status above says **Queued** or what
+/// it is doing (section 8.1.1).
+pub fn shows_result(has_result: bool, running: bool) -> bool {
+    has_result && !running
+}
+
+/// The notice **Try again** leaves while another window holds the lock.
+pub fn still_held() -> Feedback {
+    Feedback::new(Tone::Info, tr!("Another window still holds automation."))
+}
+
+/// The automation notice once automation is `state`: **Try again** that
+/// found the lock still held (`retried`) says so, and that notice goes as
+/// soon as the lock is taken or automation is off. Any other notice (what
+/// recovery found) stays until it is closed.
+pub fn notice_after(
+    notice: Option<Feedback>,
+    state: &Availability,
+    retried: bool,
+) -> Option<Feedback> {
+    match state {
+        Availability::ReadOnly if retried => Some(still_held()),
+        Availability::ReadOnly => notice,
+        _ => notice.filter(|notice| *notice != still_held()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jykre::automation::OffReason;
     use jykre::automation::definition::{OutputSpec, SqlOutput};
     use jykre::automation::{ChainRunId, RunId, UtcMillis};
     use jykre::reports::ParameterSpec;
@@ -533,7 +595,7 @@ mod tests {
             vec![
                 "Its default, or NULL",
                 "Chain input external_key",
-                "Output address of step lookup",
+                "Output address of lookup",
                 "A constant"
             ]
         );
@@ -659,7 +721,7 @@ mod tests {
         assert!(lines[0].run.is_some());
         assert_eq!(
             lines[1].text,
-            "Not run: the chain stopped at step lookup. Its outputs did not match what the job declares."
+            "Not run: the chain stopped at lookup. Its outputs did not match what the job declares."
         );
         assert!(lines[2].run.is_none());
         let mut changed = chain.clone();
@@ -667,11 +729,68 @@ mod tests {
         assert_eq!(
             plan_changed(&changed, |step| (step == "lookup").then(|| "Billing".to_owned())),
             Some(
-                "The settings of Billing changed after the plan was confirmed, so step lookup did not start."
+                "The settings of Billing changed after the plan was confirmed, so lookup did not start."
                     .to_owned()
             )
         );
         assert_eq!(plan_changed(&chain, |_| None), None);
+        // A stopped or interrupted chain names the step once, in a sentence.
+        let steps = vec![("step_1".to_owned(), None), ("step_2".to_owned(), None)];
+        let runs = vec![step_run(0, RunState::Cancelled, None)];
+        let mut stopped = chain.clone();
+        stopped.state = RunState::Cancelled;
+        stopped.cause = None;
+        stopped.failed_step = Some("step_1".into());
+        assert_eq!(
+            chain_steps(&stopped, &steps, &runs)[1].text,
+            "Not run: the chain was stopped at step_1."
+        );
+        stopped.state = RunState::Interrupted;
+        assert_eq!(
+            chain_steps(&stopped, &steps, &runs)[1].text,
+            "Not run: Jykre Studio closed while step_1 ran."
+        );
+    }
+
+    #[test]
+    fn a_step_input_shows_the_source_its_definition_holds() {
+        crate::app::source_text();
+        let choices = vec![
+            SourceChoice {
+                label: "Its default, or NULL".into(),
+                source: None,
+            },
+            SourceChoice {
+                label: "Output address of lookup".into(),
+                source: Some(SourceKind::Step {
+                    step: "lookup".into(),
+                    output: "address".into(),
+                }),
+            },
+        ];
+        assert_eq!(shown_source(None, &choices), "Its default, or NULL");
+        let offered = SourceKind::Step {
+            step: "lookup".into(),
+            output: "address".into(),
+        };
+        assert_eq!(
+            shown_source(Some(&offered), &choices),
+            "Output address of lookup"
+        );
+        // An output the version no longer declares is still what the step
+        // reads: never shown as the default.
+        let stale = SourceKind::Step {
+            step: "lookup".into(),
+            output: "zip".into(),
+        };
+        assert_eq!(
+            shown_source(Some(&stale), &choices),
+            "Output zip of lookup (not available)"
+        );
+        assert_eq!(
+            shown_source(Some(&SourceKind::Input("gone".into())), &choices),
+            "Chain input gone (not available)"
+        );
     }
 
     #[test]
@@ -693,5 +812,51 @@ mod tests {
         assert_eq!(steps[0].version, 2);
         assert_eq!(steps[0].definition, Some(job));
         assert!(snapshot_definition("not json").is_none());
+    }
+
+    #[test]
+    fn a_waiting_run_never_shows_the_last_run_s_result() {
+        crate::app::source_text();
+        // Queued or running: the status says so; no result is shown.
+        assert!(!shows_result(true, true));
+        assert!(!shows_result(false, true));
+        // Finished with a result, or without one.
+        assert!(shows_result(true, false));
+        assert!(!shows_result(false, false));
+    }
+
+    #[test]
+    fn the_still_held_notice_goes_once_the_lock_is_taken() {
+        crate::app::source_text();
+        // Try again while another window holds the lock says so.
+        let notice = notice_after(None, &Availability::ReadOnly, true);
+        assert_eq!(notice, Some(still_held()));
+        assert_eq!(still_held().text, "Another window still holds automation.");
+        // Read-only again without Try again keeps it.
+        let notice = notice_after(notice, &Availability::ReadOnly, false);
+        assert_eq!(notice, Some(still_held()));
+        // Taken: the notice goes, from the retry's answer or the watch.
+        assert_eq!(
+            notice_after(notice.clone(), &Availability::Ready, true),
+            None
+        );
+        assert_eq!(
+            notice_after(notice.clone(), &Availability::Ready, false),
+            None
+        );
+        assert_eq!(
+            notice_after(notice, &Availability::Off(OffReason::Unreadable), false),
+            None
+        );
+        // What recovery found stays until it is closed.
+        let recovery = Feedback::new(Tone::Info, "1 run was active".to_owned());
+        assert_eq!(
+            notice_after(Some(recovery.clone()), &Availability::Ready, false),
+            Some(recovery.clone())
+        );
+        assert_eq!(
+            notice_after(Some(recovery.clone()), &Availability::ReadOnly, false),
+            Some(recovery)
+        );
     }
 }

@@ -92,6 +92,17 @@ enum ImportRun {
     },
 }
 
+impl ImportRun {
+    /// Forgets how the last import ended: once the file, the sheet, the
+    /// table or the mapping changed, that outcome was about another import.
+    /// An import that runs is kept.
+    fn forget_outcome(&mut self) {
+        if matches!(self, Self::Finished { .. }) {
+            *self = Self::Idle;
+        }
+    }
+}
+
 /// The open dialog and what keeps it subscribed.
 pub(super) struct ImportHost {
     dialog: Entity<ImportDialog>,
@@ -122,6 +133,9 @@ pub(super) struct ImportDialog {
     empty: EmptyFields,
     /// The connection's cached tables, by qualified title.
     tables: Vec<ObjectPath>,
+    /// Every relation the cache knows (tables, views…), so a drafted table
+    /// does not take one's name.
+    relations: Vec<ObjectPath>,
     table: Option<usize>,
     table_select: Entity<SelectState<SearchableVec<Choice>>>,
     targets: Load<Vec<TargetColumn>>,
@@ -257,6 +271,7 @@ impl ImportDialog {
             header_error: None,
             empty: EmptyFields::default(),
             tables: Vec::new(),
+            relations: Vec::new(),
             table: None,
             table_select,
             targets: Load::Idle,
@@ -297,11 +312,14 @@ impl ImportDialog {
                     .await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 let mut tables: Vec<ObjectPath> = match result {
-                    Ok((_, relations)) => relations
-                        .into_iter()
-                        .filter(|(_, kind)| *kind == ObjectKind::Table)
-                        .map(|(path, _)| path)
-                        .collect(),
+                    Ok((_, relations)) => {
+                        this.relations = relations.iter().map(|(path, _)| path.clone()).collect();
+                        relations
+                            .into_iter()
+                            .filter(|(_, kind)| *kind == ObjectKind::Table)
+                            .map(|(path, _)| path)
+                            .collect()
+                    }
                     Err(error) => {
                         this.targets = Load::Failed(tr!(
                             "The tables could not be read from the metadata: {0}",
@@ -407,6 +425,7 @@ impl ImportDialog {
     /// Learns the chosen file's kind, sheets and byte-order mark, then
     /// previews it.
     fn inspect(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.run.forget_outcome();
         self.file = Some(path.clone());
         self.preview = Load::Idle;
         self.mapping = None;
@@ -523,6 +542,7 @@ impl ImportDialog {
         if let Some(reading) = self.reading.take() {
             reading.cancel();
         }
+        self.run.forget_outcome();
         self.revision += 1;
         let revision = self.revision;
         let Some(options) = self.read_options(cx) else {
@@ -635,6 +655,8 @@ impl ImportDialog {
     /// The preview's rows as they would be bound, and what stops the
     /// mapping.
     fn derive(&mut self) {
+        // Every change of the preview, the table or the mapping comes here.
+        self.run.forget_outcome();
         self.shown.clear();
         self.shown_columns.clear();
         self.problems.clear();
@@ -702,9 +724,24 @@ impl ImportDialog {
             .and_then(|path| path.file_stem())
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let table = jykre::import::draft::table_name(&stem);
-        let sql =
-            jykre::import::draft::create_table(&*self.driver, &namespace, &table, &preview.columns);
+        // Not a name the cache knows in that namespace; the draft says so
+        // when the file's own name was taken.
+        let taken: Vec<&str> = self
+            .relations
+            .iter()
+            .filter(|path| path.parent().as_ref() == Some(&namespace))
+            .filter_map(ObjectPath::relation)
+            .collect();
+        let wanted = jykre::import::draft::wanted_name(&stem);
+        let table = jykre::import::draft::table_name(&stem, &taken);
+        let instead_of = (table != wanted).then_some(wanted.as_str());
+        let sql = jykre::import::draft::create_table(
+            &*self.driver,
+            &namespace,
+            &table,
+            &preview.columns,
+            instead_of,
+        );
         cx.emit(ImportEvent::Draft { sql, title: table });
     }
 
@@ -1243,7 +1280,10 @@ impl ImportDialog {
                     self.shown.len()
                 )
             } else {
-                tr!("All {0} rows, as they would be written", self.shown.len())
+                match self.shown.len() {
+                    1 => tr!("The only row, as it would be written").to_owned(),
+                    rows => tr!("All {0} rows, as they would be written", rows),
+                }
             }))
             .child(
                 div()
@@ -1302,7 +1342,11 @@ impl ImportDialog {
                     ),
             )
             .when(hidden > 0, |s| {
-                s.child(label(tr!("{0} more columns are not shown.", hidden)))
+                s.child(label(if hidden == 1 {
+                    tr!("1 more column is not shown.").to_owned()
+                } else {
+                    tr!("{0} more columns are not shown.", hidden)
+                }))
             })
             .into_any_element()
     }
@@ -1427,11 +1471,11 @@ pub(super) fn running_status<V: 'static>(
     let rows = jykre::cell_format::count(progress.rows_written as usize);
     let text = match progress.read {
         Some(share) => tr!(
-            "Importing… {0} rows written, {1} % of the file read",
+            "Importing… rows written: {0}, {1} % of the file read",
             rows,
             (share * 100.0).floor() as u32
         ),
-        None => tr!("Importing… {0} rows written", rows),
+        None => tr!("Importing… rows written: {0}", rows),
     };
     row()
         .id("import-progress")
@@ -1539,77 +1583,69 @@ impl Render for ImportDialog {
             self.focus.focus(window, cx);
         }
         let title = tr!("Import from file");
-        div()
-            .id("import-backdrop")
-            .absolute()
-            .inset_0()
-            .flex()
-            .justify_center()
-            .items_start()
-            .bg(rgba(colors().scrim))
-            .child(
-                column()
-                    .id("import-dialog")
-                    .role(Role::Dialog)
-                    .aria_label(title)
-                    .w(px(880.))
-                    .max_h(relative(0.92))
-                    .mt(px(32.))
-                    .rounded(px(12.))
-                    .border_1()
-                    .border_color(rgb(colors().border_strong))
-                    .bg(rgb(colors().panel))
-                    .shadow_lg()
-                    .overflow_hidden()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .child(
-                        row()
-                            .flex_none()
-                            .px_5()
-                            .pt_4()
-                            .justify_between()
-                            .child(
-                                column()
-                                    .child(
-                                        div()
-                                            .text_size(px(18.))
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .child(title),
-                                    )
-                                    .child(label(tr!("Into a table of {0}", self.connection))),
-                            )
-                            .child(
-                                icon_button("import-x", I::X, tr!("Close"))
-                                    .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
-                            ),
-                    )
-                    .child(
-                        column()
-                            .id("import-body")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .px_5()
-                            .py_3()
-                            .gap_4()
-                            .child(self.file_section(cx))
-                            .child(self.table_section(cx))
-                            .child(self.mapping_section(cx))
-                            .child(self.preview_section(cx)),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_5()
-                            .pb_4()
-                            .pt_2()
-                            .border_t_1()
-                            .border_color(rgb(colors().border))
-                            .child(self.footer(cx)),
-                    )
-                    // Tab stays inside the dialog while it is open.
-                    .focus_trap("import-focus-trap", &self.focus),
-            )
+        modal_backdrop("import-backdrop").child(
+            column()
+                .id("import-dialog")
+                .role(Role::Dialog)
+                .aria_label(title)
+                .w(px(880.))
+                .max_h(relative(0.92))
+                .mt(px(32.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(rgb(colors().border_strong))
+                .bg(rgb(colors().panel))
+                .shadow_lg()
+                .overflow_hidden()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .child(
+                    row()
+                        .flex_none()
+                        .px_5()
+                        .pt_4()
+                        .justify_between()
+                        .child(
+                            column()
+                                .child(
+                                    div()
+                                        .text_size(px(18.))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(title),
+                                )
+                                .child(label(tr!("Into a table of {0}", self.connection))),
+                        )
+                        .child(
+                            icon_button("import-x", I::X, tr!("Close"))
+                                .on_click(cx.listener(|this, _, _, cx| this.close(cx))),
+                        ),
+                )
+                .child(
+                    column()
+                        .id("import-body")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_5()
+                        .py_3()
+                        .gap_4()
+                        .child(self.file_section(cx))
+                        .child(self.table_section(cx))
+                        .child(self.mapping_section(cx))
+                        .child(self.preview_section(cx)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px_5()
+                        .pb_4()
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(rgb(colors().border))
+                        .child(self.footer(cx)),
+                )
+                // Tab stays inside the dialog while it is open.
+                .focus_trap("import-focus-trap", &self.focus),
+        )
     }
 }
 
@@ -1793,5 +1829,32 @@ impl AppView {
         {
             panel.update(cx, |panel, cx| panel.focus_editor(window, cx));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CancellationToken, ImportRun, Instant, Progress, Tone};
+
+    #[test]
+    fn a_change_forgets_the_last_outcome_but_never_a_running_import() {
+        crate::app::source_text();
+        let mut run = ImportRun::Finished {
+            tone: Tone::Success,
+            text: "Imported 12 rows".into(),
+            detail: None,
+        };
+        run.forget_outcome();
+        assert!(matches!(run, ImportRun::Idle));
+        run.forget_outcome();
+        assert!(matches!(run, ImportRun::Idle));
+        let (_sender, progress) = tokio::sync::watch::channel(Progress::default());
+        let mut run = ImportRun::Running {
+            started: Instant::now(),
+            cancel: CancellationToken::new(),
+            progress,
+        };
+        run.forget_outcome();
+        assert!(matches!(run, ImportRun::Running { .. }));
     }
 }

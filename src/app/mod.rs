@@ -1482,10 +1482,14 @@ impl AppView {
                             window,
                             cx,
                             Confirmation {
-                                title: tr!(
-                                    "Run and lose {0} pending changes?",
-                                    jykre::cell_format::count(*pending)
-                                ),
+                                title: if *pending == 1 {
+                                    tr!("Run and lose 1 pending change?").to_owned()
+                                } else {
+                                    tr!(
+                                        "Run and lose {0} pending changes?",
+                                        jykre::cell_format::count(*pending)
+                                    )
+                                },
                                 description: tr!(
                                     "Edits in this tab's results are not written. The result tabs this run replaces lose theirs; write them first to keep them."
                                 )
@@ -1843,19 +1847,27 @@ impl AppView {
                 title,
                 format!(
                     "{description} {}",
-                    tr!(
-                        "The {0} pending changes to its results are lost.",
-                        jykre::cell_format::count(pending)
-                    )
+                    if pending == 1 {
+                        tr!("The pending change to its results is lost.").to_owned()
+                    } else {
+                        tr!(
+                            "The {0} pending changes to its results are lost.",
+                            jykre::cell_format::count(pending)
+                        )
+                    }
                 ),
                 ok,
             )),
             None => Some((
                 tr!("Edits in this tab are not written.").to_string(),
-                tr!(
-                    "Closing the tab loses {0} pending changes to its results.",
-                    jykre::cell_format::count(pending)
-                ),
+                if pending == 1 {
+                    tr!("Closing the tab loses 1 pending change to its results.").to_owned()
+                } else {
+                    tr!(
+                        "Closing the tab loses {0} pending changes to its results.",
+                        jykre::cell_format::count(pending)
+                    )
+                },
                 tr!("Close and discard"),
             )),
         };
@@ -3460,28 +3472,20 @@ impl AppView {
     }
 
     fn overlay(&self, id: &'static str, cx: &mut Context<Self>) -> Stateful<Div> {
-        div()
-            .id(id)
-            .absolute()
-            .inset_0()
-            .flex()
-            .justify_center()
-            .items_start()
-            .bg(rgba(colors().scrim))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    // Only the palette closes on an outside click. The connection
-                    // form keeps what was typed until it is closed explicitly.
-                    if this.command_open {
-                        this.command_open = false;
-                        cx.notify();
-                    }
-                    if this.inspection.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
+        modal_backdrop(id).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _, _, cx| {
+                // Only the palette closes on an outside click. The connection
+                // form keeps what was typed until it is closed explicitly.
+                if this.command_open {
+                    this.command_open = false;
+                    cx.notify();
+                }
+                if this.inspection.take().is_some() {
+                    cx.notify();
+                }
+            }),
+        )
     }
 }
 
@@ -3742,10 +3746,17 @@ impl Render for AppView {
                                     I::LoaderCircle,
                                     colors().amber,
                                 ))
-                                .child(label(tr!(
-                                    "Stopping {0} automation runs before closing (up to about 11 s)…",
-                                    count
-                                ))),
+                                .child(label(if count == 1 {
+                                    tr!(
+                                        "Stopping 1 automation run before closing (up to about 11 s)…"
+                                    )
+                                    .to_owned()
+                                } else {
+                                    tr!(
+                                        "Stopping {0} automation runs before closing (up to about 11 s)…",
+                                        count
+                                    )
+                                })),
                         )
                     })
                     .children(self.automation_news_line(cx))

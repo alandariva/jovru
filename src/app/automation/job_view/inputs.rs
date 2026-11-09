@@ -34,7 +34,7 @@ impl JobView {
                     .child(self.form_rows(&specs, running, cx)),
             )
             .child(self.run_status(cx))
-            .when(self.has_result, |s| {
+            .when(logic::shows_result(self.has_result, running), |s| {
                 s.child(
                     div()
                         .flex_1()

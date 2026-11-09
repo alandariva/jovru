@@ -264,6 +264,7 @@ impl Outcome {
     /// name).
     pub fn message(&self, table: &str) -> String {
         match self {
+            Self::Imported { rows: 1 } => tr!("Imported 1 row into {0}.", table),
             Self::Imported { rows } => tr!("Imported {0} rows into {1}.", rows, table),
             Self::NothingImported { .. } => {
                 tr!("Nothing was imported: {0} is as it was.", table)
@@ -306,7 +307,7 @@ pub async fn run(
                 return Err(DriverError::new(
                     ErrorCode::Internal,
                     tr!(
-                        "The database reported {0} rows written for {1} rows sent.",
+                        "The database reported a different number of rows written ({0}) than rows sent ({1}).",
                         wrote,
                         sent
                     ),
