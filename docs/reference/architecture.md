@@ -522,7 +522,10 @@ A chain is a linear sequence of published versions of jobs
    the next one asks for one, so a chain progresses even with a global limit
    of 1.
 3. After each step the owner maps its declared outputs to the next step's
-   inputs (`chain::step_inputs`). The values stay in memory unless the job
+   inputs (`chain::step_inputs`). A SQL Job's outputs come from a row its
+   result kept: a row the statement returned but the result could not keep
+   (alone over the memory ceiling) fails the step with `output`, never
+   reads as empty text. The values stay in memory unless the job
    opted in to persist its outputs
    ([ADR-0035](../adr/0035-persisted-declared-outputs.md)).
 4. The first step that does not succeed stops the chain: later steps never

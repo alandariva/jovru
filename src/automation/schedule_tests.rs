@@ -876,6 +876,114 @@ async fn a_scheduled_chain_records_its_schedule_on_itself_and_its_steps_and_susp
 }
 
 #[tokio::test]
+async fn turning_off_withdraws_a_scheduled_chain_whose_first_step_waits() {
+    let file = SqliteFile::new(&chain_file_setup()).await;
+    let clock = ManualClock::new(t0());
+    let engine = Engine::with_clock(
+        Handle::current(),
+        data_dir(),
+        Limits {
+            global: 1,
+            ..Limits::default()
+        },
+        crate::result::DEFAULT_MEMORY_CEILING,
+        process::Timings::default(),
+        Clock::Manual(clock.clone()),
+    );
+    engine.started().await;
+    engine.set_connections(vec![ScheduleConnection {
+        input: file.connection(),
+        name: "file".into(),
+        environment: None,
+    }]);
+    let mut chain = lookup_then_insert(&engine, &file).await;
+    if let JobBody::Chain(body) = &mut chain.body {
+        body.inputs[0].default = Some("a".into());
+    }
+    let stored = engine.save_job(&chain, None).await.unwrap();
+    let schedule = ScheduleDraft {
+        id: ScheduleId::new(),
+        job_id: stored.id,
+        job_version: None,
+        rule_json: Rule::Interval {
+            every_minutes: 60,
+            anchor: t0().plus(MINUTE),
+        }
+        .to_json(),
+        time_zone: "UTC".into(),
+        missed_policy: MissedPolicy::Ignore,
+        missed_limit: None,
+        overlap_policy: OverlapPolicy::Skip,
+        notify: false,
+    };
+    engine.save_schedule(&schedule, None).await.unwrap();
+    let consent = engine.consent(schedule.id).await.unwrap();
+    engine.confirm_schedule(&consent).await.unwrap();
+    // A manual run holds the only slot.
+    let driver = Scripted::new(Script::Blocks);
+    let mut manual = engine
+        .submit(scripted_run(
+            &driver,
+            sql_job(ConnectionId::new(), "SELECT 1"),
+        ))
+        .unwrap();
+    eventually(Duration::from_secs(10), || {
+        matches!(manual.status(), RunStatus::Active(_))
+    })
+    .await;
+    let mut passes = engine.watch_schedule_passes();
+    let before = passes.borrow_and_update().count;
+    clock.set(t0().plus(MINUTE));
+    passes
+        .wait_for(|pass| pass.count > before && pass.at == t0().plus(MINUTE))
+        .await
+        .unwrap();
+    // The chain's first step waits in the queue.
+    eventually(Duration::from_secs(10), || {
+        engine.overview().iter().any(|entry| {
+            entry.chain.is_some() && matches!(entry.status, Some(RunStatus::Queued { .. }))
+        })
+    })
+    .await;
+    // Revoking takes the chain out, as Stop does: no step ever runs.
+    engine.disable_schedule(schedule.id).await.unwrap();
+    eventually(Duration::from_secs(10), || {
+        engine.overview().iter().all(|entry| entry.chain.is_none())
+    })
+    .await;
+    engine.stop_run(manual.id);
+    manual.finished().await;
+    eventually(Duration::from_secs(10), || engine.active() == 0).await;
+    let history = engine
+        .repository()
+        .unwrap()
+        .history(&HistoryFilter::default())
+        .await
+        .unwrap();
+    let chain_run = history
+        .iter()
+        .find_map(|entry| match entry {
+            HistoryEntry::Chain(chain) if chain.job_id == Some(stored.id) => Some(chain.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(chain_run.state, RunState::Cancelled);
+    let steps = engine
+        .repository()
+        .unwrap()
+        .chain_steps(chain_run.id)
+        .await
+        .unwrap();
+    assert!(steps.is_empty(), "no step was admitted: {steps:?}");
+    assert_eq!(
+        file.scalar(&engine, "SELECT count(*) FROM done")
+            .await
+            .as_deref(),
+        Some("0")
+    );
+}
+
+#[tokio::test]
 async fn a_second_instance_runs_nothing_and_taking_the_lock_applies_the_policy() {
     let dir = data_dir();
     let first = Bench::in_dir(

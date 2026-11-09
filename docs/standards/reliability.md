@@ -197,7 +197,10 @@ these rules; the specification explains why
   grant is checked against the connections' profile revisions and
   environment labels, the chain's revision, the target's fingerprint and the
   zone; any difference suspends the schedule and takes its queued run out of
-  the queue, as **Stop** does (an active run is not stopped). A scheduled run
+  the queue, as **Stop** does (an active run is not stopped). A chain is
+  queued until its first step starts: while that step is prepared or waits
+  for a slot, turning the schedule off, deleting it or a suspension stops
+  the chain, and no step runs; once a step started, the chain goes on. A scheduled run
   opens no dialog: without a remembered password it is admitted and fails
   with `authentication`, nothing sent; a chain fails before its first step.
   A scheduled run refused by a full queue or past its wait leaves no run row;

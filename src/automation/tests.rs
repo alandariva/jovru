@@ -1075,6 +1075,43 @@ fn with_outputs(job: &mut JobDefinition, row: RowRule) {
 }
 
 #[tokio::test]
+async fn an_output_of_a_row_over_the_memory_ceiling_fails_instead_of_reading_empty_text() {
+    let file = SqliteFile::new(&[
+        "CREATE TABLE d (k TEXT, address TEXT)",
+        "INSERT INTO d VALUES ('a', 'synthetic-' || hex(randomblob(2048)))",
+    ])
+    .await;
+    // A ceiling below the one row: the result keeps none of it.
+    let engine = Engine::with_limits(
+        Handle::current(),
+        data_dir(),
+        Limits::default(),
+        1024,
+        process::Timings::default(),
+    );
+    assert_eq!(engine.started().await, Availability::Ready);
+    for sql in [
+        "SELECT k, address FROM d",
+        "UPDATE d SET k = k RETURNING k, address",
+    ] {
+        let mut job = file.job(sql);
+        with_outputs(&mut job, RowRule::ExactlyOne);
+        let mut handle = engine.submit(file.run(job, &[])).unwrap();
+        let outcome = finished(&mut handle).await;
+        assert_eq!(
+            (outcome.state, outcome.cause),
+            (RunState::Failed, Some(Cause::Output)),
+            "{sql}"
+        );
+        assert!(
+            matches!(outcome.outputs, Some(Err(OutputProblem::RowNotKept))),
+            "{sql}: {:?}",
+            outcome.outputs
+        );
+    }
+}
+
+#[tokio::test]
 async fn outputs_follow_the_row_rule_and_are_stored_only_on_opt_in() {
     let file = SqliteFile::new(&[
         "CREATE TABLE d (k TEXT, address TEXT)",

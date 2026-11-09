@@ -376,6 +376,10 @@ pub fn output_problem(problem: &OutputProblem) -> String {
         OutputProblem::SeveralRows => {
             tr!("The result had several rows and the rule does not take the first.").to_owned()
         }
+        OutputProblem::RowNotKept => tr!(
+            "The row the outputs read was larger than a result keeps in memory, so its values are unknown."
+        )
+        .to_owned(),
         OutputProblem::MissingColumn { name, column } => tr!(
             "The output {0} reads column {1}, which the result does not have.",
             name,

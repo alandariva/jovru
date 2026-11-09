@@ -40,6 +40,9 @@ pub enum OutputProblem {
     NoRow,
     /// The result had several rows and the rule does not take the first.
     SeveralRows,
+    /// The row the outputs read was returned but not kept: it alone was
+    /// over the memory ceiling of a result.
+    RowNotKept,
     /// An output names a column the result does not have.
     MissingColumn { name: String, column: u32 },
     /// A declared output is absent.
@@ -75,6 +78,10 @@ pub fn from_result(
             return Err(OutputProblem::SeveralRows);
         }
     };
+    // A row seen but not kept has no values to read: they are not empty.
+    if taken.is_some_and(|row| row >= data.row_count()) {
+        return Err(OutputProblem::RowNotKept);
+    }
     let values = outputs
         .iter()
         .map(|output| {
@@ -212,6 +219,19 @@ mod tests {
             |rule, data: &ResultData| from_result(&outputs(), rule, data, data.row_count() as u64);
 
         assert_eq!(take(RowRule::ExactlyOne, &none), Err(OutputProblem::NoRow));
+        // A row the statement returned that was over the memory ceiling, so
+        // the result kept none: its values are unknown, never empty text.
+        for rule in [RowRule::ExactlyOne, RowRule::AtMostOne, RowRule::First] {
+            assert_eq!(
+                from_result(&outputs(), rule, &none, 1),
+                Err(OutputProblem::RowNotKept),
+                "{rule:?}"
+            );
+        }
+        assert_eq!(
+            from_result(&outputs(), RowRule::First, &none, 5),
+            Err(OutputProblem::RowNotKept)
+        );
         assert_eq!(
             values(&take(RowRule::ExactlyOne, &one).unwrap()),
             vec![Some("12.50"), Some("NULL")]

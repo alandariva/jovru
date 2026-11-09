@@ -1780,6 +1780,7 @@
   "The result is large: copying it can take a moment and holds all of it in the clipboard.": "O resultado é grande: copiá-lo pode levar um tempo e ocupa tudo isso na área de transferência.",
   "The result stopped at {0} rows; more rows exist.": "O resultado parou em {0} linhas; existem mais linhas.",
   "The row affected {0} rows of the table, not one.": "A linha afetou {0} linhas da tabela, não uma.",
+  "The row the outputs read was larger than a result keeps in memory, so its values are unknown.": "A linha de onde as saídas são lidas era maior do que um resultado guarda na memória, então os valores dela são desconhecidos.",
   "The rows are added to the table in one transaction: all of them, or none if anything fails or you cancel. Values are sent as written and converted by the database.": "As linhas são adicionadas à tabela em uma transação: todas, ou nenhuma se algo falhar ou você cancelar. Os valores vão como estão escritos e o banco os converte.",
   "The rows of {0} are added to {1} on {2}, a connection marked Production. They are written in one transaction: all of them, or none.": "As linhas de {0} são adicionadas a {1} em {2}, uma conexão marcada como Produção. Elas são gravadas em uma transação: todas, ou nenhuma.",
   "The run chosen": "A execução escolhida",

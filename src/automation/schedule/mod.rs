@@ -1343,16 +1343,36 @@ pub fn refusal_code(refusal: &Refusal) -> &'static str {
 }
 
 /// Takes a schedule's queued runs out of the queue, as **Stop** does, and
-/// drops its catch-ups and its waiting due time. An active run goes on.
+/// drops its catch-ups and its waiting due time. An active run goes on. A
+/// chain is queued until its first step starts: while that step is being
+/// prepared or waits for a slot, the chain is stopped, and the step leaves
+/// the queue with it; once a step started, the chain is active and goes on.
 fn withdraw(engine: &Engine, slot: &mut Slot) -> bool {
     let mut changed = !slot.backlog.is_empty() || slot.waiting.is_some();
     slot.backlog.clear();
     slot.waiting = None;
     for tracked in &slot.runs {
-        if let Handle::Run(handle) = &tracked.handle
-            && matches!(handle.status(), RunStatus::Queued { .. })
-        {
-            changed |= engine.stop_run(handle.id);
+        match &tracked.handle {
+            Handle::Run(handle) => {
+                if matches!(handle.status(), RunStatus::Queued { .. }) {
+                    changed |= engine.stop_run(handle.id);
+                }
+            }
+            Handle::Chain(handle) => {
+                let queued = match handle.status() {
+                    ChainStatus::Running { step: 0, run: None } => true,
+                    ChainStatus::Running {
+                        step: 0,
+                        run: Some(run),
+                    } => engine
+                        .subscribe(run)
+                        .is_some_and(|step| matches!(step.status(), RunStatus::Queued { .. })),
+                    _ => false,
+                };
+                if queued {
+                    changed |= engine.stop_chain(handle.id);
+                }
+            }
         }
     }
     changed
