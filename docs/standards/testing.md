@@ -111,7 +111,8 @@ defaults and comments, a view, a materialized view and a partitioned table
 an index, a check constraint, a trigger and a routine for inspection, an enum
 and a sequence (PostgreSQL), and a login `gate_reader` (same fixture-only
 password) that may not use one schema or database, for permission warnings,
-with synthetic data. Never use production credentials or data.
+with synthetic data. MySQL also has `gate_plain`, which never signs in over
+TLS, so its password always needs the RSA exchange without TLS. Never use production credentials or data.
 
 Each run creates a Compose project `jykre-gate-<pid>-<suffix>` and tries to
 remove it, with its volumes, at the end, even if startup or a test fails. An

@@ -591,6 +591,27 @@ async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
 }
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_a_password_that_needs_rsa_without_tls_says_tls_is_required() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        // `gate_plain` never signs in over TLS, so the server has no cached
+        // hash for it: without TLS its password must go RSA-encrypted, which
+        // this build leaves out (ADR-0002). The fixture accepts plaintext
+        // connections; the error names TLS instead of a broken protocol.
+        let mut plain = input();
+        plain.config.options["user"] = json!("gate_plain");
+        plain.config.options["sslMode"] = json!("disabled");
+        let error = MySqlDriver
+            .test(&plain, CancellationToken::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Authentication, "{}", error.message);
+        assert!(error.message.contains("requires TLS"), "{}", error.message);
+    })
+    .await
+    .unwrap();
+}
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_discovery_lists_databases_without_system_ones() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = MySqlDriver;

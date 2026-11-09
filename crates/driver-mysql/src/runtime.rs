@@ -16,8 +16,17 @@ use tokio::sync::{mpsc, oneshot};
 /// operating system's reason. Anything else (such as configuration, which may
 /// hold the connection URL) gets a fixed message.
 pub(crate) fn map_error(error: sqlx::Error) -> DriverError {
-    if matches!(&error, sqlx::Error::Protocol(message) if message.contains("RSA auth backend disabled"))
-    {
+    // Without TLS, `caching_sha2_password` (MySQL 8's default) and
+    // `sha256_password` send the password RSA-encrypted when the server has
+    // not cached it, and SQLx is built without its RSA feature (ADR-0002).
+    // SQLx 0.9 reports that as a configuration error, earlier versions as a
+    // protocol error; either way it must not read as a broken protocol.
+    let rsa_disabled = |message: &str| message.contains("RSA auth backend disabled");
+    if match &error {
+        sqlx::Error::Protocol(message) => rsa_disabled(message),
+        sqlx::Error::Configuration(source) => rsa_disabled(&source.to_string()),
+        _ => false,
+    } {
         return DriverError::new(
             ErrorCode::Authentication,
             "This MySQL authentication method requires TLS; select required or verify-identity",
@@ -1847,6 +1856,32 @@ mod tests {
                 .map(|(start, found)| start..start + found.len())
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_password_that_needs_rsa_without_tls_says_so() {
+        // What SQLx 0.9 returns when full authentication needs RSA and the
+        // connection has no TLS (sslMode "disabled").
+        let error = sqlx::Error::Configuration(
+            "RSA auth backend disabled; enable feature `mysql-rsa` (or `rsa` if using sqlx-mysql directly) or use TLS.".into(),
+        );
+        let mapped = super::map_error(error);
+        assert_eq!(mapped.code, ErrorCode::Authentication);
+        assert!(
+            mapped.message.contains("requires TLS"),
+            "{}",
+            mapped.message
+        );
+        // Earlier SQLx versions said it as a protocol error.
+        let mapped = super::map_error(sqlx::Error::Protocol("RSA auth backend disabled".into()));
+        assert_eq!(mapped.code, ErrorCode::Authentication);
+        // Any other configuration error keeps its fixed, generic message:
+        // it may hold the connection's URL.
+        let mapped = super::map_error(sqlx::Error::Configuration(
+            "mysql://user:secret@host".into(),
+        ));
+        assert_eq!(mapped.code, ErrorCode::Protocol);
+        assert!(!mapped.message.contains("secret"));
     }
 
     #[test]

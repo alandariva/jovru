@@ -134,7 +134,7 @@ invalid.
 TLS is always explicit. PostgreSQL accepts `disable`, `prefer`, `require`,
 `verify-ca` and `verify-full`. MySQL accepts `disabled`, `preferred`,
 `required`, `verify-ca` and `verify-identity`. The modes are applied to the
-connections. MySQL authentication methods that require RSA must use TLS.
+connections. MySQL authentication methods that require RSA must use TLS: without it, `caching_sha2_password` (MySQL 8's default) signs in only while the server holds the account's hash from an earlier TLS sign-in, and otherwise fails as an authentication error that says TLS is required, never as a protocol error.
 
 `Credentials.password` uses `SecretString`, with a redacted `Debug`.
 Credentials and `ResolvedConnection` do not implement serialization; only the
