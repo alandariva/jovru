@@ -1,12 +1,14 @@
 //! UI-independent contracts shared by database drivers and the application.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod automation;
 mod connection;
 mod driver;
 mod error;
 mod metadata;
 mod registry;
 mod result;
+pub mod write;
 
 pub use async_trait::async_trait;
 pub use connection::*;

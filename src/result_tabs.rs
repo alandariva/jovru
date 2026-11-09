@@ -201,7 +201,7 @@ impl ResultTab {
         self.released
     }
 
-    /// What an export of this tab can read ([Results](../docs/results.md#export)).
+    /// What an export of this tab can read ([Results](../docs/reference/results.md#export)).
     pub fn export_source(&self) -> ExportSource {
         if self.state != ResultState::Done
             || self
@@ -586,10 +586,12 @@ impl ResultTabs {
 
     /// Adds the page read from the session and shows it. Pages from the
     /// start are released while the tab holds more than the ceiling, keeping
-    /// at least the new one.
+    /// at least the new one. A tab whose result no longer has more to read
+    /// (another run closed it, or an export took it) takes no page: one that
+    /// arrives late belongs to a result the tab gave up.
     pub fn add_page(&mut self, id: ResultId, page: Completed) {
         let ceiling = self.ceiling;
-        let Some(tab) = self.get_mut(id) else {
+        let Some(tab) = self.get_mut(id).filter(|tab| tab.has_more) else {
             return;
         };
         let first_row = tab
@@ -854,6 +856,49 @@ mod tests {
             },
         );
         assert_eq!(source(&tabs, 0), ExportSource::Partial(Missing::Released));
+    }
+
+    #[test]
+    fn a_page_that_arrives_after_its_result_closed_is_dropped() {
+        let mut tabs = ResultTabs::new(usize::MAX);
+        let old = tabs.begin(&sql(&["select"]), Placement::New)[0];
+        tabs.complete(
+            old,
+            Completed {
+                data: rows(10),
+                limit: Some(ResultLimit::Rows(10)),
+                has_more: true,
+                ..Completed::default()
+            },
+        );
+        // A new run closes the old result while its next page is out.
+        tabs.begin(&sql(&["select again"]), Placement::New);
+        let late = || Completed {
+            data: rows(10),
+            limit: Some(ResultLimit::Rows(10)),
+            has_more: true,
+            ..Completed::default()
+        };
+        tabs.add_page(old, late());
+        let tab = &tabs.tabs()[0];
+        assert_eq!(tab.held_rows(), 10);
+        assert!(!tab.has_more, "the old result does not page again");
+
+        // The same after an export read the rest.
+        let ids = tabs.begin(&sql(&["select"]), Placement::New);
+        tabs.complete(
+            ids[0],
+            Completed {
+                data: rows(10),
+                limit: Some(ResultLimit::Rows(10)),
+                has_more: true,
+                ..Completed::default()
+            },
+        );
+        tabs.rest_exported(ids[0]);
+        tabs.add_page(ids[0], late());
+        let last = tabs.tabs().len() - 1;
+        assert_eq!(tabs.tabs()[last].held_rows(), 10);
     }
 
     fn numbers(tabs: &ResultTabs) -> Vec<(usize, String)> {

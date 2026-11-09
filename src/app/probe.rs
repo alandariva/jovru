@@ -4,9 +4,11 @@
 //! painted last. The heartbeat is a UI-thread task that sleeps 5 ms in a
 //! loop; any extra delay is time the UI thread was busy. Every few seconds
 //! the summary (median, p95 and maximum frame, longest stall and which views
-//! rendered) is logged at `info` under the `jykre::probe` target.
+//! rendered) is logged at `info` under the `jykre::probe` target. The
+//! performance run (`--test-performance`) also keeps each phase's frames and
+//! stalls apart ([`begin_phase`], [`end_phase`]) for its report.
 use gpui_kit::*;
-use jykre::probe::{self, HEARTBEAT, REPORT_EVERY, Samples};
+use jykre::probe::{self, HEARTBEAT, REPORT_EVERY, Samples, Summary};
 use std::{cell::RefCell, collections::BTreeMap, time::Instant};
 
 #[derive(Default)]
@@ -16,6 +18,22 @@ struct Probe {
     stalls: Samples,
     renders: BTreeMap<&'static str, usize>,
     last_report: Option<Instant>,
+    /// The performance run's phase being recorded, if any.
+    phase: Option<Phase>,
+}
+
+/// One phase's frames and stalls.
+#[derive(Default)]
+struct Phase {
+    frames: Samples,
+    stalls: Samples,
+}
+
+/// What the probe saw during a phase of the performance run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhaseSummary {
+    pub frames: Option<Summary>,
+    pub stalls: Option<Summary>,
 }
 
 thread_local! {
@@ -32,10 +50,10 @@ fn with(update: impl FnOnce(&mut Probe)) {
 }
 
 /// Turns the probe on when `JYKRE_PROBE` asks for it and starts the
-/// heartbeat. Call once, on the UI thread.
-pub fn start(cx: &mut App) {
+/// heartbeat. Call once, on the UI thread. Returns whether it is on.
+pub fn start(cx: &mut App) -> bool {
     if !probe::enabled() {
-        return;
+        return false;
     }
     PROBE.with(|probe| *probe.borrow_mut() = Some(Probe::default()));
     tracing::info!("frame probe on");
@@ -45,10 +63,36 @@ pub fn start(cx: &mut App) {
             let slept = Instant::now();
             cx.background_executor().timer(HEARTBEAT).await;
             let late = slept.elapsed().saturating_sub(HEARTBEAT);
-            with(|probe| probe.stalls.push(late));
+            with(|probe| {
+                probe.stalls.push(late);
+                if let Some(phase) = &mut probe.phase {
+                    phase.stalls.push(late);
+                }
+            });
         }
     })
     .detach();
+    true
+}
+
+/// Starts recording a phase's frames and stalls apart from the periodic
+/// summary; a phase already being recorded starts over. Nothing happens
+/// while the probe is off.
+pub fn begin_phase() {
+    with(|probe| probe.phase = Some(Phase::default()));
+}
+
+/// Ends the phase and summarizes it; `None` while the probe is off.
+pub fn end_phase() -> Option<PhaseSummary> {
+    PROBE.with(|probe| {
+        let mut probe = probe.borrow_mut();
+        let probe = probe.as_mut()?;
+        let mut phase = probe.phase.take().unwrap_or_default();
+        Some(PhaseSummary {
+            frames: phase.frames.take_summary(),
+            stalls: phase.stalls.take_summary(),
+        })
+    })
 }
 
 /// Marks the start of a frame. Called first in the root view's `render`.
@@ -74,6 +118,9 @@ fn frame_ended() {
         let now = Instant::now();
         if let Some(started) = probe.frame_started.take() {
             probe.frames.push(now - started);
+            if let Some(phase) = &mut probe.phase {
+                phase.frames.push(now - started);
+            }
         }
         let due = probe
             .last_report

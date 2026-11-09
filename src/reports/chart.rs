@@ -4,7 +4,7 @@
 //! `f64` serves only the geometry (bar heights, line positions, slice
 //! angles), while tooltips, the table and exports keep the database's text,
 //! and a pie's remainder is summed exactly ([`crate::decimal::Sum`]).
-use super::{ChartKind, ChartSpec};
+use super::{ChartKind, ChartSpec, MAX_NUMBERS, Signal};
 use crate::cell_format::{ValueFamily, family};
 use crate::decimal::{Sum, is_number};
 use crate::result::ResultData;
@@ -77,8 +77,8 @@ pub enum ChartProblem {
     NotNumeric(String),
     /// A pie shows a single value column.
     PieNeedsOneValue,
-    /// An indicator shows a single value column.
-    NumberNeedsOneValue,
+    /// A number panel shows at most [`MAX_NUMBERS`] columns.
+    TooManyNumbers,
     /// An indicator shows the first row, and the result has none.
     NoRows,
 }
@@ -99,8 +99,8 @@ impl ChartProblem {
             ChartProblem::PieNeedsOneValue => {
                 crate::tr!("A pie shows a single column of values.").to_owned()
             }
-            ChartProblem::NumberNeedsOneValue => {
-                crate::tr!("An indicator shows a single column.").to_owned()
+            ChartProblem::TooManyNumbers => {
+                crate::tr!("A number panel shows at most {0} columns.", MAX_NUMBERS)
             }
             ChartProblem::NoRows => crate::tr!("The result has no rows to show.").to_owned(),
         }
@@ -108,50 +108,65 @@ impl ChartProblem {
 }
 
 /// One value shown large: the first row's value of a column, as the
-/// database wrote it.
+/// database wrote it, in the colour its condition gives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Indicator {
     pub column: String,
     /// `None` when the value is NULL.
     pub text: Option<String>,
-    /// The result's rows, of which the indicator shows the first.
-    pub rows: usize,
+    /// Green or red when a condition of the column holds.
+    pub signal: Option<Signal>,
 }
 
 /// What a panel shows of its result.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Visual {
     Chart(ChartData),
-    Number(Indicator),
+    /// One indicator per column, in the chart's order.
+    Number(Vec<Indicator>),
 }
 
-/// What `spec` shows of `result`: an indicator for [`ChartKind::Number`],
-/// a chart otherwise.
+/// What `spec` shows of `result`: indicators for [`ChartKind::Number`], a
+/// chart otherwise.
 pub fn visual(result: &ResultData, spec: &ChartSpec) -> Result<Visual, ChartProblem> {
     if spec.kind == ChartKind::Number {
-        indicator(result, spec).map(Visual::Number)
+        indicators(result, spec).map(Visual::Number)
     } else {
         derive(result, spec).map(Visual::Chart)
     }
 }
 
-/// The first row's value of the column `spec` names. Any column may be
-/// shown; its text is never reinterpreted.
-pub fn indicator(result: &ResultData, spec: &ChartSpec) -> Result<Indicator, ChartProblem> {
-    let name = match spec.values.as_slice() {
-        [] => return Err(ChartProblem::NoValues),
-        [name] => name,
-        _ => return Err(ChartProblem::NumberNeedsOneValue),
-    };
-    let index = column(result, name)?;
+/// The first row's value of each column `spec` names, with its colour. Any
+/// column may be shown; its text is never reinterpreted, and it is compared
+/// with its targets exactly.
+pub fn indicators(result: &ResultData, spec: &ChartSpec) -> Result<Vec<Indicator>, ChartProblem> {
+    if spec.values.is_empty() {
+        return Err(ChartProblem::NoValues);
+    }
+    if spec.values.len() > MAX_NUMBERS {
+        return Err(ChartProblem::TooManyNumbers);
+    }
+    let indexes = spec
+        .values
+        .iter()
+        .map(|name| column(result, name))
+        .collect::<Result<Vec<_>, _>>()?;
     if result.row_count() == 0 {
         return Err(ChartProblem::NoRows);
     }
-    Ok(Indicator {
-        column: name.clone(),
-        text: result.value(0, index).map(str::to_owned),
-        rows: result.row_count(),
-    })
+    Ok(spec
+        .values
+        .iter()
+        .zip(indexes)
+        .map(|(name, index)| {
+            let text = result.value(0, index);
+            Indicator {
+                column: name.clone(),
+                text: text.map(str::to_owned),
+                signal: spec.colors.get(name).and_then(|colors| colors.signal(text)),
+            }
+        })
+        .collect())
 }
 
 fn column(result: &ResultData, name: &str) -> Result<usize, ChartProblem> {
@@ -196,9 +211,6 @@ pub fn derive(result: &ResultData, spec: &ChartSpec) -> Result<ChartData, ChartP
     if spec.kind == ChartKind::Pie && spec.values.len() > 1 {
         return Err(ChartProblem::PieNeedsOneValue);
     }
-    if spec.kind == ChartKind::Number && spec.values.len() > 1 {
-        return Err(ChartProblem::NumberNeedsOneValue);
-    }
     let label = column(result, &spec.label)?;
     let values = spec
         .values
@@ -216,7 +228,8 @@ pub fn derive(result: &ResultData, spec: &ChartSpec) -> Result<ChartData, ChartP
         ChartKind::Bar => MAX_BARS,
         ChartKind::Line => MAX_POINTS,
         ChartKind::Pie => MAX_SLICES,
-        // An indicator reads [`indicator`]; drawn as a chart, it is one bar.
+        // A number panel reads [`indicators`]; drawn as a chart, it is one
+        // bar per column.
         ChartKind::Number => 1,
     };
     let point = |row: usize| ChartPoint {
@@ -257,20 +270,17 @@ pub fn derive(result: &ResultData, spec: &ChartSpec) -> Result<ChartData, ChartP
     })
 }
 
-/// A chart that fits `result`: a single number (one row, one column) is an
-/// indicator; otherwise the first column that is not a number labels
+/// A chart that fits `result`: a single row of numbers only (at most four
+/// columns) is a number panel; otherwise the first column that is not a number labels
 /// the points and up to three number columns give values, a date or time
 /// label drawing a line and anything else bars. `None` without a number
 /// column beside the label.
 pub fn suggest(result: &ResultData) -> Option<ChartSpec> {
     let columns = result.columns();
     let numbers = numeric_columns(result);
-    if result.row_count() == 1 && columns.len() == 1 && numbers.len() == 1 {
-        return Some(ChartSpec {
-            kind: ChartKind::Number,
-            label: String::new(),
-            values: numbers,
-        });
+    if result.row_count() == 1 && (1..=4).contains(&columns.len()) && numbers.len() == columns.len()
+    {
+        return Some(ChartSpec::new(ChartKind::Number, "", numbers));
     }
     let label = columns
         .iter()
@@ -289,11 +299,7 @@ pub fn suggest(result: &ResultData) -> Option<ChartSpec> {
     } else {
         ChartKind::Bar
     };
-    Some(ChartSpec {
-        kind,
-        label: label.name.clone(),
-        values,
-    })
+    Some(ChartSpec::new(kind, label.name.clone(), values))
 }
 
 #[cfg(test)]
@@ -312,11 +318,11 @@ mod tests {
     }
 
     fn spec(kind: ChartKind, label: &str, values: &[&str]) -> ChartSpec {
-        ChartSpec {
+        ChartSpec::new(
             kind,
-            label: label.into(),
-            values: values.iter().map(|name| (*name).to_owned()).collect(),
-        }
+            label,
+            values.iter().map(|name| (*name).to_owned()).collect(),
+        )
     }
 
     #[test]
@@ -385,43 +391,70 @@ mod tests {
     }
 
     #[test]
-    fn an_indicator_shows_the_first_row_as_the_database_wrote_it() {
+    fn indicators_show_the_first_row_as_the_database_wrote_it_in_their_colour() {
+        use crate::reports::{Comparison, Condition};
         let data = result(
-            &[("total", "numeric"), ("note", "text")],
+            &[("total", "numeric"), ("note", "text"), ("late", "int4")],
             &[
-                vec![Some("1234567890.123456789"), None],
-                vec![Some("1"), Some("x")],
+                vec![Some("1234567890.123456789"), None, Some("3")],
+                vec![Some("1"), Some("x"), Some("0")],
             ],
         );
-        let spec = |values: &[&str]| ChartSpec {
-            kind: ChartKind::Number,
-            label: String::new(),
-            values: values.iter().map(|name| (*name).to_owned()).collect(),
+        let number = |values: &[&str]| spec(ChartKind::Number, "", values);
+        let indicator = |column: &str, text: Option<&str>, signal| Indicator {
+            column: column.into(),
+            text: text.map(str::to_owned),
+            signal,
         };
         assert_eq!(
-            visual(&data, &spec(&["total"])),
-            Ok(Visual::Number(Indicator {
-                column: "total".into(),
-                text: Some("1234567890.123456789".into()),
-                rows: 2,
-            }))
+            visual(&data, &number(&["total"])),
+            Ok(Visual::Number(vec![indicator(
+                "total",
+                Some("1234567890.123456789"),
+                None
+            )]))
+        );
+        let mut colored = number(&["late", "total", "note"]);
+        colored.set_condition(
+            "late",
+            Signal::Red,
+            Some(Condition::new(Comparison::Greater, "0")),
+        );
+        colored.set_condition(
+            "total",
+            Signal::Green,
+            Some(Condition::new(
+                Comparison::GreaterOrEqual,
+                "1234567890.123456789",
+            )),
+        );
+        colored.set_condition(
+            "note",
+            Signal::Green,
+            Some(Condition::new(Comparison::NotEqual, "0")),
         );
         assert_eq!(
-            indicator(&data, &spec(&["note"])).map(|number| number.text),
-            Ok(None)
+            indicators(&data, &colored),
+            Ok(vec![
+                indicator("late", Some("3"), Some(Signal::Red)),
+                indicator("total", Some("1234567890.123456789"), Some(Signal::Green)),
+                // NULL is never coloured.
+                indicator("note", None, None),
+            ])
         );
-        assert_eq!(indicator(&data, &spec(&[])), Err(ChartProblem::NoValues));
+        assert_eq!(indicators(&data, &number(&[])), Err(ChartProblem::NoValues));
+        let many: Vec<String> = (0..=MAX_NUMBERS).map(|_| "total".to_owned()).collect();
         assert_eq!(
-            indicator(&data, &spec(&["total", "note"])),
-            Err(ChartProblem::NumberNeedsOneValue)
+            indicators(&data, &ChartSpec::new(ChartKind::Number, "", many)),
+            Err(ChartProblem::TooManyNumbers)
         );
         assert_eq!(
-            indicator(&data, &spec(&["gone"])),
+            indicators(&data, &number(&["total", "gone"])),
             Err(ChartProblem::MissingColumn("gone".into()))
         );
         let empty = result(&[("total", "numeric")], &[]);
         assert_eq!(
-            indicator(&empty, &spec(&["total"])),
+            indicators(&empty, &number(&["total"])),
             Err(ChartProblem::NoRows)
         );
     }
@@ -457,10 +490,31 @@ mod tests {
             suggest(&single),
             Some(spec(ChartKind::Number, "", &["total"]))
         );
+        // One row of numbers only: a number per column.
         let numbers = result(
             &[("n", "text"), ("m", "text")],
             &[vec![Some("1"), Some("2")]],
         );
-        assert_eq!(suggest(&numbers), Some(spec(ChartKind::Bar, "n", &["m"])));
+        assert_eq!(
+            suggest(&numbers),
+            Some(spec(ChartKind::Number, "", &["n", "m"]))
+        );
+        // Past four columns, or with more rows, they are bars.
+        let wide = result(
+            &[
+                ("a", "int4"),
+                ("b", "int4"),
+                ("c", "int4"),
+                ("d", "int4"),
+                ("e", "int4"),
+            ],
+            &[vec![Some("1"), Some("2"), Some("3"), Some("4"), Some("5")]],
+        );
+        assert_eq!(suggest(&wide).map(|spec| spec.kind), Some(ChartKind::Bar));
+        let rows = result(
+            &[("n", "text"), ("m", "text")],
+            &[vec![Some("1"), Some("2")], vec![Some("3"), Some("4")]],
+        );
+        assert_eq!(suggest(&rows), Some(spec(ChartKind::Bar, "n", &["m"])));
     }
 }

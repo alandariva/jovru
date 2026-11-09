@@ -1421,7 +1421,7 @@ impl ReportView {
                     .child(
                         div()
                             .w(px(120.))
-                            .font_family("Cascadia Code")
+                            .font_family(fonts().code.clone())
                             .text_size(px(13.))
                             .text_color(rgb(colors().sql_parameter))
                             .truncate()
@@ -1818,7 +1818,8 @@ impl ReportView {
             .child(label(parts.join(" · ")))
             .when(self.mode == ReportMode::Edit, |s| {
                 s.child(div().flex_1()).child(label(tr!(
-                    "Ctrl Enter in a panel's SQL runs that panel; elsewhere, the whole report."
+                    "{0} in a panel's SQL runs that panel; elsewhere, the whole report.",
+                    super::shortcuts::label::<super::ExecuteCurrentQuery>(cx)
                 )))
             })
     }

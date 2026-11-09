@@ -17,7 +17,7 @@ resolver = "3"
 members = ["crates/*", "xtask"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
@@ -74,9 +74,39 @@ opentelemetry-otlp = { version = "0.33.1", default-features = false, features = 
 tracing-opentelemetry = { version = "0.34.0", default-features = false }
 opentelemetry-appender-tracing = { version = "0.33.1", default-features = false }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# Process-tree supervision for automation's external programs (Q-11,
+# approved 2026-11-08, docs/plans/process-supervision-dependency.md): a Job
+# Object on Windows, a process group on Unix. Used only by
+# `jykre::automation`'s program executor; no `tracing` feature, whose spans
+# would carry fields outside the telemetry allowlist.
+process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop", "process-group", "creation-flags"] }
+# Time zones of automation schedules (Q-33, approved 2026-11-08,
+# docs/plans/schedule-time-zone-dependency.md): the version already in
+# Cargo.lock, default features (the system's zone database on Unix, the
+# bundled one on Windows). No cron or RRULE crate: the rule is our own form.
+jiff = "0.2.39"
+# SHA-256 fingerprints of automation snapshots (ADR-0034, approved
+# 2026-11-08): a direct dependency of jykre-storage only.
+sha2 = "0.10"
 # SQL formatting by dialect (N010), behind jykre-sql-language's `sqruff`
 # feature; it has no default features to turn off.
 sqruff-lib = "0.44.0"
+# The Windows executable's icon and version details, from build.rs
+# (approved 2026-11-07). Without `toml`, it reads nothing from Cargo.toml.
+winresource = { version = "0.1.34", default-features = false }
+# Updates (ADR-0033, approved 2026-11-08): GitHub's release list, signature
+# verification (zipsign, ed25519ph) and archive extraction. Never its
+# `rustls` feature: through reqwest 0.13 it compiles aws-lc-rs; our own
+# reqwest client (TLS on ring) is passed in instead.
+self_update = { version = "1.3.3", default-features = false, features = ["github", "async", "signatures", "archive-tar", "compression-tar-gz", "archive-zip", "compression-zip-deflate"] }
+# Reading CSV and XLSX files for an import into a table (ADR-0040, approved
+# 2026-11-08, docs/plans/csv-and-xlsx-reading-dependencies.md). Used only by
+# `jykre::import`. `calamine`'s default is empty; `dates`, `chrono` and
+# `picture` stay off. `encoding_rs` was already in the tree and becomes
+# direct, without `fast-legacy-encode` or `simd-accel`.
+csv = "1.4.0"
+calamine = { version = "0.38.0", default-features = false }
+encoding_rs = "0.8.44"
 
 [dependencies]
 gpui-kit = "0.9.0"
@@ -116,12 +146,41 @@ secrecy.workspace = true
 # Export to XLSX (approved 2026-11-04). Constant memory mode writes each row
 # to a temporary file as it is added, so an export never holds the sheet.
 rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["constant_memory"] }
+# Update check and signed self-install (ADR-0033); only `jykre::update`.
+self_update.workspace = true
+# External programs of automation (Q-11); only `jykre::automation`.
+process-wrap.workspace = true
+# Schedules' time zones (Q-33): the scheduler and the schedule views only.
+jiff.workspace = true
+# Reading CSV and XLSX for an import (ADR-0040); only `jykre::import`.
+csv.workspace = true
+calamine.workspace = true
+encoding_rs.workspace = true
+# The size of an XLSX's shared strings table, checked before `calamine`
+# opens the workbook (ADR-0040's proposal). Already in the tree through
+# `rust_xlsxwriter` and `self_update`; the update tests also write archives.
+zip = { version = "9", default-features = false }
+
+# A program's stdout and stderr in the console's OEM code page (CP437, CP850…)
+# are shown as text (ADR-0037, amended 2026-11-09): `windows-registry` reads
+# that code page, `oem_cp` decodes it. Both safe; no `unsafe` in our code.
+[target.'cfg(windows)'.dependencies]
+oem_cp = "2.1.2"
+windows-registry = "0.6.1"
+
+[build-dependencies]
+winresource.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+# Signed release archives for the update tests (ADR-0033): crates the
+# updater already brings, with zipsign-api's signing turned on.
+zipsign-api = { version = "0.2.2", default-features = false, features = ["sign-tar", "sign-zip"] }
+tar = "0.4"
+flate2 = "1"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
 # Hot paths with criterion (ADR-0010). `cargo xtask check --full` runs them in
@@ -129,3 +188,36 @@ opentelemetry_sdk = { workspace = true, features = ["testing"] }
 [[bench]]
 name = "hot_paths"
 harness = false
+
+# `calamine` parses numbers and cell references of untrusted XLSX files with
+# `atoi_simd`, which indexes through `debug_unsafe`: checked with debug
+# assertions, unchecked otherwise. Debug assertions on for that crate keep
+# its indexing checked in release builds, so a malformed file panics (and
+# the import fails) instead of reading out of bounds. Approved by the
+# maintainer on 2026-11-08 (ADR-0040's proposal, residual risks).
+[profile.release.package.debug_unsafe]
+debug-assertions = true
+
+# `atoi_simd` also branches on `cfg!(debug_assertions)` to its own
+# `unreachable_unchecked`, and `calamine` adds up cell references in `u32`
+# without a check. Both are checked in release builds too, for the same
+# reason. Approved by the maintainer on 2026-11-08.
+[profile.release.package.atoi_simd]
+debug-assertions = true
+
+[profile.release.package.calamine]
+overflow-checks = true
+
+# SQLx 0.9.0 plus public readers of the transaction state the server reports
+# (ADR-0030, TD-001), from a fork pinned to one revision of its branch
+# `jykre/transaction-status` until a SQLx release has them. Every SQLx crate
+# is patched, so the tree keeps one `sqlx-core`; the revision is allowed in
+# `deny.toml`.
+[patch.crates-io]
+sqlx = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-core = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-macros = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-macros-core = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-mysql = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-postgres = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }
+sqlx-sqlite = { git = "https://github.com/alandariva/sqlx", rev = "8ddadbe8083766320e8ca1417c62ce3c8a689658" }

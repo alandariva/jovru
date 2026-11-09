@@ -84,7 +84,8 @@ impl AppView {
                 quick.text.pop();
                 self.quick_search_changed(window, cx);
             }
-            "up" | "down" if plain => self.quick_step(keystroke.key == "down", window, cx),
+            // Up and Down are the explorer's keymap actions, which step
+            // through the matches while this search is open.
             "enter" if plain => self.activate_selected(window, cx),
             // Left, Right, Home, End, F5 and the rest go to the node.
             _ => match typed {
@@ -126,7 +127,27 @@ impl AppView {
 
     /// `↑` or `↓` during the quick search: the previous or next match,
     /// wrapping; with no text, the previous or next node.
-    fn quick_step(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Up or Down on the tree itself: a step of the quick search while it
+    /// is open; otherwise the key goes on.
+    pub(super) fn quick_step_or_pass(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.explorer_quick.is_some() {
+            self.quick_step(forward, window, cx);
+        } else {
+            cx.propagate();
+        }
+    }
+
+    pub(super) fn quick_step(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let text = self
             .explorer_quick
             .as_ref()

@@ -360,33 +360,50 @@ pub fn relex(
     edit: Edit,
     dialect: Option<SqlDialect>,
 ) -> Vec<(Range<usize>, TokenKind)> {
+    let mut tokens = old.to_vec();
+    relex_in_place(&mut tokens, sql, edit, dialect);
+    tokens
+}
+
+/// [`relex`] on the tokens it is given: only the tokens around the edit are
+/// replaced and the ones after it moved, so a keystroke in a long script
+/// costs no new list of every token.
+pub fn relex_in_place(
+    tokens: &mut Vec<(Range<usize>, TokenKind)>,
+    sql: &str,
+    edit: Edit,
+    dialect: Option<SqlDialect>,
+) {
     let rules = Rules { dialect };
     // A token ending before the edit is read up to a character before it,
     // so the edit cannot change it.
-    let keep = old.partition_point(|(range, _)| range.end < edit.start);
-    let mut found: Vec<_> = old[..keep].to_vec();
-    let mut pos = found.last().map_or(0, |(range, _)| range.end);
-    let moved = |(range, kind): &(Range<usize>, TokenKind)| {
-        let shift = |at: usize| at - edit.old_end + edit.new_end;
-        (shift(range.start)..shift(range.end), *kind)
-    };
-    let mut candidate = old.partition_point(|(range, _)| range.start < edit.old_end);
+    let keep = tokens.partition_point(|(range, _)| range.end < edit.start);
+    let mut pos = keep.checked_sub(1).map_or(0, |last| tokens[last].0.end);
+    let shift = |at: usize| at - edit.old_end + edit.new_end;
+    let moved =
+        |(range, kind): &(Range<usize>, TokenKind)| (shift(range.start)..shift(range.end), *kind);
+    let mut candidate = tokens.partition_point(|(range, _)| range.start < edit.old_end);
+    let mut fresh = Vec::new();
     while let Some(token) = next_token(sql, pos, rules) {
         if token.0.start >= edit.new_end {
-            while candidate < old.len() && moved(&old[candidate]).0.start < token.0.start {
+            while candidate < tokens.len() && moved(&tokens[candidate]).0.start < token.0.start {
                 candidate += 1;
             }
-            if candidate < old.len() && moved(&old[candidate]) == token {
+            if candidate < tokens.len() && moved(&tokens[candidate]) == token {
                 // In step again: the text from here on is the old text,
                 // moved, so its tokens are too.
-                found.extend(old[candidate..].iter().map(moved));
-                return found;
+                for (range, _) in &mut tokens[candidate..] {
+                    *range = shift(range.start)..shift(range.end);
+                }
+                tokens.splice(keep..candidate, fresh);
+                return;
             }
         }
         pos = token.0.end;
-        found.push(token);
+        fresh.push(token);
     }
-    found
+    tokens.truncate(keep);
+    tokens.extend(fresh);
 }
 
 /// The word of a token, upper case, or `None` for any other kind.
@@ -1293,6 +1310,31 @@ SELECT 'a;b' FROM t{index};
     }
 
     #[test]
+    fn a_keystroke_in_a_4_mib_script_relexes_in_place_within_budget() {
+        // The highlighter's tokens for the largest file a tab opens: a
+        // keystroke replaces the tokens around it and moves the rest, with
+        // no new list of every token (about 1.5 ms in release).
+        let line = "SELECT 00000000 AS n, 'synthetic row' AS label, 42 AS answer FROM dual;\n";
+        let mut script = line.repeat(4 * 1024 * 1024 / line.len());
+        let mut current = tokens(&script, None);
+        let middle = script.len() / 2;
+        let middle = (middle..script.len())
+            .find(|at| script.is_char_boundary(*at))
+            .unwrap();
+        script.insert(middle, 'x');
+        let edit = super::Edit {
+            start: middle,
+            old_end: middle,
+            new_end: middle + 1,
+        };
+        let start = Instant::now();
+        super::relex_in_place(&mut current, &script, edit, None);
+        let elapsed = start.elapsed();
+        assert!(elapsed < Duration::from_millis(100), "took {elapsed:?}");
+        assert_eq!(current, tokens(&script, None));
+    }
+
+    #[test]
     fn a_long_script_maps_its_statements_to_lines_within_budget() {
         // Counting lines from the start for every statement is quadratic in
         // the script; this is one pass, paid once per edit.
@@ -1355,7 +1397,7 @@ SELECT 'a;b' FROM t{index};
                     old_end,
                     new_end: start + inserted.len(),
                 };
-                current = super::relex(&current, &text, edit, dialect);
+                super::relex_in_place(&mut current, &text, edit, dialect);
                 assert_eq!(current, tokens(&text, dialect), "{text:?} after {edit:?}");
             }
         }

@@ -107,11 +107,13 @@ impl Session for PagedSession {
                 name: "n".into(),
                 data_type: "int8".into(),
                 nullable: Some(false),
+                origin: Default::default(),
             },
             ColumnInfo {
                 name: "note".into(),
                 data_type: "text".into(),
                 nullable: Some(true),
+                origin: Default::default(),
             },
         ]);
         Ok(self.send(request.options.max_rows, sink))
@@ -222,6 +224,7 @@ fn request(target: PathBuf, pages: Vec<Arc<ResultData>>, read: ExportRead) -> Ex
         target,
         options: crate::export::ExportOptions::default(),
         columns: columns(),
+        shown: None,
         sql: SqlTarget::default(),
         pages,
         read,
@@ -307,6 +310,7 @@ async fn the_rest_of_an_open_result_follows_the_held_pages_in_larger_parts() {
     // Parts are sized by the bytes of a row, far above the tab's page.
     assert!(calls.fetches[0] > 10_000, "{:?}", calls.fetches);
     assert!(calls.fetches.len() <= 3, "{:?}", calls.fetches);
+    assert!(run.rest_read);
     // Read to its end, so the session reports its context again.
     assert_eq!(calls.contexts, 1);
     assert!(run.context.is_some());
@@ -343,6 +347,8 @@ async fn a_cancelled_or_failed_export_leaves_the_destination_as_it_was() {
         )
         .await;
         assert_eq!(run.outcome.unwrap_err().code, code);
+        // The rest was read from the result, so the tab no longer pages it.
+        assert!(run.rest_read);
         // The session goes back to the tab; nothing asks it for a context,
         // which would discard what is left of the result.
         assert!(run.session.is_some());
@@ -374,6 +380,32 @@ async fn a_folder_that_cannot_be_written_fails_before_the_session_is_read() {
     assert_eq!(run.outcome.unwrap_err().code, ErrorCode::NotFound);
     assert!(run.session.is_some());
     assert!(calls.lock().unwrap().fetches.is_empty());
+    // The result is still open: the tab goes on paging it.
+    assert!(!run.rest_read);
+    assert!(!run.target_unknown);
+
+    // Cancelled before the first part is asked of the session: the same.
+    let calls = Arc::new(Mutex::new(Calls::default()));
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let run = export(
+        request(
+            dir.join("result.csv"),
+            vec![page(0, 10)],
+            ExportRead::Rest {
+                session: Box::new(PagedSession::new(100, 10, &calls)),
+                options: ExecutionOptions::default(),
+            },
+        ),
+        cancel,
+        None,
+    )
+    .await;
+    assert_eq!(run.outcome.unwrap_err().code, ErrorCode::Cancelled);
+    assert!(run.session.is_some());
+    assert!(calls.lock().unwrap().fetches.is_empty());
+    assert!(!run.rest_read);
+    assert!(names(&dir).is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }
 

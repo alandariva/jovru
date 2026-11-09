@@ -9,6 +9,7 @@ pub use runtime::{ComputeResource, list_compute};
 
 use jykre_core::*;
 mod auth;
+mod position;
 mod runtime;
 
 #[derive(Debug, Default)]
@@ -42,6 +43,7 @@ impl Driver for DatabricksDriver {
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
                 named_parameters: true,
+                row_writes: true,
                 sql: true,
                 metadata: true,
                 transactions: false,

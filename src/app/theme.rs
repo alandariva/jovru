@@ -1,6 +1,7 @@
 //! Puts the theme the user chose on screen: the application's palette
 //! ([`super::ui::colors`]) and the component kit's theme follow it
 //! together. The choice itself is [`jykre::theme::ThemeChoice`].
+use super::fonts::fonts;
 use super::ui::{colors, set_light};
 use gpui_kit::component::{ActiveTheme, Theme, ThemeMode};
 use gpui_kit::*;
@@ -52,9 +53,9 @@ pub(super) fn apply(choice: ThemeChoice, window: Option<&Window>, cx: &mut App) 
     );
     let c = colors();
     Theme::update(cx, |theme| {
-        theme.font_family = "Segoe UI".into();
+        theme.font_family = fonts().ui.clone();
         theme.font_size = px(14.);
-        theme.mono_font_family = "Cascadia Code".into();
+        theme.mono_font_family = fonts().code.clone();
         theme.mono_font_size = mono_font_size;
         theme.background = rgb(c.bg).into();
         theme.foreground = rgb(c.text).into();

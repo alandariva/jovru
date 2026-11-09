@@ -1,17 +1,12 @@
-//! The dialog that names a saved query and gives it tags: it opens when a
-//! query is saved for the first time and from the library's rename button.
-//! Saving it again later only updates the SQL, so the name and tags stay
-//! what the user chose here.
+//! The dialog that renames a saved query and gives it tags, from the
+//! library's pencil. A query that is a file is renamed by renaming its
+//! file, never over another one, and its tags stay local (ADR-0031); a
+//! saved query of an earlier version, not moved to a file yet, is renamed
+//! in place.
 use super::*;
 
 /// What the open dialog names.
 pub(super) enum QueryDetails {
-    /// A tab's SQL, not in the library yet.
-    New {
-        panel: WeakEntity<Workspace>,
-        connection: String,
-        sql: String,
-    },
     /// The saved query with this identity.
     Edit { id: u64 },
 }
@@ -45,10 +40,13 @@ impl AppView {
         self.query_details.is_some()
     }
 
-    /// A modal dialog is open: the query details, the report picker or
-    /// Preferences.
+    /// A modal dialog is open: the query details, the report picker, the
+    /// import dialog or Preferences.
     pub(super) fn dialog_open(&self) -> bool {
-        self.details_open() || self.report_picker.is_some() || self.settings_open
+        self.details_open()
+            || self.report_picker.is_some()
+            || self.import_dialog.is_some()
+            || self.settings_open
     }
 
     /// Opens the dialog for the saved query `id`, to rename it or change its
@@ -76,34 +74,20 @@ impl AppView {
             return;
         }
         let tags = jykre::workspace_state::parse_tags(&self.details_tags.read(cx).value());
-        let Some(details) = self.query_details.take() else {
+        let Some(QueryDetails::Edit { id }) = self
+            .query_details
+            .as_ref()
+            .map(|QueryDetails::Edit { id }| QueryDetails::Edit { id: *id })
+        else {
             return;
         };
-        let id = match details {
-            QueryDetails::New {
-                panel,
-                connection,
-                sql,
-            } => {
-                let id = jykre::workspace_state::save_query(
-                    &mut self.saved_queries,
-                    &mut self.next_saved_id,
-                    None,
-                    &name,
-                    &tags,
-                    &connection,
-                    &sql,
-                );
-                if let Some(panel) = panel.upgrade() {
-                    panel.update(cx, |panel, cx| panel.saved(id, sql, cx));
-                }
-                id
-            }
-            QueryDetails::Edit { id } => {
-                jykre::workspace_state::edit_saved(&mut self.saved_queries, id, &name, &tags);
-                id
-            }
-        };
+        if self.is_file_entry(id) {
+            self.rename_file_entry(id, &name, tags, window, cx);
+            return;
+        }
+        self.query_details = None;
+        jykre::workspace_state::edit_saved(&mut self.unmigrated, id, &name, &tags);
+        jykre::workspace_state::edit_saved(&mut self.saved_queries, id, &name, &tags);
         // The tab that edits the query shows its name.
         let open: Vec<(TabId, Entity<Workspace>)> = self
             .panels
@@ -121,6 +105,89 @@ impl AppView {
         self.save_state_soon(cx);
         self.focus_active_editor(window, cx);
         cx.notify();
+    }
+
+    /// A file's tags change locally; a new name renames the file, off the UI
+    /// thread, and the tabs that edit it follow. A rename that fails (the
+    /// name is taken, the file is gone) keeps the dialog open and says why.
+    fn rename_file_entry(
+        &mut self,
+        id: u64,
+        name: &str,
+        tags: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = self.query_library.entry(id).cloned() else {
+            return;
+        };
+        let from = entry.path.clone();
+        let to = from
+            .parent()
+            .map(|folder| folder.join(jykre::query_files::names::file_name(name)))
+            .unwrap_or_else(|| from.clone());
+        let renames = !jykre::query_files::names::same_path(&from, &to) || from != to;
+        if let Some(entry) = self.query_library.entry_mut(id) {
+            entry.tags = tags;
+        }
+        self.save_library_soon(cx);
+        if !renames {
+            self.query_details = None;
+            self.rebuild_library_view(cx);
+            self.focus_active_editor(window, cx);
+            cx.notify();
+            return;
+        }
+        let (source, target) = (from.clone(), to.clone());
+        cx.spawn_in(window, async move |weak, cx| {
+            let renamed = backend::run(async move {
+                Ok(tokio::task::spawn_blocking(move || {
+                    jykre::query_files::rename(&source, &target)
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    Err(jykre::query_files::FileError::Io(
+                        "the file task stopped".into(),
+                    ))
+                }))
+            })
+            .await
+            .unwrap_or_else(|error| Err(jykre::query_files::FileError::Io(error.message.clone())));
+            let _ = weak.update_in(cx, |this, window, cx| {
+                if let Err(error) = renamed {
+                    this.details_error = Some(tr!("Not renamed: {0}", error.message()));
+                    cx.notify();
+                    return;
+                }
+                this.query_details = None;
+                this.query_library.moved(id, &to);
+                let title = jykre::query_files::names::title_of(&to);
+                let open: Vec<(TabId, Entity<Workspace>)> = this
+                    .panels
+                    .iter()
+                    .filter(|(_, panel)| {
+                        panel.read(cx).file().is_some_and(|file| {
+                            jykre::query_files::names::same_path(&file.path, &from)
+                        })
+                    })
+                    .map(|(tab, panel)| (*tab, panel.clone()))
+                    .collect();
+                for (tab, panel) in open {
+                    panel.update(cx, |panel, cx| panel.file_moved(to.clone(), None, cx));
+                    let _ = this
+                        .tabs
+                        .update(cx, |tabs, cx| tabs.set_tab_title(tab, title.clone(), cx));
+                    this.unsaved_marked.remove(&tab);
+                    this.mark_unsaved(tab, cx);
+                }
+                this.save_library_soon(cx);
+                this.save_state_soon(cx);
+                this.scan_library(cx);
+                this.focus_active_editor(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Closes the dialog; a new query stays unsaved.
@@ -148,9 +215,18 @@ impl AppView {
             return div().into_any_element();
         };
         let (title, ok) = match details {
-            QueryDetails::New { .. } => (tr!("Save the query"), tr!("Save")),
             QueryDetails::Edit { .. } => (tr!("Rename the saved query"), tr!("Save changes")),
         };
+        // A file's name cannot hold every title: the name it will get is
+        // shown before the rename (ADR-0031).
+        let QueryDetails::Edit { id } = details;
+        let file_name = self
+            .is_file_entry(*id)
+            .then(|| self.details_name.read(cx).value().trim().to_owned())
+            .filter(|name| {
+                !name.is_empty() && jykre::query_files::names::safe_stem(name, "Query") != *name
+            })
+            .map(|name| jykre::query_files::names::file_name(&name));
         self.overlay("details-backdrop", cx)
             .child(
                 column()
@@ -179,6 +255,15 @@ impl AppView {
                             .w_full()
                             .aria_label(tr!("Name of the saved query")),
                     )
+                    .when_some(file_name, |s, file_name| {
+                        s.child(
+                            div()
+                                .id("details-file-name")
+                                .text_size(px(13.))
+                                .text_color(rgb(colors().muted))
+                                .child(tr!("The file will be named {0}.", file_name)),
+                        )
+                    })
                     .child(label(tr!("Tags, separated by commas")))
                     .child(
                         Input::new(&self.details_tags)

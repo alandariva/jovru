@@ -31,6 +31,25 @@ pub enum TransactionStatus {
     Manual,
 }
 
+/// Whether what a session sends and receives travels encrypted, as the
+/// connection found it when the session opened
+/// ([`crate::Session::encryption`]).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Encryption {
+    /// The driver cannot tell.
+    #[default]
+    Unknown,
+    /// Over TLS, with the protocol version when the server names it
+    /// (`TLSv1.3`).
+    Tls { version: Option<String> },
+    /// In plain text: anyone on the network path can read the SQL, the
+    /// results and the password.
+    Plaintext,
+    /// No network at all: a database file on this computer.
+    Local,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOptions {
     pub max_rows: u32,
@@ -309,6 +328,46 @@ pub struct ColumnInfo {
     pub name: String,
     pub data_type: String,
     pub nullable: Option<bool>,
+    /// Where the column's values come from, as the protocol described it
+    /// when the statement was prepared, with no extra I/O (ADR-0039).
+    pub origin: ColumnOrigin,
+}
+
+impl ColumnInfo {
+    /// A column whose nullability and origin the driver cannot tell.
+    pub fn new(name: impl Into<String>, data_type: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable: None,
+            origin: ColumnOrigin::Unknown,
+        }
+    }
+}
+
+/// Where a result column's values come from (ADR-0039).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub enum ColumnOrigin {
+    /// The driver cannot tell (the default; Databricks).
+    #[default]
+    Unknown,
+    /// Computed: an expression, a function, a literal, an aggregate, or a
+    /// column the protocol does not tie to a relation.
+    Expression,
+    /// A column of a stored relation, named the way the driver identifies it.
+    Stored(SourceColumn),
+}
+
+/// The driver's own identifiers for a column's relation and the column in
+/// it. Elsewhere they are compared for equality only: never parsed, shown or
+/// written into SQL. PostgreSQL: the relation's OID and the attribute
+/// number. MySQL: schema, table and column. SQLite: database, table and
+/// column.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SourceColumn {
+    pub relation: String,
+    pub column: String,
 }
 
 /// Exact decimals and temporal values keep their original textual representation.

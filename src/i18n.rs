@@ -30,8 +30,9 @@ struct Active {
     messages: HashMap<&'static str, &'static str>,
 }
 
+static ACTIVE: OnceLock<Active> = OnceLock::new();
+
 fn active() -> &'static Active {
-    static ACTIVE: OnceLock<Active> = OnceLock::new();
     ACTIVE.get_or_init(|| {
         // Unit tests assert source text, so they ignore the machine's language.
         let requested = std::env::var("JYKRE_LOCALE")
@@ -49,6 +50,20 @@ fn active() -> &'static Active {
             .unwrap_or_default();
         Active { tag, messages }
     })
+}
+
+/// Uses the source text for the rest of the process, unless a locale was
+/// already chosen, and returns whether the source locale is the one in use.
+///
+/// This library's own unit tests ignore the machine's language by themselves
+/// (`cfg(test)`). The application's tests link it as an ordinary dependency, so
+/// they call this first to assert source text on any machine.
+pub fn use_source_locale() -> bool {
+    let _ = ACTIVE.set(Active {
+        tag: SOURCE_LOCALE,
+        messages: HashMap::new(),
+    });
+    locale() == SOURCE_LOCALE
 }
 
 /// The locale in use: a catalog tag or [`SOURCE_LOCALE`].

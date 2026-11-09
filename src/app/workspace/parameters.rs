@@ -31,6 +31,8 @@ pub(super) struct ParameterForm {
     memory: Vec<TabParameter>,
     /// The inputs of `fields`, built when the window is at hand.
     inputs: Vec<ParameterInput>,
+    /// The names of the SQL as its outline last read them.
+    names: Vec<String>,
     errors: HashMap<String, ParameterProblem>,
 }
 
@@ -41,28 +43,30 @@ impl ParameterForm {
 }
 
 impl Workspace {
-    /// Reads the names of the SQL again, after it or its dialect changed;
-    /// the fields change only when the names did.
-    pub(super) fn sync_parameters(&mut self) {
-        // Most SQL holds no colon at all: nothing to read.
-        let names = if self.editor_sql.contains(':') {
-            parameters::names(&self.editor_sql, self.run.dialect())
-        } else {
-            Vec::new()
-        };
+    /// Takes the names of the SQL, read with its outline after it or its
+    /// dialect changed ([`jykre::script_outline::Outline`]); the fields
+    /// change only when the names did.
+    pub(super) fn apply_parameter_names(&mut self, names: Vec<String>) {
+        self.parameters.names = names;
+        self.sync_parameters();
+    }
+
+    /// Matches the fields to the names last read.
+    fn sync_parameters(&mut self) {
         let form = &mut self.parameters;
+        let names = &form.names;
         if form.fields.len() == names.len()
             && form
                 .fields
                 .iter()
-                .zip(&names)
+                .zip(names)
                 .all(|(field, name)| &field.name == name)
         {
             return;
         }
         let mut known = std::mem::take(&mut form.fields);
         known.extend(std::mem::take(&mut form.memory));
-        form.fields = parameters::reconcile_fields(&known, &names);
+        form.fields = parameters::reconcile_fields(&known, names);
         form.memory = known
             .into_iter()
             .filter(|field| !names.contains(&field.name))

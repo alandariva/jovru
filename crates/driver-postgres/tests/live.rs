@@ -29,9 +29,9 @@ impl IntrospectionSink for Metadata {
 }
 fn input() -> ResolvedConnection {
     // The fixture port is chosen by Docker for each run: `cargo xtask check
-    // --full` sets it, and docs/testing.md shows how to run these by hand.
+    // --full` sets it, and docs/standards/testing.md shows how to run these by hand.
     let port: u16 = std::env::var("JYKRE_TEST_PORT")
-        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/testing.md)")
+        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/standards/testing.md)")
         .parse()
         .expect("JYKRE_TEST_PORT must be a valid port");
     ResolvedConnection {
@@ -94,6 +94,11 @@ async fn live_connection_queries_metadata_and_timeout() {
             .is_some()
     );
     let mut session = driver.open_session(&input, cancel.clone()).await.unwrap();
+    // The fixture's profile disables TLS: the server says it is plain text.
+    assert_eq!(
+        session.encryption(cancel.clone()).await.unwrap(),
+        Encryption::Plaintext
+    );
     keep_state(&mut session).await;
     let mut sink = Sink::default();
     session.execute(&QueryRequest{parameters:Vec::new(),sql:"SELECT 42 AS answer, NULL AS missing, CAST(123456789.12 AS DECIMAL(20,2)) AS amount".into(),options:ExecutionOptions::default()},&mut sink,cancel.clone()).await.unwrap();
@@ -763,6 +768,47 @@ async fn live_the_transaction_state_is_reported_without_taking_a_snapshot() {
 
 #[tokio::test]
 #[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_commit_and_chain_opens_a_transaction_without_taking_its_snapshot() {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let driver = PostgresDriver;
+        let mut session = driver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        let none = SessionContext::default();
+        text_in(&mut session, "BEGIN", &none).await;
+        text_in(&mut session, "SELECT 1", &none).await;
+        // The chained transaction is open, and neither the state nor the
+        // context took its snapshot: SET TRANSACTION still works.
+        text_in(&mut session, "COMMIT AND CHAIN", &none).await;
+        assert_eq!(
+            state(&mut session).await,
+            Some(TransactionStatus::Open {
+                changes: Some(false)
+            })
+        );
+        session.context(CancellationToken::new()).await.unwrap();
+        text_in(
+            &mut session,
+            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            &none,
+        )
+        .await;
+        assert_eq!(
+            text_in(&mut session, "SHOW transaction_isolation", &none).await,
+            "serializable"
+        );
+        // AND NO CHAIN leaves nothing open.
+        text_in(&mut session, "COMMIT AND NO CHAIN", &none).await;
+        assert_eq!(state(&mut session).await, Some(TransactionStatus::Idle));
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_levels_partitions_inspection_permissions_and_databases() {
     tokio::time::timeout(Duration::from_secs(90), async {
         let driver = PostgresDriver;
@@ -1070,4 +1116,611 @@ async fn live_named_parameters_are_bound_and_never_interpolated() {
     })
     .await
     .expect("live named parameters took too long");
+}
+
+/// A sink that keeps the columns, for editing (ADR-0039).
+#[derive(Default)]
+struct Described {
+    columns: Vec<ColumnInfo>,
+    rows: Vec<Row>,
+}
+impl RowSink for Described {
+    fn columns(&mut self, columns: Vec<ColumnInfo>) -> SinkControl {
+        self.columns = columns;
+        SinkControl::Continue
+    }
+    fn row(&mut self, row: Row) -> SinkControl {
+        self.rows.push(row);
+        SinkControl::Continue
+    }
+}
+
+async fn read(session: &mut Box<dyn Session>, sql: &str) -> DriverResult<Described> {
+    let mut sink = Described::default();
+    session
+        .execute(
+            &QueryRequest::new(sql, ExecutionOptions::default()),
+            &mut sink,
+            CancellationToken::new(),
+        )
+        .await?;
+    Ok(sink)
+}
+
+async fn target_of(session: &mut Box<dyn Session>, sql: &str) -> write::EditTarget {
+    let sink = read(session, sql).await.unwrap();
+    session
+        .edit_target(sql, &sink.columns, CancellationToken::new())
+        .await
+        .unwrap()
+}
+
+async fn write_changes(
+    session: &mut Box<dyn Session>,
+    target: &write::EditableTable,
+    changes: Vec<write::RowChange>,
+) -> DriverResult<write::WriteOutcome> {
+    let request = write::WriteRequest {
+        target: target.clone(),
+        changes,
+        timeout: Some(Duration::from_secs(30)),
+        scope: write::WriteScope::Atomic,
+    };
+    session.write(&request, CancellationToken::new()).await
+}
+
+fn text(value: &str) -> write::WriteValue {
+    write::WriteValue::Text(value.into())
+}
+
+/// The tables an editing test reads and writes, with the names starting
+/// with `prefix`: each test has its own, since tests run at the same time.
+fn edit_setup(prefix: &str) -> Vec<String> {
+    EDIT_SETUP
+        .iter()
+        .map(|sql| sql.replace("jykre_edit", prefix))
+        .collect()
+}
+
+const EDIT_SETUP: [&str; 9] = [
+    "DROP VIEW IF EXISTS jykre_edit_view",
+    "DROP TABLE IF EXISTS jykre_edit_refs, jykre_edit_items, jykre_edit_loose, jykre_edit_measures",
+    "CREATE TABLE jykre_edit_items (id bigint PRIMARY KEY, amount numeric(38,10), note text, at timestamptz, raw bytea, label varchar(3), doubled bigint GENERATED ALWAYS AS (id * 2) STORED)",
+    "CREATE TABLE jykre_edit_refs (id int PRIMARY KEY, item bigint REFERENCES jykre_edit_items ON DELETE CASCADE)",
+    "CREATE TABLE jykre_edit_loose (a text)",
+    "CREATE TABLE jykre_edit_measures (v double precision PRIMARY KEY, w text)",
+    "CREATE VIEW jykre_edit_view AS SELECT id, note FROM jykre_edit_items",
+    "INSERT INTO jykre_edit_items (id, amount, note) VALUES (1, 1, 'one'), (2, 2, 'two')",
+    "SET TIME ZONE 'UTC'",
+];
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_results_say_whether_they_can_be_written_back() {
+    use write::{EditTarget, KeyKind, ReadOnlyReason, ReferenceAction, SideEffect};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut session = PostgresDriver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        for sql in edit_setup("jykre_target") {
+            read(&mut session, &sql).await.unwrap();
+        }
+        let items = target_of(&mut session, "SELECT * FROM jykre_target_items")
+            .await
+            .editable()
+            .unwrap();
+        assert_eq!((items.key.clone(), items.key_kind), (vec![0], KeyKind::PrimaryKey));
+        assert!(!items.columns[6].as_ref().unwrap().writable, "generated");
+        assert_eq!(items.table.relation(), Some("jykre_target_items"));
+        assert!(items.side_effects.contains(&SideEffect::Reference {
+            table: "jykre_target_refs".into(),
+            name: "jykre_target_refs_item_fkey".into(),
+            on_delete: Some(ReferenceAction::Cascade),
+            on_update: None,
+        }));
+        for (sql, reason) in [
+            ("SELECT 1 AS n", ReadOnlyReason::ComputedOnly),
+            (
+                "SELECT i.note, r.id FROM jykre_target_items i JOIN jykre_target_refs r ON r.item = i.id",
+                ReadOnlyReason::SeveralTables,
+            ),
+            (
+                "SELECT * FROM jykre_target_view",
+                ReadOnlyReason::NotATable {
+                    kind: "view".into(),
+                },
+            ),
+            (
+                "SELECT note FROM jykre_target_items",
+                ReadOnlyReason::KeyNotInResult {
+                    missing: vec!["id".into()],
+                },
+            ),
+            ("SELECT a FROM jykre_target_loose", ReadOnlyReason::NoKey),
+            (
+                "SELECT * FROM jykre_target_measures",
+                ReadOnlyReason::KeyType { column: "v".into() },
+            ),
+        ] {
+            assert_eq!(
+                target_of(&mut session, sql).await,
+                EditTarget::ReadOnly(reason),
+                "{sql}"
+            );
+        }
+        for sql in edit_setup("jykre_target").iter().take(2) {
+            read(&mut session, sql).await.unwrap();
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live edit targets took too long");
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_edits_are_bound_exact_and_honour_the_transaction() {
+    use write::{RowChange, WriteOutcome, WriteValue};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut session = PostgresDriver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        for sql in edit_setup("jykre_edit") {
+            read(&mut session, &sql).await.unwrap();
+        }
+        let sql = "SELECT id, amount, note, at, raw, label FROM jykre_edit_items";
+        let items = target_of(&mut session, sql).await.editable().unwrap();
+
+        // Outside a transaction: exact numbers, NULL apart from the text
+        // NULL, a timestamp with its offset and bytes as their \x text.
+        let written = write_changes(
+            &mut session,
+            &items,
+            vec![
+                RowChange::Update {
+                    key: vec![text("1")],
+                    set: vec![
+                        (1, text("12345678901234567890.0123456789")),
+                        (2, text("NULL")),
+                        (3, text("2026-11-02 10:00:00+03")),
+                        (4, text("\\x00ff")),
+                    ],
+                },
+                RowChange::Insert {
+                    values: vec![
+                        (0, text("9007199254740993")),
+                        (2, WriteValue::Null),
+                        (5, text("abc")),
+                    ],
+                },
+                RowChange::Update {
+                    key: vec![text("2")],
+                    set: vec![(2, text(""))],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            written,
+            WriteOutcome::Written {
+                rows: 3,
+                committed: true
+            }
+        );
+        let rows = read(
+            &mut session,
+            "SELECT id, amount, note, at, raw, label FROM jykre_edit_items ORDER BY id",
+        )
+        .await
+        .unwrap()
+        .rows;
+        let text_cell = |value: &str| Cell::Text(value.into());
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    text_cell("1"),
+                    text_cell("12345678901234567890.0123456789"),
+                    text_cell("NULL"),
+                    text_cell("2026-11-02 07:00:00+00"),
+                    text_cell("\\x00ff"),
+                    Cell::Null
+                ],
+                vec![
+                    text_cell("2"),
+                    text_cell("2.0000000000"),
+                    text_cell(""),
+                    Cell::Null,
+                    Cell::Null,
+                    Cell::Null
+                ],
+                vec![
+                    text_cell("9007199254740993"),
+                    Cell::Null,
+                    Cell::Null,
+                    Cell::Null,
+                    Cell::Null,
+                    text_cell("abc")
+                ],
+            ]
+        );
+
+        // A text too long for its column fails; it is never cut.
+        let refused = write_changes(
+            &mut session,
+            &items,
+            vec![RowChange::Update {
+                key: vec![text("1")],
+                set: vec![(5, text("abcd"))],
+            }],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Database);
+
+        // A change that matches no row rolls the whole request back.
+        let rolled = write_changes(
+            &mut session,
+            &items,
+            vec![
+                RowChange::Delete {
+                    key: vec![text("2")],
+                },
+                RowChange::Update {
+                    key: vec![text("999")],
+                    set: vec![(2, text("nobody"))],
+                },
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rolled,
+            WriteOutcome::RolledBack {
+                index: 1,
+                matched: 0
+            }
+        );
+        let count = read(&mut session, "SELECT count(*) FROM jykre_edit_items")
+            .await
+            .unwrap()
+            .rows;
+        assert_eq!(count, vec![vec![text_cell("3")]]);
+
+        // Inside an open transaction the change stays uncommitted, and a
+        // failure there leaves the transaction usable.
+        read(&mut session, "BEGIN").await.unwrap();
+        read(
+            &mut session,
+            "UPDATE jykre_edit_items SET note = 'mine' WHERE id = 2",
+        )
+        .await
+        .unwrap();
+        let inside = write_changes(
+            &mut session,
+            &items,
+            vec![RowChange::Update {
+                key: vec![text("1")],
+                set: vec![(2, text("inside"))],
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            inside,
+            WriteOutcome::Written {
+                rows: 1,
+                committed: false
+            }
+        );
+        let failed = write_changes(
+            &mut session,
+            &items,
+            vec![RowChange::Update {
+                key: vec![text("1")],
+                set: vec![(1, text("not a number"))],
+            }],
+        )
+        .await;
+        assert!(failed.is_err());
+        assert_eq!(
+            session.transaction(CancellationToken::new()).await.unwrap(),
+            Some(TransactionStatus::Open {
+                changes: Some(true)
+            })
+        );
+        let mine = read(
+            &mut session,
+            "SELECT note FROM jykre_edit_items WHERE id IN (1, 2) ORDER BY id",
+        )
+        .await
+        .unwrap()
+        .rows;
+        assert_eq!(
+            mine,
+            vec![vec![text_cell("inside")], vec![text_cell("mine")]]
+        );
+        read(&mut session, "ROLLBACK").await.unwrap();
+        let after = read(
+            &mut session,
+            "SELECT note FROM jykre_edit_items WHERE id = 1",
+        )
+        .await
+        .unwrap()
+        .rows;
+        assert_eq!(after, vec![vec![text_cell("NULL")]]);
+
+        // A table changed since the result was read is not written. The view
+        // on the column would keep its type from changing.
+        read(&mut session, "DROP VIEW jykre_edit_view")
+            .await
+            .unwrap();
+        read(
+            &mut session,
+            "ALTER TABLE jykre_edit_items ALTER COLUMN note TYPE varchar(100)",
+        )
+        .await
+        .unwrap();
+        let changed = write_changes(
+            &mut session,
+            &items,
+            vec![RowChange::Delete {
+                key: vec![text("1")],
+            }],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(changed.code, ErrorCode::Validation);
+        for sql in edit_setup("jykre_edit").iter().take(2) {
+            read(&mut session, sql).await.unwrap();
+        }
+        session.close().await.unwrap();
+    })
+    .await
+    .expect("live edits took too long");
+}
+
+/// An import's writes (ADR-0040): the table's description, one transaction
+/// the import begins and ends, every value bound as text the server
+/// converts, a boolean as a boolean, and a rejected value failing at its
+/// change with nothing left behind.
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
+    use write::{RowChange, WriteOutcome, WriteScope, WriteValue};
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let mut session = PostgresDriver
+            .open_session(&input(), CancellationToken::new())
+            .await
+            .unwrap();
+        for sql in [
+            "DROP TABLE IF EXISTS jykre_import",
+            "CREATE TABLE jykre_import (id bigint GENERATED BY DEFAULT AS IDENTITY, amount numeric(38,10), big bigint, day date, note text NOT NULL, flag boolean, doubled bigint GENERATED ALWAYS AS (big * 2) STORED)",
+        ] {
+            read(&mut session, sql).await.unwrap();
+        }
+        let path = ObjectPath::default()
+            .child(ObjectKind::Database, "jykre")
+            .child(ObjectKind::Schema, "public")
+            .child(ObjectKind::Table, "jykre_import");
+        let target = session
+            .table_target(&path, CancellationToken::new())
+            .await
+            .unwrap()
+            .editable()
+            .unwrap();
+        assert!(target.key.is_empty());
+        let names: Vec<(&str, bool, bool)> = target
+            .columns
+            .iter()
+            .flatten()
+            .map(|column| (column.name.as_str(), column.writable, column.has_default))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("id", true, true),
+                ("amount", true, true),
+                ("big", true, true),
+                ("day", true, true),
+                ("note", true, false),
+                ("flag", true, true),
+                ("doubled", false, true),
+            ]
+        );
+        let row = |amount: &str, big: &str, day: &str, note: WriteValue, flag: WriteValue| {
+            RowChange::Insert {
+                values: vec![
+                    (1, text(amount)),
+                    (2, text(big)),
+                    (3, text(day)),
+                    (4, note),
+                    (5, flag),
+                ],
+            }
+        };
+        let request = |changes: Vec<RowChange>| write::WriteRequest {
+            target: target.clone(),
+            changes,
+            timeout: Some(Duration::from_secs(30)),
+            scope: WriteScope::Caller,
+        };
+        session.begin_writes(CancellationToken::new()).await.unwrap();
+        let written = session
+            .write(
+                &request(vec![
+                    row(
+                        "12345678901234567890123456.1234567891",
+                        "9007199254740993",
+                        "2025-01-31 00:00:00",
+                        text("NULL"),
+                        WriteValue::Boolean(true),
+                    ),
+                    row("0.1", "-1", "2025-02-01", text(""), WriteValue::Null),
+                ]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            written,
+            WriteOutcome::Written {
+                rows: 2,
+                committed: false
+            }
+        );
+        session.end_writes(true, CancellationToken::new()).await.unwrap();
+        let rows = read(
+            &mut session,
+            "SELECT amount::text, big::text, day::text, note, flag::text, doubled::text FROM jykre_import ORDER BY id",
+        )
+        .await
+        .unwrap()
+        .rows;
+        assert_eq!(
+            rows[0],
+            [
+                Cell::Text("12345678901234567890123456.1234567891".into()),
+                Cell::Text("9007199254740993".into()),
+                Cell::Text("2025-01-31".into()),
+                Cell::Text("NULL".into()),
+                Cell::Text("true".into()),
+                Cell::Text("18014398509481986".into()),
+            ],
+            "exact numbers, the text NULL and a boolean as written"
+        );
+        assert_eq!(rows[1][3], Cell::Text(String::new()), "empty text stays text");
+        // A value the database rejects fails at its change; the rollback
+        // leaves the table as it was.
+        session.begin_writes(CancellationToken::new()).await.unwrap();
+        let failed = session
+            .write(
+                &request(vec![
+                    row("1", "1", "2025-01-01", text("kept?"), WriteValue::Null),
+                    row("not a number", "1", "2025-01-01", text("x"), WriteValue::Null),
+                ]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failed.change(), Some(1));
+        assert!(failed.server.is_some(), "the server's own message");
+        session.end_writes(false, CancellationToken::new()).await.unwrap();
+        let count = read(&mut session, "SELECT count(*)::text FROM jykre_import")
+            .await
+            .unwrap()
+            .rows;
+        assert_eq!(count, [vec![Cell::Text("2".into())]]);
+        // A required column left NULL is rejected the same way.
+        session.begin_writes(CancellationToken::new()).await.unwrap();
+        let failed = session
+            .write(
+                &request(vec![row("1", "1", "2025-01-01", WriteValue::Null, WriteValue::Null)]),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(failed.change(), Some(0));
+        session.end_writes(false, CancellationToken::new()).await.unwrap();
+        read(&mut session, "DROP TABLE jykre_import").await.unwrap();
+        session.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+async fn live_a_write_left_open_is_not_undone_by_the_next_statement() {
+    /// Takes the first rows, then stops reading.
+    struct Few(usize);
+    impl RowSink for Few {
+        fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+            SinkControl::Continue
+        }
+        fn row(&mut self, _: Row) -> SinkControl {
+            self.0 += 1;
+            if self.0 >= 10 {
+                SinkControl::Stop
+            } else {
+                SinkControl::Continue
+            }
+        }
+    }
+    async fn run(session: &mut Box<dyn Session>, sql: &str, sink: &mut dyn RowSink) -> bool {
+        session
+            .execute(
+                &QueryRequest {
+                    parameters: Vec::new(),
+                    sql: sql.into(),
+                    options: ExecutionOptions {
+                        max_rows: 100,
+                        ..ExecutionOptions::default()
+                    },
+                },
+                sink,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap()
+            .has_more
+    }
+    async fn total(session: &mut Box<dyn Session>) -> Row {
+        let mut sink = Sink::default();
+        run(
+            session,
+            "SELECT sum(n)::text FROM live_cut_write",
+            &mut sink,
+        )
+        .await;
+        sink.rows.remove(0)
+    }
+    let driver = PostgresDriver;
+    let input = input();
+    let mut session = driver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    for sql in [
+        "DROP TABLE IF EXISTS live_cut_write",
+        "CREATE TABLE live_cut_write AS SELECT 0 AS n FROM generate_series(1, 5000)",
+        "CREATE OR REPLACE FUNCTION live_cut_log(i int) RETURNS text LANGUAGE sql AS \
+         $$ INSERT INTO live_cut_write VALUES (1) RETURNING repeat('x', 10000) $$",
+    ] {
+        run(&mut session, sql, &mut Sink::default()).await;
+    }
+    // About 50 MB of returned rows each, so the server is still sending
+    // them when the next statement arrives. PostgreSQL finishes an `UPDATE
+    // … RETURNING` before it sends its first row, but a `SELECT` that writes
+    // as it goes (here, a row per call) is still running.
+    let update = "UPDATE live_cut_write SET n = n + 1 RETURNING n, repeat('x', 10000)";
+    let select = "SELECT live_cut_log(i) FROM generate_series(1, 5000) AS i";
+
+    // A page of each write is shown, then the tab runs something else.
+    assert!(run(&mut session, update, &mut Sink::default()).await);
+    assert_eq!(total(&mut session).await, vec![Cell::Text("5000".into())]);
+    assert!(run(&mut session, select, &mut Sink::default()).await);
+    assert_eq!(total(&mut session).await, vec![Cell::Text("10000".into())]);
+
+    // The sink stops reading (as the memory ceiling does).
+    run(&mut session, select, &mut Few(0)).await;
+    assert_eq!(total(&mut session).await, vec![Cell::Text("15000".into())]);
+
+    // Another session sees the writes committed.
+    let mut other = driver
+        .open_session(&input, CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(total(&mut other).await, vec![Cell::Text("15000".into())]);
+    for sql in [
+        "DROP FUNCTION live_cut_log(int)",
+        "DROP TABLE live_cut_write",
+    ] {
+        run(&mut other, sql, &mut Sink::default()).await;
+    }
+    other.close().await.unwrap();
+    session.close().await.unwrap();
 }

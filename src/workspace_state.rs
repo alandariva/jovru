@@ -2,12 +2,14 @@
 //! queries and the history.
 //!
 //! The state is stored as one JSON value in `config.db` settings
-//! ([Persistence](../docs/persistence.md)). Reading tolerates missing or
+//! ([Persistence](../docs/reference/persistence.md)). Reading tolerates missing or
 //! unknown fields, so a file written by another version still opens.
 use crate::drivers::ObjectPath;
 use crate::parameters::{KindChoice, TabParameter};
+use crate::query_files::{Fingerprint, TextFormat};
 use jykre_core::is_parameter_name;
 use serde_json::{Value, json};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 /// The settings key the state is stored under.
@@ -58,6 +60,43 @@ pub struct TabState {
     /// as the table's Data view; its result tab is called Data. `None` for
     /// other tabs and tabs from older versions.
     pub data_sql: Option<String>,
+    /// The `.sql` file the tab edits (ADR-0031).
+    pub file: Option<TabFile>,
+    /// The tab's recovery file, when its text is kept apart from the state
+    /// (a draft, or a file tab's edits not saved yet): `sql` is then not
+    /// written to the state.
+    pub recovery: Option<String>,
+}
+
+/// The file a tab edits: where it is and what it was loaded or last saved
+/// from, so a change on disk is noticed before writing over it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TabFile {
+    pub path: PathBuf,
+    pub base: Fingerprint,
+    pub format: TextFormat,
+}
+
+impl TabFile {
+    fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            path: PathBuf::from(value["path"].as_str().filter(|path| !path.is_empty())?),
+            base: Fingerprint::from_value(&value["base"])?,
+            format: TextFormat {
+                crlf: value["line_ending"].as_str() == Some("crlf"),
+                bom: value["bom"].as_bool().unwrap_or(false),
+            },
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        json!({
+            "path": self.path.to_string_lossy(),
+            "base": self.base.to_value(),
+            "line_ending": if self.format.crlf { "crlf" } else { "lf" },
+            "bom": self.format.bom,
+        })
+    }
 }
 
 impl TabState {
@@ -340,6 +379,11 @@ impl WorkspaceState {
                 object: serde_json::from_value(tab["object"].clone()).ok(),
                 parameters: read_parameters(&tab["parameters"]),
                 data_sql: tab["data_sql"].as_str().map(str::to_owned),
+                file: TabFile::from_value(&tab["file"]),
+                recovery: tab["recovery"]
+                    .as_str()
+                    .filter(|name| crate::query_files::recovery::valid_name(name))
+                    .map(str::to_owned),
             })
             .collect();
         let mut history = entries("history");
@@ -392,9 +436,12 @@ impl WorkspaceState {
                     })
                     .map(|entry| entry.id);
             }
-            if tab
-                .saved_id
-                .is_none_or(|id| !state.saved_queries.iter().any(|entry| entry.id == id))
+            // A file tab's identity is the file's, in the local library
+            // state; checked when the library is read.
+            if tab.file.is_none()
+                && tab
+                    .saved_id
+                    .is_none_or(|id| !state.saved_queries.iter().any(|entry| entry.id == id))
             {
                 // Its saved query is gone: the tab is a draft again.
                 tab.saved_id = None;
@@ -412,8 +459,14 @@ impl WorkspaceState {
             "tabs": self.tabs.iter().map(|tab| json!({
                 "title": tab.title,
                 "connection": tab.connection,
-                "sql": tab.sql,
-                "saved_sql": tab.saved_sql,
+                // Kept apart: in its recovery file, or in its file when the
+                // tab holds the file's text.
+                "sql": if tab.recovery.is_some() || (tab.file.is_some() && tab.saved_sql.as_deref() == Some(tab.sql.as_str())) {
+                    Value::Null
+                } else {
+                    json!(tab.sql)
+                },
+                "saved_sql": if tab.file.is_some() { Value::Null } else { json!(tab.saved_sql) },
                 "saved_id": tab.saved_id,
                 "timeout_seconds": tab.timeout_seconds,
                 "opened_sql": tab.opened_sql,
@@ -427,6 +480,8 @@ impl WorkspaceState {
                     "null": parameter.null,
                 })).collect::<Vec<_>>(),
                 "data_sql": tab.data_sql,
+                "file": tab.file.as_ref().map(TabFile::to_value),
+                "recovery": tab.recovery,
             })).collect::<Vec<_>>(),
             "active": self.active,
             "saved_queries": entries(&self.saved_queries),
@@ -528,6 +583,8 @@ mod tests {
                     },
                 ],
                 data_sql: Some("SELECT * FROM \"sales\".\"orders\";".into()),
+                file: None,
+                recovery: None,
             }],
             active: Some(0),
             saved_queries: vec![QueryEntry {
@@ -551,6 +608,51 @@ mod tests {
         };
         assert_eq!(WorkspaceState::from_value(Some(state.to_value())), state);
         assert_eq!(state.tabs[0].timeout(Some(Duration::from_secs(300))), None);
+        // A file tab and a draft kept in a recovery file write no SQL of
+        // their own; the text comes back from the file or the recovery file.
+        let file = TabFile {
+            path: "C:/q/orders.sql".into(),
+            base: crate::query_files::Fingerprint {
+                size: 9,
+                modified: Some(1_700_000_000_123_456_789),
+                digest: 42,
+            },
+            format: TextFormat {
+                crlf: true,
+                bom: false,
+            },
+        };
+        let kept = WorkspaceState {
+            tabs: vec![
+                TabState {
+                    title: "orders".into(),
+                    sql: "SELECT 1;".into(),
+                    saved_sql: Some("SELECT 1;".into()),
+                    saved_id: Some(3),
+                    file: Some(file.clone()),
+                    ..TabState::default()
+                },
+                TabState {
+                    title: "Query 2".into(),
+                    sql: "SELECT 2;".into(),
+                    recovery: Some("0123456789abcdef0123456789abcdef".into()),
+                    ..TabState::default()
+                },
+            ],
+            ..WorkspaceState::default()
+        };
+        let value = kept.to_value();
+        assert!(value["tabs"][0]["sql"].is_null() && value["tabs"][1]["sql"].is_null());
+        let read = WorkspaceState::from_value(Some(value));
+        assert_eq!(read.tabs[0].file, Some(file));
+        assert_eq!(read.tabs[0].saved_id, Some(3));
+        assert_eq!(read.tabs[1].recovery, kept.tabs[1].recovery);
+        // A recovery name that could reach another folder is dropped.
+        let unsafe_name = serde_json::json!({"tabs": [{"recovery": "../config"}]});
+        assert_eq!(
+            WorkspaceState::from_value(Some(unsafe_name)).tabs[0].recovery,
+            None
+        );
         let old = serde_json::json!({"tabs": [{"title": "Old", "sql": "SELECT 1"}], "active": 7, "extra": true});
         let read = WorkspaceState::from_value(Some(old));
         assert_eq!(read.tabs[0].title, "Old");

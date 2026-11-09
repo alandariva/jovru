@@ -15,9 +15,18 @@ use tokio::sync::{mpsc, oneshot};
 /// and its error number and SQLSTATE; errors from the connection keep the
 /// operating system's reason. Anything else (such as configuration, which may
 /// hold the connection URL) gets a fixed message.
-fn map_error(error: sqlx::Error) -> DriverError {
-    if matches!(&error, sqlx::Error::Protocol(message) if message.contains("RSA auth backend disabled"))
-    {
+pub(crate) fn map_error(error: sqlx::Error) -> DriverError {
+    // Without TLS, `caching_sha2_password` (MySQL 8's default) and
+    // `sha256_password` send the password RSA-encrypted when the server has
+    // not cached it, and SQLx is built without its RSA feature (ADR-0002).
+    // SQLx 0.9 reports that as a configuration error, earlier versions as a
+    // protocol error; either way it must not read as a broken protocol.
+    let rsa_disabled = |message: &str| message.contains("RSA auth backend disabled");
+    if match &error {
+        sqlx::Error::Protocol(message) => rsa_disabled(message),
+        sqlx::Error::Configuration(source) => rsa_disabled(&source.to_string()),
+        _ => false,
+    } {
         return DriverError::new(
             ErrorCode::Authentication,
             "This MySQL authentication method requires TLS; select required or verify-identity",
@@ -75,6 +84,21 @@ async fn resynchronize(connection: &mut MySqlConnection) -> Result<(), sqlx::Err
             Err(sqlx::Error::Database(_)) => continue,
             outcome => return outcome,
         }
+    }
+}
+
+/// The transaction state from the status flags of the server's last OK or
+/// EOF packet. An error packet carries none, but every failed or cut
+/// statement ends with [`resynchronize`], whose ping reads them again, so
+/// they are current. Autocommit off is reported first: every statement then
+/// waits for a `COMMIT`, whether or not one ran.
+fn transaction_status(connection: &MySqlConnection) -> TransactionStatus {
+    if !connection.server_autocommit() {
+        TransactionStatus::Manual
+    } else if connection.server_in_transaction() {
+        TransactionStatus::Open { changes: None }
+    } else {
+        TransactionStatus::Idle
     }
 }
 async fn bounded<T>(
@@ -182,9 +206,56 @@ enum Command {
     Transaction {
         reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
     },
+    Encryption {
+        reply: oneshot::Sender<DriverResult<Encryption>>,
+    },
+    EditTarget {
+        columns: Vec<ColumnInfo>,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    Write {
+        request: Box<write::WriteRequest>,
+        reply: oneshot::Sender<DriverResult<write::WriteOutcome>>,
+        cancel: CancellationToken,
+    },
+    TableTarget {
+        path: ObjectPath,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    BeginWrites {
+        reply: oneshot::Sender<DriverResult<()>>,
+        cancel: CancellationToken,
+    },
+    EndWrites {
+        commit: bool,
+        reply: oneshot::Sender<DriverResult<()>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
+}
+
+/// How long reading a table's catalog for editing may take.
+const CATALOG: Duration = Duration::from_secs(60);
+
+/// Runs a session command the driver writes itself (no value in it).
+async fn simple(connection: &mut MySqlConnection, sql: String) -> DriverResult<()> {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(&mut *connection)
+        .await
+        .map(|_| ())
+        .map_err(map_error)
+}
+
+/// A write whose `COMMIT` got no answer: it may or may not have been
+/// written, and it is never sent again.
+fn commit_unknown() -> DriverError {
+    DriverError::new(
+        ErrorCode::Connection,
+        "The connection was lost while committing: the changes may or may not have been written. Read the rows again before writing them again.",
+    )
 }
 
 enum Event {
@@ -307,11 +378,9 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
-    /// Only `autocommit = 0` is reported. Whether a `BEGIN` is open needs
-    /// the `PROCESS` privilege (`information_schema.innodb_trx`) or a
-    /// `performance_schema` consumer a user may not have, and the protocol's
-    /// status flags are private to SQLx, so that is left to the caller
-    /// ([technical debt TD-001](../../../docs/technical-debt.md)).
+    /// Read from the status flags of the server's last response, so it
+    /// runs nothing. Whether a transaction wrote is not in them, so an open
+    /// one leaves `changes` unknown.
     async fn transaction(
         &mut self,
         cancel: CancellationToken,
@@ -326,6 +395,98 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
+    /// Read from the session's `Ssl_version` status, which is empty when the
+    /// connection did not negotiate TLS.
+    async fn encryption(&mut self, cancel: CancellationToken) -> DriverResult<Encryption> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Encryption { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+    /// Read from `information_schema` (`TABLES`, `ENGINES`, `COLUMNS`,
+    /// `STATISTICS`, `TRIGGERS`, `REFERENTIAL_CONSTRAINTS`) for the table the
+    /// columns' origins name.
+    async fn edit_target(
+        &mut self,
+        _statement: &str,
+        columns: &[ColumnInfo],
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::EditTarget {
+                columns: columns.to_vec(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    async fn write(
+        &mut self,
+        request: &write::WriteRequest,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::WriteOutcome> {
+        request.validate()?;
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Write {
+                request: Box::new(request.clone()),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    /// Read from `information_schema` for the table at `path`.
+    async fn table_target(
+        &mut self,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::TableTarget {
+                path: path.clone(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    async fn begin_writes(&mut self, cancel: CancellationToken) -> DriverResult<()> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        self.ask(|reply| Command::BeginWrites { reply, cancel })
+            .await
+    }
+
+    /// Never cancelled: a commit or a rollback is not left half done.
+    async fn end_writes(&mut self, commit: bool, _cancel: CancellationToken) -> DriverResult<()> {
+        self.ask(|reply| Command::EndWrites { commit, reply }).await
+    }
+
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -450,19 +611,32 @@ impl Server {
                     }
                 }
                 Command::Transaction { reply } => {
-                    // Reading a system variable reads no table, so no
-                    // consistent snapshot is taken.
-                    let autocommit = tokio::time::timeout(
+                    let _ = reply.send(Ok(Some(transaction_status(&connection))));
+                    Flow::Ready
+                }
+                Command::Encryption { reply } => {
+                    // The text protocol, like the statements the user runs.
+                    let found = tokio::time::timeout(
                         RECOVERY,
-                        sqlx::raw_sql("SELECT CAST(@@autocommit AS CHAR)")
-                            .fetch_one(&mut connection),
+                        sqlx::raw_sql("SHOW SESSION STATUS LIKE 'Ssl_version'")
+                            .fetch_optional(&mut connection),
                     )
                     .await
-                    .map(|row| row.and_then(|row| sqlx::Row::try_get::<String, _>(&row, 0)));
-                    match autocommit {
-                        Ok(Ok(value)) => {
-                            let manual = value.trim() == "0";
-                            let _ = reply.send(Ok(manual.then_some(TransactionStatus::Manual)));
+                    .map(|row| {
+                        row.and_then(|row| {
+                            row.map(|row| sqlx::Row::try_get::<String, _>(&row, 1))
+                                .transpose()
+                        })
+                    });
+                    match found {
+                        Ok(Ok(found)) => {
+                            let _ = reply.send(Ok(match found {
+                                Some(version) if version.is_empty() => Encryption::Plaintext,
+                                Some(version) => Encryption::Tls {
+                                    version: Some(version),
+                                },
+                                None => Encryption::Unknown,
+                            }));
                             Flow::Ready
                         }
                         Ok(Err(error)) => {
@@ -477,6 +651,66 @@ impl Server {
                             Flow::Broken
                         }
                     }
+                }
+                Command::EditTarget {
+                    columns,
+                    reply,
+                    cancel,
+                } => {
+                    let limit = Limit::new(&cancel, Some(CATALOG));
+                    let read = self
+                        .step(&limit, crate::edit::edit_target(&mut connection, &columns))
+                        .await;
+                    let (result, flow) = match read {
+                        Ok(target) => (Ok(target), Flow::Ready),
+                        Err((error, unfinished)) => {
+                            (Err(error), self.recover(&mut connection, unfinished).await)
+                        }
+                    };
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::Write {
+                    request,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.write(&mut connection, &request, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::TableTarget {
+                    path,
+                    reply,
+                    cancel,
+                } => {
+                    let limit = Limit::new(&cancel, Some(CATALOG));
+                    let read = self
+                        .step(&limit, crate::edit::table_target(&mut connection, &path))
+                        .await;
+                    let (result, flow) = match read {
+                        Ok(target) => (Ok(target), Flow::Ready),
+                        Err((error, unfinished)) => {
+                            (Err(error), self.recover(&mut connection, unfinished).await)
+                        }
+                    };
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::BeginWrites { reply, cancel } => {
+                    let (result, flow) = self.begin_writes(&mut connection, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::EndWrites { commit, reply } => {
+                    let (result, flow) = self.end_writes(&mut connection, commit).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
                 }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
@@ -539,6 +773,16 @@ impl Server {
             self.database = apply;
         }
         let sql = request.with_references(parameter_reference);
+        // A syntax error's position is read from its message and found in
+        // the statement; only where that is the text the user wrote, since
+        // the position is in the statement as sent.
+        let locate = |(error, unfinished): Stop| -> Stop {
+            if sql == request.sql {
+                (crate::position::locate(error, &sql), unfinished)
+            } else {
+                (error, unfinished)
+            }
+        };
         if let Some(set) = bind_statement(&request.parameters) {
             let bound = self
                 .step(&Limit::new(&cancel, options.timeout), async {
@@ -574,13 +818,15 @@ impl Server {
                         name: c.name().into(),
                         data_type: c.type_info().name().into(),
                         nullable: None,
+                        origin: crate::edit::origin(c.origin()),
                     })
                     .collect::<Vec<_>>())
             })
             .await;
         // Some statements (USE, and others MySQL cannot prepare: error 1295)
-        // run as text only; their columns, if any, come with their rows.
-        let mut describe = Describe::Prepared;
+        // run as text only. A prepared `CALL` describes no columns, whatever
+        // its procedure returns. In both cases the columns, if any, come
+        // with the first row.
         let columns = match columns {
             Ok(columns) => columns,
             Err((error, _))
@@ -590,10 +836,14 @@ impl Server {
                     .and_then(|server| server.vendor_code.as_deref())
                     == Some("1295") =>
             {
-                describe = Describe::FromRows;
                 Vec::new()
             }
-            Err(stopped) => return self.fail(connection, stopped, &events).await,
+            Err(stopped) => return self.fail(connection, locate(stopped), &events).await,
+        };
+        let describe = if columns.is_empty() {
+            Describe::FromRows
+        } else {
+            Describe::Prepared
         };
         let mut returns_rows = !columns.is_empty();
         if returns_rows && events.send(Event::Columns(columns)).await.is_err() {
@@ -605,6 +855,7 @@ impl Server {
             ahead: None,
             affected: None,
             describe,
+            ended: false,
         };
         loop {
             let page = self
@@ -667,10 +918,209 @@ impl Server {
                 }
                 Err(stopped) => {
                     drop(stream);
-                    return self.fail(connection, stopped, &events).await;
+                    return self.fail(connection, locate(stopped), &events).await;
                 }
             }
         }
+    }
+
+    /// Writes `request` in a transaction of its own, or in a savepoint of the
+    /// open one (autocommit off included), and commits (or releases the
+    /// savepoint) only when every change affected exactly one row and MySQL
+    /// adjusted no value. A failure, a cancellation or the timeout rolls back
+    /// what the write did.
+    async fn write(
+        &mut self,
+        connection: &mut MySqlConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        if request.scope == write::WriteScope::Caller {
+            return self.write_in_caller(connection, request, cancel).await;
+        }
+        let nested = transaction_status(connection) != TransactionStatus::Idle;
+        let savepoint = crate::edit::SAVEPOINT;
+        let open = if nested {
+            format!("SAVEPOINT {savepoint}")
+        } else {
+            "START TRANSACTION".to_owned()
+        };
+        let opening = Limit::new(cancel, Some(RECOVERY));
+        if let Err((error, unfinished)) = self.step(&opening, simple(connection, open)).await {
+            let flow = self.recover(connection, unfinished).await;
+            return (Err(error), flow);
+        }
+        let limit = Limit::new(cancel, request.timeout);
+        let applied = self
+            .step(&limit, crate::edit::apply(connection, request))
+            .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => {
+                match self.end_edit(connection, nested, true).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::Written {
+                            rows,
+                            committed: !nested,
+                        }),
+                        Flow::Ready,
+                    ),
+                    // The server answered, and ended the transaction.
+                    Err(error) if error.server.is_some() => (Err(error), Flow::Ready),
+                    Err(_) => (Err(commit_unknown()), Flow::Broken),
+                }
+            }
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => {
+                match self.end_edit(connection, nested, false).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::RolledBack { index, matched }),
+                        Flow::Ready,
+                    ),
+                    // Closing the session rolls the write back.
+                    Err(error) => (Err(error), Flow::Broken),
+                }
+            }
+            Ok(crate::edit::Applied::Adjusted { index, warning }) => {
+                let error = DriverError::validation(format!(
+                    "MySQL would have changed a value of change {} ({warning}), so nothing was written",
+                    index + 1
+                ));
+                match self.end_edit(connection, nested, false).await {
+                    Ok(()) => (Err(error), Flow::Ready),
+                    Err(_) => (Err(error), Flow::Broken),
+                }
+            }
+            Err((error, unfinished)) => {
+                let flow = match self.recover(connection, unfinished).await {
+                    Flow::Ready if self.end_edit(connection, nested, false).await.is_ok() => {
+                        Flow::Ready
+                    }
+                    _ => Flow::Broken,
+                };
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Opens the import's transaction, which only `end_writes` ends.
+    async fn begin_writes(
+        &mut self,
+        connection: &mut MySqlConnection,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<()>, Flow) {
+        if transaction_status(connection) != TransactionStatus::Idle {
+            return (
+                Err(DriverError::validation(
+                    "The session already holds a transaction",
+                )),
+                Flow::Ready,
+            );
+        }
+        let opening = Limit::new(cancel, Some(RECOVERY));
+        match self
+            .step(&opening, simple(connection, "START TRANSACTION".to_owned()))
+            .await
+        {
+            Ok(()) => (Ok(()), Flow::Ready),
+            Err((error, unfinished)) => {
+                let flow = self.recover(connection, unfinished).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Commits (`commit`) or rolls back the import's transaction. A commit
+    /// the server answered with an error ended it; one without an answer
+    /// may or may not have been written, and closes the session.
+    async fn end_writes(
+        &mut self,
+        connection: &mut MySqlConnection,
+        commit: bool,
+    ) -> (DriverResult<()>, Flow) {
+        match self.end_edit(connection, false, commit).await {
+            Ok(()) => (Ok(()), Flow::Ready),
+            Err(error) if error.server.is_some() => (Err(error), Flow::Ready),
+            Err(_) if commit => (Err(commit_unknown()), Flow::Broken),
+            // Closing the session rolls the transaction back.
+            Err(error) => (Err(error), Flow::Broken),
+        }
+    }
+
+    /// A write that joins the import's transaction (`WriteScope::Caller`):
+    /// nothing is committed or rolled back, and a change that fails,
+    /// affects another number of rows than one, or has a value MySQL would
+    /// adjust fails the write at its index. The transaction is left to
+    /// `end_writes`.
+    async fn write_in_caller(
+        &mut self,
+        connection: &mut MySqlConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        if transaction_status(connection) == TransactionStatus::Idle {
+            return (
+                Err(DriverError::validation("Begin the writes first")),
+                Flow::Ready,
+            );
+        }
+        let limit = Limit::new(cancel, request.timeout);
+        let applied = self
+            .step(&limit, crate::edit::apply(connection, request))
+            .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => (
+                Ok(write::WriteOutcome::Written {
+                    rows,
+                    committed: false,
+                }),
+                Flow::Ready,
+            ),
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => (
+                Err(DriverError::validation(format!(
+                    "The row affected {matched} rows of the table, not one"
+                ))
+                .at_change(index)),
+                Flow::Ready,
+            ),
+            Ok(crate::edit::Applied::Adjusted { index, warning }) => (
+                Err(DriverError::validation(format!(
+                    "MySQL would have changed a value of the row ({warning})"
+                ))
+                .at_change(index)),
+                Flow::Ready,
+            ),
+            Err((error, unfinished)) => {
+                let flow = self.recover(connection, unfinished).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Ends what a write opened, within [`RECOVERY`]: its savepoint
+    /// (`nested`) or its own transaction, kept (`keep`) or rolled back.
+    async fn end_edit(
+        &self,
+        connection: &mut MySqlConnection,
+        nested: bool,
+        keep: bool,
+    ) -> DriverResult<()> {
+        let savepoint = crate::edit::SAVEPOINT;
+        let commands: Vec<String> = match (nested, keep) {
+            (true, true) => vec![format!("RELEASE SAVEPOINT {savepoint}")],
+            (true, false) => vec![
+                format!("ROLLBACK TO SAVEPOINT {savepoint}"),
+                format!("RELEASE SAVEPOINT {savepoint}"),
+            ],
+            (false, true) => vec!["COMMIT".to_owned()],
+            (false, false) => vec!["ROLLBACK".to_owned()],
+        };
+        let never = CancellationToken::new();
+        for command in commands {
+            let limit = Limit::new(&never, Some(RECOVERY));
+            self.step(&limit, simple(connection, command))
+                .await
+                .map_err(|(error, _)| error)?;
+        }
+        Ok(())
     }
 
     /// Kills the session's running statement from another connection. One
@@ -804,7 +1254,15 @@ impl Server {
             .await?
         {
             match item {
-                sqlx::Either::Left(result) => reading.affected = Some(result.rows_affected()),
+                sqlx::Either::Left(result) => {
+                    reading.affected = Some(result.rows_affected());
+                    // The end of a result set: once the delivered one ends,
+                    // what a procedure returns after it is read and dropped.
+                    if reading.describe == Describe::Sent {
+                        reading.ended = true;
+                    }
+                }
+                sqlx::Either::Right(_) if reading.ended => {}
                 sqlx::Either::Right(row) => {
                     if reading.describe == Describe::FromRows {
                         let columns = row
@@ -814,6 +1272,7 @@ impl Server {
                                 name: column.name().into(),
                                 data_type: column.type_info().name().into(),
                                 nullable: None,
+                                origin: crate::edit::origin(column.origin()),
                             })
                             .collect();
                         if !deliver(events, Event::Columns(columns), limit).await? {
@@ -853,9 +1312,17 @@ impl<'a> Limit<'a> {
     }
 
     /// Resolves, with the error to report, once the statement must stop.
+    ///
+    /// A deadline that has passed is read from the clock, not left to the
+    /// timer: while a result arrives faster than it is read, SQLx's reads
+    /// never wait, the session's task keeps its thread and no worker turns
+    /// Tokio's timer, so a timer set then does not fire before the reading
+    /// waits. Every step and every delivery asks first, so the statement
+    /// still stops at its next row.
     async fn reached(&self) -> DriverError {
         let expired = async {
             match self.deadline {
+                Some(deadline) if tokio::time::Instant::now() >= deadline => {}
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
@@ -925,7 +1392,8 @@ async fn deliver(
 enum Describe {
     /// Preparing the statement described them before it ran.
     Prepared,
-    /// The statement could not be prepared; columns come with the first row.
+    /// Preparing described none (the statement could not be prepared, or is
+    /// a `CALL`); columns come with the first row.
     FromRows,
     /// They came with the first row and were sent.
     Sent,
@@ -938,6 +1406,10 @@ struct Reading {
     /// The rows affected, reported by a statement without rows.
     affected: Option<u64>,
     describe: Describe,
+    /// The result set whose columns were sent from its first row has ended.
+    /// A procedure may return more; their rows are read, so it runs to its
+    /// end, and dropped, since a run delivers one result.
+    ended: bool,
 }
 
 /// The cells of a row as the text protocol sent them.
@@ -1367,8 +1839,12 @@ fn bind_statement(parameters: &[QueryParameter]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{bind_statement, parameter_reference};
-    use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+    use super::{Limit, bind_statement, parameter_reference};
+    use futures_util::FutureExt;
+    use jykre_core::{
+        CancellationToken, ErrorCode, ExecutionOptions, ParameterKind, QueryParameter, QueryRequest,
+    };
+    use std::time::Duration;
 
     fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
         QueryParameter {
@@ -1380,6 +1856,32 @@ mod tests {
                 .map(|(start, found)| start..start + found.len())
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_password_that_needs_rsa_without_tls_says_so() {
+        // What SQLx 0.9 returns when full authentication needs RSA and the
+        // connection has no TLS (sslMode "disabled").
+        let error = sqlx::Error::Configuration(
+            "RSA auth backend disabled; enable feature `mysql-rsa` (or `rsa` if using sqlx-mysql directly) or use TLS.".into(),
+        );
+        let mapped = super::map_error(error);
+        assert_eq!(mapped.code, ErrorCode::Authentication);
+        assert!(
+            mapped.message.contains("requires TLS"),
+            "{}",
+            mapped.message
+        );
+        // Earlier SQLx versions said it as a protocol error.
+        let mapped = super::map_error(sqlx::Error::Protocol("RSA auth backend disabled".into()));
+        assert_eq!(mapped.code, ErrorCode::Authentication);
+        // Any other configuration error keeps its fixed, generic message:
+        // it may hold the connection's URL.
+        let mapped = super::map_error(sqlx::Error::Configuration(
+            "mysql://user:secret@host".into(),
+        ));
+        assert_eq!(mapped.code, ErrorCode::Protocol);
+        assert!(!mapped.message.contains("secret"));
     }
 
     #[test]
@@ -1424,5 +1926,22 @@ mod tests {
             )
         );
         assert_eq!(bind_statement(&[]), None);
+    }
+
+    /// While a result arrives faster than it is read, SQLx's reads never
+    /// wait, so the session's task keeps its thread and no worker turns
+    /// Tokio's timer: a timer set after the deadline has passed does not
+    /// fire. Blocking the runtime's only thread does the same here.
+    #[tokio::test]
+    async fn a_passed_deadline_stops_the_statement_without_the_timer() {
+        let cancel = CancellationToken::new();
+        let limit = Limit::new(&cancel, Some(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(20));
+        let reached = limit.reached().now_or_never();
+        assert_eq!(reached.map(|error| error.code), Some(ErrorCode::Timeout));
+        // A cancellation still comes first.
+        cancel.cancel();
+        let reached = limit.reached().now_or_never();
+        assert_eq!(reached.map(|error| error.code), Some(ErrorCode::Cancelled));
     }
 }

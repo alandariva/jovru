@@ -7,8 +7,11 @@
 //! connection, the names of its cache and the tab's context), so the
 //! features can be removed or replaced here without touching what runs
 //! queries ([ADR-0020](../../../docs/adr/0020-editor-language-features-in-their-own-crates.md)).
+mod go_to_line;
 mod highlighter;
 mod providers;
+
+pub use go_to_line::GoToLine;
 
 use super::ui::{Feedback, Tone};
 use gpui_kit::component::input::EditorState;
@@ -22,7 +25,8 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 pub use jykre_sql_language::catalog::SqlCatalogs;
 pub use jykre_sql_language::completion::NameIndex;
@@ -33,6 +37,21 @@ pub enum SqlEditorEvent {
     Reveal(ObjectPath),
     /// How Format went, for the notice bar.
     Notice(Feedback),
+    /// A Format started, ended or ran another second past 2 s: the button
+    /// that shows it and cancels it is drawn again.
+    Formatting,
+}
+
+/// How long a Format runs before its button shows the time.
+const FORMAT_ELAPSED_AFTER: Duration = Duration::from_secs(2);
+
+/// A Format running off the UI thread.
+struct FormatJob {
+    started: Instant,
+    /// Asked by the formatter before each statement.
+    stop: Arc<AtomicBool>,
+    /// Tells this Format's outcome from a cancelled or later one's.
+    revision: u64,
 }
 
 /// Quotes a name for SQL the application writes, when the dialect needs it.
@@ -58,8 +77,9 @@ pub struct SqlEditor {
     /// read.
     columns: Arc<HashMap<ObjectPath, Vec<MetadataObject>>>,
     columns_loading: HashSet<ObjectPath>,
-    /// The SQL is being formatted off the UI thread.
-    formatting: bool,
+    /// The Format running off the UI thread, if any.
+    formatting: Option<FormatJob>,
+    format_revision: u64,
 }
 
 impl EventEmitter<SqlEditorEvent> for SqlEditor {}
@@ -81,7 +101,8 @@ impl SqlEditor {
             names: Arc::default(),
             columns: Arc::default(),
             columns_loading: HashSet::new(),
-            formatting: false,
+            formatting: None,
+            format_revision: 0,
         }
     }
 
@@ -389,20 +410,29 @@ impl SqlEditor {
     /// one, the whole script, statement by statement. Only whitespace and
     /// keyword case change, so the caret, the selection and the caret's
     /// place on screen are kept. A result for SQL edited meanwhile is
-    /// dropped.
+    /// dropped. While it runs, the same button cancels it.
     pub fn format(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.formatting.is_some() {
+            self.cancel_format(cx);
+            return;
+        }
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
-        if self.formatting {
-            return;
-        }
         let (sql, selection) = {
             let editor = editor.read(cx);
             (editor.text().to_string(), editor.selected_range())
         };
         let dialect = self.dialect;
-        self.formatting = true;
+        self.format_revision += 1;
+        let revision = self.format_revision;
+        let stop = Arc::new(AtomicBool::new(false));
+        self.formatting = Some(FormatJob {
+            started: Instant::now(),
+            stop: stop.clone(),
+            revision,
+        });
+        cx.emit(SqlEditorEvent::Formatting);
         cx.emit(SqlEditorEvent::Notice(Feedback::new(
             Tone::Info,
             if selection.is_empty() {
@@ -413,23 +443,132 @@ impl SqlEditor {
         )));
         let source = sql.clone();
         let task = cx.background_spawn(async move {
+            let stop = || stop.load(Ordering::Relaxed);
             if selection.is_empty() {
-                jykre_sql_language::format::format(&source, dialect)
+                jykre_sql_language::format::format_until(&source, dialect, &stop)
             } else {
-                jykre_sql_language::format::format_range(&source, selection, dialect)
+                jykre_sql_language::format::format_range_until(&source, selection, dialect, &stop)
                     .map(|(formatted, _)| formatted)
             }
         });
+        self.tick_format(revision, cx);
         cx.spawn_in(window, async move |weak, cx| {
             let result = task.await;
             let _ = weak.update_in(cx, |this, window, cx| {
-                this.formatting = false;
+                // A cancelled Format, or one a later one replaced, says
+                // nothing more.
+                if this.formatting.as_ref().map(|job| job.revision) != Some(revision) {
+                    return;
+                }
+                this.formatting = None;
+                cx.emit(SqlEditorEvent::Formatting);
                 if let Some(notice) = this.apply_format(&sql, result, window, cx) {
                     cx.emit(SqlEditorEvent::Notice(notice));
                 }
             });
         })
         .detach();
+    }
+
+    /// Stops the running Format: the SQL is left as it was. The formatter
+    /// stops before its next statement, off the UI thread.
+    pub fn cancel_format(&mut self, cx: &mut Context<Self>) {
+        let Some(job) = self.formatting.take() else {
+            return;
+        };
+        job.stop.store(true, Ordering::Relaxed);
+        cx.emit(SqlEditorEvent::Formatting);
+        cx.emit(SqlEditorEvent::Notice(Feedback::new(
+            Tone::Info,
+            tr!("Format cancelled. The SQL was left as it was."),
+        )));
+    }
+
+    /// How long the running Format has run, or `None` when none runs.
+    pub fn formatting_for(&self) -> Option<Duration> {
+        self.formatting.as_ref().map(|job| job.started.elapsed())
+    }
+
+    /// Past 2 s, asks for the Format button to be drawn again each second
+    /// so it shows the time, until this Format ends.
+    fn tick_format(&self, revision: u64, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| {
+            cx.background_executor().timer(FORMAT_ELAPSED_AFTER).await;
+            loop {
+                let running = weak
+                    .update(cx, |this, cx| {
+                        let running =
+                            this.formatting.as_ref().map(|job| job.revision) == Some(revision);
+                        if running {
+                            cx.emit(SqlEditorEvent::Formatting);
+                        }
+                        running
+                    })
+                    .unwrap_or(false);
+                if !running {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+            }
+        })
+        .detach();
+    }
+
+    /// The number of lines of the editor's text, as its gutter numbers
+    /// them; the rope knows it without reading the text.
+    pub fn line_count(&self, cx: &App) -> usize {
+        use gpui_kit::component::RopeExt as _;
+        self.editor
+            .upgrade()
+            .map_or(1, |editor| editor.read(cx).text().lines_len())
+    }
+
+    /// Closes the editor's search bar, keeping its text for the next one.
+    pub fn close_search(&self, cx: &mut App) {
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| editor.close_search(cx));
+        }
+    }
+
+    /// Gives the keyboard to the editor.
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        if let Some(editor) = self.editor.upgrade() {
+            editor.update(cx, |editor, cx| editor.focus(window, cx));
+        }
+    }
+
+    /// Go to line: puts the cursor on `target`'s line and column (the end
+    /// of the line when it is shorter), scrolled into view, with the
+    /// keyboard in the editor. A line past the text goes to the last one,
+    /// and the notice says so. Only the rope's line index is read, so the
+    /// cost does not grow with the text.
+    pub fn go_to(
+        &mut self,
+        target: jykre::go_to_line::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.editor.upgrade() else {
+            return;
+        };
+        let lines = self.line_count(cx);
+        let place = jykre::go_to_line::place(target, lines);
+        editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(
+                gpui_kit::component::input::Position::new(
+                    u32::try_from(place.line).unwrap_or(u32::MAX),
+                    u32::try_from(place.column).unwrap_or(u32::MAX),
+                ),
+                window,
+                cx,
+            );
+        });
+        if place.past_end {
+            cx.emit(SqlEditorEvent::Notice(Feedback::new(
+                Tone::Info,
+                jykre::go_to_line::past_end_notice(target, lines),
+            )));
+        }
     }
 
     /// Ctrl+/: comments the lines the selection touches (or the caret's
@@ -469,6 +608,12 @@ impl SqlEditor {
                 return notice(
                     Tone::Info,
                     tr!("The SQL changed while it was being formatted. Format it again."),
+                );
+            }
+            Err(FormatError::Cancelled) => {
+                return notice(
+                    Tone::Info,
+                    tr!("Format cancelled. The SQL was left as it was."),
                 );
             }
             Err(FormatError::Failed) => {
@@ -521,12 +666,19 @@ impl SqlEditor {
         if partial {
             notice(
                 Tone::Warning,
-                tr!(
-                    "SQL formatted, except a part that does not parse in this connection's dialect, which was left as it was. Use Ctrl+Z to undo."
+                &tr!(
+                    "SQL formatted, except a part that does not parse in this connection's dialect, which was left as it was. Use {0} to undo.",
+                    super::shortcuts::label::<gpui_kit::base::input::Undo>(cx)
                 ),
             )
         } else {
-            notice(Tone::Success, tr!("SQL formatted. Use Ctrl+Z to undo."))
+            notice(
+                Tone::Success,
+                &tr!(
+                    "SQL formatted. Use {0} to undo.",
+                    super::shortcuts::label::<gpui_kit::base::input::Undo>(cx)
+                ),
+            )
         }
     }
 }

@@ -1,6 +1,6 @@
 # ADR-0022: Result pages shared across threads with `Arc`
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-04
 - **Authors:** AI agent, at the maintainer's request (decision approved by the maintainer on 2026-11-04)
 - **Supersedes in part:** [ADR-0012](0012-result-grid-as-a-cached-entity.md), the point that a result page is shared as `Rc<ResultData>`
@@ -14,8 +14,8 @@ that reads a whole page has to do it there:
 
 - **Copy** of a large selection builds its text on the UI thread (about
   85 ms for 500,000 cells), the known deviation that keeps N031 partial
-  ([Results](../results.md#known-deviations)).
-- **Export** of a result to a file ([Results](../results.md#export)) has to
+  ([Results](../reference/results.md#known-deviations)).
+- **Export** of a result to a file ([Results](../reference/results.md#export)) has to
   write the pages the tab already holds (up to 256 MB) before the rows the
   session still keeps open. On the UI thread that would stall the window for
   seconds; copying the pages there first costs tens of milliseconds and twice
@@ -65,6 +65,6 @@ only where visible.
 - The gate passes with the grid, result tab and export tests unchanged in
   what they assert.
 - The frame probe shows no change for scrolling, hovering and selecting in a
-  100,000-row result ([Performance](../performance.md#budgets)).
+  100,000-row result ([Performance](../standards/performance.md#budgets)).
 - Exporting a tab that holds several pages keeps the UI thread under the
   stall budget (heartbeat, `stall_max_ms`).

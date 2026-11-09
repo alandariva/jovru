@@ -38,6 +38,14 @@ pub struct NameIndex {
 }
 
 impl NameIndex {
+    /// Whether the cache this index was read from holds a relation at
+    /// `path` (an explorer favorite that still exists).
+    pub fn contains(&self, path: &ObjectPath) -> bool {
+        path.parent()
+            .and_then(|namespace| self.relations.get(&namespace))
+            .is_some_and(|relations| relations.iter().any(|relation| relation.path == *path))
+    }
+
     /// Groups `relations` (paths of tables, views and materialized views)
     /// by their last-level namespace.
     pub fn new(
@@ -1050,6 +1058,17 @@ mod tests {
                 relation("crm", "customers", ObjectKind::Table),
             ],
         )
+    }
+
+    #[test]
+    fn the_index_knows_which_relations_the_cache_holds() {
+        let index = index();
+        assert!(index.contains(&schema("sales").child(ObjectKind::Table, "orders")));
+        assert!(index.contains(&schema("sales").child(ObjectKind::View, "Totals")));
+        // Another namespace, another name, or a namespace itself is not one.
+        assert!(!index.contains(&schema("crm").child(ObjectKind::Table, "orders")));
+        assert!(!index.contains(&schema("sales").child(ObjectKind::Table, "totals")));
+        assert!(!index.contains(&schema("sales")));
     }
 
     fn context() -> SessionContext {

@@ -11,3 +11,7 @@ CREATE PROCEDURE gate_touch(IN steps INT, OUT total INT) SET total = steps + 1;
 CREATE DATABASE gate_private;
 CREATE USER 'gate_reader'@'%' IDENTIFIED BY 'jykre-test';
 GRANT SELECT ON jykre.* TO 'gate_reader'@'%';
+-- A login that never signs in over TLS, so the server never caches its
+-- caching_sha2_password hash: without TLS it always needs the RSA exchange.
+CREATE USER 'gate_plain'@'%' IDENTIFIED BY 'jykre-test';
+GRANT SELECT ON jykre.* TO 'gate_plain'@'%';

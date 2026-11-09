@@ -293,6 +293,24 @@ async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
     );
     restored.close().await;
 
+    // A restore that fails on the way leaves config.db as it was: here the
+    // place it would take cannot be replaced (a folder holds its name).
+    // Nothing is left behind, and no empty configuration takes its place.
+    let held = std::fs::read(dir.join("config.db")).unwrap();
+    std::fs::rename(dir.join("config.db"), dir.join("kept.db")).unwrap();
+    std::fs::create_dir(dir.join("config.db")).unwrap();
+    std::fs::write(dir.join("config.db").join("inside"), b"x").unwrap();
+    let before = names(&dir);
+    assert!(
+        jykre_storage::restore_config_backup(&dir, &newest)
+            .await
+            .is_err()
+    );
+    assert_eq!(names(&dir), before);
+    std::fs::remove_dir_all(dir.join("config.db")).unwrap();
+    std::fs::rename(dir.join("kept.db"), dir.join("config.db")).unwrap();
+    assert_eq!(std::fs::read(dir.join("config.db")).unwrap(), held);
+
     // Only a copy from the backup folder is restored.
     let elsewhere = dir.join("config-v1-1.db");
     std::fs::copy(&newest, &elsewhere).unwrap();
@@ -302,4 +320,44 @@ async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
             .is_err()
     );
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// At the first start several parts of the application open the same new
+/// file at once; every one of them must get a working repository, and the
+/// schema must be created once, without a backup of a file that was new.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opening_a_new_file_from_several_places_at_once_works_for_all() {
+    for _ in 0..10 {
+        let dir = std::env::temp_dir().join(format!("jykre-config-{}", ConnectionId::new()));
+        let opens: Vec<_> = (0..6)
+            .map(|_| {
+                let dir = dir.clone();
+                tokio::spawn(async move { ConfigRepository::open(&dir).await })
+            })
+            .collect();
+        let mut repositories = Vec::new();
+        for open in opens {
+            repositories.push(open.await.unwrap());
+        }
+        for repository in &repositories {
+            let repository = repository.as_ref().unwrap();
+            assert!(repository.list().await.unwrap().is_empty());
+            assert_eq!(repository.setting("absent").await.unwrap(), None);
+        }
+        assert!(!dir.join("backups").exists());
+        for repository in repositories.into_iter().flatten() {
+            repository.close().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The names in `dir`, sorted.
+fn names(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
 }

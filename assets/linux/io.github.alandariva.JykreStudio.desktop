@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Jykre Studio
+GenericName=Database workspace
+Comment=Explore databases and run SQL on PostgreSQL, MySQL, Databricks and SQLite
+Exec=jykre
+Icon=io.github.alandariva.JykreStudio
+Terminal=false
+Categories=Development;Database;
+Keywords=sql;database;postgresql;mysql;sqlite;databricks;
+StartupNotify=true
+StartupWMClass=io.github.alandariva.JykreStudio

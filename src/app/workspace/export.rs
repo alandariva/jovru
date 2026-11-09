@@ -1,5 +1,5 @@
 //! The export bar of a query tab: the options, the system's save dialog, the
-//! export's progress and how it ended ([Results](../../../docs/results.md#export)).
+//! export's progress and how it ended ([Results](../../../docs/reference/results.md#export)).
 //!
 //! The bar exports the result tab on screen. What it writes and how runs in
 //! `jykre::export` and `backend::export`; this view only chooses, starts,
@@ -449,10 +449,16 @@ impl Workspace {
             }
         })
         .detach();
+        // The columns as the grid shows them: the tab on screen's layout.
+        let shown = (self.results.active().map(|tab| tab.id) == Some(id))
+            .then(|| self.grid.read(cx).layout())
+            .filter(|layout| layout.len() == columns.len() && !layout.is_identity())
+            .map(|layout| layout.visible().to_vec());
         let request = ExportRequest {
             target: path.clone(),
             options,
             columns,
+            shown,
             sql,
             pages,
             read,
@@ -508,13 +514,19 @@ impl Workspace {
             path,
             statement,
         } = ended;
+        // A run that never came back lost its session, and the open result
+        // with it.
+        let rest_read = run.as_ref().map_or(true, |run| run.rest_read);
+        let target_unknown = run.as_ref().is_ok_and(|run| run.target_unknown);
         let outcome = match run {
             Ok(run) => {
                 match lease {
                     Some(lease) => {
                         let current = self.session_lease == Some(lease);
+                        // A session lost on the way took the tab's
+                        // transaction with it; the notice names it.
+                        let open = self.transaction.is_open();
                         if current {
-                            self.session_notice(run.reopened, run.ended);
                             if run.reopened {
                                 self.transaction = Transaction::AutoCommit;
                             }
@@ -522,8 +534,17 @@ impl Workspace {
                         }
                         self.session_context(lease, run.context, cx);
                         self.return_session(lease, run.session);
-                        if current && self.session.is_none() {
-                            self.transaction = Transaction::AutoCommit;
+                        if current {
+                            let ended = self.session.is_none();
+                            let lost = SessionLoss {
+                                reopened: run.reopened,
+                                ended: run.ended || ended,
+                                transaction: false,
+                            };
+                            self.session_notice(lost, open && (run.reopened || ended));
+                            if ended {
+                                self.transaction = Transaction::AutoCommit;
+                            }
                         }
                     }
                     None => {
@@ -536,8 +557,9 @@ impl Workspace {
             }
             Err(error) => Err(error),
         };
-        // What the export read went to the file, not to this tab (D4).
-        if mode == Mode::Rest {
+        // What the export read went to the file, not to this tab (D4). An
+        // export that failed before reading leaves the result open.
+        if mode == Mode::Rest && rest_read {
             self.results.rest_exported(id);
             self.show_active(cx);
         }
@@ -608,6 +630,17 @@ impl Workspace {
                     Tone::Info,
                     tr!(
                         "Export cancelled. No file was written, and {0} was left as it was.",
+                        name
+                    ),
+                ),
+                path: None,
+            },
+            Err(error) if target_unknown => ExportState::Ended {
+                feedback: Feedback::new(
+                    Tone::Error,
+                    tr!(
+                        "The export failed: {0} {1} may still be replaced by the exported file; check it before using it or exporting to it again.",
+                        error,
                         name
                     ),
                 ),

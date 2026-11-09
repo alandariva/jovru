@@ -2,7 +2,7 @@
 //! with its own connection, database and chart (ADR-0024, ADR-0025).
 //!
 //! The library is one JSON value under its own `config.db` setting
-//! ([Persistence](../docs/persistence.md)). It holds definitions only: never
+//! ([Persistence](../../docs/reference/persistence.md)). It holds definitions only: never
 //! a result, and never the values typed for a run, only each parameter's
 //! default. Reading tolerates missing fields and keeps the ones it does not
 //! know, so a version that writes the value back loses nothing another
@@ -10,6 +10,7 @@
 use crate::parameters::{kind_str, parse_kind};
 use jykre_core::{ConnectionId, ParameterKind, SessionContext};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 
 pub mod chart;
 pub mod export;
@@ -63,7 +64,7 @@ impl ConnectionRef {
         }
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         Some(Self {
             id: object
@@ -78,7 +79,7 @@ impl ConnectionRef {
         })
     }
 
-    fn to_value(&self) -> Value {
+    pub(crate) fn to_value(&self) -> Value {
         json!({
             "id": self.id.map(|id| id.to_string()),
             "name": self.name,
@@ -126,7 +127,8 @@ impl ParameterSpec {
         }
     }
 
-    fn from_value(value: &Value) -> Option<Self> {
+    /// The spec a stored value holds; `None` when it has no valid name.
+    pub(crate) fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         let name = object.get("name")?.as_str()?;
         if !jykre_core::is_parameter_name(name) {
@@ -153,7 +155,8 @@ impl ParameterSpec {
         })
     }
 
-    fn to_value(&self) -> Value {
+    /// The stored value, unknown fields included.
+    pub(crate) fn to_value(&self) -> Value {
         with_extra(
             &self.extra,
             json!({
@@ -200,54 +203,375 @@ impl ChartKind {
 
     /// Whether the kind draws one column of values only.
     pub fn single_value(self) -> bool {
-        matches!(self, ChartKind::Pie | ChartKind::Number)
+        self == ChartKind::Pie
     }
 
     /// Whether the kind needs a column that labels its points.
     pub fn labelled(self) -> bool {
         self != ChartKind::Number
     }
+
+    /// The most value columns the kind shows: a pie one, a number panel
+    /// [`MAX_NUMBERS`]; bars and lines any.
+    pub fn max_values(self) -> Option<usize> {
+        match self {
+            ChartKind::Pie => Some(1),
+            ChartKind::Number => Some(MAX_NUMBERS),
+            ChartKind::Bar | ChartKind::Line => None,
+        }
+    }
+}
+
+/// The most numbers a number panel shows side by side.
+pub const MAX_NUMBERS: usize = 8;
+
+/// How a number is compared with a target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Comparison {
+    Greater,
+    GreaterOrEqual,
+    Less,
+    LessOrEqual,
+    Equal,
+    NotEqual,
+}
+
+impl Comparison {
+    pub const ALL: [Comparison; 6] = [
+        Comparison::Greater,
+        Comparison::GreaterOrEqual,
+        Comparison::Less,
+        Comparison::LessOrEqual,
+        Comparison::Equal,
+        Comparison::NotEqual,
+    ];
+
+    /// The operator, as stored and shown.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Comparison::Greater => ">",
+            Comparison::GreaterOrEqual => ">=",
+            Comparison::Less => "<",
+            Comparison::LessOrEqual => "<=",
+            Comparison::Equal => "=",
+            Comparison::NotEqual => "<>",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|op| op.symbol() == text)
+    }
+
+    /// Whether a value that compares to the target as `order` meets it.
+    pub fn holds(self, order: std::cmp::Ordering) -> bool {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match self {
+            Comparison::Greater => order == Greater,
+            Comparison::GreaterOrEqual => order != Less,
+            Comparison::Less => order == Less,
+            Comparison::LessOrEqual => order != Greater,
+            Comparison::Equal => order == Equal,
+            Comparison::NotEqual => order != Equal,
+        }
+    }
+}
+
+/// A test of a number against a target the user typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Condition {
+    pub comparison: Comparison,
+    /// As typed: a decimal with a dot (`1250.50`), compared exactly.
+    /// Anything else, empty included, never holds.
+    pub target: String,
+}
+
+impl Condition {
+    pub fn new(comparison: Comparison, target: impl Into<String>) -> Self {
+        Self {
+            comparison,
+            target: target.into(),
+        }
+    }
+
+    /// Whether the target is a number a value can be compared with.
+    pub fn target_is_valid(&self) -> bool {
+        crate::decimal::is_number(&self.target)
+    }
+
+    /// Whether `value` (as the database wrote it) meets the condition. NULL,
+    /// a value that is not a number and an invalid target never do; the
+    /// comparison is exact, never through floating point.
+    pub fn holds(&self, value: Option<&str>) -> bool {
+        value.is_some_and(|value| {
+            crate::decimal::is_number(value)
+                && self.target_is_valid()
+                && self
+                    .comparison
+                    .holds(crate::decimal::compare_numbers(value, &self.target))
+        })
+    }
+
+    fn from_value(value: &Value) -> Option<Self> {
+        Some(Self {
+            comparison: value["op"].as_str().and_then(Comparison::parse)?,
+            target: value["value"].as_str().unwrap_or_default().to_owned(),
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        json!({ "op": self.comparison.symbol(), "value": self.target })
+    }
+}
+
+/// The colour a number shows in when it meets its condition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Signal {
+    Green,
+    Red,
+}
+
+impl Signal {
+    pub const ALL: [Signal; 2] = [Signal::Green, Signal::Red];
+
+    fn key(self) -> &'static str {
+        match self {
+            Signal::Green => "green",
+            Signal::Red => "red",
+        }
+    }
+}
+
+/// When one number of a number panel turns green or red. Both are
+/// optional; when both hold, red wins, so an alert is never hidden.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NumberColors {
+    pub green: Option<Condition>,
+    pub red: Option<Condition>,
+}
+
+impl NumberColors {
+    pub fn get(&self, signal: Signal) -> Option<&Condition> {
+        match signal {
+            Signal::Green => self.green.as_ref(),
+            Signal::Red => self.red.as_ref(),
+        }
+    }
+
+    fn slot(&mut self, signal: Signal) -> &mut Option<Condition> {
+        match signal {
+            Signal::Green => &mut self.green,
+            Signal::Red => &mut self.red,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.green.is_none() && self.red.is_none()
+    }
+
+    /// The colour `value` shows in, if any.
+    pub fn signal(&self, value: Option<&str>) -> Option<Signal> {
+        if self.red.as_ref().is_some_and(|red| red.holds(value)) {
+            Some(Signal::Red)
+        } else if self.green.as_ref().is_some_and(|green| green.holds(value)) {
+            Some(Signal::Green)
+        } else {
+            None
+        }
+    }
+
+    fn from_value(value: &Value) -> Self {
+        Self {
+            green: Condition::from_value(&value[Signal::Green.key()]),
+            red: Condition::from_value(&value[Signal::Red.key()]),
+        }
+    }
+
+    fn to_value(&self) -> Value {
+        let mut object = Map::new();
+        for signal in Signal::ALL {
+            if let Some(condition) = self.get(signal) {
+                object.insert(signal.key().to_owned(), condition.to_value());
+            }
+        }
+        Value::Object(object)
+    }
 }
 
 /// A chart of a panel's result: one column labels the points, the others
 /// give their values. Columns are named, so reordering the `SELECT` keeps
-/// the chart. A [`ChartKind::Number`] has no label.
+/// the chart. A [`ChartKind::Number`] has no label, and may colour each of
+/// its numbers green or red.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChartSpec {
     pub kind: ChartKind,
     pub label: String,
     pub values: Vec<String>,
+    /// By value column, for a number panel only; a column without an entry
+    /// keeps the text colour.
+    pub colors: BTreeMap<String, NumberColors>,
 }
 
 impl ChartSpec {
+    pub fn new(kind: ChartKind, label: impl Into<String>, values: Vec<String>) -> Self {
+        Self {
+            kind,
+            label: label.into(),
+            values,
+            colors: BTreeMap::new(),
+        }
+    }
+
+    /// The chart a change to `kind` gives: the current columns where they
+    /// fit, otherwise the first ones the result offers (`columns`, of which
+    /// `numeric` hold numbers). Colours belong to number panels and go with
+    /// another kind.
+    pub fn switched(
+        current: Option<ChartSpec>,
+        kind: ChartKind,
+        columns: &[String],
+        numeric: &[String],
+    ) -> ChartSpec {
+        let mut spec = current.unwrap_or_else(|| ChartSpec::new(kind, "", Vec::new()));
+        spec.kind = kind;
+        if kind.labelled() && spec.label.is_empty() {
+            spec.label = columns
+                .iter()
+                .find(|name| !numeric.contains(name))
+                .or_else(|| columns.first())
+                .cloned()
+                .unwrap_or_default();
+        }
+        if spec.values.is_empty() {
+            let first = match kind {
+                ChartKind::Pie | ChartKind::Number => 1,
+                ChartKind::Bar | ChartKind::Line => 3,
+            };
+            spec.values = numeric
+                .iter()
+                .filter(|name| **name != spec.label)
+                .take(first)
+                .cloned()
+                .collect();
+        }
+        if let Some(max) = kind.max_values() {
+            spec.values.truncate(max);
+        }
+        if kind == ChartKind::Number {
+            spec.retain_colors();
+        } else {
+            spec.colors.clear();
+        }
+        spec
+    }
+
+    /// Shows column `name` if it is not shown, or stops showing it. A pie
+    /// swaps its one column; a number panel takes no more than
+    /// [`MAX_NUMBERS`] and forgets the colours of a column it drops.
+    /// `false` when nothing changed.
+    pub fn toggle_value(&mut self, name: &str) -> bool {
+        if self.values.iter().any(|value| value == name) {
+            self.values.retain(|value| value != name);
+            self.colors.remove(name);
+            return true;
+        }
+        match self.kind.max_values() {
+            Some(1) => self.values = vec![name.to_owned()],
+            Some(max) if self.values.len() >= max => return false,
+            _ => self.values.push(name.to_owned()),
+        }
+        self.retain_colors();
+        true
+    }
+
+    /// The colours of column `name` (none by default).
+    pub fn colors_of(&self, name: &str) -> NumberColors {
+        self.colors.get(name).cloned().unwrap_or_default()
+    }
+
+    /// Sets when column `name` shows in `signal`'s colour; `None` never.
+    pub fn set_condition(&mut self, name: &str, signal: Signal, condition: Option<Condition>) {
+        let mut colors = self.colors_of(name);
+        *colors.slot(signal) = condition;
+        if colors.is_empty() {
+            self.colors.remove(name);
+        } else {
+            self.colors.insert(name.to_owned(), colors);
+        }
+    }
+
+    /// Changes the target of an existing condition; `false` without one.
+    pub fn set_target(&mut self, name: &str, signal: Signal, target: &str) -> bool {
+        let Some(condition) = self
+            .colors
+            .get_mut(name)
+            .and_then(|colors| colors.slot(signal).as_mut())
+        else {
+            return false;
+        };
+        condition.target = target.trim().to_owned();
+        true
+    }
+
+    /// Keeps only the colours of the columns shown.
+    fn retain_colors(&mut self) {
+        let values = &self.values;
+        self.colors.retain(|name, _| values.contains(name));
+    }
+
     fn from_value(value: &Value) -> Option<Self> {
         let chart = value.as_object()?;
-        Some(Self {
-            kind: chart
-                .get("kind")
-                .and_then(Value::as_str)
-                .and_then(ChartKind::parse)?,
-            label: chart
+        let kind = chart
+            .get("kind")
+            .and_then(Value::as_str)
+            .and_then(ChartKind::parse)?;
+        let mut spec = Self::new(
+            kind,
+            chart
                 .get("label")
                 .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
-            values: chart
+                .unwrap_or_default(),
+            chart
                 .get("values")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
                 .filter_map(|value| value.as_str().map(str::to_owned))
                 .collect(),
-        })
+        );
+        if kind == ChartKind::Number {
+            spec.colors = chart
+                .get("colors")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flatten()
+                .map(|(name, colors)| (name.clone(), NumberColors::from_value(colors)))
+                .filter(|(_, colors)| !colors.is_empty())
+                .collect();
+            spec.retain_colors();
+        }
+        Some(spec)
     }
 
     fn to_value(&self) -> Value {
-        json!({
+        let mut chart = json!({
             "kind": self.kind.as_str(),
             "label": self.label,
             "values": self.values,
-        })
+        });
+        if !self.colors.is_empty()
+            && let Value::Object(object) = &mut chart
+        {
+            object.insert(
+                "colors".to_owned(),
+                Value::Object(
+                    self.colors
+                        .iter()
+                        .map(|(name, colors)| (name.clone(), colors.to_value()))
+                        .collect(),
+                ),
+            );
+        }
+        chart
     }
 }
 
@@ -732,7 +1056,7 @@ fn context_from(value: &Value) -> SessionContext {
 }
 
 /// The entries of `object` whose keys are not in `known`.
-fn unknown(object: &Map<String, Value>, known: &[&str]) -> Map<String, Value> {
+pub(crate) fn unknown(object: &Map<String, Value>, known: &[&str]) -> Map<String, Value> {
     object
         .iter()
         .filter(|(key, _)| !known.contains(&key.as_str()))
@@ -741,7 +1065,7 @@ fn unknown(object: &Map<String, Value>, known: &[&str]) -> Map<String, Value> {
 }
 
 /// `known` (an object) over the kept unknown entries.
-fn with_extra(extra: &Map<String, Value>, known: Value) -> Value {
+pub(crate) fn with_extra(extra: &Map<String, Value>, known: Value) -> Value {
     let mut object = extra.clone();
     if let Value::Object(known) = known {
         object.extend(known);
@@ -890,11 +1214,11 @@ mod tests {
                 SessionContext::default(),
             )
             .unwrap();
-        report.panels[0].chart = Some(ChartSpec {
-            kind: ChartKind::Line,
-            label: "month".into(),
-            values: vec!["total".into()],
-        });
+        report.panels[0].chart = Some(ChartSpec::new(
+            ChartKind::Line,
+            "month",
+            vec!["total".into()],
+        ));
         let other = report
             .add_panel(
                 ConnectionRef {
@@ -912,11 +1236,18 @@ mod tests {
         panel.title = "Orders".into();
         panel.width = Width::Half;
         panel.table = false;
-        panel.chart = Some(ChartSpec {
-            kind: ChartKind::Number,
-            label: String::new(),
-            values: vec!["count".into()],
-        });
+        let mut number = ChartSpec::new(ChartKind::Number, "", vec!["count".into(), "late".into()]);
+        number.set_condition(
+            "count",
+            Signal::Green,
+            Some(Condition::new(Comparison::GreaterOrEqual, "100")),
+        );
+        number.set_condition(
+            "late",
+            Signal::Red,
+            Some(Condition::new(Comparison::Greater, "0")),
+        );
+        panel.chart = Some(number);
         report
     }
 
@@ -937,6 +1268,153 @@ mod tests {
         assert_eq!(panels[1].width, Width::Half);
         assert_eq!(panels[1].chart.as_ref().unwrap().kind, ChartKind::Number);
         assert!(read.to_value()["reports"][0].get("connection").is_none());
+        let stored = &read.to_value()["reports"][0]["panels"][1]["chart"];
+        assert_eq!(stored["values"], json!(["count", "late"]));
+        assert_eq!(
+            stored["colors"],
+            json!({
+                "count": {"green": {"op": ">=", "value": "100"}},
+                "late": {"red": {"op": ">", "value": "0"}},
+            })
+        );
+        // A chart without colours stores none.
+        assert!(
+            read.to_value()["reports"][0]["panels"][0]["chart"]
+                .get("colors")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn colours_are_read_for_shown_numbers_only_and_unknown_operators_are_dropped() {
+        let chart = ChartSpec::from_value(&json!({
+            "kind": "number",
+            "values": ["a", "b"],
+            "colors": {
+                "a": {"green": {"op": "<=", "value": "1.5"}, "red": {"op": "~", "value": "2"}},
+                "b": {"red": {"op": "radar"}},
+                "gone": {"red": {"op": "<", "value": "0"}},
+            },
+        }))
+        .unwrap();
+        assert_eq!(chart.colors.len(), 1);
+        assert_eq!(
+            chart.colors_of("a"),
+            NumberColors {
+                green: Some(Condition::new(Comparison::LessOrEqual, "1.5")),
+                red: None,
+            }
+        );
+        // Colours belong to number panels.
+        let bars = ChartSpec::from_value(&json!({
+            "kind": "bar",
+            "label": "x",
+            "values": ["a"],
+            "colors": {"a": {"red": {"op": "<", "value": "0"}}},
+        }))
+        .unwrap();
+        assert!(bars.colors.is_empty());
+    }
+
+    #[test]
+    fn a_number_turns_red_or_green_by_exact_comparison_and_red_wins() {
+        let colors = NumberColors {
+            green: Some(Condition::new(Comparison::GreaterOrEqual, "100")),
+            red: Some(Condition::new(Comparison::Less, "50.5")),
+        };
+        assert_eq!(colors.signal(Some("100.00")), Some(Signal::Green));
+        assert_eq!(colors.signal(Some("1e3")), Some(Signal::Green));
+        assert_eq!(colors.signal(Some("75")), None);
+        assert_eq!(
+            colors.signal(Some("50.49999999999999999999")),
+            Some(Signal::Red)
+        );
+        assert_eq!(colors.signal(Some("-200")), Some(Signal::Red));
+        // NULL and text are never coloured.
+        assert_eq!(colors.signal(None), None);
+        assert_eq!(colors.signal(Some("n/a")), None);
+        // Both hold: red wins.
+        let both = NumberColors {
+            green: Some(Condition::new(Comparison::Greater, "0")),
+            red: Some(Condition::new(Comparison::NotEqual, "10")),
+        };
+        assert_eq!(both.signal(Some("5")), Some(Signal::Red));
+        assert_eq!(both.signal(Some("10.0")), Some(Signal::Green));
+        // A target that is not a number never holds.
+        for target in ["", "1,5", "abc"] {
+            let condition = Condition::new(Comparison::Equal, target);
+            assert!(!condition.target_is_valid());
+            assert!(!condition.holds(Some("1")));
+        }
+        let cases = [
+            (Comparison::Greater, [false, false, true]),
+            (Comparison::GreaterOrEqual, [false, true, true]),
+            (Comparison::Less, [true, false, false]),
+            (Comparison::LessOrEqual, [true, true, false]),
+            (Comparison::Equal, [false, true, false]),
+            (Comparison::NotEqual, [true, false, true]),
+        ];
+        for (comparison, expected) in cases {
+            let condition = Condition::new(comparison, "2");
+            let held = ["1.99", "2.000", "2.01"].map(|value| condition.holds(Some(value)));
+            assert_eq!(held, expected, "{}", comparison.symbol());
+        }
+    }
+
+    #[test]
+    fn a_number_panel_takes_several_columns_up_to_its_limit() {
+        let mut spec = ChartSpec::new(ChartKind::Number, "", vec!["a".into()]);
+        assert!(spec.toggle_value("b"));
+        assert_eq!(spec.values, ["a", "b"]);
+        for n in 2..MAX_NUMBERS {
+            assert!(spec.toggle_value(&format!("c{n}")));
+        }
+        assert_eq!(spec.values.len(), MAX_NUMBERS);
+        assert!(!spec.toggle_value("one too many"));
+        assert_eq!(spec.values.len(), MAX_NUMBERS);
+        // Dropping a column forgets its colours.
+        spec.set_condition("b", Signal::Red, Some(Condition::new(Comparison::Less, "")));
+        assert!(spec.set_target("b", Signal::Red, " 12.5 "));
+        assert_eq!(spec.colors_of("b").red.unwrap().target, "12.5");
+        assert!(!spec.set_target("b", Signal::Green, "1"));
+        assert!(spec.toggle_value("b"));
+        assert!(spec.colors.is_empty());
+        // Clearing the last condition removes the entry.
+        spec.set_condition(
+            "a",
+            Signal::Green,
+            Some(Condition::new(Comparison::Greater, "1")),
+        );
+        spec.set_condition("a", Signal::Green, None);
+        assert!(spec.colors.is_empty());
+        // A pie swaps its one column.
+        let mut pie = ChartSpec::new(ChartKind::Pie, "l", vec!["a".into()]);
+        assert!(pie.toggle_value("b"));
+        assert_eq!(pie.values, ["b"]);
+    }
+
+    #[test]
+    fn switching_kind_keeps_what_fits_and_colours_only_for_numbers() {
+        let columns: Vec<String> = ["day", "a", "b", "c", "d"].map(String::from).to_vec();
+        let numeric: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let bars = ChartSpec::switched(None, ChartKind::Bar, &columns, &numeric);
+        assert_eq!((bars.label.as_str(), bars.values.len()), ("day", 3));
+        let number = ChartSpec::switched(None, ChartKind::Number, &columns, &numeric);
+        assert_eq!(number.values, ["a"]);
+        // Bars become numbers with the same columns.
+        let mut number = ChartSpec::switched(Some(bars), ChartKind::Number, &columns, &numeric);
+        assert_eq!(number.values, ["a", "b", "c"]);
+        number.set_condition(
+            "a",
+            Signal::Green,
+            Some(Condition::new(Comparison::Greater, "0")),
+        );
+        let pie = ChartSpec::switched(Some(number.clone()), ChartKind::Pie, &columns, &numeric);
+        assert_eq!(pie.values, ["a"]);
+        assert!(pie.colors.is_empty());
+        let again =
+            ChartSpec::switched(Some(number.clone()), ChartKind::Number, &columns, &numeric);
+        assert_eq!(again.colors, number.colors);
     }
 
     #[test]

@@ -98,6 +98,7 @@ fn gate(root: &Path, full: bool, id: &str, data: &Path) -> Result<(), String> {
     architecture(&metadata)?;
     library_without_language_features(root)?;
     assistant_privacy(root)?;
+    query_files_run_nothing(root)?;
     println!("[OK] Architecture (direct dependencies, including dev and build)");
     catalogs::check(&root.join("catalog"))?;
     command(root, "cargo", &["fmt", "--all", "--check"])?;
@@ -422,6 +423,52 @@ fn assistant_privacy(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// What the saved-query files' code may not name (ADR-0031): sessions,
+/// drivers and running queries, so opening, discovering, migrating or
+/// recovering files can never run SQL.
+const QUERY_FILES_FORBIDDEN: [&str; 9] = [
+    "Session",
+    "Driver",
+    "ResolvedConnection",
+    "QueryRequest",
+    "backend::query",
+    "backend::fetch",
+    "open_session",
+    "execute(",
+    "builtin_registry",
+];
+
+fn query_files_run_nothing(root: &Path) -> Result<(), String> {
+    let mut pending = vec![root.join("src").join("query_files")];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let source =
+                fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if let Some(name) = QUERY_FILES_FORBIDDEN
+                .iter()
+                .find(|name| source.contains(**name))
+            {
+                return Err(format!(
+                    "{} uses {name}; the saved-query files' code must never be able to run SQL",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn command(root: &Path, program: &str, args: &[&str]) -> Result<(), String> {
     command_env(root, program, args, &[])
 }
@@ -681,6 +728,26 @@ mod tests {
         let refused = library_without_language_features(&root);
         fs::remove_dir_all(&root).unwrap();
         assert!(refused.is_err_and(|error| error.contains("names.rs")));
+    }
+
+    #[test]
+    fn the_saved_query_files_never_name_what_runs_sql() {
+        let root = env::temp_dir().join(format!("xtask-query-files-{}", std::process::id()));
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write("src/query_files/mod.rs", "pub fn read(path: &Path) {}");
+        write("src/query_files/scan.rs", "pub fn scan(dir: &Path) {}");
+        assert!(query_files_run_nothing(&root).is_ok());
+        write(
+            "src/query_files/migration.rs",
+            "fn run(s: &mut dyn Session) { s.execute(&request); }",
+        );
+        let refused = query_files_run_nothing(&root);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(refused.is_err_and(|error| error.contains("migration.rs")));
     }
 
     #[test]

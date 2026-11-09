@@ -1,6 +1,6 @@
 # ADR-0015: Introspect only what the user chooses
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-03
 - **Authors:** Alan de Oliveira (maintainer), with an AI agent
 

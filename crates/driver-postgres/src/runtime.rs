@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 /// detail and hint, its SQLSTATE and the position it reported; errors from
 /// the connection keep the operating system's reason. Anything else (such as
 /// configuration, which may hold the connection URL) gets a fixed message.
-fn map_error(error: sqlx::Error) -> DriverError {
+pub(crate) fn map_error(error: sqlx::Error) -> DriverError {
     match &error {
         sqlx::Error::Database(db) => {
             let state = db.code().map(|code| code.into_owned());
@@ -84,9 +84,56 @@ async fn bounded<T>(
     timeout: Option<Duration>,
     work: impl Future<Output = DriverResult<T>>,
 ) -> DriverResult<T> {
-    tokio::select! { biased;
-    _ = cancel.cancelled() => Err(DriverError::cancelled()),
-    result = async { match timeout { Some(limit) => tokio::time::timeout(limit, work).await.map_err(|_| DriverError::new(ErrorCode::Timeout,"Database operation timed out"))?, None => work.await } } => result }
+    Limit::new(cancel, timeout).bound(work).await
+}
+fn timed_out() -> DriverError {
+    DriverError::new(ErrorCode::Timeout, "Database operation timed out")
+}
+/// When a statement must stop: when it is cancelled, or when its time is up.
+struct Limit<'a> {
+    cancel: &'a CancellationToken,
+    deadline: Option<tokio::time::Instant>,
+}
+impl<'a> Limit<'a> {
+    fn new(cancel: &'a CancellationToken, timeout: Option<Duration>) -> Self {
+        Self {
+            cancel,
+            deadline: timeout.map(|limit| tokio::time::Instant::now() + limit),
+        }
+    }
+
+    /// Drives `work` until it ends, or until the limit comes while it waits.
+    async fn bound<T>(&self, work: impl Future<Output = DriverResult<T>>) -> DriverResult<T> {
+        tokio::select! { biased;
+            _ = self.cancel.cancelled() => Err(DriverError::cancelled()),
+            result = async {
+                match self.deadline {
+                    Some(deadline) => tokio::time::timeout_at(deadline, work)
+                        .await
+                        .map_err(|_| timed_out())?,
+                    None => work.await,
+                }
+            } => result,
+        }
+    }
+
+    /// The error to stop with, when the statement must stop now. While a
+    /// result arrives faster than it is read, SQLx's reads never wait, so the
+    /// session's task keeps its thread: [`Limit::bound`] is not polled again
+    /// and no worker turns Tokio's timer. The token and the clock are read
+    /// here instead.
+    fn passed(&self) -> Option<DriverError> {
+        if self.cancel.is_cancelled() {
+            Some(DriverError::cancelled())
+        } else if self
+            .deadline
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+        {
+            Some(timed_out())
+        } else {
+            None
+        }
+    }
 }
 async fn connect(
     input: &ResolvedConnection,
@@ -204,10 +251,39 @@ enum Command {
     Transaction {
         reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
     },
+    Encryption {
+        reply: oneshot::Sender<DriverResult<Encryption>>,
+    },
+    EditTarget {
+        columns: Vec<ColumnInfo>,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    Write {
+        request: Box<write::WriteRequest>,
+        reply: oneshot::Sender<DriverResult<write::WriteOutcome>>,
+        cancel: CancellationToken,
+    },
+    TableTarget {
+        path: ObjectPath,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    BeginWrites {
+        reply: oneshot::Sender<DriverResult<()>>,
+        cancel: CancellationToken,
+    },
+    EndWrites {
+        commit: bool,
+        reply: oneshot::Sender<DriverResult<()>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
 }
+
+/// How long reading a table's catalog for editing may take.
+const CATALOG: Duration = Duration::from_secs(60);
 
 enum Event {
     Columns(Vec<ColumnInfo>),
@@ -343,6 +419,99 @@ impl Session for DatabaseSession {
             .map_err(|_| session_closed())?;
         answer.await.map_err(|_| session_closed())?
     }
+    /// Read from `pg_stat_ssl` for this backend, so a profile that only
+    /// prefers TLS tells whether it fell back to plain text.
+    async fn encryption(&mut self, cancel: CancellationToken) -> DriverResult<Encryption> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Encryption { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+    /// Read from `pg_class`, `pg_attribute`, `pg_index`, `pg_trigger` and
+    /// `pg_constraint` for the relation the columns' OIDs name, inside a
+    /// savepoint when a transaction is open.
+    async fn edit_target(
+        &mut self,
+        _statement: &str,
+        columns: &[ColumnInfo],
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::EditTarget {
+                columns: columns.to_vec(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    async fn write(
+        &mut self,
+        request: &write::WriteRequest,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::WriteOutcome> {
+        request.validate()?;
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Write {
+                request: Box::new(request.clone()),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    /// Read from `pg_class`, `pg_attribute`, `pg_index`, `pg_trigger` and
+    /// `pg_constraint` for the table at `path`.
+    async fn table_target(
+        &mut self,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::TableTarget {
+                path: path.clone(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    async fn begin_writes(&mut self, cancel: CancellationToken) -> DriverResult<()> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        self.ask(|reply| Command::BeginWrites { reply, cancel })
+            .await
+    }
+
+    /// Never cancelled: a commit or a rollback is not left half done.
+    async fn end_writes(&mut self, commit: bool, _cancel: CancellationToken) -> DriverResult<()> {
+        self.ask(|reply| Command::EndWrites { commit, reply }).await
+    }
+
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
             return Ok(());
@@ -404,15 +573,17 @@ const BIND_SETTINGS: &str =
 /// none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SnapshotEffect {
-    /// `BEGIN` or `START TRANSACTION`: a transaction opens without a snapshot.
+    /// `BEGIN`, `START TRANSACTION`, or ending one `AND CHAIN`: a transaction
+    /// opens without a snapshot.
     Opens,
-    /// `SET`, `SHOW`, `SAVEPOINT`, `RELEASE`: no snapshot is taken.
+    /// `SET`, `SHOW`, `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`: no snapshot is
+    /// taken.
     Keeps,
     /// Anything else may take one.
     Takes,
 }
 
-/// The [`SnapshotEffect`] of `sql`, from its first word after whitespace and
+/// The [`SnapshotEffect`] of `sql`, from its first words after whitespace and
 /// comments.
 fn snapshot_effect(sql: &str) -> SnapshotEffect {
     let mut rest = sql;
@@ -448,48 +619,117 @@ fn snapshot_effect(sql: &str) -> SnapshotEffect {
             break;
         }
     }
-    let word: String = rest
+    let first: String = rest
         .chars()
         .take_while(char::is_ascii_alphabetic)
         .collect::<String>()
         .to_ascii_uppercase();
-    match word.as_str() {
+    match first.as_str() {
         "BEGIN" | "START" => SnapshotEffect::Opens,
         "SET" | "SHOW" | "SAVEPOINT" | "RELEASE" => SnapshotEffect::Keeps,
+        "COMMIT" | "END" | "ROLLBACK" | "ABORT" => {
+            // `[WORK | TRANSACTION] [AND [NO] CHAIN]`, or `ROLLBACK [WORK |
+            // TRANSACTION] TO [SAVEPOINT] name`.
+            let next: Vec<String> = rest[first.len()..]
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .filter(|word| !word.is_empty())
+                .map(str::to_ascii_uppercase)
+                .skip_while(|word| word == "WORK" || word == "TRANSACTION")
+                .take(2)
+                .collect();
+            match next.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                ["AND", "CHAIN"] => SnapshotEffect::Opens,
+                ["TO", ..] if first == "ROLLBACK" => SnapshotEffect::Keeps,
+                _ => SnapshotEffect::Takes,
+            }
+        }
         _ => SnapshotEffect::Takes,
     }
 }
 
-/// The transaction state, read with one simple-protocol query. In the
-/// simple protocol the transaction and the statement start at the same
-/// `Query` message, so their timestamps differ only inside a transaction
-/// opened earlier; the extended protocol stamps each message apart and
-/// cannot be used. Inside a failed transaction the query itself fails with
-/// SQLSTATE 25P02, which is the answer.
-async fn transaction_status(connection: &mut PgConnection) -> DriverResult<TransactionStatus> {
-    let probe = sqlx::raw_sql(sqlx::AssertSqlSafe(
-        "SELECT (transaction_timestamp() <> statement_timestamp())::text, \
-         (pg_current_xact_id_if_assigned() IS NOT NULL)::text",
+/// Whether the open transaction wrote something, read with one
+/// simple-protocol query. Asked only once the transaction has a snapshot
+/// ([`SnapshotEffect`]), so the query takes none.
+async fn transaction_wrote(connection: &mut PgConnection) -> DriverResult<bool> {
+    let row = sqlx::raw_sql(sqlx::AssertSqlSafe(
+        "SELECT (pg_current_xact_id_if_assigned() IS NOT NULL)::text",
     ))
     .fetch_one(&mut *connection)
-    .await;
-    match probe {
-        Ok(row) => {
-            let flag = |index: usize| -> DriverResult<bool> {
-                Ok(row.try_get::<String, _>(index).map_err(map_error)? == "true")
-            };
-            Ok(if flag(0)? {
-                TransactionStatus::Open {
-                    changes: Some(flag(1)?),
-                }
-            } else {
-                TransactionStatus::Idle
-            })
+    .await
+    .map_err(map_error)?;
+    Ok(row.try_get::<String, _>(0).map_err(map_error)? == "true")
+}
+
+/// Where an edit runs, from the transaction state of the last
+/// `ReadyForQuery`: `true` inside an open transaction (in a savepoint),
+/// `false` outside one; a failed transaction refuses edits until it is
+/// rolled back.
+async fn edit_scope(connection: &mut PgConnection) -> DriverResult<bool> {
+    use sqlx::postgres::PgTransactionStatus;
+    match connection.transaction_status().await.map_err(map_error)? {
+        PgTransactionStatus::Idle => Ok(false),
+        PgTransactionStatus::Transaction => Ok(true),
+        PgTransactionStatus::Error => Err(DriverError::validation(
+            "The transaction failed; roll it back before editing rows",
+        )),
+    }
+}
+
+/// Runs a session command the driver writes itself (no value in it).
+async fn simple(connection: &mut PgConnection, sql: &str) -> DriverResult<()> {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(&mut *connection)
+        .await
+        .map(|_| ())
+        .map_err(map_error)
+}
+
+/// Ends what an edit opened, within [`RECOVERY`]: its savepoint (`nested`)
+/// or its own transaction, kept (`keep`: released or committed) or rolled
+/// back.
+async fn end_edit(connection: &mut PgConnection, nested: bool, keep: bool) -> DriverResult<()> {
+    let savepoint = crate::edit::SAVEPOINT;
+    let sql = match (nested, keep) {
+        (true, true) => format!("RELEASE SAVEPOINT {savepoint}"),
+        (true, false) => {
+            format!("ROLLBACK TO SAVEPOINT {savepoint}; RELEASE SAVEPOINT {savepoint}")
         }
-        Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("25P02") => {
-            Ok(TransactionStatus::Failed)
-        }
-        Err(error) => Err(map_error(error)),
+        (false, true) => "COMMIT".to_owned(),
+        (false, false) => "ROLLBACK".to_owned(),
+    };
+    tokio::time::timeout(RECOVERY, simple(connection, &sql))
+        .await
+        .unwrap_or_else(|_| Err(timed_out()))
+}
+
+/// A write whose `COMMIT` got no answer: it may or may not have been
+/// written, and it is never sent again.
+fn commit_unknown() -> DriverError {
+    DriverError::new(
+        ErrorCode::Connection,
+        "The connection was lost while committing: the changes may or may not have been written. Read the rows again before writing them again.",
+    )
+}
+
+/// The error of a change of an import's write that affected `matched` rows,
+/// not one.
+fn mismatch(index: usize, matched: u64) -> DriverError {
+    DriverError::validation(format!(
+        "The row affected {matched} rows of the table, not one"
+    ))
+    .at_change(index)
+}
+
+/// Commits (`commit`) or rolls back the import's transaction. A commit the
+/// server answered with an error rolled it back; one without an answer may
+/// or may not have been written, and closes the session.
+async fn end_writes(connection: &mut PgConnection, commit: bool) -> (DriverResult<()>, Flow) {
+    match end_edit(connection, false, commit).await {
+        Ok(()) => (Ok(()), Flow::Ready),
+        Err(error) if error.server.is_some() => (Err(error), Flow::Ready),
+        Err(_) if commit => (Err(commit_unknown()), Flow::Broken),
+        // Closing the session rolls the transaction back.
+        Err(error) => (Err(error), Flow::Broken),
     }
 }
 
@@ -583,15 +823,8 @@ impl Server {
                     }));
                     Flow::Ready
                 }
-                Command::Transaction { reply } if self.unread => {
-                    let _ = reply.send(Ok(Some(TransactionStatus::Open {
-                        changes: Some(false),
-                    })));
-                    Flow::Ready
-                }
                 Command::Transaction { reply } => {
-                    match tokio::time::timeout(RECOVERY, transaction_status(&mut connection)).await
-                    {
+                    match tokio::time::timeout(RECOVERY, self.transaction(&mut connection)).await {
                         Ok(status) => {
                             let _ = reply.send(status.map(Some));
                             Flow::Ready
@@ -636,6 +869,86 @@ impl Server {
                         }
                     }
                 }
+                Command::Encryption { reply } if self.unread => {
+                    // Querying would take the new transaction's snapshot.
+                    let _ = reply.send(Ok(Encryption::Unknown));
+                    Flow::Ready
+                }
+                Command::Encryption { reply } => {
+                    let found = tokio::time::timeout(
+                        RECOVERY,
+                        sqlx::query_as::<_, (bool, Option<String>)>(
+                            "SELECT ssl, version FROM pg_stat_ssl WHERE pid = pg_backend_pid()",
+                        )
+                        .fetch_optional(&mut connection),
+                    )
+                    .await;
+                    match found {
+                        Ok(Ok(found)) => {
+                            let _ = reply.send(Ok(match found {
+                                Some((true, version)) => Encryption::Tls { version },
+                                Some((false, _)) => Encryption::Plaintext,
+                                // A server without the view's row (a
+                                // compatible database) does not tell.
+                                None => Encryption::Unknown,
+                            }));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(DriverError::new(
+                                ErrorCode::Timeout,
+                                "Database operation timed out",
+                            )));
+                            Flow::Broken
+                        }
+                    }
+                }
+                Command::EditTarget {
+                    columns,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.edit_target(&mut connection, &columns, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::Write {
+                    request,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.write(&mut connection, &request, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::TableTarget {
+                    path,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.table_target(&mut connection, &path, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::BeginWrites { reply, cancel } => {
+                    let (result, flow) = self.begin_writes(&mut connection, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::EndWrites { commit, reply } => {
+                    let (result, flow) = end_writes(&mut connection, commit).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
                     let _ = reply.send(connection.close().await.map_err(map_error));
@@ -655,6 +968,33 @@ impl Server {
         }
         self.open.store(false, Ordering::SeqCst);
         let _ = tokio::time::timeout(RECOVERY, connection.close()).await;
+    }
+
+    /// The transaction state the server reported in its last `ReadyForQuery`
+    /// message, which takes no query. Whether an open transaction wrote is
+    /// known to be nothing while it has no snapshot, and is otherwise asked
+    /// with [`transaction_wrote`].
+    async fn transaction(
+        &mut self,
+        connection: &mut PgConnection,
+    ) -> DriverResult<TransactionStatus> {
+        use sqlx::postgres::PgTransactionStatus;
+        let status = connection.transaction_status().await.map_err(map_error)?;
+        if status != PgTransactionStatus::Transaction {
+            // Whatever the statements suggested, no transaction waits for
+            // its snapshot.
+            self.unread = false;
+        }
+        Ok(match status {
+            PgTransactionStatus::Idle => TransactionStatus::Idle,
+            PgTransactionStatus::Error => TransactionStatus::Failed,
+            PgTransactionStatus::Transaction if self.unread => TransactionStatus::Open {
+                changes: Some(false),
+            },
+            PgTransactionStatus::Transaction => TransactionStatus::Open {
+                changes: Some(transaction_wrote(connection).await?),
+            },
+        })
     }
 
     /// Runs one statement and serves its pages until the result ends or
@@ -732,6 +1072,7 @@ impl Server {
                     name: c.name().into(),
                     data_type: c.type_info().name().into(),
                     nullable: None,
+                    origin: crate::edit::origin(c.relation_id(), c.relation_attribute_no()),
                 })
                 .collect::<Vec<_>>())
         })
@@ -749,18 +1090,17 @@ impl Server {
         let mut ahead = None;
         let mut affected = None;
         loop {
-            let page = bounded(
-                &cancel,
-                options.timeout,
-                read_page(
+            let limit = Limit::new(&cancel, options.timeout);
+            let page = limit
+                .bound(read_page(
                     &mut stream,
                     &mut ahead,
                     &mut affected,
                     options.max_rows,
                     &events,
-                ),
-            )
-            .await;
+                    &limit,
+                ))
+                .await;
             match page {
                 Ok(PageEnd::Finished) => {
                     drop(stream);
@@ -784,8 +1124,9 @@ impl Server {
                         ..DriverOutcome::default()
                     };
                     if events.send(Event::Done(Ok(outcome))).await.is_err() {
+                        let drained = drain(&mut stream, RECOVERY, || self.cancel_server()).await;
                         drop(stream);
-                        return self.recover(connection, true).await;
+                        return self.cut(connection, drained).await;
                     }
                     // The result stays open until the next command.
                     match commands.recv().await {
@@ -799,14 +1140,21 @@ impl Server {
                             cancel = next_cancel;
                         }
                         Some(other) => {
+                            let drained =
+                                drain(&mut stream, RECOVERY, || self.cancel_server()).await;
                             drop(stream);
-                            return match self.recover(connection, true).await {
+                            return match self.cut(connection, drained).await {
                                 Flow::Ready => Flow::Next(other),
                                 flow => flow,
                             };
                         }
                         None => return Flow::Closed,
                     }
+                }
+                Ok(PageEnd::Gone) if !cancel.is_cancelled() => {
+                    let drained = drain(&mut stream, RECOVERY, || self.cancel_server()).await;
+                    drop(stream);
+                    return self.cut(connection, drained).await;
                 }
                 Ok(PageEnd::Gone) => {
                     drop(stream);
@@ -820,27 +1168,285 @@ impl Server {
         }
     }
 
+    /// Reads what a result with `columns` can be written back to. Inside an
+    /// open transaction the catalog is read in a savepoint, rolled back
+    /// afterwards, so neither a failure nor a cancellation reaches that
+    /// transaction.
+    async fn edit_target(
+        &mut self,
+        connection: &mut PgConnection,
+        columns: &[ColumnInfo],
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::EditTarget>, Flow) {
+        let nested = match edit_scope(connection).await {
+            Ok(nested) => nested,
+            Err(error) => return (Err(error), Flow::Ready),
+        };
+        if nested {
+            // The catalog's queries take the transaction's snapshot.
+            self.unread = false;
+            if let Err(error) =
+                simple(connection, &format!("SAVEPOINT {}", crate::edit::SAVEPOINT)).await
+            {
+                let flow = self.abandon(connection, None, &error).await;
+                return (Err(error), flow);
+            }
+        }
+        let read = bounded(
+            cancel,
+            Some(CATALOG),
+            crate::edit::edit_target(connection, &self.database, columns),
+        )
+        .await;
+        match read {
+            Ok(target) => {
+                let flow = if nested && end_edit(connection, true, false).await.is_err() {
+                    Flow::Broken
+                } else {
+                    Flow::Ready
+                };
+                (Ok(target), flow)
+            }
+            Err(error) => {
+                let flow = self
+                    .abandon(connection, nested.then_some(true), &error)
+                    .await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// The table at `path` as an import's target. Read in the session's
+    /// snapshot, outside any transaction an import opens later.
+    async fn table_target(
+        &mut self,
+        connection: &mut PgConnection,
+        path: &ObjectPath,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::EditTarget>, Flow) {
+        let read = bounded(
+            cancel,
+            Some(CATALOG),
+            crate::edit::table_target(connection, &self.database, path),
+        )
+        .await;
+        match read {
+            Ok(target) => (Ok(target), Flow::Ready),
+            Err(error) => {
+                let flow = self.abandon(connection, None, &error).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Opens the import's transaction, which only the session's own
+    /// `end_writes` ends.
+    async fn begin_writes(
+        &mut self,
+        connection: &mut PgConnection,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<()>, Flow) {
+        match edit_scope(connection).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return (
+                    Err(DriverError::validation(
+                        "The session already holds a transaction",
+                    )),
+                    Flow::Ready,
+                );
+            }
+            Err(error) => return (Err(error), Flow::Ready),
+        }
+        match bounded(cancel, Some(RECOVERY), simple(connection, "BEGIN")).await {
+            Ok(()) => {
+                self.unread = false;
+                (Ok(()), Flow::Ready)
+            }
+            Err(error) => {
+                let flow = self.abandon(connection, None, &error).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// A write that joins the import's transaction (`WriteScope::Caller`):
+    /// the changes run with nothing committed or rolled back, and one that
+    /// fails or affects another number of rows than one fails the write at
+    /// its index. The transaction is left to `end_writes`.
+    async fn write_in_caller(
+        &mut self,
+        connection: &mut PgConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        match edit_scope(connection).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    Err(DriverError::validation("Begin the writes first")),
+                    Flow::Ready,
+                );
+            }
+            Err(error) => return (Err(error), Flow::Ready),
+        }
+        let applied = bounded(
+            cancel,
+            request.timeout,
+            crate::edit::apply(connection, &self.database, request),
+        )
+        .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => (
+                Ok(write::WriteOutcome::Written {
+                    rows,
+                    committed: false,
+                }),
+                Flow::Ready,
+            ),
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => {
+                (Err(mismatch(index, matched)), Flow::Ready)
+            }
+            Err(error) => {
+                let flow = self.abandon(connection, None, &error).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Writes `request` in a transaction of its own, or in a savepoint of the
+    /// open one, and commits (or releases the savepoint) only when every
+    /// change affected exactly one row. A failure, a cancellation or the
+    /// timeout rolls back what the write did. A write with
+    /// `WriteScope::Caller` joins the import's transaction instead.
+    async fn write(
+        &mut self,
+        connection: &mut PgConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        if request.scope == write::WriteScope::Caller {
+            return self.write_in_caller(connection, request, cancel).await;
+        }
+        let nested = match edit_scope(connection).await {
+            Ok(nested) => nested,
+            Err(error) => return (Err(error), Flow::Ready),
+        };
+        let open = if nested {
+            format!("SAVEPOINT {}", crate::edit::SAVEPOINT)
+        } else {
+            "BEGIN".to_owned()
+        };
+        if let Err(error) = simple(connection, &open).await {
+            let flow = self.abandon(connection, None, &error).await;
+            return (Err(error), flow);
+        }
+        self.unread = false;
+        let applied = bounded(
+            cancel,
+            request.timeout,
+            crate::edit::apply(connection, &self.database, request),
+        )
+        .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => {
+                match end_edit(connection, nested, true).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::Written {
+                            rows,
+                            committed: !nested,
+                        }),
+                        Flow::Ready,
+                    ),
+                    // The server answered: it rolled the transaction back (a
+                    // deferred constraint failed at COMMIT).
+                    Err(error) if error.server.is_some() => (Err(error), Flow::Ready),
+                    Err(_) => (Err(commit_unknown()), Flow::Broken),
+                }
+            }
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => {
+                match end_edit(connection, nested, false).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::RolledBack { index, matched }),
+                        Flow::Ready,
+                    ),
+                    // Closing the session rolls the write back.
+                    Err(error) => (Err(error), Flow::Broken),
+                }
+            }
+            Err(error) => {
+                let flow = self.abandon(connection, Some(nested), &error).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// After a failed edit step: brings the protocol back (cancelling a
+    /// statement that may still run), then rolls back what the edit opened
+    /// (`opened`). A connection that cannot be brought back is closed, which
+    /// rolls it back too.
+    async fn abandon(
+        &self,
+        connection: &mut PgConnection,
+        opened: Option<bool>,
+        error: &DriverError,
+    ) -> Flow {
+        if error.code == ErrorCode::Connection {
+            return Flow::Broken;
+        }
+        let running = matches!(
+            error.code,
+            ErrorCode::Cancelled | ErrorCode::Timeout | ErrorCode::Protocol
+        );
+        if let Flow::Broken = self.recover(connection, running).await {
+            return Flow::Broken;
+        }
+        let Some(nested) = opened else {
+            return Flow::Ready;
+        };
+        match end_edit(connection, nested, false).await {
+            Ok(()) => Flow::Ready,
+            Err(_) => Flow::Broken,
+        }
+    }
+
     /// Brings the protocol back to a known state after a statement was left
     /// unfinished (cancelling it on the server when it may still run), or
     /// reports that the connection must be closed.
     async fn recover(&self, connection: &mut PgConnection, running: bool) -> Flow {
         if running {
-            // A cancel request that reaches an idle backend is ignored.
-            let cancel_server = async {
-                let mut control = connect(&self.input, &CancellationToken::new()).await?;
-                sqlx::query("SELECT pg_cancel_backend($1)")
-                    .bind(self.backend as i32)
-                    .execute(&mut control)
-                    .await
-                    .map_err(map_error)?;
-                Ok::<_, DriverError>(())
-            };
-            let _ = tokio::time::timeout(RECOVERY, cancel_server).await;
+            self.cancel_server().await;
         }
         match tokio::time::timeout(RECOVERY, resynchronize(connection)).await {
             Ok(Ok(())) => Flow::Ready,
             _ => Flow::Broken,
         }
+    }
+
+    /// Asks the server, from another connection, to cancel what the
+    /// session's backend runs. A cancel request that reaches an idle backend
+    /// is ignored.
+    async fn cancel_server(&self) {
+        let cancel_server = async {
+            let mut control = connect(&self.input, &CancellationToken::new()).await?;
+            sqlx::query("SELECT pg_cancel_backend($1)")
+                .bind(self.backend as i32)
+                .execute(&mut control)
+                .await
+                .map_err(map_error)?;
+            Ok::<_, DriverError>(())
+        };
+        let _ = tokio::time::timeout(RECOVERY, cancel_server).await;
+    }
+
+    /// Recovers after the reader left a result before its end (another
+    /// command arrived, or the sink stopped) and [`drain`] read what was
+    /// left of it: `drained` when the result ended.
+    async fn cut(&self, connection: &mut PgConnection, drained: bool) -> Flow {
+        if !drained {
+            return Flow::Broken;
+        }
+        self.recover(connection, false).await
     }
 
     /// Recovers after a failed statement and reports the error. A database
@@ -868,14 +1474,60 @@ impl Server {
     }
 }
 
+/// Reads and drops the rest of a result the reader left before its end. Its
+/// statement may already be done, or still writing as it returns rows (a
+/// `SELECT` of a function that writes), and cancelling it would roll back
+/// its implicit transaction with the writes whose rows were shown. So the
+/// result is read until it ends, for at most `window` ([`RECOVERY`]); past
+/// it, `cancel` is called once and what is left is read for another
+/// `window`. Each read is bounded by the clock as well as by the timer
+/// ([`Limit::passed`] says why). `true` when the result ended, with or
+/// without a database error (the cancellation's); `false` when the
+/// connection must be closed.
+async fn drain<S, C>(stream: &mut S, window: Duration, cancel: impl FnOnce() -> C) -> bool
+where
+    S: futures_util::Stream<
+            Item = Result<
+                sqlx::Either<sqlx::postgres::PgQueryResult, sqlx::postgres::PgRow>,
+                sqlx::Error,
+            >,
+        > + Unpin,
+    C: Future<Output = ()>,
+{
+    let mut until = tokio::time::Instant::now() + window;
+    let mut cancel = Some(cancel);
+    loop {
+        let next = if tokio::time::Instant::now() < until {
+            tokio::time::timeout_at(until, stream.try_next()).await.ok()
+        } else {
+            None
+        };
+        match next {
+            Some(Ok(Some(_))) => {}
+            Some(Ok(None) | Err(sqlx::Error::Database(_))) => return true,
+            Some(Err(_)) => return false,
+            None => match cancel.take() {
+                Some(cancel) => {
+                    cancel().await;
+                    until = tokio::time::Instant::now() + window;
+                }
+                None => return false,
+            },
+        }
+    }
+}
+
 /// Sends up to `max_rows` rows, starting with the one read ahead last time,
 /// and reads one row ahead to tell a full page from the end of the result.
+/// `limit` is checked before every read, so a statement stops at its next
+/// row even when its reads never wait.
 async fn read_page<S>(
     stream: &mut S,
     ahead: &mut Option<Row>,
     affected: &mut Option<u64>,
     max_rows: u32,
     events: &mpsc::Sender<Event>,
+    limit: &Limit<'_>,
 ) -> DriverResult<PageEnd>
 where
     S: futures_util::Stream<
@@ -892,7 +1544,13 @@ where
         }
         count = 1;
     }
-    while let Some(item) = stream.try_next().await.map_err(map_error)? {
+    loop {
+        if let Some(error) = limit.passed() {
+            return Err(error);
+        }
+        let Some(item) = stream.try_next().await.map_err(map_error)? else {
+            break;
+        };
         match item {
             sqlx::Either::Left(result) => *affected = Some(result.rows_affected()),
             sqlx::Either::Right(row) => {
@@ -1462,8 +2120,17 @@ ORDER BY n.nspname, c.relname, k.conname"#;
 
 #[cfg(test)]
 mod tests {
-    use super::{SnapshotEffect, parameter_reference, parameter_settings, snapshot_effect};
-    use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+    use super::{
+        EVENT_BUFFER, Limit, SnapshotEffect, drain, parameter_reference, parameter_settings,
+        read_page, snapshot_effect,
+    };
+    use futures_util::Stream as _;
+    use jykre_core::{
+        CancellationToken, ErrorCode, ExecutionOptions, ParameterKind, QueryParameter, QueryRequest,
+    };
+    use sqlx::postgres::{PgQueryResult, PgRow};
+    use std::time::Duration;
+    use tokio::sync::mpsc;
 
     fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
         QueryParameter {
@@ -1514,6 +2181,11 @@ mod tests {
             "BEGIN",
             "begin;",
             "START TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            // Ending a transaction AND CHAIN opens the next one at once.
+            "COMMIT AND CHAIN",
+            "end work and chain;",
+            "ROLLBACK TRANSACTION AND CHAIN",
+            "abort and chain",
         ] {
             assert_eq!(snapshot_effect(sql), SnapshotEffect::Opens, "{sql}");
         }
@@ -1523,6 +2195,9 @@ mod tests {
             "/* a /* nested */ b */ SHOW search_path",
             "SAVEPOINT a",
             "RELEASE SAVEPOINT a",
+            "ROLLBACK TO SAVEPOINT a",
+            // A savepoint named like the keyword is still a name.
+            "rollback work to chain",
         ] {
             assert_eq!(snapshot_effect(sql), SnapshotEffect::Keeps, "{sql}");
         }
@@ -1532,8 +2207,131 @@ mod tests {
             "",
             "-- only",
             "/* open",
+            "COMMIT",
+            "COMMIT AND NO CHAIN",
+            "ROLLBACK",
         ] {
             assert_eq!(snapshot_effect(sql), SnapshotEffect::Takes, "{sql}");
         }
+    }
+
+    /// While a result arrives faster than it is read, SQLx's reads never
+    /// wait, so the session's task keeps its thread: a cancellation's wake-up
+    /// is not seen, and no worker turns Tokio's timer. A stream that is
+    /// always ready does the same here, and blocking the runtime's only
+    /// thread lets the deadline pass without the timer.
+    #[tokio::test]
+    async fn a_page_that_never_waits_still_stops_at_its_limit() {
+        let results = |cancel_at_ten: Option<CancellationToken>| {
+            futures_util::stream::iter((0..10_000).map(move |index| {
+                if index == 10
+                    && let Some(cancel) = &cancel_at_ten
+                {
+                    cancel.cancel();
+                }
+                Ok::<_, sqlx::Error>(sqlx::Either::<_, PgRow>::Left(PgQueryResult::default()))
+            }))
+        };
+        let (events, _receiver) = mpsc::channel(EVENT_BUFFER);
+
+        let cancel = CancellationToken::new();
+        let limit = Limit::new(&cancel, None);
+        let mut stream = results(Some(cancel.clone()));
+        let page = limit
+            .bound(read_page(
+                &mut stream,
+                &mut None,
+                &mut None,
+                1_000,
+                &events,
+                &limit,
+            ))
+            .await;
+        assert_eq!(
+            page.err().map(|error| error.code),
+            Some(ErrorCode::Cancelled)
+        );
+        assert!(
+            stream.size_hint().0 > 9_900,
+            "read on after the cancellation"
+        );
+
+        let cancel = CancellationToken::new();
+        let limit = Limit::new(&cancel, Some(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(20));
+        let mut stream = results(None);
+        let page = limit
+            .bound(read_page(
+                &mut stream,
+                &mut None,
+                &mut None,
+                1_000,
+                &events,
+                &limit,
+            ))
+            .await;
+        assert_eq!(page.err().map(|error| error.code), Some(ErrorCode::Timeout));
+    }
+
+    /// A stream of `items` that then waits until `ends` is notified.
+    fn waiting(
+        items: usize,
+        ends: std::sync::Arc<tokio::sync::Notify>,
+    ) -> impl futures_util::Stream<Item = Result<sqlx::Either<PgQueryResult, PgRow>, sqlx::Error>> + Unpin
+    {
+        let rows = futures_util::stream::iter(
+            (0..items).map(|_| Ok(sqlx::Either::Left(PgQueryResult::default()))),
+        );
+        let end = futures_util::stream::once(async move {
+            ends.notified().await;
+            Ok(sqlx::Either::Left(PgQueryResult::default()))
+        });
+        Box::pin(futures_util::StreamExt::chain(rows, end))
+    }
+
+    #[tokio::test]
+    async fn a_cut_result_is_drained_and_cancelled_only_when_it_does_not_end() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let window = Duration::from_millis(50);
+
+        // A result that ends on its own is read to its end: its statement
+        // may be a write already done, and is never cancelled.
+        let cancels = Arc::new(AtomicUsize::new(0));
+        let mut stream = futures_util::stream::iter(
+            (0..1_000).map(|_| Ok(sqlx::Either::<_, PgRow>::Left(PgQueryResult::default()))),
+        );
+        let counted = cancels.clone();
+        let drained = drain(&mut stream, window, || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert!(drained);
+        assert_eq!(cancels.load(Ordering::SeqCst), 0);
+        assert_eq!(stream.size_hint().0, 0, "read to the end");
+
+        // One that does not end in time is cancelled, and what is left of
+        // it is then read.
+        let ends = Arc::new(tokio::sync::Notify::new());
+        let mut stream = waiting(10, ends.clone());
+        let counted = cancels.clone();
+        let drained = drain(&mut stream, window, || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+            ends.notify_one();
+        })
+        .await;
+        assert!(drained);
+        assert_eq!(cancels.load(Ordering::SeqCst), 1);
+
+        // One that does not end even after the cancellation closes the
+        // connection.
+        let mut stream = waiting(0, Arc::new(tokio::sync::Notify::new()));
+        let counted = cancels.clone();
+        let drained = drain(&mut stream, window, || async move {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+        .await;
+        assert!(!drained);
+        assert_eq!(cancels.load(Ordering::SeqCst), 2);
     }
 }

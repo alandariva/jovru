@@ -248,6 +248,7 @@ impl AppView {
         self.command_matches.clear();
         self.command_revision += 1;
         self.search_revision += 1;
+        self.explorer_searching = false;
         self.explorer_signature.clear();
         self.refresh_connection_choices(cx);
         self.save_state_soon(cx);
@@ -673,7 +674,7 @@ impl AppView {
                     Err(_) => connection_store::latest_backup(&dir).await,
                     Ok(_) => None,
                 };
-                let (font_size, copy, state, reports, theme) =
+                let (font_size, copy, state, reports, theme, favorites, library) =
                     match ConfigRepository::open(&dir).await {
                         Ok(repository) => {
                             let font_size = repository.setting("editor.font_size").await;
@@ -681,10 +682,17 @@ impl AppView {
                             let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
                             let state = super::state::read_state(&repository).await;
                             let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
+                            let favorites =
+                                repository.setting(jykre::favorites::SETTINGS_KEY).await;
+                            let library = repository
+                                .setting(jykre::query_files::library::SETTINGS_KEY)
+                                .await;
                             repository.close().await;
-                            (font_size, copy, state, reports, theme)
+                            (font_size, copy, state, reports, theme, favorites, library)
                         }
                         Err(error) => (
+                            Err(error.clone()),
+                            Err(error.clone()),
                             Err(error.clone()),
                             Err(error.clone()),
                             Err(error.clone()),
@@ -692,12 +700,56 @@ impl AppView {
                             Err(error),
                         ),
                     };
-                Ok((connections, font_size, copy, state, reports, theme, backup))
+                // The tabs' text, from their recovery files and files, read
+                // here, off the UI thread.
+                let (state, filled) = match state {
+                    Ok(mut state) => {
+                        let data = dir.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            let filled = jykre::query_files::tabs::fill(&mut state, &data);
+                            (state, filled)
+                        })
+                        .await
+                        {
+                            Ok((state, filled)) => (Ok(state), filled),
+                            Err(_) => (
+                                Err(DriverError::new(
+                                    ErrorCode::Internal,
+                                    "Could not read the tabs' files",
+                                )),
+                                Default::default(),
+                            ),
+                        }
+                    }
+                    Err(error) => (Err(error), Default::default()),
+                };
+                Ok((
+                    connections,
+                    font_size,
+                    copy,
+                    state,
+                    reports,
+                    theme,
+                    favorites,
+                    library,
+                    filled,
+                    backup,
+                ))
             })
             .await;
             let _ = weak.update_in(cx, |this, window, cx| {
-                this.connections_loading = false;
-                let (connections, font_size, copy, state, reports, theme, backup) = match result {
+                let (
+                    connections,
+                    font_size,
+                    copy,
+                    state,
+                    reports,
+                    theme,
+                    favorites,
+                    library,
+                    filled,
+                    backup,
+                ) = match result {
                     Ok(parts) => parts,
                     Err(error) => (
                         Err(error.clone()),
@@ -705,7 +757,10 @@ impl AppView {
                         Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
+                        Err(error.clone()),
+                        Err(error.clone()),
                         Err(error),
+                        Default::default(),
                         None,
                     ),
                 };
@@ -755,10 +810,22 @@ impl AppView {
                         problems.push(tr!("Could not load the saved connections: {0}", error))
                     }
                 }
+                // Loaded only once all of them are in: automation gets the
+                // whole list once, never a partial one that would suspend
+                // the schedules of the connections not inserted yet.
+                this.connections_loading = false;
+                this.sync_automation(cx);
+                // The saved queries' local data, which the tabs' files are
+                // found in. The demo keeps none.
+                if !super::demo::enabled()
+                    && let Some(problem) = this.load_library(library)
+                {
+                    problems.push(problem);
+                }
                 // The demo keeps its fixed tabs and saves nothing.
                 let restored = match state {
                     _ if super::demo::enabled() => false,
-                    Ok(state) => this.restore_state(state, window, cx),
+                    Ok(state) => this.restore_state(state, filled, window, cx),
                     Err(error) => {
                         problems.push(tr!(
                             "Could not read the tabs of the last session: {0}",
@@ -767,6 +834,12 @@ impl AppView {
                         false
                     }
                 };
+                // The demo keeps no favorites.
+                if !super::demo::enabled()
+                    && let Some(problem) = this.load_favorites(favorites)
+                {
+                    problems.push(problem);
+                }
                 // The demo keeps no reports.
                 if !super::demo::enabled()
                     && let Some(problem) = this.load_reports(reports, cx)
@@ -775,6 +848,12 @@ impl AppView {
                 }
                 if !problems.is_empty() {
                     this.app_notice = Some(Feedback::new(Tone::Error, problems.join(" ")));
+                }
+                // The saved queries of an earlier version become files; the
+                // library is read from its directory.
+                if !super::demo::enabled() {
+                    this.migrate_saved_queries(cx);
+                    this.scan_library(cx);
                 }
                 // Without connections the explorer and the workspace show
                 // an empty state with the way forward; nothing pops up.
@@ -911,6 +990,11 @@ impl AppView {
             self.report_tabs
                 .values()
                 .map(|report| (report.group, colors().neutral)),
+        );
+        shades.extend(
+            self.automation
+                .tab_groups()
+                .map(|group| (group, colors().neutral)),
         );
         self.tabs.update(cx, |tabs, cx| {
             for (group, shade) in shades {
@@ -1679,6 +1763,26 @@ impl AppView {
         cx.notify();
     }
 
+    /// A key of the explorer's keymap on a node: during the quick search
+    /// Up and Down go through its matches; otherwise every key moves,
+    /// expands or collapses ([`AppView::tree_key`]).
+    fn explorer_key(
+        &mut self,
+        index: usize,
+        path: &ObjectPath,
+        key: jykre::explorer::TreeKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use jykre::explorer::TreeKey;
+        match key {
+            TreeKey::Up | TreeKey::Down if self.explorer_quick.is_some() => {
+                self.quick_step(key == TreeKey::Down, window, cx)
+            }
+            key => self.tree_key(index, path, key, window, cx),
+        }
+    }
+
     /// An arrow key on an explorer node: move, expand or collapse
     /// ([`jykre::explorer::step`]).
     fn tree_key(
@@ -2363,6 +2467,7 @@ impl AppView {
             self.command_revision
         } else {
             self.search_revision += 1;
+            self.explorer_searching = !query.is_empty();
             self.search_revision
         };
         if !palette && query.is_empty() {
@@ -2473,6 +2578,7 @@ impl AppView {
                     this.command_matches
                         .retain(|item| matches!(item, super::PaletteItem::Saved(_)));
                 } else {
+                    this.explorer_searching = false;
                     for connection in &mut this.connections {
                         connection.set_search_rows(Vec::new());
                     }
@@ -2625,29 +2731,28 @@ impl AppView {
                             .when_some(connection.appearance.environment, |s, environment| {
                                 s.child(environment_badge(environment))
                             })
-                            .on_key_down(cx.listener(
-                                move |this, event: &KeyDownEvent, window, cx| {
-                                    let modified = event.keystroke.modifiers.modified();
-                                    match event.keystroke.key.as_str() {
-                                        "f5" => {
-                                            this.toggle_refresh(index, ObjectPath::default(), cx)
-                                        }
-                                        // Asks before deleting anything.
-                                        "delete" if !modified => {
-                                            this.delete_connection(index, window, cx)
-                                        }
-                                        "right" if !modified => {
-                                            this.connections[index].expanded = true;
-                                            cx.notify();
-                                        }
-                                        "left" if !modified => {
-                                            this.connections[index].expanded = false;
-                                            cx.notify();
-                                        }
-                                        _ => return,
-                                    }
-                                    window.prevent_default();
-                                    cx.stop_propagation();
+                            .on_action(cx.listener(
+                                move |this, _: &super::shortcuts::RefreshNode, _, cx| {
+                                    this.toggle_refresh(index, ObjectPath::default(), cx)
+                                },
+                            ))
+                            // Asks before deleting anything.
+                            .on_action(cx.listener(
+                                move |this, _: &super::shortcuts::DeleteConnection, window, cx| {
+                                    this.delete_connection(index, window, cx)
+                                },
+                            ))
+                            // Right and Left expand and collapse the connection.
+                            .on_action(cx.listener(
+                                move |this, _: &super::shortcuts::ExplorerRight, _, cx| {
+                                    this.connections[index].expanded = true;
+                                    cx.notify();
+                                },
+                            ))
+                            .on_action(cx.listener(
+                                move |this, _: &super::shortcuts::ExplorerLeft, _, cx| {
+                                    this.connections[index].expanded = false;
+                                    cx.notify();
                                 },
                             ))
                             .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
@@ -2698,7 +2803,11 @@ impl AppView {
                     })
                     .context_menu({
                         let weak = weak.clone();
-                        move |menu, _, _| {
+                        move |menu, _, cx| {
+                            // Read when the menu opens.
+                            let favorite = weak
+                                .upgrade()
+                                .is_some_and(|view| view.read(cx).is_favorite(index, None));
                             let run = |action: fn(
                                 &mut AppView,
                                 usize,
@@ -2730,6 +2839,19 @@ impl AppView {
                                 .on_click(run(
                                     |this, index, _, cx| {
                                         this.toggle_refresh(index, ObjectPath::default(), cx)
+                                    },
+                                )),
+                            )
+                            .item(
+                                PopupMenuItem::new(if favorite {
+                                    tr!("Remove from favorites")
+                                } else {
+                                    tr!("Add to favorites")
+                                })
+                                .icon(if favorite { I::StarOff } else { I::Star })
+                                .on_click(run(
+                                    |this, index, _, cx| {
+                                        this.toggle_favorite(index, None, None, cx)
                                     },
                                 )),
                             )
@@ -3139,22 +3261,14 @@ impl AppView {
                                 .build(window, cx)
                         })
                     })
-                    // F5 refreshes the focused node, or cancels its refresh;
-                    // the arrows move through the tree.
-                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                        let keystroke = &event.keystroke;
-                        if keystroke.key == "f5" {
-                            this.toggle_refresh(index, f5_path.clone(), cx);
-                        } else if let Some(key) = jykre::explorer::TreeKey::from_key(&keystroke.key)
-                            .filter(|_| !keystroke.modifiers.modified())
-                        {
-                            this.tree_key(index, &key_path, key, window, cx);
-                        } else {
-                            return;
-                        }
-                        window.prevent_default();
-                        cx.stop_propagation();
-                    }))
+                    // F5 (`RefreshNode`) refreshes the focused node, or
+                    // cancels its refresh; the arrows move through the tree.
+                    .on_action(cx.listener(
+                        move |this, _: &super::shortcuts::RefreshNode, _, cx| {
+                            this.toggle_refresh(index, f5_path.clone(), cx)
+                        },
+                    ))
+                    .map(|node| tree_keys(node, index, &key_path, cx))
                     // One rule for every node: a click selects; a double
                     // click or Enter opens a table, or expands or collapses
                     // any other node (as its chevron and the arrows do), so a
@@ -3243,6 +3357,24 @@ impl AppView {
                 let query_path = path.clone();
                 let query_preview = preview.clone();
                 let relation_path = path.clone();
+                let favorite_path = path.clone();
+                let favorite_stored = preview.clone();
+                // A table imports into itself; a last-level namespace
+                // offers its tables, or a new one (ADR-0040).
+                let import_target = match object.kind {
+                    // As the cache lists it, which the dialog's list does.
+                    ObjectKind::Table => Some((Some(path.clone()), path.parent())),
+                    kind if Some(kind) == last_level => Some((None, Some(path.clone()))),
+                    _ => None,
+                }
+                .filter(|_| {
+                    weak.upgrade()
+                        .is_some_and(|view| view.read(cx).can_import(index))
+                });
+                let favorite = opens
+                    && weak
+                        .upgrade()
+                        .is_some_and(|view| view.read(cx).is_favorite(index, Some(&path)));
                 menu.item(if opens {
                     PopupMenuItem::new(tr!("View data"))
                         .icon(I::Table2)
@@ -3289,6 +3421,21 @@ impl AppView {
                             }))),
                     )
                 })
+                .when_some(import_target, |menu, (table, namespace)| {
+                    menu.item(
+                        PopupMenuItem::new(tr!("Import from file…"))
+                            .icon(I::Upload)
+                            .on_click(run(Box::new(move |this, window, cx| {
+                                this.open_import(
+                                    index,
+                                    table.clone(),
+                                    namespace.clone(),
+                                    window,
+                                    cx,
+                                )
+                            }))),
+                    )
+                })
                 .item(
                     PopupMenuItem::new(if refreshing_this {
                         tr!("Cancel refresh")
@@ -3309,6 +3456,24 @@ impl AppView {
                             .on_click(run(Box::new(move |this, _, cx| {
                                 this.inspect_node(index, inspect_path.clone(), cx)
                             }))),
+                    )
+                })
+                .when(opens, |menu| {
+                    menu.item(
+                        PopupMenuItem::new(if favorite {
+                            tr!("Remove from favorites")
+                        } else {
+                            tr!("Add to favorites")
+                        })
+                        .icon(if favorite { I::StarOff } else { I::Star })
+                        .on_click(run(Box::new(move |this, _, cx| {
+                            this.toggle_favorite(
+                                index,
+                                Some(favorite_path.clone()),
+                                Some(favorite_stored.clone()),
+                                cx,
+                            )
+                        }))),
                     )
                 })
                 .when(defined, |menu| {
@@ -4316,4 +4481,34 @@ fn connection_shade(
         DriverKind::Sqlite => C::Teal,
         _ => C::Mint,
     })
+}
+
+/// The explorer's keys on a node (`ExplorerUp`, ... in [`super::shortcuts`]):
+/// each is an action of the keymap, bound in the explorer's context.
+fn tree_keys(
+    node: Stateful<Div>,
+    index: usize,
+    path: &ObjectPath,
+    cx: &mut Context<AppView>,
+) -> Stateful<Div> {
+    use super::shortcuts::*;
+    use jykre::explorer::TreeKey;
+    fn on<A: Action>(
+        node: Stateful<Div>,
+        index: usize,
+        path: &ObjectPath,
+        key: TreeKey,
+        cx: &mut Context<AppView>,
+    ) -> Stateful<Div> {
+        let path = path.clone();
+        node.on_action(cx.listener(move |this, _: &A, window, cx| {
+            this.explorer_key(index, &path, key, window, cx)
+        }))
+    }
+    let node = on::<ExplorerUp>(node, index, path, TreeKey::Up, cx);
+    let node = on::<ExplorerDown>(node, index, path, TreeKey::Down, cx);
+    let node = on::<ExplorerLeft>(node, index, path, TreeKey::Left, cx);
+    let node = on::<ExplorerRight>(node, index, path, TreeKey::Right, cx);
+    let node = on::<ExplorerHome>(node, index, path, TreeKey::Home, cx);
+    on::<ExplorerEnd>(node, index, path, TreeKey::End, cx)
 }

@@ -1,6 +1,6 @@
 # ADR-0026: Named parameters in SQL tabs, and typed literals on classic Databricks clusters
 
-- **Status:** Proposed
+- **Status:** Accepted (by the maintainer on 2026-11-07; implemented)
 - **Date:** 2026-11-05
 - **Authors:** AI agent, at the maintainer's request (plan approved 2026-11-05)
 - **Amends:** [ADR-0023](0023-named-parameters-bound-by-drivers.md), which
@@ -15,7 +15,7 @@
 carries no parameters, so its markers reach the server as written. Running a
 `SELECT` again with another id means editing a literal in the SQL, or writing
 the value into the text, which is what the bound-values rule
-([Rust guidelines](../rust-guidelines.md#sql-generated-by-the-application))
+([Rust guidelines](../standards/rust-guidelines.md#sql-generated-by-the-application))
 exists to avoid. DataGrip and DBeaver bind variables in their consoles;
 Beekeeper Studio has query parameters.
 
@@ -106,7 +106,7 @@ text of a value that could change the statement:
     the binding round trip of ADR-0023, and its settings or variables stay in
     the tab's session. In a transaction the tab opened, the PostgreSQL
     `set_config` can take the snapshot just before the statement would
-    ([TD-002](../technical-debt.md#td-002--binding-named-parameters-in-postgresql-runs-a-query-first)).
+    ([TD-002](../plans/technical-debt.md#td-002--binding-named-parameters-in-postgresql-runs-a-query-first)).
   - On PostgreSQL and MySQL a statement with markers is not sent byte for byte
     as written: its markers are replaced by references.
   - On classic clusters values are written into the command as typed

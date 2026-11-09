@@ -1,7 +1,7 @@
 //! The copy formats of a result's selection: tab-separated text, CSV, JSON,
 //! JSON Lines, a Markdown or HTML table, `INSERT` statements, an `IN` list,
 //! values separated by commas and the column names
-//! ([Results](../docs/results.md#copying)).
+//! ([Results](../docs/reference/results.md#copying)).
 //!
 //! Values are written from the database's text, never reinterpreted: a
 //! number of a number column is written as the database wrote it, a
@@ -12,17 +12,21 @@
 //!
 //! [`CopyOptions`] are the choices of the copy menu: the format `Ctrl C`
 //! copies in and how the delimited formats write their fields. They are kept
-//! in the settings as `copy.preferences` ([Persistence](../docs/persistence.md)).
+//! in the settings as `copy.preferences` ([Persistence](../docs/reference/persistence.md)).
 use crate::cell_format::{self, ValueFamily};
+use crate::column_layout::ColumnLayout;
 use crate::decimal;
 use crate::drivers::DriverResult;
 use crate::export::{Quoting, Separator, push_csv_field};
-use crate::grid::{CellSelection, selection_block};
+use crate::grid::{CellSelection, block_columns, selection_block};
 use crate::result::ResultData;
 use crate::sql::string_literal;
 use jykre_core::SqlDialect;
 use std::collections::HashSet;
 use std::path::Path;
+
+mod job;
+pub use job::{CopyRequest, CopySource, Progress, generate};
 
 /// The formats a selection copies in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -254,28 +258,30 @@ pub struct Block<'a> {
 }
 
 impl<'a> Block<'a> {
-    /// The visible part of `selection`, or `None` when nothing visible is
-    /// selected.
+    /// The visible part of `selection`, its columns as `layout` shows them,
+    /// or `None` when nothing visible is selected.
     pub fn new(
         result: &'a ResultData,
         visible: &[usize],
+        layout: &ColumnLayout,
         selection: Option<CellSelection>,
         families: &[ValueFamily],
     ) -> Option<Self> {
-        let (rows, cols) = selection_block(selection?, visible)?;
+        let (rows, cols) = selection_block(selection?, visible, layout)?;
+        let cols = block_columns(layout, cols);
         Some(Self {
             names: cols
-                .clone()
-                .filter_map(|col| result.columns().get(col))
+                .iter()
+                .filter_map(|col| result.columns().get(*col))
                 .map(|column| column.name.as_str())
                 .collect(),
             families: cols
-                .clone()
-                .map(|col| families.get(col).copied().unwrap_or(ValueFamily::Text))
+                .iter()
+                .map(|col| families.get(*col).copied().unwrap_or(ValueFamily::Text))
                 .collect(),
             rows: rows
                 .filter_map(|position| visible.get(position))
-                .map(|row| cols.clone().map(|col| result.value(*row, col)).collect())
+                .map(|row| cols.iter().map(|col| result.value(*row, *col)).collect())
                 .collect(),
         })
     }
@@ -657,10 +663,12 @@ mod tests {
 
     fn all(result: &ResultData) -> Block<'_> {
         let families = families();
+        let layout = ColumnLayout::new(3);
         Block::new(
             result,
             &[0, 1, 2],
-            CellSelection::all(&[0, 1, 2], 3),
+            &layout,
+            CellSelection::all(&[0, 1, 2], &layout),
             &families,
         )
         .expect("a block")
@@ -685,6 +693,7 @@ mod tests {
         let block = Block::new(
             &result,
             &[0, 1, 2],
+            &ColumnLayout::new(3),
             Some(CellSelection {
                 anchor: (0, 0),
                 focus: (2, 1),

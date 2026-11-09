@@ -44,7 +44,7 @@ column can outweigh many narrow ones.
 
 A unit test checks values, NULLs, empty text and Unicode round-trip through
 the representation. Measure memory and frame time at 100,000 × 30 columns in
-a release build; frame budgets in [Performance](../performance.md#budgets)
+a release build; frame budgets in [Performance](../standards/performance.md#budgets)
 must hold.
 
 ## Implementation notes

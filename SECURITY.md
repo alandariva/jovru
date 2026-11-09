@@ -31,6 +31,11 @@ Areas that are especially relevant:
   non-sensitive configuration and object names but are not encrypted.
 - SQL sent to servers: the application runs the SQL you write; previews quote
   identifiers.
+- Updates: an archive is installed only when it verifies against the release
+  key compiled into the application (`assets/update/release-key.pub`); its
+  download follows redirects only to GitHub's download hosts. A way to make
+  the application install an archive that key did not sign is a
+  vulnerability.
 
 The test fixture password `jykre-test` in `docker-compose.test.yml` is public on
 purpose and only binds to `127.0.0.1`; it is not a vulnerability.

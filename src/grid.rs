@@ -4,15 +4,21 @@
 //! number format: the rows in display order, column widths and value
 //! families. [`GridCache`] rebuilds it only when one of those inputs changes,
 //! so hover, scroll and selection frames never pay for it. Selections address
-//! data rows, so filtering or sorting does not change what is selected.
+//! data rows and result columns, so filtering, sorting or laying out the
+//! columns ([`ColumnLayout`]) does not change what is selected.
 use crate::cell_format::{self, ValueFamily};
+use crate::column_layout::{ColumnLayout, ColumnWidths};
 use crate::decimal::compare_numbers;
 use crate::result::ResultData;
-use std::{cell::RefCell, ops::RangeInclusive, rc::Rc};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::{cell::RefCell, ops::RangeInclusive, sync::Arc};
 
 /// A rectangular block of result cells, from the cell clicked first (anchor)
 /// to the one reached with Shift (focus). Rows are indices into the result
-/// data, so sorting or filtering the view does not change what is selected.
+/// data and columns into the result's columns, so sorting or filtering the
+/// view, or moving its columns, does not change what is selected; the block
+/// spans the display positions between its ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CellSelection {
     /// `(data row, column)` of the cell clicked first.
@@ -22,14 +28,18 @@ pub struct CellSelection {
 }
 
 /// Position of each selected cell in the displayed grid: rows as positions in
-/// `visible`, columns as indices. `None` when the selection is hidden.
+/// `visible`, columns as display positions of `layout` (its
+/// [`ColumnLayout::column`] gives the result column). `None` when the
+/// selection is hidden: an end's row is filtered out or its column hidden.
 pub fn selection_block(
     selection: CellSelection,
     visible: &[usize],
+    layout: &ColumnLayout,
 ) -> Option<(RangeInclusive<usize>, RangeInclusive<usize>)> {
     let anchor = visible.iter().position(|row| *row == selection.anchor.0)?;
     let focus = visible.iter().position(|row| *row == selection.focus.0)?;
-    let (left, right) = (selection.anchor.1, selection.focus.1);
+    let left = layout.position(selection.anchor.1)?;
+    let right = layout.position(selection.focus.1)?;
     Some((
         anchor.min(focus)..=anchor.max(focus),
         left.min(right)..=left.max(right),
@@ -57,6 +67,12 @@ pub struct GridKey {
     /// The column the rows are sorted by; `None` keeps the server's order.
     pub sort: Option<ColumnSort>,
     pub numbers_pt_br: bool,
+    /// The version of the pending edits drawn over the result
+    /// ([`crate::grid_edit`]), so a change to them is drawn.
+    pub edits: u64,
+    /// Rows the edits insert: they follow the result's rows, as data rows
+    /// `row_count..row_count + inserted`, unfiltered and unsorted.
+    pub inserted: usize,
 }
 
 /// Rows sorted by the values of one column.
@@ -141,6 +157,9 @@ impl GridView {
                 )
             });
         }
+        // Inserted rows have no values to filter or sort by: they stay last,
+        // in the order they were added.
+        rows.extend(result.row_count()..result.row_count() + key.inserted);
         // Widths follow the first rows only, so a long result sizes as fast
         // as a short one.
         let widths = result
@@ -173,19 +192,68 @@ impl GridView {
 
 /// The last [`GridView`], reused while its key is unchanged.
 #[derive(Default)]
-pub struct GridCache(RefCell<Option<Rc<GridView>>>);
+pub struct GridCache(RefCell<Option<Arc<GridView>>>);
 
 impl GridCache {
-    pub fn get(&self, result: &ResultData, key: GridKey) -> Rc<GridView> {
+    pub fn get(&self, result: &ResultData, key: GridKey) -> Arc<GridView> {
         let mut cached = self.0.borrow_mut();
         match cached.as_ref() {
             Some(grid) if grid.key == key => grid.clone(),
             _ => {
                 // Rebuilt on the UI thread once per change, never per frame.
                 let _timer = crate::logging::UiTimer::start("grid view");
-                cached.insert(Rc::new(GridView::new(result, key))).clone()
+                cached.insert(Arc::new(GridView::new(result, key))).clone()
             }
         }
+    }
+}
+
+/// The last [`ColumnWidths`], reused while the grid view, the column
+/// layout and the widths the user set are unchanged: a frame reads them and
+/// never computes them for every column of the result.
+#[derive(Default)]
+pub struct WidthsCache(RefCell<Option<CachedWidths>>);
+
+struct CachedWidths {
+    view: GridKey,
+    layout: u64,
+    set: HashMap<usize, f32>,
+    widths: Rc<ColumnWidths>,
+}
+
+impl WidthsCache {
+    /// The widths of `view`'s columns, with `set` (the widths the user set,
+    /// by result column) over the measured ones, laid out by `layout`.
+    /// `layout_version` changes with every change of `layout`.
+    pub fn get(
+        &self,
+        view: &GridView,
+        layout: &ColumnLayout,
+        layout_version: u64,
+        set: &HashMap<usize, f32>,
+    ) -> Rc<ColumnWidths> {
+        let mut cached = self.0.borrow_mut();
+        if let Some(cached) = cached.as_ref()
+            && cached.view == view.key
+            && cached.layout == layout_version
+            && cached.set == *set
+        {
+            return cached.widths.clone();
+        }
+        let by_column = view
+            .widths
+            .iter()
+            .enumerate()
+            .map(|(column, width)| set.get(&column).copied().unwrap_or(*width))
+            .collect();
+        let widths = Rc::new(ColumnWidths::new(by_column, layout, MIN_COLUMN_WIDTH));
+        *cached = Some(CachedWidths {
+            view: view.key.clone(),
+            layout: layout_version,
+            set: set.clone(),
+            widths: widths.clone(),
+        });
+        widths
     }
 }
 
@@ -210,17 +278,23 @@ impl CellSelection {
         }
     }
 
-    /// A click on a row number: the whole row, or with `extend` every row
-    /// from the anchor's row to it.
-    pub fn click_row(current: Option<Self>, row: usize, columns: usize, extend: bool) -> Self {
-        let last = columns.saturating_sub(1);
+    /// A click on a row number: the whole row as shown, or with `extend`
+    /// every row from the anchor's row to it.
+    pub fn click_row(
+        current: Option<Self>,
+        row: usize,
+        layout: &ColumnLayout,
+        extend: bool,
+    ) -> Self {
+        let first = layout.column(0).unwrap_or(0);
+        let last = layout.visible().last().copied().unwrap_or(first);
         match current {
             Some(selection) if extend => Self {
-                anchor: (selection.anchor.0, 0),
+                anchor: (selection.anchor.0, first),
                 focus: (row, last),
             },
             _ => Self {
-                anchor: (row, 0),
+                anchor: (row, first),
                 focus: (row, last),
             },
         }
@@ -256,39 +330,44 @@ impl CellSelection {
         })
     }
 
-    /// Every visible cell, from the first displayed row to the last.
-    pub fn all(visible: &[usize], columns: usize) -> Option<Self> {
+    /// Every visible cell, from the first displayed row and column to the
+    /// last.
+    pub fn all(visible: &[usize], layout: &ColumnLayout) -> Option<Self> {
         let (first, last) = (visible.first()?, visible.last()?);
-        (columns > 0).then(|| Self {
-            anchor: (*first, 0),
-            focus: (*last, columns - 1),
+        let (left, right) = (layout.visible().first()?, layout.visible().last()?);
+        Some(Self {
+            anchor: (*first, *left),
+            focus: (*last, *right),
         })
     }
 
-    /// Arrow-key navigation over the displayed rows; with `extend` the block
-    /// grows from the anchor. Returns the new selection and the display
-    /// position of its focus, to scroll it into view.
+    /// Arrow-key navigation over the displayed rows and columns; with
+    /// `extend` the block grows from the anchor. Returns the new selection
+    /// and the display position of its focus (row, column), to scroll it
+    /// into view.
     pub fn moved(
         current: Option<Self>,
         visible: &[usize],
-        columns: usize,
+        layout: &ColumnLayout,
         rows: isize,
         cols: isize,
         extend: bool,
-    ) -> Option<(Self, usize)> {
+    ) -> Option<(Self, (usize, usize))> {
+        let columns = layout.visible().len();
         if visible.is_empty() || columns == 0 {
             return None;
         }
         let (position, col) = current
             .and_then(|selection| {
                 let position = visible.iter().position(|row| *row == selection.focus.0)?;
-                Some((position, selection.focus.1))
+                Some((position, layout.position(selection.focus.1)?))
             })
             .unwrap_or((0, 0));
         let position = position.saturating_add_signed(rows).min(visible.len() - 1);
         let col = col.saturating_add_signed(cols).min(columns - 1);
         let row = *visible.get(position)?;
-        Some((Self::click(current, row, col, extend), position))
+        let column = layout.column(col)?;
+        Some((Self::click(current, row, column, extend), (position, col)))
     }
 
     /// Navigation by more than one cell: `Home` and `End` along the row,
@@ -298,12 +377,12 @@ impl CellSelection {
     pub fn jumped(
         current: Option<Self>,
         visible: &[usize],
-        columns: usize,
+        layout: &ColumnLayout,
         jump: Jump,
         extend: bool,
-    ) -> Option<(Self, usize)> {
+    ) -> Option<(Self, (usize, usize))> {
         let rows = visible.len() as isize;
-        let cols = columns as isize;
+        let cols = layout.visible().len() as isize;
         let (down, right) = match jump {
             Jump::RowStart => (0, -cols),
             Jump::RowEnd => (0, cols),
@@ -311,7 +390,7 @@ impl CellSelection {
             Jump::Last => (rows, cols),
             Jump::Rows(delta) => (delta, 0),
         };
-        Self::moved(current, visible, columns, down, right, extend)
+        Self::moved(current, visible, layout, down, right, extend)
     }
 }
 
@@ -407,9 +486,13 @@ pub fn pan_to_column(
 
 /// The data rows of the selection's visible block, in display order: what
 /// the records view shows side by side.
-pub fn selected_rows(selection: Option<CellSelection>, visible: &[usize]) -> Vec<usize> {
+pub fn selected_rows(
+    selection: Option<CellSelection>,
+    visible: &[usize],
+    layout: &ColumnLayout,
+) -> Vec<usize> {
     selection
-        .and_then(|selection| selection_block(selection, visible))
+        .and_then(|selection| selection_block(selection, visible, layout))
         .map(|(rows, _)| {
             rows.filter_map(|position| visible.get(position).copied())
                 .collect()
@@ -418,79 +501,49 @@ pub fn selected_rows(selection: Option<CellSelection>, visible: &[usize]) -> Vec
 }
 
 /// Copies above this size ask for confirmation first
-/// ([Results](../docs/results.md#copying)).
+/// ([Results](../docs/reference/results.md#copying)).
 pub const COPY_CONFIRM_BYTES: usize = 50 * 1024 * 1024;
 
-/// About how many bytes [`copy_selection`] would produce: the text of the
-/// selected cells plus a separator after each, and the headers. Quotes
-/// added around special values are not counted. It reads only cell lengths,
-/// so it costs far less than the copy itself.
-pub fn selection_bytes(
-    result: &ResultData,
-    visible: &[usize],
-    selection: Option<CellSelection>,
-    headers: bool,
-) -> usize {
-    let Some((rows, cols)) = selection.and_then(|selection| selection_block(selection, visible))
-    else {
-        return 0;
-    };
-    let names = if headers {
-        cols.clone()
-            .filter_map(|col| result.columns().get(col))
-            .map(|column| column.name.len() + 1)
-            .sum()
-    } else {
-        0
-    };
-    names
-        + rows
-            .filter_map(|position| visible.get(position))
-            .map(|row| {
-                cols.clone()
-                    .map(|col| result.value(*row, col).map_or(0, str::len) + 1)
-                    .sum::<usize>()
-            })
-            .sum::<usize>()
-}
-
-/// About how many bytes [`cell_format::result_csv`] would produce for a
-/// page: the headers and every value quoted, with a separator after each.
-pub fn csv_bytes(result: &ResultData) -> usize {
-    let cells = result.row_count() * result.column_count();
-    let headers: usize = result
-        .columns()
-        .iter()
-        .map(|column| column.name.len() + 3)
-        .sum();
-    headers + result.text_bytes() + cells * 3 + result.row_count()
-}
-
 /// Number of cells in the visible part of a selection.
-pub fn selected_cells(selection: Option<CellSelection>, visible: &[usize]) -> usize {
+pub fn selected_cells(
+    selection: Option<CellSelection>,
+    visible: &[usize],
+    layout: &ColumnLayout,
+) -> usize {
     selection
-        .and_then(|selection| selection_block(selection, visible))
+        .and_then(|selection| selection_block(selection, visible, layout))
         .map_or(0, |(rows, cols)| rows.count() * cols.count())
+}
+
+/// The result columns at the display positions `positions` of `layout`, in
+/// display order.
+pub fn block_columns(layout: &ColumnLayout, positions: RangeInclusive<usize>) -> Vec<usize> {
+    positions
+        .filter_map(|position| layout.column(position))
+        .collect()
 }
 
 /// The selected block as tab-separated text (a single cell as its exact
 /// value), optionally with the column names first, and its number of cells.
-/// `None` when nothing visible is selected.
+/// Its columns are the shown ones, in display order. `None` when nothing
+/// visible is selected.
 pub fn copy_selection(
     result: &ResultData,
     visible: &[usize],
+    layout: &ColumnLayout,
     selection: Option<CellSelection>,
     headers: bool,
 ) -> Option<(String, usize)> {
-    let (rows, cols) = selection_block(selection?, visible)?;
+    let (rows, cols) = selection_block(selection?, visible, layout)?;
+    let cols = block_columns(layout, cols);
     let names: Vec<&str> = cols
-        .clone()
-        .filter_map(|col| result.columns().get(col))
+        .iter()
+        .filter_map(|col| result.columns().get(*col))
         .map(|column| column.name.as_str())
         .collect();
     let data: Vec<Vec<Option<&str>>> = rows
         .filter_map(|position| visible.get(position))
-        .map(|row| cols.clone().map(|col| result.value(*row, col)).collect())
+        .map(|row| cols.iter().map(|col| result.value(*row, *col)).collect())
         .collect();
     let count = data.len() * names.len();
     let text = cell_format::copy_cells(headers.then_some(names.as_slice()), &data);
@@ -511,9 +564,38 @@ mod tests {
         };
         // Rows shown in reverse order: data rows 4..1 sit at positions 1..=4.
         let visible = [5, 4, 3, 2, 1, 0];
-        assert_eq!(selection_block(selection, &visible), Some((1..=4, 0..=2)));
+        let layout = ColumnLayout::new(3);
+        assert_eq!(
+            selection_block(selection, &visible, &layout),
+            Some((1..=4, 0..=2))
+        );
         // A filter that hides an end of the block hides the selection.
-        assert_eq!(selection_block(selection, &[5, 4, 3]), None);
+        assert_eq!(selection_block(selection, &[5, 4, 3], &layout), None);
+    }
+
+    #[test]
+    fn a_selection_spans_the_display_positions_between_its_columns() {
+        let selection = CellSelection {
+            anchor: (0, 3),
+            focus: (1, 1),
+        };
+        let mut layout = ColumnLayout::new(5);
+        // Shown as 3, 0, 1, 2, 4: columns 3 and 1 sit at positions 0 and 2.
+        layout.freeze(3);
+        assert_eq!(
+            selection_block(selection, &[0, 1], &layout),
+            Some((0..=1, 0..=2))
+        );
+        assert_eq!(block_columns(&layout, 0..=2), [3, 0, 1]);
+        assert_eq!(selected_cells(Some(selection), &[0, 1], &layout), 6);
+        // Hiding a column between the ends narrows the block; hiding an end
+        // hides it until the column is shown again.
+        layout.hide(0);
+        assert_eq!(selected_cells(Some(selection), &[0, 1], &layout), 4);
+        layout.hide(3);
+        assert_eq!(selection_block(selection, &[0, 1], &layout), None);
+        layout.show(3);
+        assert_eq!(selected_cells(Some(selection), &[0, 1], &layout), 4);
     }
     #[test]
     fn a_selection_survives_filters_that_keep_its_ends() {
@@ -523,15 +605,16 @@ mod tests {
             anchor: (3, 1),
             focus: (7, 1),
         });
+        let layout = ColumnLayout::new(result.column_count());
         let all = GridView::new(&result, key(0, "", None));
-        assert_eq!(selected_cells(selection, &all.rows), 5);
+        assert_eq!(selected_cells(selection, &all.rows, &layout), 5);
         let errors = GridView::new(&result, key(0, "error", None));
         assert_eq!(errors.rows, [3, 7, 11]);
-        assert_eq!(selected_cells(selection, &errors.rows), 2);
+        assert_eq!(selected_cells(selection, &errors.rows, &layout), 2);
         // Hiding an end hides the block, which comes back with the rows.
         let info = GridView::new(&result, key(0, "info", None));
-        assert_eq!(selected_cells(selection, &info.rows), 0);
-        assert_eq!(selected_cells(selection, &all.rows), 5);
+        assert_eq!(selected_cells(selection, &info.rows, &layout), 0);
+        assert_eq!(selected_cells(selection, &all.rows, &layout), 5);
     }
 
     #[test]
@@ -593,7 +676,53 @@ mod tests {
             filter: filter.into(),
             sort: sort.map(|(column, descending)| ColumnSort { column, descending }),
             numbers_pt_br: false,
+            edits: 0,
+            inserted: 0,
         }
+    }
+
+    #[test]
+    fn widths_are_computed_again_only_when_what_they_follow_changes() {
+        let result = event_log(10);
+        let view = GridView::new(&result, key(1, "", None));
+        let mut layout = ColumnLayout::new(5);
+        let mut set = HashMap::new();
+        let cache = WidthsCache::default();
+        let first = cache.get(&view, &layout, 0, &set);
+        assert_eq!(first.by_column(), view.widths);
+        // The same view, layout and widths: the same widths, not a copy.
+        assert!(Rc::ptr_eq(&first, &cache.get(&view, &layout, 0, &set)));
+        // A width the user set takes the place of the measured one.
+        set.insert(2, 300.);
+        let resized = cache.get(&view, &layout, 0, &set);
+        assert!(!Rc::ptr_eq(&first, &resized));
+        assert_eq!(resized.by_column()[2], 300.);
+        assert_eq!(resized.by_column()[1], view.widths[1]);
+        // A change of the layout lays them out again.
+        layout.freeze(2);
+        let frozen = cache.get(&view, &layout, 1, &set);
+        assert_eq!((frozen.frozen(), frozen.display()[0]), (1, 300.));
+        assert!(Rc::ptr_eq(&frozen, &cache.get(&view, &layout, 1, &set)));
+        // So does another view: a filter, a sort, another result.
+        let filtered = GridView::new(&result, key(1, "info", None));
+        assert!(!Rc::ptr_eq(
+            &frozen,
+            &cache.get(&filtered, &layout, 1, &set)
+        ));
+    }
+
+    #[test]
+    fn inserted_rows_follow_the_result_whatever_its_filter_and_sort() {
+        let result = table(&[vec!["b".into(), "1".into()], vec!["a".into(), "2".into()]]);
+        let view = GridView::new(
+            &result,
+            GridKey {
+                inserted: 2,
+                edits: 3,
+                ..key(1, "a", Some((0, false)))
+            },
+        );
+        assert_eq!(view.rows, [1, 2, 3]);
     }
 
     #[test]
@@ -637,7 +766,7 @@ mod tests {
         let cache = GridCache::default();
         let first = cache.get(&result, key(1, "", None));
         // Hover, scroll and selection frames change none of the inputs.
-        assert!(Rc::ptr_eq(&first, &cache.get(&result, key(1, "", None))));
+        assert!(Arc::ptr_eq(&first, &cache.get(&result, key(1, "", None))));
         for changed in [
             key(2, "", None),
             key(1, "info", None),
@@ -648,7 +777,7 @@ mod tests {
             },
         ] {
             let rebuilt = cache.get(&result, changed.clone());
-            assert!(!Rc::ptr_eq(&first, &rebuilt));
+            assert!(!Arc::ptr_eq(&first, &rebuilt));
             assert_eq!(rebuilt.key, changed);
         }
     }
@@ -738,37 +867,57 @@ mod tests {
     #[test]
     fn home_end_and_pages_move_along_the_displayed_rows() {
         let visible = [4, 3, 2, 1, 0];
+        let layout = ColumnLayout::new(3);
         let start = Some(CellSelection::cell(3, 1));
-        let jump =
-            |jump, extend| CellSelection::jumped(start, &visible, 3, jump, extend).expect("a cell");
-        assert_eq!(jump(Jump::RowStart, false), (CellSelection::cell(3, 0), 1));
-        assert_eq!(jump(Jump::RowEnd, false), (CellSelection::cell(3, 2), 1));
-        assert_eq!(jump(Jump::First, false), (CellSelection::cell(4, 0), 0));
-        assert_eq!(jump(Jump::Last, false), (CellSelection::cell(0, 2), 4));
-        assert_eq!(jump(Jump::Rows(2), false), (CellSelection::cell(1, 1), 3));
-        assert_eq!(jump(Jump::Rows(-20), false), (CellSelection::cell(4, 1), 0));
+        let jump = |jump, extend| {
+            CellSelection::jumped(start, &visible, &layout, jump, extend).expect("a cell")
+        };
+        assert_eq!(
+            jump(Jump::RowStart, false),
+            (CellSelection::cell(3, 0), (1, 0))
+        );
+        assert_eq!(
+            jump(Jump::RowEnd, false),
+            (CellSelection::cell(3, 2), (1, 2))
+        );
+        assert_eq!(
+            jump(Jump::First, false),
+            (CellSelection::cell(4, 0), (0, 0))
+        );
+        assert_eq!(jump(Jump::Last, false), (CellSelection::cell(0, 2), (4, 2)));
+        assert_eq!(
+            jump(Jump::Rows(2), false),
+            (CellSelection::cell(1, 1), (3, 1))
+        );
+        assert_eq!(
+            jump(Jump::Rows(-20), false),
+            (CellSelection::cell(4, 1), (0, 1))
+        );
         // Shift extends the block from the anchor.
         let (block, _) = jump(Jump::Last, true);
         assert_eq!((block.anchor, block.focus), ((3, 1), (0, 2)));
-        assert_eq!(CellSelection::jumped(None, &[], 3, Jump::Last, false), None);
+        assert_eq!(
+            CellSelection::jumped(None, &[], &layout, Jump::Last, false),
+            None
+        );
     }
 
     #[test]
-    fn copy_sizes_are_estimated_from_the_cell_lengths() {
-        let result = ResultData::from_rows(
-            vec![
-                ResultColumn::new("id", "int8"),
-                ResultColumn::new("note", "text"),
-            ],
-            [vec![Some("1"), Some("abc")], vec![Some("22"), None]],
-        );
-        let all = CellSelection::all(&[0, 1], 2);
-        // "1\tabc\n22\t" is 9 bytes; the estimate counts a separator per cell.
-        assert_eq!(selection_bytes(&result, &[0, 1], all, false), 10);
-        assert_eq!(selection_bytes(&result, &[0, 1], all, true), 18);
-        assert_eq!(selection_bytes(&result, &[0, 1], None, true), 0);
-        let csv = cell_format::result_csv(&result).len();
-        assert!(csv_bytes(&result) >= csv, "{csv}");
+    fn keys_move_along_the_columns_as_they_are_shown() {
+        let visible = [0, 1];
+        let mut layout = ColumnLayout::new(4);
+        layout.move_onto(3, 0);
+        layout.hide(1);
+        // Shown as 3, 0, 2.
+        let start = Some(CellSelection::cell(0, 3));
+        let right = CellSelection::moved(start, &visible, &layout, 0, 1, false);
+        assert_eq!(right, Some((CellSelection::cell(0, 0), (0, 1))));
+        let end = CellSelection::jumped(start, &visible, &layout, Jump::RowEnd, false);
+        assert_eq!(end, Some((CellSelection::cell(0, 2), (0, 2))));
+        let all = CellSelection::all(&visible, &layout).expect("cells");
+        assert_eq!((all.anchor, all.focus), ((0, 3), (1, 2)));
+        let row = CellSelection::click_row(None, 1, &layout, false);
+        assert_eq!((row.anchor, row.focus), ((1, 3), (1, 2)));
     }
 
     #[test]
@@ -782,28 +931,34 @@ mod tests {
             CellSelection::click(Some(block), 7, 2, false),
             CellSelection::cell(7, 2)
         );
-        let row = CellSelection::click_row(Some(block), 9, 4, false);
+        let layout = ColumnLayout::new(4);
+        let row = CellSelection::click_row(Some(block), 9, &layout, false);
         assert_eq!((row.anchor, row.focus), ((9, 0), (9, 3)));
-        let rows = CellSelection::click_row(Some(block), 9, 4, true);
+        let rows = CellSelection::click_row(Some(block), 9, &layout, true);
         assert_eq!((rows.anchor, rows.focus), ((3, 0), (9, 3)));
     }
 
     #[test]
     fn select_all_and_arrows_follow_the_displayed_rows() {
         let visible = [4, 2, 0];
-        let all = CellSelection::all(&visible, 3).expect("cells");
+        let layout = ColumnLayout::new(3);
+        let all = CellSelection::all(&visible, &layout).expect("cells");
         assert_eq!((all.anchor, all.focus), ((4, 0), (0, 2)));
-        assert_eq!(selected_cells(Some(all), &visible), 9);
-        assert_eq!(CellSelection::all(&[], 3), None);
-        assert_eq!(CellSelection::all(&visible, 0), None);
+        assert_eq!(selected_cells(Some(all), &visible, &layout), 9);
+        assert_eq!(CellSelection::all(&[], &layout), None);
+        assert_eq!(CellSelection::all(&visible, &ColumnLayout::new(0)), None);
         // Without a selection, arrows start at the first displayed cell.
-        let (down, position) = CellSelection::moved(None, &visible, 3, 1, 0, true).expect("a cell");
-        assert_eq!((down, position), (CellSelection::cell(2, 0), 1));
+        let (down, position) =
+            CellSelection::moved(None, &visible, &layout, 1, 0, true).expect("a cell");
+        assert_eq!((down, position), (CellSelection::cell(2, 0), (1, 0)));
         // Shift grows the block; moves stop at the edges.
         let (grown, position) =
-            CellSelection::moved(Some(down), &visible, 3, 5, 9, true).expect("a cell");
-        assert_eq!((grown.anchor, grown.focus, position), ((2, 0), (0, 2), 2));
-        assert_eq!(CellSelection::moved(None, &[], 3, 1, 0, false), None);
+            CellSelection::moved(Some(down), &visible, &layout, 5, 9, true).expect("a cell");
+        assert_eq!(
+            (grown.anchor, grown.focus, position),
+            ((2, 0), (0, 2), (2, 2))
+        );
+        assert_eq!(CellSelection::moved(None, &[], &layout, 1, 0, false), None);
     }
 
     #[test]
@@ -816,23 +971,36 @@ mod tests {
             [vec![Some("1"), Some("a\tb")], vec![Some("2"), None]],
         );
         let visible = [1, 0];
+        let mut layout = ColumnLayout::new(2);
         let block = CellSelection {
             anchor: (1, 0),
             focus: (0, 1),
         };
         assert_eq!(
-            copy_selection(&result, &visible, Some(block), true),
+            copy_selection(&result, &visible, &layout, Some(block), true),
             Some(("id\tnote\n2\t\n1\t\"a\tb\"".to_owned(), 4))
         );
         // A single cell copies its exact value.
         let cell = CellSelection::cell(0, 1);
         assert_eq!(
-            copy_selection(&result, &visible, Some(cell), false),
+            copy_selection(&result, &visible, &layout, Some(cell), false),
             Some(("a\tb".to_owned(), 1))
         );
-        assert_eq!(copy_selection(&result, &visible, None, false), None);
+        assert_eq!(
+            copy_selection(&result, &visible, &layout, None, false),
+            None
+        );
         // A selection whose rows are hidden copies nothing.
-        assert_eq!(copy_selection(&result, &[1], Some(block), false), None);
+        assert_eq!(
+            copy_selection(&result, &[1], &layout, Some(block), false),
+            None
+        );
+        // Columns copy in the order they are shown.
+        layout.move_onto(1, 0);
+        assert_eq!(
+            copy_selection(&result, &visible, &layout, Some(block), true),
+            Some(("note\tid\n\t2\n\"a\tb\"\t1".to_owned(), 4))
+        );
     }
 
     #[test]
@@ -849,7 +1017,10 @@ mod tests {
         let visible = [4, 2, 0];
         let column = CellSelection::click_column(None, &visible, 1, false).expect("a column");
         assert_eq!((column.anchor, column.focus), ((4, 1), (0, 1)));
-        assert_eq!(selected_cells(Some(column), &visible), 3);
+        assert_eq!(
+            selected_cells(Some(column), &visible, &ColumnLayout::new(4)),
+            3
+        );
         let columns =
             CellSelection::click_column(Some(column), &visible, 3, true).expect("columns");
         assert_eq!((columns.anchor, columns.focus), ((4, 1), (0, 3)));
@@ -907,7 +1078,8 @@ mod tests {
             anchor: (2, 1),
             focus: (1, 0),
         };
-        assert_eq!(selected_rows(Some(block), &visible), [2, 0, 1]);
-        assert!(selected_rows(None, &visible).is_empty());
+        let layout = ColumnLayout::new(2);
+        assert_eq!(selected_rows(Some(block), &visible, &layout), [2, 0, 1]);
+        assert!(selected_rows(None, &visible, &layout).is_empty());
     }
 }

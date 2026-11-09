@@ -1,6 +1,6 @@
 //! What each dialect has built in (keywords, functions and types), read from
 //! a catalog directory laid out as
-//! [the catalog specification](../../../docs/especificacao-catalogo-sql.md)
+//! [the catalog specification](../../../docs/plans/sql-catalog-proposal.md)
 //! says: `<dir>/<dialect>/manifest.json` and one JSON Lines file per kind of
 //! entry. Every entry holds the range of server versions it is valid for.
 //!
@@ -444,7 +444,7 @@ fn compare(scheme: VersionScheme, a: &str, b: &str) -> Option<Ordering> {
 }
 
 /// The tracked version whose entries apply to `server`
-/// ([specification §4.4](../../../docs/especificacao-catalogo-sql.md)): the
+/// ([specification §4.4](../../../docs/plans/sql-catalog-proposal.md)): the
 /// greatest of `versions` not after it, the first for an older server and the
 /// last for a newer one or none given.
 pub fn resolve_version(

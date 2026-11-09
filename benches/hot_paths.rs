@@ -1,5 +1,6 @@
 //! Benchmarks for the hot paths listed in ADR-0010: building the grid view,
-//! converting driver rows to result data, splitting large scripts, paging
+//! converting driver rows to result data, splitting large scripts and
+//! reading a query tab's outline of them, paging
 //! metadata children from a large local cache and encoding a result for an
 //! export.
 //!
@@ -91,6 +92,7 @@ fn driver_rows(rows: usize) -> (Vec<ColumnInfo>, Vec<Vec<Cell>>) {
             name: format!("column_{index}"),
             data_type: ["int8", "text", "numeric", "timestamptz", "bool"][index % 5].into(),
             nullable: Some(true),
+            origin: Default::default(),
         })
         .collect();
     let rows = (0..rows)
@@ -168,6 +170,31 @@ fn sql_tokens(c: &mut Criterion) {
     });
     group.bench_function("after one keystroke", |b| {
         b.iter(|| jykre::sql::relex(black_box(&tokens), black_box(&edited), edit, None))
+    });
+    // What the highlighter runs on the UI thread for a keystroke.
+    group.bench_function("after one keystroke, in place", |b| {
+        b.iter_batched(
+            || tokens.clone(),
+            |mut tokens| {
+                jykre::sql::relex_in_place(&mut tokens, black_box(&edited), edit, None);
+                tokens
+            },
+            BatchSize::LargeInput,
+        )
+    });
+    group.finish();
+}
+
+/// What a query tab reads off the UI thread after an edit to a 4 MiB file,
+/// the largest it opens: statements, their lines and the parameters.
+fn editor_outline(c: &mut Criterion) {
+    let line =
+        "SELECT 00000000 AS n, 'synthetic row number 00000000' AS label, 42 AS answer FROM dual;\n";
+    let script = line.repeat(4 * 1024 * 1024 / line.len());
+    let mut group = c.benchmark_group("editor outline of a 4 MiB script");
+    group.sample_size(10);
+    group.bench_function("read", |b| {
+        b.iter(|| jykre::script_outline::Outline::read(1, black_box(&script), None))
     });
     group.finish();
 }
@@ -278,7 +305,7 @@ fn metadata_paging(c: &mut Criterion) {
 }
 
 /// Encoding a page for an export, as each part is before it reaches the
-/// file ([Results](../docs/results.md#export)).
+/// file ([Results](../docs/reference/results.md#export)).
 fn export_encoding(c: &mut Criterion) {
     use jykre::export::{Encoder, ExportFormat, ExportOptions, SqlTarget};
     let result = event_log(100_000);
@@ -312,13 +339,107 @@ fn export_encoding(c: &mut Criterion) {
     group.finish();
 }
 
+fn clipboard_encoding(c: &mut Criterion) {
+    use jykre::column_layout::ColumnLayout;
+    use jykre::copy_as::{self, Block, CopyFormat, CopyOptions, CopyRequest, CopySource, SqlStyle};
+    use jykre::grid::CellSelection;
+    use std::sync::Arc;
+    let result = Arc::new(event_log(100_000));
+    let view = Arc::new(GridView::new(&result, GridKey::default()));
+    let layout = Arc::new(ColumnLayout::new(result.column_count()));
+    let selection = CellSelection::all(&view.rows, &layout);
+    let quote = |name: &str| name.to_owned();
+    let style = SqlStyle {
+        dialect: None,
+        table: "table_name",
+        quote_name: &quote,
+    };
+    let mut group = c.benchmark_group("clipboard, 500,000 cells");
+    group.sample_size(10);
+    for format in [CopyFormat::Text, CopyFormat::Csv] {
+        let options = CopyOptions {
+            format,
+            ..Default::default()
+        };
+        let request = CopyRequest {
+            result: result.clone(),
+            options,
+            source: CopySource::Selection {
+                view: view.clone(),
+                selection: selection.expect("selection"),
+            },
+            dialect: None,
+            table: "table_name".to_owned(),
+            quoted_columns: result
+                .columns()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            layout: layout.clone(),
+        };
+        group.bench_function(format!("{format:?} legacy"), |b| {
+            b.iter(|| {
+                let block = Block::new(&result, &view.rows, &layout, selection, &view.families)
+                    .expect("block");
+                copy_as::copy_as(&options, &block, &style)
+            })
+        });
+        group.bench_function(format!("{format:?} worker"), |b| {
+            b.iter(|| {
+                copy_as::generate(black_box(&request), &CancellationToken::new(), |_| {})
+                    .expect("encoded")
+            })
+        });
+        group.bench_function(format!("{format:?} estimate"), |b| {
+            b.iter(|| {
+                request
+                    .estimate(&CancellationToken::new())
+                    .expect("estimate")
+            })
+        });
+    }
+    group.finish();
+    let value = "x".repeat(600);
+    let result = Arc::new(ResultData::from_rows(
+        vec![ResultColumn::new("payload", "text")],
+        (0..100_000).map(|_| [Some(value.as_str())]),
+    ));
+    let request = CopyRequest {
+        result: result.clone(),
+        source: CopySource::Page,
+        options: CopyOptions {
+            format: CopyFormat::Csv,
+            header: true,
+            ..Default::default()
+        },
+        dialect: None,
+        table: String::new(),
+        quoted_columns: vec!["payload".to_owned()],
+        layout: Arc::new(ColumnLayout::new(1)),
+    };
+    let mut group = c.benchmark_group("clipboard, page above 50 MiB");
+    group.sample_size(10);
+    group.bench_function("CSV legacy", |b| {
+        b.iter(|| jykre::cell_format::result_csv(black_box(&result)))
+    });
+    group.bench_function("CSV worker", |b| {
+        b.iter(|| {
+            copy_as::generate(black_box(&request), &CancellationToken::new(), |_| {})
+                .expect("encoded")
+        })
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     grid_view,
     result_conversion,
     statement_splitting,
     sql_tokens,
+    editor_outline,
     metadata_paging,
-    export_encoding
+    export_encoding,
+    clipboard_encoding
 );
 criterion_main!(benches);

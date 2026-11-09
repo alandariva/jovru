@@ -17,7 +17,7 @@ use secrecy::ExposeSecret;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Limits of one round ([reliability](../../../docs/reliability.md)).
+/// Limits of one round ([reliability](../../../docs/standards/reliability.md)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timeouts {
     /// Opening the connection.

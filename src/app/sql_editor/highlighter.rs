@@ -3,7 +3,7 @@
 //! where literals and comments end; the dialect's catalog tells keywords,
 //! functions and types apart ([`jykre_sql_language::highlight`]).
 //!
-//! An edit re-reads only the text around it ([`jykre::sql::relex`]), and a
+//! An edit re-reads only the text around it ([`jykre::sql::relex_in_place`]), and a
 //! frame classifies only the tokens on screen, so the cost of typing and of
 //! painting does not grow with the script.
 use super::super::ui::colors;
@@ -12,7 +12,7 @@ use gpui_kit::component::input::{
 };
 use gpui_kit::*;
 use jykre::drivers::SqlDialect;
-use jykre::sql::{Edit, TokenKind, relex, tokens};
+use jykre::sql::{Edit, TokenKind, relex_in_place, tokens};
 use jykre_sql_language::catalog::DialectCatalog;
 use jykre_sql_language::highlight::{Highlight, classify};
 use std::ops::Range;
@@ -91,7 +91,7 @@ impl InputHighlighter for SqlHighlighter {
         _: &mut Context<EditorState>,
     ) {
         match edit.and_then(|edit| self.apply(&edit, text)) {
-            Some(edit) => self.tokens = relex(&self.tokens, &self.text, edit, self.dialect),
+            Some(edit) => relex_in_place(&mut self.tokens, &self.text, edit, self.dialect),
             None => {
                 self.text = text.to_string();
                 self.tokens = tokens(&self.text, self.dialect);

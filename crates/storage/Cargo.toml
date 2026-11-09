@@ -16,4 +16,6 @@ jykre-core = { path = "../core" }
 sqlx = { workspace = true, features = ["sqlite"] }
 serde_json.workspace = true
 tokio.workspace = true
+# Fingerprints of automation snapshots (ADR-0034).
+sha2.workspace = true
 

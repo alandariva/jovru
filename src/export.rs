@@ -1,4 +1,4 @@
-//! Writing a result to a file the user chose ([Results](../docs/results.md#export)).
+//! Writing a result to a file the user chose ([Results](../docs/reference/results.md#export)).
 //!
 //! Every format is written row by row, so an export never holds more than
 //! the page it is writing. [`ExportFile`] writes into a temporary file next
@@ -12,7 +12,7 @@
 //! floats (XLSX, whose cells are floats, gets a number only when no digit can
 //! change), NULL stays distinct from empty text wherever the format can tell
 //! them apart, and nothing is changed to defend spreadsheets from formulas
-//! ([Security](../docs/security.md#untrusted-content)).
+//! ([Security](../docs/standards/security.md#untrusted-content)).
 //!
 //! The functions of [`ExportFile`] block on disk I/O; callers run them on the
 //! runtime's blocking pool ([`crate::backend::export`]).
@@ -478,7 +478,9 @@ impl Sheet {
         })
     }
 
-    fn rows(&mut self, data: &ResultData) -> DriverResult<()> {
+    /// Writes the rows of `data`, the cells of the `shown` result columns
+    /// in that order, or every cell without them.
+    fn rows(&mut self, data: &ResultData, shown: Option<&[usize]>) -> DriverResult<()> {
         if self.next_row + data.row_count() as u64 > XLSX_MAX_ROWS {
             return Err(DriverError::validation(tr!(
                 "An Excel sheet holds at most 1,048,576 rows. Export as CSV or JSON instead."
@@ -488,7 +490,11 @@ impl Sheet {
         for row in 0..data.row_count() {
             // Checked above against Excel's row count, far below u32::MAX.
             let at = u32::try_from(self.next_row).map_err(|_| too_many_rows())?;
-            for (column, value) in data.row(row).enumerate() {
+            let cells: Box<dyn Iterator<Item = Option<&str>>> = match shown {
+                Some(shown) => Box::new(shown.iter().map(|column| data.value(row, *column))),
+                None => Box::new(data.row(row)),
+            };
+            for (column, value) in cells.enumerate() {
                 let Some(value) = value else {
                     // NULL leaves the cell empty.
                     continue;
@@ -593,13 +599,15 @@ enum Output {
 }
 
 /// An export being written: a temporary file in the destination's folder
-/// that becomes the destination in [`ExportFile::finish`]. Dropped before
-/// that, it removes the temporary file.
+/// that becomes the destination in [`Sealed::place`]. Dropped before that,
+/// it removes the temporary file.
 pub struct ExportFile {
     target: PathBuf,
     temp: PathBuf,
     /// `None` once finished, or while dropping.
     output: Option<Output>,
+    /// The result columns written, in order; `None` writes every one.
+    shown: Option<Vec<usize>>,
     rows: u64,
     bytes: u64,
 }
@@ -626,6 +634,54 @@ impl ExportFile {
         columns: &[ResultColumn],
         sql: &SqlTarget,
     ) -> DriverResult<Self> {
+        Self::create_shown(target, options, columns, None, sql)
+    }
+
+    /// [`ExportFile::create`] for the result columns `shown`, in that order
+    /// (the grid's visible columns in display order); `None` writes every
+    /// column in the result's order. `columns` and `sql.columns` are the
+    /// result's; the file names only the shown ones.
+    pub fn create_shown(
+        target: &Path,
+        options: &ExportOptions,
+        columns: &[ResultColumn],
+        shown: Option<&[usize]>,
+        sql: &SqlTarget,
+    ) -> DriverResult<Self> {
+        let shown: Option<Vec<usize>> = shown
+            .map(|shown| {
+                shown
+                    .iter()
+                    .copied()
+                    .filter(|column| *column < columns.len())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|shown| !shown.iter().copied().eq(0..columns.len()));
+        let projected: Option<(Vec<ResultColumn>, SqlTarget)> = shown.as_ref().map(|shown| {
+            let columns: Vec<ResultColumn> = shown
+                .iter()
+                .map(|column| columns[*column].clone())
+                .collect();
+            let sql = SqlTarget {
+                dialect: sql.dialect,
+                table: sql.table.clone(),
+                columns: shown
+                    .iter()
+                    .zip(&columns)
+                    .map(|(at, column)| {
+                        sql.columns
+                            .get(*at)
+                            .cloned()
+                            .unwrap_or_else(|| column.name.clone())
+                    })
+                    .collect(),
+            };
+            (columns, sql)
+        });
+        let (columns, sql) = match &projected {
+            Some((columns, sql)) => (columns.as_slice(), sql),
+            None => (columns, sql),
+        };
         let name = target
             .file_name()
             .ok_or_else(|| DriverError::validation(tr!("Choose a file to export to.")))?;
@@ -644,6 +700,7 @@ impl ExportFile {
             target: target.to_path_buf(),
             temp,
             output: None,
+            shown,
             rows: 0,
             bytes: 0,
         };
@@ -682,14 +739,19 @@ impl ExportFile {
                 buffer,
             }) => {
                 for row in 0..data.row_count() {
-                    encoder.row(data.row(row), buffer);
+                    match &self.shown {
+                        Some(shown) => {
+                            encoder.row(shown.iter().map(|column| data.value(row, *column)), buffer)
+                        }
+                        None => encoder.row(data.row(row), buffer),
+                    }
                     if buffer.len() >= FLUSH_BYTES {
                         self.bytes += write_out(file, buffer)?;
                     }
                 }
                 self.bytes += write_out(file, buffer)?;
             }
-            Some(Output::Xlsx(sheet)) => sheet.rows(data)?,
+            Some(Output::Xlsx(sheet)) => sheet.rows(data, self.shown.as_deref())?,
             None => return Err(finished()),
         }
         self.rows += data.row_count() as u64;
@@ -706,9 +768,17 @@ impl ExportFile {
         self.bytes
     }
 
-    /// Writes what comes after the rows, flushes and syncs the file and puts
-    /// it in the destination's place, replacing the file there.
-    pub fn finish(mut self) -> DriverResult<Written> {
+    /// Seals the file ([`ExportFile::seal`]) and puts it in the
+    /// destination's place ([`Sealed::place`]), replacing the file there.
+    pub fn finish(self) -> DriverResult<Written> {
+        self.seal()?.place()
+    }
+
+    /// Writes what comes after the rows, then flushes and syncs the file.
+    /// The destination keeps what it had until [`Sealed::place`]: work that
+    /// is abandoned while it seals (past its time limit) drops the file
+    /// when it ends, which removes it.
+    pub fn seal(mut self) -> DriverResult<Sealed> {
         match self.output.take() {
             Some(Output::Text {
                 mut file,
@@ -739,6 +809,38 @@ impl ExportFile {
             }
             None => return Err(finished()),
         }
+        // The sealed file removes the temporary file from now on.
+        Ok(Sealed {
+            target: std::mem::take(&mut self.target),
+            temp: std::mem::take(&mut self.temp),
+            rows: self.rows,
+            bytes: self.bytes,
+        })
+    }
+}
+
+/// A complete export in its temporary file, not yet in the destination's
+/// place. Dropped before [`Sealed::place`], it removes the temporary file
+/// and the destination keeps what it had.
+pub struct Sealed {
+    target: PathBuf,
+    temp: PathBuf,
+    rows: u64,
+    bytes: u64,
+}
+
+impl std::fmt::Debug for Sealed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sealed")
+            .field("rows", &self.rows)
+            .field("bytes", &self.bytes)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Sealed {
+    /// Puts the file in the destination's place, replacing the file there.
+    pub fn place(mut self) -> DriverResult<Written> {
         std::fs::rename(&self.temp, &self.target).map_err(|error| file_error(&error))?;
         // Nothing is left to remove.
         self.temp = PathBuf::new();
@@ -746,6 +848,14 @@ impl ExportFile {
             rows: self.rows,
             bytes: self.bytes,
         })
+    }
+}
+
+impl Drop for Sealed {
+    fn drop(&mut self) {
+        if !self.temp.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.temp);
+        }
     }
 }
 
@@ -795,7 +905,7 @@ fn temp_name(name: &std::ffi::OsStr) -> std::ffi::OsString {
 /// A file name for an export of `stem` (a table or a tab title) in
 /// `format`. Names from the database are never read as paths: characters
 /// that a file name cannot hold become `_`, and names Windows reserves get a
-/// `_` in front ([Security](../docs/security.md#untrusted-content)).
+/// `_` in front ([Security](../docs/standards/security.md#untrusted-content)).
 pub fn suggested_file_name(stem: &str, format: ExportFormat) -> String {
     let cleaned: String = stem
         .chars()

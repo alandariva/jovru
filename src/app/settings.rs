@@ -44,8 +44,10 @@ impl SettingsPage {
             Self::Editor => tr!("How SQL is shown in query tabs and report panels."),
             Self::Assistant => tr!("The AI model that answers in the assistant panel."),
             Self::Diagnostics => tr!("The application's log and the export of logs and traces."),
-            Self::Shortcuts => tr!("Keys that work across the window."),
-            Self::About => tr!("The version and where the preferences are kept."),
+            Self::Shortcuts => {
+                tr!("The keys of the window's actions and of the editor, which you can change.")
+            }
+            Self::About => tr!("The version, updates and where the preferences are kept."),
         }
     }
 
@@ -143,12 +145,21 @@ impl AppView {
                                     ),
                             )
                             .child(
-                                row().gap_2().child(shortcut("Esc")).child(
-                                    icon_button("settings-close", I::X, tr!("Close Preferences"))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_settings(window, cx)
-                                        })),
-                                ),
+                                row()
+                                    .gap_2()
+                                    .child(shortcut(shortcuts::label::<shortcuts::Dismiss>(cx)))
+                                    .child(
+                                        icon_button(
+                                            "settings-close",
+                                            I::X,
+                                            tr!("Close Preferences"),
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.close_settings(window, cx)
+                                            }),
+                                        ),
+                                    ),
                             ),
                     )
                     .child(
@@ -282,10 +293,10 @@ impl AppView {
                         .child(self.telemetry_settings.clone()),
                 )
                 .into_any_element(),
-            SettingsPage::Shortcuts => shortcuts_page().into_any_element(),
-            SettingsPage::About => {
-                about_page(cx.theme().mono_font_family.clone()).into_any_element()
-            }
+            SettingsPage::Shortcuts => self.shortcut_editor.clone().into_any_element(),
+            SettingsPage::About => about_page(cx.theme().mono_font_family.clone())
+                .child(setting_section(tr!("Updates")).child(self.update_settings.clone()))
+                .into_any_element(),
         }
     }
 
@@ -362,7 +373,12 @@ impl AppView {
                 setting_section(tr!("Font"))
                     .child(setting_row(
                         tr!("SQL font size"),
-                        tr!("Also Ctrl + and Ctrl − in the window; Ctrl 0 resets it."),
+                        tr!(
+                            "Also {0} and {1} in the window; {2} resets it.",
+                            shortcuts::label::<shortcuts::LargerFont>(cx),
+                            shortcuts::label::<shortcuts::SmallerFont>(cx),
+                            shortcuts::label::<shortcuts::ResetFont>(cx)
+                        ),
                         row()
                             .gap_1()
                             .child(
@@ -421,6 +437,75 @@ impl AppView {
                         "Keywords, functions and types the editor suggests and colours, read from the SQL catalogs at start."
                     ))),
             )
+            .child(
+                setting_section(tr!("Saved queries"))
+                    .child(setting_row(
+                        tr!("Folder of saved queries"),
+                        tr!(
+                            "The library lists the .sql files in it and its subfolders. Changing it moves, copies or deletes nothing."
+                        ),
+                        row()
+                            .gap_1()
+                            .child(
+                                button("library-folder", I::FolderOpen, tr!("Change…"))
+                                    .when(!self.persist_library, |s| s.opacity(0.5).cursor_default())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.choose_library_dir(cx)
+                                    })),
+                            )
+                            .when(self.query_library.directory.is_some(), |s| {
+                                s.child(
+                                    button("library-folder-default", I::RotateCcw, tr!("Use the default"))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.set_library_dir(None, cx)
+                                        })),
+                                )
+                            }),
+                    ))
+                    .child(
+                        div()
+                            .id("library-folder-path")
+                            .role(Role::Status)
+                            .text_size(px(12.))
+                            .text_color(rgb(colors().muted))
+                            .child(self.library_dir().display().to_string()),
+                    ),
+            )
+    }
+
+    /// **Change…**: a folder chosen in the system dialog becomes the
+    /// library's.
+    fn choose_library_dir(&mut self, cx: &mut Context<Self>) {
+        if !self.persist_library {
+            return;
+        }
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(tr!("Choose").into()),
+        });
+        cx.spawn(async move |weak, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            if let Some(path) = paths.into_iter().next() {
+                let _ = weak.update(cx, |this, cx| this.set_library_dir(Some(path), cx));
+            }
+        })
+        .detach();
+    }
+
+    /// Points the library at `directory` (`None`: the default). Files stay
+    /// where they are; open tabs keep their files.
+    fn set_library_dir(&mut self, directory: Option<std::path::PathBuf>, cx: &mut Context<Self>) {
+        self.query_library.directory = directory;
+        self.library_found.clear();
+        self.library_scanned_at = None;
+        self.save_library_soon(cx);
+        self.rebuild_library_view(cx);
+        self.scan_library(cx);
+        cx.notify();
     }
 }
 
@@ -437,7 +522,11 @@ fn setting_section(title: &'static str) -> Div {
 
 /// One setting: what it is and what it does on the left, its control on
 /// the right.
-fn setting_row(title: &'static str, detail: &'static str, control: impl IntoElement) -> Div {
+fn setting_row(
+    title: &'static str,
+    detail: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
     row()
         .justify_between()
         .gap_4()
@@ -447,7 +536,7 @@ fn setting_row(title: &'static str, detail: &'static str, control: impl IntoElem
                 .gap(px(2.))
                 .min_w_0()
                 .child(div().text_size(px(14.)).child(title))
-                .child(label(detail)),
+                .child(label(detail.into())),
         )
         .child(div().flex_none().child(control))
 }
@@ -625,79 +714,6 @@ fn sql_preview() -> StyledText {
         })
         .collect();
     StyledText::new(PREVIEW_SQL).with_highlights(highlights)
-}
-
-/// Every shortcut of the window, by where it works
-/// ([User experience](../../docs/ux.md#keyboard-shortcuts)).
-fn shortcuts_page() -> Div {
-    let groups: [(&'static str, &[(&'static str, &'static str)]); 4] = [
-        (
-            tr!("Window"),
-            &[
-                (tr!("Search tables and saved queries"), "Ctrl Shift P"),
-                (tr!("New tab on the tab's connection"), "Ctrl T"),
-                (tr!("New query on the active connection"), "Ctrl N"),
-                (tr!("Close the tab"), "Ctrl W"),
-                (tr!("Next or previous tab"), "Ctrl Tab / Ctrl Shift Tab"),
-                (tr!("Show or hide the explorer"), "Ctrl B"),
-                (tr!("Show or hide the assistant"), "Ctrl Shift B"),
-                (tr!("Preferences"), "Ctrl ,"),
-                (
-                    tr!("SQL font: larger, smaller, reset"),
-                    "Ctrl + / Ctrl − / Ctrl 0",
-                ),
-            ],
-        ),
-        (
-            tr!("SQL editor"),
-            &[
-                (
-                    tr!("Run the selection or the statement at the cursor"),
-                    "Ctrl ↵",
-                ),
-                (tr!("The same, in a new result tab"), "Ctrl Shift ↵"),
-                (tr!("Run every statement"), "Ctrl Alt ↵"),
-                (tr!("Show suggestions"), "Ctrl Space"),
-                (tr!("Comment or uncomment lines"), "Ctrl /"),
-            ],
-        ),
-        (
-            tr!("Results"),
-            &[
-                (tr!("Open or close the export bar"), "Ctrl Shift E"),
-                (tr!("Copy, with the column names"), "Ctrl C / Ctrl Shift C"),
-                (tr!("Select all"), "Ctrl A"),
-                (tr!("Show the cell's full value"), "Enter"),
-                (tr!("Move a result tab"), "Ctrl Shift ← / →"),
-            ],
-        ),
-        (
-            tr!("Explorer"),
-            &[
-                (tr!("Refresh the node"), "F5"),
-                (tr!("Open the node's menu"), "Shift F10"),
-                (tr!("Highlight or filter the quick search"), "Ctrl F"),
-                (tr!("Delete the connection"), "Delete"),
-            ],
-        ),
-    ];
-    column()
-        .flex_none()
-        .gap_4()
-        .children(groups.into_iter().map(|(title, shortcuts)| {
-            setting_section(title).child(column().children(shortcuts.iter().map(
-                |&(action, keys)| {
-                    row()
-                        .flex_none()
-                        .justify_between()
-                        .py(px(5.))
-                        .border_b_1()
-                        .border_color(rgb(colors().border))
-                        .child(div().text_size(px(14.)).child(action))
-                        .child(shortcut(keys))
-                },
-            )))
-        }))
 }
 
 fn about_page(mono: SharedString) -> Div {

@@ -9,24 +9,30 @@
 use super::copying::format_name;
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::Sizable as _;
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
 use jykre::cell_format::{self, ValueFamily};
-use jykre::copy_as::{self, Block, CopyFormat, CopyOptions, SqlStyle};
+use jykre::column_layout::{ColumnLayout, ColumnWidths};
+use jykre::column_search::{self, ColumnMatch};
+use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
 use jykre::grid::{
-    self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, selection_block,
+    self, CellSelection, ColumnSort, GridCache, GridKey, GridView, Jump, WidthsCache,
+    selection_block,
 };
+use jykre::grid_edit::{self, EditSession, EditValue, Overlay, RowMark};
 use jykre::result::ResultData;
 use jykre::result_tabs::ResultId;
 use jykre::stats::{self, BlockSummary, ColumnSummary, Sample, SelectionSummary};
 use jykre::tr;
 use jykre_core::SqlDialect;
+use jykre_core::write;
 use std::collections::HashMap;
 use std::time::Duration;
-use std::{ops::Range, rc::Rc, sync::Arc};
+use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
 
 /// What the grid reports to the view that embeds it.
 pub enum ResultGridEvent {
@@ -43,6 +49,43 @@ pub enum ResultGridEvent {
     /// The side panel opened, closed or changed tab, for the toolbar's
     /// Statistics button.
     PanelChanged,
+    /// Editing started on a result tab whose table is not known yet: the
+    /// workspace reads it from the session and answers with
+    /// [`ResultGrid::set_editing`] (ADR-0039).
+    EditRequested(ResultId),
+    /// The pending edits changed.
+    EditsChanged,
+    /// **Write…** (or **Generate SQL…**) was asked for.
+    WriteRequested,
+    /// **Discard** was asked for.
+    DiscardRequested,
+}
+
+/// Where editing a result tab stands (ADR-0039).
+pub enum Editing {
+    /// Its table is being read from the session.
+    Resolving,
+    /// It cannot be edited, for this reason.
+    ReadOnly(write::ReadOnlyReason),
+    /// Its pending edits.
+    Session(Box<EditSession>),
+}
+
+/// What an editing key asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditAction {
+    Cell,
+    Null,
+    Insert,
+    Delete,
+}
+
+/// The field a cell is typed in, over the cell.
+struct CellEditor {
+    /// (data row, result column).
+    cell: (usize, usize),
+    input: Entity<InputState>,
+    _events: Subscription,
 }
 
 /// The statistics of the selected cells, for the footer.
@@ -89,13 +132,178 @@ impl Default for GridSql {
     }
 }
 
-/// Where the user left a result tab: its page, selection, scroll and the
-/// column widths they set.
+/// Where the user left a result tab: its page, selection, scroll, the
+/// column widths they set and how its columns are laid out.
 struct Place {
     page: usize,
     selection: Option<CellSelection>,
     scroll: Point<Pixels>,
     widths: HashMap<usize, f32>,
+    layout: Arc<ColumnLayout>,
+}
+
+/// A column's header being dragged to another place in the header row.
+struct ColumnDrag {
+    /// The grid it comes from, so another grid ignores it.
+    grid: EntityId,
+    column: usize,
+    name: SharedString,
+}
+
+/// What follows the pointer while a header is dragged.
+struct ColumnDragPreview {
+    name: SharedString,
+}
+
+impl Render for ColumnDragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        row()
+            .h(px(28.))
+            .px_3()
+            .rounded(px(5.))
+            .bg(rgb(colors().surface))
+            .border_1()
+            .border_color(rgb(colors().mint))
+            .text_size(px(12.))
+            .text_color(rgb(colors().text))
+            .child(self.name.clone())
+    }
+}
+
+/// The field that finds a column by name, and what it found.
+struct ColumnFind {
+    input: Entity<InputState>,
+    /// The text the matches are for.
+    text: String,
+    /// Computed when the text or the layout changes, never per frame.
+    matches: Vec<ColumnMatch>,
+    /// The match `Enter` chooses.
+    highlighted: usize,
+    scroll: UniformListScrollHandle,
+    /// The matches show while the field has the keyboard.
+    focused: bool,
+    _events: Subscription,
+}
+
+/// Matches the list shows at once, and the height of each.
+const MATCH_ROWS: usize = 8;
+const MATCH_HEIGHT: f32 = 30.;
+/// Height of the bar holding the field.
+const FIND_BAR_HEIGHT: f32 = 40.;
+
+/// What the rows on screen share while they are built.
+struct RowsContext {
+    grid: Arc<GridView>,
+    widths: Rc<ColumnWidths>,
+    /// The selection's display rows and columns.
+    block: Option<(
+        std::ops::RangeInclusive<usize>,
+        std::ops::RangeInclusive<usize>,
+    )>,
+    /// The focused cell, as (data row, result column).
+    focus: Option<(usize, usize)>,
+    flexible: bool,
+}
+
+/// Paints its child as one layer of the scene: everything the child draws
+/// shares one place in the drawing order, found once, instead of each quad
+/// finding its own among everything drawn before it. A row of the grid
+/// draws four border strips per cell, its backgrounds and its values; as a
+/// layer, finding their order costs one look-up per row, not one per
+/// primitive. Inside a layer, backgrounds and borders are drawn before
+/// text, as they already are within a cell, whose text never overlaps its
+/// border; a nested layer (each line of text, the frozen part of a row)
+/// is drawn over what it covers, as before.
+struct Layer(AnyElement);
+
+impl Layer {
+    /// `child` as one layer when `layered`, as it is otherwise.
+    fn of(child: impl IntoElement, layered: bool) -> AnyElement {
+        if layered {
+            Self(child.into_any_element()).into_any_element()
+        } else {
+            child.into_any_element()
+        }
+    }
+}
+
+impl IntoElement for Layer {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for Layer {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        (self.0.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.0.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        window.paint_layer(bounds, |window| self.0.paint(window, cx));
+    }
+}
+
+/// The demo result's column proportions.
+const DEMO_FLEX: [f32; 5] = [1.5, 0.8, 1.2, 1.1, 0.65];
+
+/// What the table lays out sideways in one frame: the frozen columns, the
+/// scrolling ones in view, and where they go.
+struct Strip {
+    /// Display positions `0..frozen` are frozen.
+    frozen: usize,
+    /// The scrolling columns built, as display positions.
+    shown: Range<usize>,
+    /// Width of the scrolling columns before `shown`, in pixels.
+    before: f32,
+    /// Row numbers and frozen columns, in pixels.
+    lead: f32,
+    /// How far the columns are panned, in pixels.
+    pan: f32,
+    /// Row numbers and frozen columns stay at the left edge while the rest
+    /// pans; without frozen columns the row numbers pan with the others.
+    sticky: bool,
+    /// The demo's columns share the width in fixed proportions.
+    flexible: bool,
 }
 
 /// A mouse gesture in progress over the grid.
@@ -134,8 +342,9 @@ pub enum StatsScope {
 
 /// The statistics of the page, for the rows the filter shows.
 struct ResultStats {
-    /// The result version and the filter they were read for.
-    key: (u64, String),
+    /// The result version, the layout version and the filter they were read
+    /// for.
+    key: (u64, u64, String),
     /// `None` while they are being computed.
     summary: Option<BlockSummary>,
 }
@@ -148,6 +357,9 @@ struct ColumnStats {
     summary: Option<ColumnSummary>,
 }
 
+/// The key context of the grid and its bars, where Shift F10 opens the
+/// menu ([`super::ResultGridMenu`]).
+pub const GRID_CONTEXT: &str = "ResultGrid";
 /// Height of a data row, in pixels.
 const ROW_HEIGHT: f32 = 34.;
 /// Height of the header and width of the row numbers, in pixels.
@@ -189,6 +401,8 @@ pub struct ResultGrid {
     /// numbers.
     first_row: usize,
     cache: GridCache,
+    /// The columns' widths for the grid view, the layout and `widths`.
+    widths_cache: WidthsCache,
     selection: Option<CellSelection>,
     /// The selected count last reported, so unchanged counts are not sent.
     reported: usize,
@@ -198,6 +412,23 @@ pub struct ResultGrid {
     columns_scroll: ScrollHandle,
     /// Widths the user dragged or fitted, by column, over the measured ones.
     widths: HashMap<usize, f32>,
+    /// Which columns are shown, in which order and which are frozen: the
+    /// result tab's, in memory only.
+    layout: Arc<ColumnLayout>,
+    /// Bumped with every change of `layout`, so what follows it (the page's
+    /// statistics) is computed again.
+    layout_version: u64,
+    /// The menu Shift F10 opened acts on `menu_column`, whatever the
+    /// synthesized click lands on.
+    menu_locked: bool,
+    /// The grid's menu is open: no tooltip of the grid is drawn over it.
+    menu_open: bool,
+    /// The table's width at the last layout, which decides the columns in
+    /// view.
+    viewport: Rc<Cell<f32>>,
+    /// The field that finds a column by name, while it is open; its text
+    /// also filters the records view's lines.
+    column_find: Option<ColumnFind>,
     gesture: Option<Gesture>,
     /// Rows and columns a drag past an edge moves per step.
     edge: (isize, isize),
@@ -218,8 +449,9 @@ pub struct ResultGrid {
     /// cell, or the one double-clicked in the records view.
     inspected: Option<(usize, usize)>,
     value_input: Option<Entity<TextareaState>>,
-    /// What `value_input` holds: (result version, data row, column).
-    value_shown: Option<(u64, usize, usize)>,
+    /// What `value_input` holds: (result version, edits version, data row,
+    /// column).
+    value_shown: Option<(u64, u64, usize, usize)>,
     column_stats: Option<ColumnStats>,
     column_task: Option<Task<()>>,
     /// Bumped with every selection, so a summary of an older one is dropped.
@@ -231,9 +463,31 @@ pub struct ResultGrid {
     records_scroll: UniformListScrollHandle,
     records_pan: ScrollHandle,
     sql: GridSql,
+    copy_job: Option<super::copying::CopyJob>,
+    /// Editing, by result tab: kept while the tab is open (ADR-0039).
+    editing: HashMap<ResultId, Editing>,
+    /// The key that asked for a table still being read, done once it is.
+    edit_after: Option<EditAction>,
+    /// The cell being typed in.
+    cell_editor: Option<CellEditor>,
 }
 
 impl EventEmitter<ResultGridEvent> for ResultGrid {}
+
+impl super::copying::CopyHost for ResultGrid {
+    fn copy_job(&mut self) -> &mut Option<super::copying::CopyJob> {
+        &mut self.copy_job
+    }
+
+    /// Bumped whenever another page is shown.
+    fn copy_epoch(&self) -> u64 {
+        self.version
+    }
+
+    fn copy_notice(&mut self, feedback: Feedback, cx: &mut Context<Self>) {
+        cx.emit(ResultGridEvent::Notice(feedback));
+    }
+}
 
 impl ResultGrid {
     pub(super) fn benchmark_begin(&mut self, bottom: bool, cx: &mut Context<Self>) {
@@ -256,12 +510,157 @@ impl ResultGrid {
             self.scroll
                 .scroll_to_item(position, ScrollStrategy::Nearest);
             cx.notify();
+        } else if phase == "pan" {
+            // Sideways, back and forth over the whole width.
+            let total = self.column_widths(&self.view()).total() + ROW_NUMBERS;
+            let room = (total - self.viewport.get()).max(1.);
+            let pan = (tick as f32 * 157.) % room;
+            let offset = self.columns_scroll.offset();
+            self.columns_scroll.set_offset(point(px(-pan), offset.y));
+            cx.notify();
         } else if phase != "idle" {
             self.move_selection(rows, cols, true, cx);
         }
     }
 
+    /// Freezes the first `columns` columns, for the wide run.
+    pub(super) fn benchmark_freeze(&mut self, columns: usize, cx: &mut Context<Self>) {
+        self.change_layout(
+            |layout| {
+                let mut changed = false;
+                for column in 0..columns {
+                    changed |= layout.freeze(column);
+                }
+                changed
+            },
+            cx,
+        );
+    }
+
+    /// One edit of the performance run's editing phase (A10), through the
+    /// same methods as the editing keys and the edit bar: by turns, a value
+    /// typed into a cell, a block set to NULL, a row inserted and given a
+    /// value, and a row marked for deletion, spread over the result.
+    pub(super) fn benchmark_edit(
+        &mut self,
+        tick: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let rows = self.result.row_count().max(1);
+        let last_column = self.result.column_count().saturating_sub(1);
+        let row = (tick.wrapping_mul(7_919)) % rows;
+        match tick % 4 {
+            0 => {
+                self.select(Some(CellSelection::cell(row, 1.min(last_column))), cx);
+                self.benchmark_type_cell(&format!("edited {tick}"), window, cx);
+            }
+            1 => {
+                let start = CellSelection::cell(row, 1.min(last_column));
+                let block = CellSelection::click(
+                    Some(start),
+                    (row + 2).min(rows - 1),
+                    2.min(last_column),
+                    true,
+                );
+                self.select(Some(block), cx);
+                self.edit(EditAction::Null, window, cx);
+            }
+            2 => {
+                // Inserting selects the new row's first column.
+                self.edit(EditAction::Insert, window, cx);
+                self.benchmark_type_cell(&format!("inserted {tick}"), window, cx);
+            }
+            _ => {
+                self.select(Some(CellSelection::cell(row, 0)), cx);
+                self.edit(EditAction::Delete, window, cx);
+            }
+        }
+    }
+
+    /// Opens the field over the focused cell, types `text` and leaves it
+    /// with Enter.
+    fn benchmark_type_cell(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Cell, window, cx);
+        if let Some(editor) = &self.cell_editor {
+            let input = editor.input.clone();
+            let text = text.to_owned();
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+            self.finish_cell_edit(true, window, cx);
+        }
+    }
+
+    /// The performance run's column search (A15): opens the field, as
+    /// `Ctrl Shift F` does, with its text selected.
+    pub(super) fn benchmark_find_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_column_search(window, cx);
+    }
+
+    /// Types `text` into the column search: replacing what is selected
+    /// (`replace`), or at the caret. The field's change finds the matches,
+    /// as typing does.
+    pub(super) fn benchmark_find_type(
+        &mut self,
+        text: &str,
+        replace: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(find) = &self.column_find {
+            let input = find.input.clone();
+            let text = text.to_owned();
+            input.update(cx, |input, cx| {
+                if replace {
+                    input.replace(text, window, cx);
+                } else {
+                    input.insert(text, window, cx);
+                }
+            });
+        }
+    }
+
+    /// How many columns the search found.
+    pub(super) fn benchmark_find_matches(&self) -> usize {
+        self.column_find
+            .as_ref()
+            .map_or(0, |find| find.matches.len())
+    }
+
+    /// Chooses the match for `column` (the first match without one), as
+    /// `↓` and `Enter` do. False when it is not among the matches.
+    pub(super) fn benchmark_find_choose(
+        &mut self,
+        column: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(find) = &mut self.column_find else {
+            return false;
+        };
+        let index = match column {
+            Some(column) => find.matches.iter().position(|found| found.column == column),
+            None => (!find.matches.is_empty()).then_some(0),
+        };
+        let Some(index) = index else {
+            return false;
+        };
+        find.highlighted = index;
+        self.choose_column_match(window, cx);
+        true
+    }
+
+    /// Hides `column`, as the header's menu does.
+    pub(super) fn benchmark_hide(&mut self, column: usize, cx: &mut Context<Self>) {
+        self.change_layout(|layout| layout.hide(column), cx);
+    }
+
+    /// Whether `column` is hidden.
+    pub(super) fn benchmark_hidden(&self, column: usize) -> bool {
+        self.layout.is_hidden(column)
+    }
+
     pub fn new(result: Arc<ResultData>, sales: bool, cx: &mut Context<Self>) -> Self {
+        let layout = Arc::new(ColumnLayout::new(result.column_count()));
         Self {
             result,
             shown: None,
@@ -274,12 +673,19 @@ impl ResultGrid {
             reported_rows: None,
             numbers_pt_br: false,
             cache: GridCache::default(),
+            widths_cache: WidthsCache::default(),
             selection: None,
             reported: 0,
             focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             columns_scroll: ScrollHandle::new(),
             widths: HashMap::new(),
+            layout,
+            layout_version: 0,
+            menu_locked: false,
+            menu_open: false,
+            viewport: Rc::default(),
+            column_find: None,
             gesture: None,
             edge: (0, 0),
             autoscrolling: false,
@@ -303,6 +709,10 @@ impl ResultGrid {
             records_scroll: UniformListScrollHandle::new(),
             records_pan: ScrollHandle::new(),
             sql: GridSql::default(),
+            copy_job: None,
+            editing: HashMap::new(),
+            edit_after: None,
+            cell_editor: None,
         }
     }
 
@@ -341,17 +751,32 @@ impl ResultGrid {
                     selection: self.selection,
                     scroll,
                     widths: std::mem::take(&mut self.widths),
+                    layout: self.layout.clone(),
                 },
             );
         }
         let place =
             shown.and_then(|(id, page)| self.places.remove(&id).filter(|place| place.page == page));
         // A sort chosen for one result tab does not carry to another; the
-        // pages of the same tab keep it, and their column widths.
+        // pages of the same tab keep it, their column widths and layout,
+        // while the result has the same columns.
+        let same_columns = self.result.column_count() == result.column_count()
+            && self
+                .result
+                .columns()
+                .iter()
+                .zip(result.columns())
+                .all(|(old, new)| old.same_as(new));
+        self.cell_editor = None;
         if !same_tab {
             self.sort = None;
             self.widths.clear();
         }
+        if !same_tab || !same_columns {
+            self.layout = Arc::new(ColumnLayout::new(result.column_count()));
+            self.layout_version += 1;
+        }
+        self.copy_job = None;
         self.result = result;
         self.sales = sales;
         self.first_row = first_row;
@@ -363,18 +788,101 @@ impl ResultGrid {
                 if !place.widths.is_empty() {
                     self.widths = place.widths;
                 }
+                if place.layout.len() == self.result.column_count() {
+                    self.layout = place.layout;
+                    self.layout_version += 1;
+                }
                 (place.selection, place.scroll)
             }
             None => (None, Point::default()),
         };
         self.scroll.0.borrow().base_handle.set_offset(scroll);
         self.select(selection, cx);
+        // Another result has other columns to find.
+        self.search_columns(cx);
         cx.notify();
     }
 
     /// Forgets where closed result tabs were left.
     pub fn retain_places(&mut self, open: &[ResultId]) {
         self.places.retain(|id, _| open.contains(id));
+        self.editing.retain(|id, _| open.contains(id));
+    }
+
+    /// Where editing result tab `id` stands.
+    pub fn editing(&self, id: ResultId) -> Option<&Editing> {
+        self.editing.get(&id)
+    }
+
+    /// The pending edits of the result tab on screen.
+    fn session(&self) -> Option<&EditSession> {
+        match self.editing.get(&self.shown?.0)? {
+            Editing::Session(session) => Some(session),
+            _ => None,
+        }
+    }
+
+    /// Changed rows waiting to be written, in the result tabs among `ids`
+    /// (all of them with `None`).
+    pub fn pending_edits(&self, ids: Option<&[ResultId]>) -> usize {
+        self.editing
+            .iter()
+            .filter(|(id, _)| ids.is_none_or(|ids| ids.contains(id)))
+            .map(|(_, editing)| match editing {
+                Editing::Session(session) => session.pending(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// The workspace's answer to [`ResultGridEvent::EditRequested`]: what
+    /// result tab `id` can be written back to. The key that asked is done
+    /// now when it is the tab on screen. `None` forgets the question (the
+    /// user did not go on).
+    pub fn set_editing(
+        &mut self,
+        id: ResultId,
+        editing: Option<Editing>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let after = self.edit_after.take();
+        match editing {
+            None => {
+                self.editing.remove(&id);
+            }
+            Some(editing) => {
+                if let Editing::ReadOnly(reason) = &editing {
+                    let text = grid_edit::read_only_text(reason);
+                    cx.emit(ResultGridEvent::Notice(Feedback::new(Tone::Info, text)));
+                }
+                let ready = matches!(editing, Editing::Session(_));
+                self.editing.insert(id, editing);
+                if ready
+                    && self.shown.map(|(shown, _)| shown) == Some(id)
+                    && let Some(action) = after
+                {
+                    self.perform(action, window, cx);
+                }
+            }
+        }
+        cx.emit(ResultGridEvent::EditsChanged);
+        cx.notify();
+    }
+
+    /// Changes result tab `id`'s pending edits with `change` (after a
+    /// write, or a discard), and draws them.
+    pub fn update_session(
+        &mut self,
+        id: ResultId,
+        change: impl FnOnce(&mut EditSession),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(Editing::Session(session)) = self.editing.get_mut(&id) {
+            change(session);
+            cx.emit(ResultGridEvent::EditsChanged);
+            cx.notify();
+        }
     }
 
     /// Filters rows by text in any column, ignoring case. An empty filter
@@ -419,24 +927,189 @@ impl ResultGrid {
     }
 
     /// The grid for the current result, filter, sort and number format.
-    fn view(&self) -> Rc<GridView> {
+    fn view(&self) -> Arc<GridView> {
+        let session = self.session();
         let key = GridKey {
             result: self.version,
             filter: self.filter.clone(),
             sort: self.sort,
             numbers_pt_br: self.numbers_pt_br,
+            edits: session.map_or(0, EditSession::version),
+            inserted: session.map_or(0, EditSession::drawn_inserted),
         };
         self.cache.get(&self.result, key)
     }
 
-    /// The width of each column: the user's where they set one, otherwise
-    /// the measured one.
-    fn column_widths(&self, grid: &GridView) -> Vec<f32> {
-        grid.widths
-            .iter()
-            .enumerate()
-            .map(|(column, width)| self.widths.get(&column).copied().unwrap_or(*width))
-            .collect()
+    /// The width of each column (the user's where they set one, otherwise
+    /// the measured one), by result column and in display order; computed
+    /// when the view, the layout or the widths change, not per frame.
+    fn column_widths(&self, grid: &GridView) -> Rc<ColumnWidths> {
+        self.widths_cache
+            .get(grid, &self.layout, self.layout_version, &self.widths)
+    }
+
+    /// The columns' layout, shared with what copies, exports and summarizes
+    /// the result.
+    pub fn layout(&self) -> Arc<ColumnLayout> {
+        self.layout.clone()
+    }
+
+    /// Changes the columns' layout with `change`, when it changes anything:
+    /// the selection keeps its cells (an end in a hidden column hides it
+    /// until the column is shown), and the counts and statistics follow.
+    fn change_layout(
+        &mut self,
+        change: impl FnOnce(&mut ColumnLayout) -> bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !change(Arc::make_mut(&mut self.layout)) {
+            return;
+        }
+        self.layout_version += 1;
+        self.select(self.selection, cx);
+        // Whether a match is hidden, and their order, follow the layout.
+        self.search_columns(cx);
+    }
+
+    /// Opens the field that finds a column by name (`Ctrl Shift F` or the
+    /// toolbar's button), or gives it the keyboard again with its text
+    /// selected.
+    pub fn open_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.column_find.is_none() {
+            let input =
+                cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Find a column by name…")));
+            let events =
+                cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                    match event {
+                        InputEvent::Change => this.search_columns(cx),
+                        InputEvent::PressEnter { .. } => this.choose_column_match(window, cx),
+                        InputEvent::Focus | InputEvent::Blur => {
+                            if let Some(find) = &mut this.column_find {
+                                find.focused = matches!(event, InputEvent::Focus);
+                            }
+                            cx.notify();
+                        }
+                    }
+                });
+            self.column_find = Some(ColumnFind {
+                input,
+                text: String::new(),
+                matches: Vec::new(),
+                highlighted: 0,
+                scroll: UniformListScrollHandle::new(),
+                focused: false,
+                _events: events,
+            });
+        }
+        if let Some(find) = &self.column_find {
+            find.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }
+        cx.notify();
+    }
+
+    /// Closes the field, which stops filtering the records view, and gives
+    /// the grid the keyboard.
+    fn close_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.column_find = None;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// Finds the columns the field's text names, once per change of the
+    /// text, the layout or the result; the highlighted match stays when it
+    /// still matches.
+    fn search_columns(&mut self, cx: &mut Context<Self>) {
+        let Some(find) = &mut self.column_find else {
+            return;
+        };
+        let text = find.input.read(cx).value().to_string();
+        let previous = find.matches.get(find.highlighted).map(|found| found.column);
+        find.matches = column_search::find(self.result.columns(), &self.layout, &text);
+        find.text = text;
+        let columns: Vec<usize> = find.matches.iter().map(|found| found.column).collect();
+        find.highlighted = jykre::palette::keep(previous.as_ref(), &columns);
+        find.scroll
+            .scroll_to_item(find.highlighted, ScrollStrategy::Nearest);
+        cx.notify();
+    }
+
+    /// `↑` and `↓` in the field: the match `Enter` chooses, wrapping.
+    fn step_column_match(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(find) = &mut self.column_find {
+            find.highlighted = jykre::palette::step(find.highlighted, find.matches.len(), delta);
+            find.scroll
+                .scroll_to_item(find.highlighted, ScrollStrategy::Nearest);
+            cx.notify();
+        }
+    }
+
+    /// Goes to the highlighted match.
+    fn choose_column_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let column = self
+            .column_find
+            .as_ref()
+            .and_then(|find| find.matches.get(find.highlighted))
+            .map(|found| found.column);
+        if let Some(column) = column {
+            self.go_to_column(column, window, cx);
+        }
+    }
+
+    /// Shows `column` when the layout hides it, scrolls the grid to it and
+    /// selects it over the displayed rows (in the records view, scrolls to
+    /// its line), and gives the grid the keyboard. The field stays open with
+    /// its text, which keeps filtering the records view.
+    fn go_to_column(&mut self, column: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.layout.is_hidden(column) {
+            self.change_layout(|layout| layout.show(column), cx);
+        }
+        let Some(position) = self.layout.position(column) else {
+            return;
+        };
+        if self.records {
+            if let Some(line) = self.record_lines().iter().position(|each| *each == column) {
+                self.records_scroll
+                    .scroll_to_item(line, ScrollStrategy::Nearest);
+            }
+        } else {
+            let view = self.view();
+            let selection = CellSelection::click_column(None, &view.rows, column, false);
+            if selection.is_some() {
+                self.select(selection, cx);
+            }
+            self.reveal(None, position, &view);
+        }
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    /// What the table lays out sideways this frame, from the columns'
+    /// widths, the pan and the viewport.
+    fn strip(&self, widths: &ColumnWidths) -> Strip {
+        let frozen = widths.frozen();
+        let sticky = frozen > 0;
+        let lead = ROW_NUMBERS + widths.span(0..frozen);
+        let pan = (-f32::from(self.columns_scroll.offset().x)).max(0.);
+        let viewport = self.viewport.get();
+        // The demo's columns grow to fill the grid, so all of them are built.
+        let flexible = self.sales && self.layout.is_identity() && self.widths.is_empty();
+        let (shown, before) = if flexible {
+            (frozen..widths.display().len(), 0.)
+        } else {
+            widths.shown(lead, pan, viewport)
+        };
+        Strip {
+            frozen,
+            shown,
+            before,
+            lead,
+            pan,
+            sticky,
+            flexible,
+        }
     }
 
     /// Changes the selection, notifies this grid only and reports a new
@@ -444,7 +1117,7 @@ impl ResultGrid {
     fn select(&mut self, selection: Option<CellSelection>, cx: &mut Context<Self>) {
         self.selection = selection;
         let view = self.view();
-        let cells = grid::selected_cells(selection, &view.rows);
+        let cells = grid::selected_cells(selection, &view.rows, &self.layout);
         if cells != self.reported {
             self.reported = cells;
             cx.emit(ResultGridEvent::SelectionChanged { cells });
@@ -467,7 +1140,7 @@ impl ResultGrid {
     }
 
     fn select_all(&mut self, cx: &mut Context<Self>) {
-        let all = CellSelection::all(&self.view().rows, self.result.column_count());
+        let all = CellSelection::all(&self.view().rows, &self.layout);
         if all.is_some() {
             self.select(all, cx);
         }
@@ -477,12 +1150,11 @@ impl ResultGrid {
     /// The focused cell scrolls into view, rows and columns.
     fn move_selection(&mut self, rows: isize, cols: isize, extend: bool, cx: &mut Context<Self>) {
         let view = self.view();
-        let columns = self.result.column_count();
-        if let Some((selection, position)) =
-            CellSelection::moved(self.selection, &view.rows, columns, rows, cols, extend)
+        if let Some((selection, (position, column))) =
+            CellSelection::moved(self.selection, &view.rows, &self.layout, rows, cols, extend)
         {
             self.select(Some(selection), cx);
-            self.reveal(position, selection.focus.1, &view);
+            self.reveal(Some(position), column, &view);
         }
     }
 
@@ -490,26 +1162,35 @@ impl ResultGrid {
     /// block grows from the anchor.
     fn jump_selection(&mut self, jump: Jump, extend: bool, cx: &mut Context<Self>) {
         let view = self.view();
-        let columns = self.result.column_count();
-        if let Some((selection, position)) =
-            CellSelection::jumped(self.selection, &view.rows, columns, jump, extend)
+        if let Some((selection, (position, column))) =
+            CellSelection::jumped(self.selection, &view.rows, &self.layout, jump, extend)
         {
             self.select(Some(selection), cx);
-            self.reveal(position, selection.focus.1, &view);
+            self.reveal(Some(position), column, &view);
         }
     }
 
-    /// Scrolls the cell at display `position` and `column` into view.
-    fn reveal(&self, position: usize, column: usize, view: &GridView) {
-        self.scroll
-            .scroll_to_item(position, ScrollStrategy::Nearest);
+    /// Scrolls the row at display `position` (when given) and the column at
+    /// display position `column` into view. A frozen column is always in
+    /// view; the others pan into the room the frozen ones leave.
+    fn reveal(&self, position: Option<usize>, column: usize, view: &GridView) {
+        if let Some(position) = position {
+            self.scroll
+                .scroll_to_item(position, ScrollStrategy::Nearest);
+        }
+        let frozen = self.layout.frozen();
+        if column < frozen {
+            return;
+        }
         let bounds = self.columns_scroll.bounds();
         let pan = -f32::from(self.columns_scroll.offset().x);
         let widths = self.column_widths(view);
+        let display = widths.display();
+        let lead = ROW_NUMBERS + widths.span(0..frozen);
         if let Some(pan) = grid::pan_to_column(
-            &widths,
-            column,
-            ROW_NUMBERS,
+            display.get(frozen..).unwrap_or_default(),
+            column - frozen,
+            lead,
             f32::from(bounds.size.width),
             pan,
         ) {
@@ -555,7 +1236,9 @@ impl ResultGrid {
             Some(Gesture::Selecting { rows }) => {
                 let (x, y) = (f32::from(position.x), f32::from(position.y));
                 let top = f32::from(bounds.top()) + HEADER_HEIGHT;
-                let left = f32::from(bounds.left()) + ROW_NUMBERS;
+                // Frozen columns do not pan, so the edge is past them.
+                let lead = self.strip(&self.column_widths(&self.view())).lead;
+                let left = f32::from(bounds.left()) + lead;
                 self.edge = (
                     grid::edge_step(y, top, f32::from(bounds.bottom())),
                     if rows {
@@ -640,13 +1323,15 @@ impl ResultGrid {
         let view = self.view();
         let Some((rows, cols)) = self
             .selection
-            .and_then(|selection| selection_block(selection, &view.rows))
+            .and_then(|selection| selection_block(selection, &view.rows, &self.layout))
         else {
             self.selection_block = None;
             self.report_summary(Summary::None, cx);
             return;
         };
-        let columns: Vec<(usize, ValueFamily)> = cols
+        // The selected columns as shown, in display order.
+        let columns: Vec<(usize, ValueFamily)> = grid::block_columns(&self.layout, cols)
+            .into_iter()
             .map(|column| {
                 let family = view
                     .families
@@ -688,7 +1373,12 @@ impl ResultGrid {
                 if this.summary_generation == generation {
                     this.report_summary(Summary::Ready(block.selection()), cx);
                     this.selection_block = Some((generation, block));
-                    cx.notify();
+                    // The footer learns it from the event; the grid draws it
+                    // only in the panel's selection statistics, so a large
+                    // selection does not draw the table again for nothing.
+                    if this.shows_stats(StatsScope::Selection) {
+                        cx.notify();
+                    }
                 }
             });
         }));
@@ -706,7 +1396,7 @@ impl ResultGrid {
         if !self.shows_stats(StatsScope::Result) {
             return;
         }
-        let key = (self.version, self.filter.clone());
+        let key = (self.version, self.layout_version, self.filter.clone());
         if self
             .result_stats
             .as_ref()
@@ -720,7 +1410,12 @@ impl ResultGrid {
         });
         let view = self.view();
         let rows = view.rows.clone();
-        let columns: Vec<(usize, ValueFamily)> = (0..self.result.column_count())
+        // The columns shown, in display order.
+        let columns: Vec<(usize, ValueFamily)> = self
+            .layout
+            .visible()
+            .iter()
+            .copied()
             .map(|column| {
                 let family = view
                     .families
@@ -801,7 +1496,7 @@ impl ResultGrid {
             self.set_inspector(None, cx);
             return;
         }
-        let selected = grid::selected_cells(self.selection, &self.view().rows);
+        let selected = grid::selected_cells(self.selection, &self.view().rows, &self.layout);
         let scope = if selected >= 2 {
             StatsScope::Selection
         } else {
@@ -897,20 +1592,34 @@ impl ResultGrid {
         }));
     }
 
-    /// Shows the inspected cell's value in the viewer, once per cell.
+    /// The text page row `row` shows in `column`: its pending or written
+    /// edit, else the value read; `None` for NULL.
+    fn shown_value(&self, row: usize, column: usize) -> Option<&str> {
+        let overlay = self.session().and_then(|session| {
+            session.cell_overlay(self.first_row, self.result.row_count(), row, column)
+        });
+        match overlay {
+            Some(overlay) => overlay.value().text(),
+            None => self.result.value(row, column),
+        }
+    }
+
+    /// Shows the inspected cell's value in the viewer, once per cell and
+    /// change: a pending edit's value over the one read, as the cell does.
     fn sync_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.inspector != Some(Inspector::Value) {
             return;
         }
+        let edits = self.session().map_or(0, EditSession::version);
         let target = self
             .inspected
-            .map(|(row, column)| (self.version, row, column));
+            .map(|(row, column)| (self.version, edits, row, column));
         if self.value_shown == target && self.value_input.is_some() {
             return;
         }
         self.value_shown = target;
         let text = target
-            .and_then(|(_, row, column)| self.result.value(row, column))
+            .and_then(|(_, _, row, column)| self.shown_value(row, column))
             .map(viewer_text)
             .unwrap_or_default();
         let input = self.value_input.get_or_insert_with(|| {
@@ -926,180 +1635,457 @@ impl ResultGrid {
     /// Copies the selected block in the format of the copy menu
     /// (`Ctrl C`), with the column names first when `headers`
     /// (`Ctrl Shift C`) or when the menu says so. A copy estimated above
-    /// 50 MiB asks first, unless `confirmed`.
+    /// 50 MiB asks first, before the worker generates the text.
     pub(super) fn copy_selection(
         &mut self,
         headers: bool,
-        confirmed: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let options = super::copying::options(cx);
-        self.copy(options.with(options.format, headers), confirmed, window, cx);
+        self.copy(options.with(options.format, headers), window, cx);
     }
 
     /// Copies the selected block in `format` (**Copy as**), with the other
     /// choices of the copy menu.
-    fn copy_as(
-        &mut self,
-        format: CopyFormat,
-        confirmed: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn copy_as(&mut self, format: CopyFormat, window: &mut Window, cx: &mut Context<Self>) {
         let options = super::copying::options(cx);
-        self.copy(options.with(format, false), confirmed, window, cx);
+        self.copy(options.with(format, false), window, cx);
     }
 
-    fn copy(
-        &mut self,
-        options: CopyOptions,
-        confirmed: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let view = self.view();
-        let bytes = grid::selection_bytes(&self.result, &view.rows, self.selection, true);
-        if !confirmed && bytes > grid::COPY_CONFIRM_BYTES {
-            self.confirm_copy(bytes, window, cx, move |this, window, cx| {
-                this.copy(options, true, window, cx)
-            });
-            return;
-        }
-        let _timer = jykre::logging::UiTimer::start("copy selection");
-        let notice = match Block::new(&self.result, &view.rows, self.selection, &view.families) {
-            None => Feedback::new(Tone::Info, tr!("Select cells to copy.")),
-            Some(block) => {
-                let count = block.cells();
-                let table = self
-                    .sql
-                    .table
-                    .clone()
-                    .unwrap_or_else(|| "table_name".to_owned());
-                let style = SqlStyle {
-                    dialect: self.sql.dialect,
-                    quote_name: &*self.sql.quote_name,
-                    table: &table,
-                };
-                let text = copy_as::copy_as(&options, &block, &style);
-                cx.write_to_clipboard(ClipboardItem::new_string(text));
-                let message = match (options.format, count) {
-                    (CopyFormat::Text, 1) => tr!("Cell copied.").to_string(),
-                    (CopyFormat::Text, count) => tr!("{0} cells copied.", count),
-                    (format, 1) => tr!("Cell copied as {0}.", format_name(format)),
-                    (format, count) => tr!("{0} cells copied as {1}.", count, format_name(format)),
-                };
-                Feedback::new(Tone::Success, message)
-            }
-        };
-        cx.emit(ResultGridEvent::Notice(notice));
-    }
-
-    fn confirm_copy(
-        &self,
-        bytes: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        copy: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) {
-        let grid = cx.entity().downgrade();
-        super::confirm(
-            window,
-            cx,
-            super::Confirmation {
-                title: tr!("Copy about {0} MB?", bytes / (1024 * 1024)),
-                description: tr!(
-                    "The selection is large: copying it can take a moment and holds all of it in the clipboard."
-                )
-                .to_string(),
-                ok: tr!("Copy"),
-                cancel: tr!("Cancel"),
-                focus: super::ConfirmFocus::Dialog,
-            },
-            move |window, cx| {
-                let _ = grid.update(cx, |this, cx| copy(this, window, cx));
-            },
-        );
-    }
-
-    /// Copies the whole value the viewer shows.
-    fn copy_value(&mut self, cx: &mut Context<Self>) {
-        let value = self
-            .inspected
-            .and_then(|(row, column)| self.result.value(row, column));
-        let notice = match value {
-            Some(value) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(value.to_owned()));
-                Feedback::new(Tone::Success, tr!("Value copied."))
-            }
-            None => Feedback::new(
+    fn copy(&mut self, options: CopyOptions, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(selection) = self.selection else {
+            cx.emit(ResultGridEvent::Notice(Feedback::new(
                 Tone::Info,
-                tr!("The value is NULL: there is nothing to copy."),
-            ),
+                tr!("Select cells to copy."),
+            )));
+            return;
         };
-        cx.emit(ResultGridEvent::Notice(notice));
+        let request = self.copy_request(
+            CopySource::Selection {
+                view: self.view(),
+                selection,
+            },
+            options,
+        );
+        self.start_copy(request, super::copying::CopyWhat::Selection, window, cx);
     }
 
+    fn copy_request(&self, source: CopySource, options: CopyOptions) -> CopyRequest {
+        CopyRequest {
+            result: self.result.clone(),
+            source,
+            options,
+            dialect: self.sql.dialect,
+            table: self
+                .sql
+                .table
+                .clone()
+                .unwrap_or_else(|| "table_name".to_owned()),
+            quoted_columns: self
+                .result
+                .columns()
+                .iter()
+                .map(|column| (self.sql.quote_name)(&column.name))
+                .collect(),
+            layout: self.layout.clone(),
+        }
+    }
+
+    pub(super) fn copy_page_csv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let options = CopyOptions {
+            format: CopyFormat::Csv,
+            header: true,
+            ..CopyOptions::default()
+        };
+        let request = self.copy_request(CopySource::Page, options);
+        self.start_copy(request, super::copying::CopyWhat::Page, window, cx);
+    }
+
+    fn start_copy(
+        &mut self,
+        request: CopyRequest,
+        what: super::copying::CopyWhat,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        super::copying::start(self, request, what, window, cx);
+    }
+
+    fn cancel_copy(&mut self, cx: &mut Context<Self>) {
+        super::copying::cancel(self, cx);
+    }
+
+    /// Copies the whole value the viewer shows, never only the part it
+    /// shows, off the UI thread like any other copy.
+    fn copy_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, column)) = self.inspected else {
+            return;
+        };
+        let request = self.copy_request(CopySource::Value { row, column }, CopyOptions::default());
+        self.start_copy(request, super::copying::CopyWhat::Value, window, cx);
+    }
+
+    /// `Esc` closes what is on top first: a copy, the panel, the records
+    /// view, then the selection. It stays a key of the grid, not an action:
+    /// the window's `Dismiss` sees it first and lets it through.
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        let shift = keystroke.modifiers.shift;
-        let handled = if keystroke.modifiers.control || keystroke.modifiers.platform {
-            match keystroke.key.as_str() {
-                "c" => {
-                    self.copy_selection(shift, false, window, cx);
-                    true
-                }
-                "a" => {
-                    self.select_all(cx);
-                    true
-                }
-                "home" => {
-                    self.jump_selection(Jump::First, shift, cx);
-                    true
-                }
-                "end" => {
-                    self.jump_selection(Jump::Last, shift, cx);
-                    true
-                }
-                _ => false,
-            }
-        } else {
-            match keystroke.key.as_str() {
-                "up" => self.move_selection(-1, 0, shift, cx),
-                "down" => self.move_selection(1, 0, shift, cx),
-                "left" => self.move_selection(0, -1, shift, cx),
-                "right" => self.move_selection(0, 1, shift, cx),
-                "home" => self.jump_selection(Jump::RowStart, shift, cx),
-                "end" => self.jump_selection(Jump::RowEnd, shift, cx),
-                "pageup" => {
-                    let rows = self.page_rows();
-                    self.jump_selection(Jump::Rows(-rows), shift, cx)
-                }
-                "pagedown" => {
-                    let rows = self.page_rows();
-                    self.jump_selection(Jump::Rows(rows), shift, cx)
-                }
-                "enter" if self.inspected.is_some() => self.open_inspector(Inspector::Value, cx),
-                // Esc closes what is on top first: the panel, the records
-                // view, then the selection.
-                "escape" if self.inspector.is_some() => self.set_inspector(None, cx),
-                "escape" if self.records => self.set_records(false, cx),
-                "escape" if self.selection.is_some() => self.select(None, cx),
-                _ => return,
-            }
-            true
-        };
-        if handled {
-            window.prevent_default();
-            cx.stop_propagation();
+        if keystroke.key != "escape" || keystroke.modifiers.modified() {
+            return;
         }
+        if self.cell_editor.is_some() {
+            // What was typed is dropped; the cell keeps its value.
+            self.finish_cell_edit(false, window, cx);
+        } else if self.copy_job.is_some() {
+            self.cancel_copy(cx);
+        } else if self.inspector.is_some() {
+            self.set_inspector(None, cx);
+        } else if self.records {
+            self.set_records(false, cx);
+        } else if self.selection.is_some() {
+            self.select(None, cx);
+        } else {
+            return;
+        }
+        window.prevent_default();
+        cx.stop_propagation();
+    }
+
+    /// A key of the grid's keymap ([`super::shortcuts`]), on the table that
+    /// has the keyboard. `Enter` with no cell to show lets the key through.
+    fn grid_key(&mut self, key: KeyAction, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cell_editor.is_some() {
+            // The cell's field has the keyboard. A key reaches the grid
+            // only when the field lets it through: Enter, which the field
+            // commits itself (`InputEvent::PressEnter`), or an arrow at the
+            // end of its text. Neither may open the panel or move the
+            // selection under the field.
+            match while_editing(key) {
+                WhileEditing::Nothing => {}
+                WhileEditing::CommitAndWrite => {
+                    self.finish_cell_edit(true, window, cx);
+                    cx.emit(ResultGridEvent::WriteRequested);
+                }
+                WhileEditing::DropAndDiscard => {
+                    self.finish_cell_edit(false, window, cx);
+                    cx.emit(ResultGridEvent::DiscardRequested);
+                }
+            }
+            return;
+        }
+        match key {
+            KeyAction::Copy { names } => self.copy_selection(names, window, cx),
+            KeyAction::SelectAll => self.select_all(cx),
+            KeyAction::Move { rows, cols, extend } => self.move_selection(rows, cols, extend, cx),
+            KeyAction::Jump { jump, extend } => self.jump_selection(jump, extend, cx),
+            KeyAction::Page { down, extend } => {
+                let rows = self.page_rows();
+                let rows = if down { rows } else { -rows };
+                self.jump_selection(Jump::Rows(rows), extend, cx)
+            }
+            KeyAction::Inspect if self.inspected.is_some() => {
+                self.open_inspector(Inspector::Value, cx)
+            }
+            KeyAction::Inspect => cx.propagate(),
+            KeyAction::Edit(action) => self.edit(action, window, cx),
+            KeyAction::Write => cx.emit(ResultGridEvent::WriteRequested),
+            KeyAction::Discard => cx.emit(ResultGridEvent::DiscardRequested),
+        }
+    }
+
+    /// An editing key: done now when the tab's table is known, after the
+    /// workspace read it otherwise; a read-only result says why.
+    fn edit(&mut self, action: EditAction, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((id, _)) = self.shown else {
+            self.edit_notice(tr!("Only a query tab's result can be edited.").into(), cx);
+            return;
+        };
+        match self.editing.get(&id) {
+            None => {
+                self.edit_after = Some(action);
+                self.editing.insert(id, Editing::Resolving);
+                cx.emit(ResultGridEvent::EditRequested(id));
+                cx.notify();
+            }
+            Some(Editing::Resolving) => {
+                self.edit_after = Some(action);
+            }
+            Some(Editing::ReadOnly(reason)) => {
+                let text = grid_edit::read_only_text(reason);
+                self.edit_notice(text, cx);
+            }
+            Some(Editing::Session(_)) => self.perform(action, window, cx),
+        }
+    }
+
+    fn edit_notice(&self, text: String, cx: &mut Context<Self>) {
+        cx.emit(ResultGridEvent::Notice(Feedback::new(Tone::Info, text)));
+    }
+
+    /// Changes the tab's pending edits with `change`; a refusal is said.
+    fn change_edits(
+        &mut self,
+        change: impl FnOnce(&mut EditSession, &ResultData, usize) -> Result<(), grid_edit::Refused>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some((id, _)) = self.shown else {
+            return false;
+        };
+        let (result, first_row) = (self.result.clone(), self.first_row);
+        let Some(Editing::Session(session)) = self.editing.get_mut(&id) else {
+            return false;
+        };
+        let done = change(session, &result, first_row);
+        cx.emit(ResultGridEvent::EditsChanged);
+        cx.notify();
+        match done {
+            Ok(()) => true,
+            Err(refused) => {
+                self.edit_notice(grid_edit::refused_text(&refused), cx);
+                false
+            }
+        }
+    }
+
+    /// The data rows and result columns of the visible selection.
+    fn selected_block(&self) -> Option<(Vec<usize>, Vec<usize>)> {
+        let view = self.view();
+        let (rows, columns) = selection_block(self.selection?, &view.rows, &self.layout)?;
+        let rows = rows
+            .filter_map(|position| view.rows.get(position).copied())
+            .collect();
+        Some((rows, grid::block_columns(&self.layout, columns)))
+    }
+
+    fn perform(&mut self, action: EditAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            EditAction::Cell => self.start_cell_edit(window, cx),
+            EditAction::Null => {
+                let Some((rows, columns)) = self.selected_block() else {
+                    self.edit_notice(tr!("Select the cells to set to NULL.").into(), cx);
+                    return;
+                };
+                self.change_edits(
+                    |session, result, first_row| {
+                        for row in &rows {
+                            for column in &columns {
+                                set_cell(
+                                    session,
+                                    result,
+                                    first_row,
+                                    *row,
+                                    *column,
+                                    EditValue::Null,
+                                )?;
+                            }
+                        }
+                        Ok(())
+                    },
+                    cx,
+                );
+            }
+            EditAction::Insert => {
+                let mut added = None;
+                self.change_edits(
+                    |session, result, _| {
+                        if session.needs_key() {
+                            return Err(grid_edit::Refused::NeedsKey);
+                        }
+                        added = Some(result.row_count() + session.insert_row());
+                        Ok(())
+                    },
+                    cx,
+                );
+                let first = self
+                    .layout
+                    .visible()
+                    .iter()
+                    .copied()
+                    .find(|column| {
+                        self.session()
+                            .is_some_and(|session| session.editable_column(*column).is_ok())
+                    })
+                    .or_else(|| self.layout.column(0));
+                if let (Some(row), Some(column)) = (added, first) {
+                    self.select(Some(CellSelection::cell(row, column)), cx);
+                    let view = self.view();
+                    let position = view.rows.iter().position(|each| *each == row);
+                    if let Some(display) = self.layout.position(column) {
+                        self.reveal(position, display, &view);
+                    }
+                }
+            }
+            EditAction::Delete => {
+                let Some((mut rows, _)) = self.selected_block() else {
+                    self.edit_notice(tr!("Select the rows to delete.").into(), cx);
+                    return;
+                };
+                // Inserted rows go from the last, so the others keep their
+                // place.
+                rows.sort_unstable_by(|a, b| b.cmp(a));
+                self.change_edits(
+                    |session, result, first_row| {
+                        for row in &rows {
+                            match row.checked_sub(result.row_count()) {
+                                Some(inserted) if inserted < session.inserted() => {
+                                    session.remove_inserted(inserted)
+                                }
+                                Some(_) => {}
+                                None => {
+                                    let read = |column: usize| {
+                                        result.value(*row, column).map(str::to_owned)
+                                    };
+                                    session.toggle_delete(first_row + row, &read)?;
+                                }
+                            }
+                        }
+                        Ok(())
+                    },
+                    cx,
+                );
+                self.select(None, cx);
+            }
+        }
+    }
+
+    /// Opens the field over the focused cell, with its value (pending or
+    /// read) selected.
+    fn start_cell_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((row, column)) = self.selection.map(|selection| selection.focus) else {
+            self.edit_notice(tr!("Select the cell to edit.").into(), cx);
+            return;
+        };
+        let Some(session) = self.session() else {
+            return;
+        };
+        let refused = if session.needs_key() {
+            Some(grid_edit::Refused::NeedsKey)
+        } else {
+            session.editable_column(column).err()
+        };
+        if let Some(refused) = refused {
+            self.edit_notice(grid_edit::refused_text(&refused), cx);
+            return;
+        }
+        let read_rows = self.result.row_count();
+        let current = match row.checked_sub(read_rows) {
+            Some(inserted) => session
+                .inserted_value(inserted, column)
+                .and_then(|overlay| overlay.value().text().map(str::to_owned)),
+            None => match session.overlay(self.first_row + row, column) {
+                Some(overlay) => overlay.value().text().map(str::to_owned),
+                None => self.result.value(row, column).map(str::to_owned),
+            },
+        };
+        let input =
+            cx.new(|cx| InputState::new(window, cx).default_value(current.unwrap_or_default()));
+        let events = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+            match event {
+                InputEvent::PressEnter { .. } => this.finish_cell_edit(true, window, cx),
+                // Leaving the field keeps what was typed, pending.
+                InputEvent::Blur => this.finish_cell_edit(true, window, cx),
+                _ => {}
+            }
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        self.cell_editor = Some(CellEditor {
+            cell: (row, column),
+            input,
+            _events: events,
+        });
+        cx.notify();
+    }
+
+    /// Closes the cell's field, keeping what was typed as the cell's pending
+    /// value (`keep`) or not, and gives the grid the keyboard back.
+    fn finish_cell_edit(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.cell_editor.take() else {
+            return;
+        };
+        if keep {
+            let text = editor.input.read(cx).value().to_string();
+            let (row, column) = editor.cell;
+            self.change_edits(
+                |session, result, first_row| {
+                    set_cell(
+                        session,
+                        result,
+                        first_row,
+                        row,
+                        column,
+                        EditValue::Text(text),
+                    )
+                },
+                cx,
+            );
+        }
+        drop(editor);
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     fn table(&self, cx: &mut Context<Self>) -> AnyElement {
         let grid = self.view();
         let widths = self.column_widths(&grid);
-        let grid_width = widths.iter().sum::<f32>() + ROW_NUMBERS;
+        let strip = self.strip(&widths);
+        let grid_width = widths.total() + ROW_NUMBERS;
         let has_rows = !grid.rows.is_empty();
+        let visible = self.layout.visible();
+        let corner = || {
+            div()
+                .w(px(ROW_NUMBERS))
+                .flex_none()
+                .text_center()
+                .child(label("#"))
+        };
+        let mut header = row()
+            .relative()
+            .h(px(HEADER_HEIGHT))
+            .flex_none()
+            .gap_0()
+            .bg(rgb(colors().grid_header))
+            .border_b_1()
+            .border_color(rgb(colors().grid_line));
+        // Only the columns in view are built; the ones panned past keep
+        // their room, so the scrollbar and the pan stay those of the whole
+        // width.
+        header = if strip.sticky {
+            header.child(div().w(px(strip.lead)).flex_none())
+        } else {
+            header.child(corner())
+        };
+        header = header.child(div().w(px(strip.before)).flex_none());
+        for position in strip.shown.clone() {
+            if let Some(column) = visible.get(position).copied() {
+                let width = widths
+                    .by_column()
+                    .get(column)
+                    .copied()
+                    .unwrap_or(grid::MIN_COLUMN_WIDTH);
+                header = header.child(self.header(column, position, width, strip.flexible, cx));
+            }
+        }
+        if strip.sticky {
+            let mut frozen = self
+                .frozen_part(&strip)
+                .bg(rgb(colors().grid_header))
+                .child(corner());
+            for position in 0..strip.frozen {
+                if let Some(column) = visible.get(position).copied() {
+                    let width = widths
+                        .by_column()
+                        .get(column)
+                        .copied()
+                        .unwrap_or(grid::MIN_COLUMN_WIDTH);
+                    frozen = frozen.child(self.header(column, position, width, false, cx));
+                }
+            }
+            header = header.child(frozen);
+        }
         // Not `overflow_x_scrollbar`: its wheel mask pans the columns with a
         // plain wheel until their end, and only then scrolls the rows. Here
         // the wheel scrolls the rows and only a horizontal delta (Shift +
@@ -1116,25 +2102,7 @@ impl ResultGrid {
                     .w(px(grid_width))
                     .min_w_full()
                     .h_full()
-                    .child(
-                        row()
-                            .h(px(HEADER_HEIGHT))
-                            .flex_none()
-                            .gap_0()
-                            .bg(rgb(colors().grid_header))
-                            .border_b_1()
-                            .border_color(rgb(colors().grid_line))
-                            .child(
-                                div()
-                                    .w(px(ROW_NUMBERS))
-                                    .flex_none()
-                                    .text_center()
-                                    .child(label("#")),
-                            )
-                            .children(self.result.columns().iter().enumerate().map(
-                                |(index, column)| self.header(index, column, widths[index], cx),
-                            )),
-                    )
+                    .child(header)
                     .child(if grid.rows.is_empty() && !self.filter.is_empty() {
                         // The filter reads only the rows held for this page,
                         // so "nothing found" says so.
@@ -1180,9 +2148,29 @@ impl ResultGrid {
                             .into_any_element()
                     }),
             );
+        // The columns in view depend on the viewport's width, known after
+        // layout: a width other than the one this frame was built for
+        // builds the next frame again, once.
+        let measured = self.viewport.clone();
+        let weak = cx.weak_entity();
+        let measure = canvas(
+            move |bounds, _, cx| {
+                let width = f32::from(bounds.size.width);
+                if (width - measured.get()).abs() > 0.5 {
+                    measured.set(width);
+                    cx.defer(move |cx| {
+                        let _ = weak.update(cx, |_, cx| cx.notify());
+                    });
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
         div()
             .size_full()
             .relative()
+            .child(measure)
             .child(table)
             .child(
                 div().absolute().inset_0().child(
@@ -1214,19 +2202,39 @@ impl ResultGrid {
             .into_any_element()
     }
 
+    /// The part of a row (or of the header) that stays at the left edge:
+    /// the row numbers and the frozen columns, drawn over the columns that
+    /// pan under it and taking the pointer from them.
+    fn frozen_part(&self, strip: &Strip) -> Div {
+        row()
+            .absolute()
+            .top_0()
+            .left(px(strip.pan))
+            .h_full()
+            .gap_0()
+            .border_r_2()
+            .border_color(rgb(colors().grid_line))
+            .block_mouse_except_scroll()
+    }
+
     /// A column's header: a click sorts by it, `Ctrl` + click selects it,
-    /// and its right edge resizes it (a double click fits it).
+    /// dragging it moves it, its right edge resizes it (a double click fits
+    /// it) and Shift F10 opens the menu on it.
     fn header(
         &self,
         index: usize,
-        column: &jykre::result::ResultColumn,
+        position: usize,
         width: f32,
+        flexible: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let Some(column) = self.result.columns().get(index) else {
+            return div().id(("result-header", index));
+        };
         let name = &column.name;
         let kind = column.data_type.to_lowercase();
         let tooltip = tr!(
-            "{0} : {1} · Click to sort this page by it, Ctrl + click to select it",
+            "{0} : {1} · Click to sort this page by it, Ctrl + click to select it, drag it to move it",
             name,
             kind
         );
@@ -1234,13 +2242,24 @@ impl ResultGrid {
             .sort
             .filter(|sort| sort.column == index)
             .map(|sort| sort.descending);
+        let sort_label = match sorted {
+            Some(false) => tr!("{0}, sorted ascending", name),
+            Some(true) => tr!("{0}, sorted descending", name),
+            None => tr!("{0}, not sorted", name),
+        };
+        let frozen = position < self.layout.frozen();
+        let drag = ColumnDrag {
+            grid: cx.entity_id(),
+            column: index,
+            name: name.clone().into(),
+        };
         row()
             .id(("result-header", index))
             .role(Role::ColumnHeader)
-            .aria_label(match sorted {
-                Some(false) => tr!("{0}, sorted ascending", name),
-                Some(true) => tr!("{0}, sorted descending", name),
-                None => tr!("{0}, not sorted", name),
+            .aria_label(if frozen {
+                tr!("{0}, frozen", sort_label)
+            } else {
+                sort_label
             })
             .relative()
             .w(px(width))
@@ -1248,9 +2267,13 @@ impl ResultGrid {
             .h_full()
             .px_3()
             .gap_1()
-            .when(self.sales && !self.widths.contains_key(&index), |s| {
-                s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][index])
-            })
+            .when_some(
+                DEMO_FLEX
+                    .get(index)
+                    .copied()
+                    .filter(|_| flexible && !self.widths.contains_key(&index)),
+                |s, grow| s.flex_grow(grow),
+            )
             .border_l_1()
             .border_color(rgb(colors().grid_line))
             .text_size(px(14.))
@@ -1260,7 +2283,11 @@ impl ResultGrid {
             .tab_index(0)
             .focus_visible(|s| s.bg(rgb(colors().hover)))
             .hover(|s| s.bg(rgb(colors().grid_hover)))
-            .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            // GPUI draws a tooltip over every layer, so none is set while the
+            // grid's menu is open.
+            .when(tooltips_shown(self.menu_open), |s| {
+                s.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            })
             .child(
                 div()
                     .flex_shrink(1.)
@@ -1289,8 +2316,33 @@ impl ResultGrid {
             })
             .on_mouse_down(
                 MouseButton::Right,
-                cx.listener(move |this, _, _, _| this.menu_column = Some(index)),
+                cx.listener(move |this, _, _, _| {
+                    if !this.menu_locked {
+                        this.menu_column = Some(index);
+                    }
+                }),
             )
+            .on_action(cx.listener(move |this, _: &super::ResultGridMenu, window, cx| {
+                this.open_column_menu(index, window, cx)
+            }))
+            // Dropped on another header, the column takes its place.
+            .on_drag(drag, |drag, _, _, cx| {
+                cx.new(|_| ColumnDragPreview {
+                    name: drag.name.clone(),
+                })
+            })
+            .drag_over::<ColumnDrag>(|style, _, _, _| {
+                style
+                    .bg(rgb(colors().hover))
+                    .border_l_2()
+                    .border_color(rgb(colors().mint))
+            })
+            .on_drop(cx.listener(move |this, drag: &ColumnDrag, _, cx| {
+                if drag.grid == cx.entity_id() {
+                    let moved = drag.column;
+                    this.change_layout(|layout| layout.move_onto(moved, index), cx);
+                }
+            }))
             // Ascending, descending, then the server's order again; the
             // rows of this page are sorted by value. With Ctrl the column
             // is selected instead (Shift extends from the anchor's).
@@ -1328,7 +2380,8 @@ impl ResultGrid {
                         }),
                         |s| s.bg(rgb(colors().grid_focus)),
                     )
-                    // Taken here, so the header neither sorts nor selects.
+                    // Taken here, so the header neither sorts, selects nor
+                    // moves.
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -1350,183 +2403,382 @@ impl ResultGrid {
             )
     }
 
+    /// Opens the grid's menu on `column` from the keyboard (Shift F10), at
+    /// its header, panned into view: the menu acts on that column whatever
+    /// lies under the point.
+    fn open_column_menu(&mut self, column: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(position) = self.layout.position(column) else {
+            return;
+        };
+        let view = self.view();
+        self.reveal(None, position, &view);
+        let widths = self.column_widths(&view);
+        let strip = self.strip(&widths);
+        let width = widths.display().get(position).copied().unwrap_or_default();
+        let x = if position < strip.frozen {
+            ROW_NUMBERS + widths.span(0..position)
+        } else {
+            strip.lead + widths.span(strip.frozen..position) - strip.pan
+        } + width / 2.;
+        let bounds = self.columns_scroll.bounds();
+        let x = x.clamp(8., (f32::from(bounds.size.width) - 8.).max(8.));
+        let at = point(bounds.left() + px(x), bounds.top() + px(HEADER_HEIGHT / 2.));
+        self.menu_column = Some(column);
+        self.menu_locked = true;
+        let weak = cx.weak_entity();
+        // The menu listens for the right button over the table; the press
+        // is sent after this key's dispatch ends.
+        window.defer(cx, move |window, cx| {
+            window.dispatch_event(
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Right,
+                    position: at,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Right,
+                    position: at,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+            let _ = weak.update(cx, |this, _| this.menu_locked = false);
+        });
+    }
+
+    /// Shift F10 in the table: the menu on the focused cell's column, or
+    /// the first column shown.
+    fn open_menu_from_keyboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let column = self
+            .inspected
+            .map(|(_, column)| column)
+            .filter(|column| self.layout.position(*column).is_some())
+            .or_else(|| self.layout.column(0));
+        if let Some(column) = column {
+            self.open_column_menu(column, window, cx);
+        }
+    }
+
     /// The data rows at `range` of the displayed order.
-    fn result_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+    fn result_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let grid = self.view();
         let widths = self.column_widths(&grid);
+        let strip = self.strip(&widths);
         let block = self
             .selection
-            .and_then(|selection| selection_block(selection, &grid.rows));
-        let focus = self.selection.map(|selection| selection.focus);
-        let last_column = self.result.column_count().saturating_sub(1);
+            .and_then(|selection| selection_block(selection, &grid.rows, &self.layout));
+        let rows = RowsContext {
+            focus: self.selection.map(|selection| selection.focus),
+            block,
+            grid,
+            widths,
+            flexible: strip.flexible,
+        };
+        let shown = self.layout.visible().len();
         range
-            .filter_map(|position| Some((position, *grid.rows.get(position)?)))
+            .filter_map(|position| Some((position, *rows.grid.rows.get(position)?)))
             .map(|(position, index)| {
-                let cells: Vec<_> = self.result.row(index).collect();
-                let row_selected = block.as_ref().is_some_and(|(rows, cols)| {
-                    rows.contains(&position) && *cols.start() == 0 && *cols.end() == last_column
+                let row_selected = rows.block.as_ref().is_some_and(|(block_rows, cols)| {
+                    block_rows.contains(&position) && *cols.start() == 0 && *cols.end() + 1 == shown
                 });
-                row()
+                let built: Vec<usize> = (0..strip.frozen).chain(strip.shown.clone()).collect();
+                // The field a cell is typed in draws its caret over its
+                // text, so the row holding it is not one layer.
+                let editing = self
+                    .cell_editor
+                    .as_ref()
+                    .is_some_and(|editor| editor.cell.0 == index);
+                let mut line = row()
                     .id(("data-row", index))
                     .role(Role::Row)
+                    // The values on screen, in display order.
                     .aria_label(
-                        cells
+                        built
                             .iter()
-                            .map(|cell| cell.unwrap_or("NULL"))
+                            .filter_map(|position| self.layout.column(*position))
+                            .map(|column| self.result.value(index, column).unwrap_or("NULL"))
                             .collect::<Vec<_>>()
                             .join(", "),
                     )
+                    .relative()
                     .w_full()
                     .h(px(ROW_HEIGHT))
                     .flex_none()
-                    .gap_0()
-                    .child(
-                        div()
-                            .id(("row-number", index))
-                            .w(px(ROW_NUMBERS))
-                            .flex_none()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .cursor_pointer()
-                            .bg(rgb(if row_selected {
-                                colors().grid_selected
-                            } else {
-                                colors().grid_header
-                            }))
-                            .hover(|s| s.bg(rgb(colors().grid_hover)))
-                            .border_b_1()
-                            .border_color(rgb(colors().grid_line))
-                            .text_center()
-                            .text_size(px(12.))
-                            .text_color(rgb(colors().faint))
-                            // Pressing selects the row (Shift extends);
-                            // dragging over other rows selects them all.
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    let selection = CellSelection::click_row(
-                                        this.selection,
-                                        index,
-                                        last_column + 1,
-                                        event.modifiers.shift,
-                                    );
-                                    this.gesture = Some(Gesture::Selecting { rows: true });
-                                    this.select(Some(selection), cx);
-                                    window.focus(&this.focus, cx);
-                                }),
-                            )
-                            .on_mouse_move(cx.listener(
-                                move |this, event: &MouseMoveEvent, _, cx| {
-                                    this.drag_over(index, last_column, event, cx)
-                                },
-                            ))
-                            .child((self.first_row + index + 1).to_string()),
-                    )
-                    .children(cells.iter().enumerate().map(|(col, raw)| {
-                        let family = grid.families[col];
-                        let raw = *raw;
-                        // A cell is one line: line breaks show as ↵ and the
-                        // full value stays in the tooltip and in copies.
-                        let displayed = cell_format::display(raw, family, self.numbers_pt_br)
-                            .replace("\r\n", "↵")
-                            .replace(['\n', '\r'], "↵");
-                        let is_null = raw.is_none();
-                        // Only values that do not fit get a tooltip, so it
-                        // does not cover the context menu or neighbours.
-                        let tooltip = raw
-                            .filter(|value| {
-                                value.contains(['\n', '\r'])
-                                    || displayed.chars().count() as f32 * 7.8 > widths[col] - 18.
-                            })
-                            .map(str::to_owned);
-                        let selected = block.as_ref().is_some_and(|(rows, cols)| {
-                            rows.contains(&position) && cols.contains(&col)
-                        });
-                        let focused = focus == Some((index, col));
-                        div()
-                            .id(("result-cell", col))
-                            .role(Role::GridCell)
-                            .aria_selected(selected)
-                            .aria_label(tr!(
-                                "Row {0}, {1}: {2}",
-                                self.first_row + index + 1,
-                                self.result
-                                    .columns()
-                                    .get(col)
-                                    .map_or("", |column| column.name.as_str()),
-                                raw.unwrap_or("NULL")
-                            ))
-                            .cursor_pointer()
-                            .w(px(widths[col]))
-                            .flex_none()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .items_center()
-                            .px(px(8.))
-                            .border_1()
-                            .border_color(rgb(colors().grid_line))
-                            .when(!selected, |s| s.hover(|s| s.bg(rgb(colors().grid_hover))))
-                            .when(selected, |s| s.bg(rgb(colors().grid_selected)))
-                            .when(focused, |s| s.border_color(rgb(colors().grid_focus)))
-                            // Pressing selects the cell (Shift extends from
-                            // the anchor) and starts a drag; a double click
-                            // shows the full value.
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    window.focus(&this.focus, cx);
-                                    if event.click_count >= 2 {
-                                        this.open_inspector(Inspector::Value, cx);
-                                        return;
-                                    }
-                                    let selection = CellSelection::click(
-                                        this.selection,
-                                        index,
-                                        col,
-                                        event.modifiers.shift,
-                                    );
-                                    this.gesture = Some(Gesture::Selecting { rows: false });
-                                    this.select(Some(selection), cx);
-                                }),
-                            )
-                            .on_mouse_move(cx.listener(
-                                move |this, event: &MouseMoveEvent, _, cx| {
-                                    this.drag_over(index, col, event, cx)
-                                },
-                            ))
-                            // A right click outside the selection selects the
-                            // cell first, so the menu acts on what is under it.
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.menu_column = None;
-                                    if !selected {
-                                        this.select(Some(CellSelection::cell(index, col)), cx);
-                                    }
-                                    window.focus(&this.focus, cx);
-                                }),
-                            )
-                            .when(self.sales && !self.widths.contains_key(&col), |s| {
-                                s.flex_grow([1.5, 0.8, 1.2, 1.1, 0.65][col])
-                            })
-                            .font_family("Cascadia Mono")
-                            .text_size(px(13.))
-                            .when(is_null, |s| s.italic())
-                            .when(family == ValueFamily::Boolean, |s| s.justify_center())
-                            .when_some(tooltip, |s, tooltip| {
-                                s.tooltip(move |window, cx| {
-                                    Tooltip::new(tooltip.clone()).build(window, cx)
-                                })
-                            })
-                            .when(family == ValueFamily::Number, |s| s.justify_end())
-                            .text_color(rgb(value_color(raw, family)))
-                            .child(div().truncate().child(displayed))
-                    }))
+                    .gap_0();
+                let number = self.row_number(index, row_selected, cx);
+                let mut number = Some(number);
+                line = if strip.sticky {
+                    line.child(div().w(px(strip.lead)).flex_none())
+                } else {
+                    line.children(number.take())
+                };
+                line = line.child(div().w(px(strip.before)).flex_none());
+                for display in strip.shown.clone() {
+                    if let Some(column) = self.layout.column(display) {
+                        line = line.child(self.cell(&rows, position, index, display, column, cx));
+                    }
+                }
+                if strip.sticky {
+                    let mut frozen = self
+                        .frozen_part(&strip)
+                        .bg(rgb(colors().grid_bg))
+                        .children(number.take());
+                    for display in 0..strip.frozen {
+                        if let Some(column) = self.layout.column(display) {
+                            frozen = frozen
+                                .child(self.cell(&rows, position, index, display, column, cx));
+                        }
+                    }
+                    // Its own layer, over the values of the columns that
+                    // pan under it.
+                    line = line.child(Layer::of(frozen, !editing));
+                }
+                Layer::of(line, !editing)
             })
             .collect()
+    }
+
+    /// The number of data row `index`: pressing it selects the row (Shift
+    /// extends) and dragging over other numbers selects them all.
+    fn row_number(&self, index: usize, selected: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id(("row-number", index))
+            .w(px(ROW_NUMBERS))
+            .flex_none()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .bg(rgb(if selected {
+                colors().grid_selected
+            } else {
+                colors().grid_header
+            }))
+            .hover(|s| s.bg(rgb(colors().grid_hover)))
+            .border_b_1()
+            .border_color(rgb(colors().grid_line))
+            .text_center()
+            .text_size(px(12.))
+            .text_color(rgb(colors().faint))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    let selection = CellSelection::click_row(
+                        this.selection,
+                        index,
+                        &this.layout,
+                        event.modifiers.shift,
+                    );
+                    this.gesture = Some(Gesture::Selecting { rows: true });
+                    this.select(Some(selection), cx);
+                    window.focus(&this.focus, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                let last = this.layout.visible().last().copied().unwrap_or_default();
+                this.drag_over(index, last, event, cx)
+            }))
+            .map(|s| {
+                // An inserted row has no number yet; an edited row's number
+                // takes the colour of its edit.
+                let inserted = index.checked_sub(self.result.row_count());
+                let mark = self
+                    .session()
+                    .map_or(RowMark::Unchanged, |session| match inserted {
+                        Some(inserted) => session.inserted_mark(inserted),
+                        None => session.row_mark(self.first_row + index),
+                    });
+                let color = match mark {
+                    RowMark::Unchanged => None,
+                    RowMark::Changed => Some(colors().amber),
+                    RowMark::Deleted | RowMark::WrittenDeleted | RowMark::Failed => {
+                        Some(colors().red)
+                    }
+                    RowMark::Written => Some(colors().mint),
+                };
+                s.when_some(color, |s, color| s.text_color(rgb(color)))
+                    .child(match inserted {
+                        Some(_) => "+".to_owned(),
+                        None => (self.first_row + index + 1).to_string(),
+                    })
+            })
+    }
+
+    /// The cell of data row `index` (at display `position`) and result
+    /// `col` (at display position `display`).
+    fn cell(
+        &self,
+        rows: &RowsContext,
+        position: usize,
+        index: usize,
+        display: usize,
+        col: usize,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let family = rows
+            .grid
+            .families
+            .get(col)
+            .copied()
+            .unwrap_or(ValueFamily::Text);
+        let width = rows
+            .widths
+            .by_column()
+            .get(col)
+            .copied()
+            .unwrap_or(grid::MIN_COLUMN_WIDTH);
+        // Pending and written edits are drawn over the values read; an
+        // inserted row follows the result's rows.
+        let session = self.session();
+        let inserted = index.checked_sub(self.result.row_count());
+        let (overlay, mark) = match (session, inserted) {
+            (Some(session), Some(inserted)) => (
+                session.inserted_value(inserted, col),
+                session.inserted_mark(inserted),
+            ),
+            (Some(session), None) => (
+                session.overlay(self.first_row + index, col),
+                session.row_mark(self.first_row + index),
+            ),
+            (None, _) => (None, RowMark::Unchanged),
+        };
+        let raw = match overlay {
+            Some(overlay) => overlay.value().text(),
+            None => self.result.value(index, col),
+        };
+        // A column an inserted row leaves out takes the table's default.
+        let default = inserted.is_some() && overlay.is_none();
+        let editor = self
+            .cell_editor
+            .as_ref()
+            .filter(|editor| editor.cell == (index, col))
+            .map(|editor| editor.input.clone());
+        // A cell is one line: line breaks show as ↵ and the full value stays
+        // in the tooltip and in copies.
+        let displayed = if default {
+            tr!("DEFAULT").to_owned()
+        } else {
+            cell_format::display(raw, family, self.numbers_pt_br)
+                .replace("\r\n", "↵")
+                .replace(['\n', '\r'], "↵")
+        };
+        let is_null = raw.is_none();
+        let deleted = matches!(mark, RowMark::Deleted | RowMark::WrittenDeleted);
+        let edge = match (overlay, mark) {
+            (_, RowMark::Failed) => Some(colors().red),
+            (Some(Overlay::Pending(_)), _) => Some(colors().amber),
+            (Some(Overlay::Written(_)), _) => Some(colors().mint),
+            _ => None,
+        };
+        // Only values that do not fit get a tooltip, so it does not cover the
+        // context menu or neighbours.
+        let tooltip = raw
+            .filter(|value| {
+                value.contains(['\n', '\r']) || displayed.chars().count() as f32 * 7.8 > width - 18.
+            })
+            .map(str::to_owned);
+        let selected = rows.block.as_ref().is_some_and(|(block_rows, cols)| {
+            block_rows.contains(&position) && cols.contains(&display)
+        });
+        let focused = rows.focus == Some((index, col));
+        div()
+            .id(("result-cell", col))
+            .role(Role::GridCell)
+            .aria_selected(selected)
+            .aria_label(tr!(
+                "Row {0}, {1}: {2}",
+                self.first_row + index + 1,
+                self.result
+                    .columns()
+                    .get(col)
+                    .map_or("", |column| column.name.as_str()),
+                raw.unwrap_or("NULL")
+            ))
+            .cursor_pointer()
+            .w(px(width))
+            .flex_none()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .px(px(8.))
+            .border_1()
+            .border_color(rgb(colors().grid_line))
+            .when(!selected, |s| s.hover(|s| s.bg(rgb(colors().grid_hover))))
+            .when(selected, |s| s.bg(rgb(colors().grid_selected)))
+            .when_some(edge, |s, edge| s.border_color(rgb(edge)))
+            .when(focused, |s| s.border_color(rgb(colors().grid_focus)))
+            // Pressing selects the cell (Shift extends from the anchor) and
+            // starts a drag; a double click shows the full value.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    window.focus(&this.focus, cx);
+                    if event.click_count >= 2 {
+                        this.open_inspector(Inspector::Value, cx);
+                        return;
+                    }
+                    let selection =
+                        CellSelection::click(this.selection, index, col, event.modifiers.shift);
+                    this.gesture = Some(Gesture::Selecting { rows: false });
+                    this.select(Some(selection), cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                this.drag_over(index, col, event, cx)
+            }))
+            // A right click outside the selection selects the cell first, so
+            // the menu acts on what is under it.
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, window, cx| {
+                    if this.menu_locked {
+                        return;
+                    }
+                    this.menu_column = None;
+                    if !selected {
+                        this.select(Some(CellSelection::cell(index, col)), cx);
+                    }
+                    window.focus(&this.focus, cx);
+                }),
+            )
+            .when_some(
+                DEMO_FLEX
+                    .get(col)
+                    .copied()
+                    .filter(|_| rows.flexible && !self.widths.contains_key(&col)),
+                |s, grow| s.flex_grow(grow),
+            )
+            .font_family(fonts().mono.clone())
+            .text_size(px(13.))
+            .when(is_null || default, |s| s.italic())
+            .when(family == ValueFamily::Boolean, |s| s.justify_center())
+            .when_some(
+                tooltip.filter(|_| tooltips_shown(self.menu_open)),
+                |s, tooltip| {
+                    s.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                },
+            )
+            .when(family == ValueFamily::Number, |s| s.justify_end())
+            .text_color(rgb(if deleted {
+                colors().red
+            } else if default {
+                colors().faint
+            } else {
+                value_color(raw, family)
+            }))
+            .when(deleted, |s| s.line_through())
+            .map(|s| match editor {
+                Some(input) => s.px_0().child(Input::new(&input).small().w_full()),
+                None => s.child(div().truncate().child(displayed)),
+            })
     }
 
     /// The pointer moved over the cell at data row `row` and `column`
@@ -1547,7 +2799,7 @@ impl ResultGrid {
         }
         self.edge = (0, 0);
         let column = if rows {
-            self.result.column_count().saturating_sub(1)
+            self.layout.visible().last().copied().unwrap_or(column)
         } else {
             column
         };
@@ -1556,11 +2808,43 @@ impl ResultGrid {
         }
     }
 
+    /// How many columns are hidden, while any is, with a way to show them
+    /// all: always in view above the table or the records.
+    fn hidden_bar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let hidden = self.layout.hidden();
+        (hidden > 0).then(|| {
+            row()
+                .id("hidden-columns")
+                .role(Role::Status)
+                .flex_none()
+                .h(px(30.))
+                .px_3()
+                .gap_2()
+                .bg(rgb(colors().panel))
+                .border_b_1()
+                .border_color(rgb(colors().grid_line))
+                .child(icon(I::EyeOff, colors().muted))
+                .child(label(if hidden == 1 {
+                    tr!("1 column hidden").to_string()
+                } else {
+                    tr!("{0} columns hidden", cell_format::count(hidden))
+                }))
+                .child(
+                    button("show-all-columns", I::Eye, tr!("Show all columns")).on_click(
+                        cx.listener(|this, _, window, cx| {
+                            this.change_layout(ColumnLayout::show_all, cx);
+                            window.focus(&this.focus, cx);
+                        }),
+                    ),
+                )
+        })
+    }
+
     /// The selected rows side by side: one line per column, one column per
     /// row, so wide rows read top to bottom.
     fn records_view(&self, cx: &mut Context<Self>) -> AnyElement {
         let grid = self.view();
-        let rows = grid::selected_rows(self.selection, &grid.rows);
+        let rows = grid::selected_rows(self.selection, &grid.rows, &self.layout);
         if rows.is_empty() {
             return column()
                 .p_6()
@@ -1605,6 +2889,9 @@ impl ResultGrid {
                     .child(tr!("Row {0}", self.first_row + row + 1))
             }));
         let records = shown.clone();
+        // One line per column shown, in display order.
+        let lines = self.record_lines();
+        let count = lines.len();
         column()
             .size_full()
             .when(total > MAX_RECORDS, |s| {
@@ -1632,9 +2919,9 @@ impl ResultGrid {
                             .child(
                                 uniform_list(
                                     "record-fields",
-                                    self.result.column_count(),
+                                    count,
                                     cx.processor(move |this, range: Range<usize>, _, cx| {
-                                        this.record_fields(range, &records, cx)
+                                        this.record_fields(range, &records, &lines, cx)
                                     }),
                                 )
                                 .flex_1()
@@ -1650,15 +2937,208 @@ impl ResultGrid {
             .into_any_element()
     }
 
-    /// The lines of the records view at `range`: one per column.
+    /// The columns the records view lists, one line each: the shown ones,
+    /// in display order; while the field that finds a column has text, only
+    /// the shown ones it finds.
+    fn record_lines(&self) -> Rc<[usize]> {
+        match self
+            .column_find
+            .as_ref()
+            .filter(|find| !find.text.trim().is_empty())
+        {
+            Some(find) => find
+                .matches
+                .iter()
+                .filter(|found| !found.hidden)
+                .map(|found| found.column)
+                .collect(),
+            None => self.layout.visible().iter().copied().collect(),
+        }
+    }
+
+    /// The field that finds a column by name, while it is open: the text,
+    /// how many columns it finds, and a button that closes it. `↑` and `↓`
+    /// choose a match, `Enter` goes to it and `Esc` closes the field.
+    fn find_bar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let find = self.column_find.as_ref()?;
+        let count = cell_format::count;
+        let status = if find.text.trim().is_empty() {
+            tr!("Type part of a column's name.").to_string()
+        } else if find.matches.is_empty() {
+            tr!("No column matches.").to_string()
+        } else {
+            tr!(
+                "{0} of {1} columns",
+                count(find.matches.len()),
+                count(self.result.column_count())
+            )
+        };
+        Some(
+            row()
+                .id("find-column-bar")
+                .flex_none()
+                .h(px(FIND_BAR_HEIGHT))
+                .px_3()
+                .gap_2()
+                .bg(rgb(colors().panel))
+                .border_b_1()
+                .border_color(rgb(colors().grid_line))
+                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.modifiers.modified() {
+                        return;
+                    }
+                    match event.keystroke.key.as_str() {
+                        "up" => this.step_column_match(-1, cx),
+                        "down" => this.step_column_match(1, cx),
+                        "escape" => this.close_column_search(window, cx),
+                        _ => return,
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }))
+                .child(
+                    div().w(px(320.)).flex_none().child(
+                        Input::new(&find.input)
+                            .small()
+                            .prefix(I::TextSearch)
+                            .w_full()
+                            .aria_label(tr!("Find a column by name")),
+                    ),
+                )
+                .child(
+                    div()
+                        .id("find-column-status")
+                        .role(Role::Status)
+                        .min_w_0()
+                        .truncate()
+                        .child(label(status)),
+                )
+                .child(div().flex_1())
+                .child(
+                    icon_button("close-column-search", I::X, tr!("Close the column search"))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.close_column_search(window, cx)),
+                        ),
+                ),
+        )
+    }
+
+    /// The matches under the field while it has the keyboard, drawn over
+    /// the table; only the lines on screen are built.
+    fn match_list(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let find = self
+            .column_find
+            .as_ref()
+            .filter(|find| find.focused && !find.matches.is_empty())?;
+        let height = find.matches.len().min(MATCH_ROWS) as f32 * MATCH_HEIGHT;
+        Some(
+            div()
+                .id("column-matches")
+                .role(Role::ListBox)
+                .aria_label(tr!("Columns found"))
+                .absolute()
+                .top(px(FIND_BAR_HEIGHT))
+                .left(px(12.))
+                .w(px(460.))
+                .h(px(height + 2.))
+                .bg(rgb(colors().panel))
+                .border_1()
+                .border_color(rgb(colors().border))
+                .rounded_md()
+                .overflow_hidden()
+                .block_mouse_except_scroll()
+                .child(
+                    uniform_list(
+                        "column-match-lines",
+                        find.matches.len(),
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            this.match_lines(range, cx)
+                        }),
+                    )
+                    .size_full()
+                    .track_scroll(&find.scroll),
+                ),
+        )
+    }
+
+    /// The matches at `range`: the name with what matched marked, its
+    /// type, and whether the layout hides it (choosing it shows it).
+    fn match_lines(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        let Some(find) = &self.column_find else {
+            return Vec::new();
+        };
+        range
+            .filter_map(|line| Some((line, find.matches.get(line)?)))
+            .map(|(line, found)| {
+                let info = self.result.columns().get(found.column);
+                let name = info.map(|info| info.name.clone()).unwrap_or_default();
+                let kind = info
+                    .map(|info| info.data_type.to_lowercase())
+                    .unwrap_or_default();
+                let chosen = line == find.highlighted;
+                row()
+                    .id(("column-match", found.column))
+                    .role(Role::ListBoxOption)
+                    .aria_selected(chosen)
+                    .aria_label(if found.hidden {
+                        tr!("{0}, hidden: choosing it shows it", name)
+                    } else {
+                        name.clone()
+                    })
+                    .h(px(MATCH_HEIGHT))
+                    .flex_none()
+                    .px_3()
+                    .gap_2()
+                    .cursor_pointer()
+                    .when(chosen, |s| s.bg(rgb(colors().hover)))
+                    .hover(|s| s.bg(rgb(colors().hover)))
+                    .child(
+                        div()
+                            .flex_shrink(1.)
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
+                            .text_color(rgb(colors().text))
+                            .child(marked(name, found.ranges.clone())),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(rgb(colors().grid_type_text))
+                            .child(format!(": {kind}")),
+                    )
+                    .when(found.hidden, |s| {
+                        s.child(badge(tr!("Hidden: choosing it shows it"), colors().amber))
+                    })
+                    // A press, not a click: the field keeps the keyboard
+                    // until the grid takes it.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, window, cx| {
+                            if let Some(find) = &mut this.column_find {
+                                find.highlighted = line;
+                            }
+                            this.choose_column_match(window, cx);
+                        }),
+                    )
+            })
+            .collect()
+    }
+
+    /// The lines of the records view at `range` of `lines`: one per column.
     fn record_fields(
         &self,
         range: Range<usize>,
         records: &[usize],
+        lines: &[usize],
         cx: &mut Context<Self>,
     ) -> Vec<Stateful<Div>> {
         let grid = self.view();
         range
+            .filter_map(|line| lines.get(line).copied())
             .filter_map(|col| Some((col, self.result.columns().get(col)?)))
             .map(|(col, info)| {
                 let family = grid.families.get(col).copied().unwrap_or(ValueFamily::Text);
@@ -1725,7 +3205,7 @@ impl ResultGrid {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(colors().grid_hover)))
                             .when(inspected, |s| s.bg(rgb(colors().grid_selected)))
-                            .font_family("Cascadia Mono")
+                            .font_family(fonts().mono.clone())
                             .text_size(px(13.))
                             .when(raw.is_none(), |s| s.italic())
                             .when(family == ValueFamily::Number, |s| s.justify_end())
@@ -1899,7 +3379,7 @@ impl ResultGrid {
             .as_ref()
             .filter(|(generation, _)| *generation == self.summary_generation)
             .map(|(_, block)| block);
-        let selected = grid::selected_cells(self.selection, &self.view().rows);
+        let selected = grid::selected_cells(self.selection, &self.view().rows, &self.layout);
         if selected < 2 {
             return column()
                 .p_3()
@@ -1933,7 +3413,7 @@ impl ResultGrid {
         let summary = self
             .result_stats
             .as_ref()
-            .filter(|stats| stats.key == (self.version, self.filter.clone()))
+            .filter(|stats| stats.key == (self.version, self.layout_version, self.filter.clone()))
             .and_then(|stats| stats.summary.as_ref());
         let Some(summary) = summary else {
             return calculating("result-stats-status");
@@ -2141,7 +3621,7 @@ impl ResultGrid {
                             .h_full()
                             .readonly(true)
                             .aria_label(tr!("Full value"))
-                            .font_family("Cascadia Mono")
+                            .font_family(fonts().mono.clone())
                             .text_size(px(13.)),
                     )
                     .into_any_element(),
@@ -2150,21 +3630,29 @@ impl ResultGrid {
             .child(
                 row()
                     .flex_none()
+                    .gap_2()
                     .justify_between()
-                    .child(label(match value {
-                        Some(value) if value.len() > VIEWER_BYTES => tr!(
-                            "{0} characters · shows the first 1 MB; Copy copies all of it",
-                            cell_format::count(value.chars().count())
-                        ),
-                        Some(value) => {
-                            tr!("{0} characters", cell_format::count(value.chars().count()))
-                        }
-                        None => String::new(),
-                    }))
+                    // The text wraps, so a long note (or a longer language)
+                    // never pushes Copy out of the panel.
                     .child(
-                        button("copy-value", I::Copy, tr!("Copy"))
-                            .on_click(cx.listener(|this, _, _, cx| this.copy_value(cx))),
-                    ),
+                        label(match value {
+                            Some(value) if value.len() > VIEWER_BYTES => tr!(
+                                "{0} characters · shows the first 1 MB; Copy copies all of it",
+                                cell_format::count(value.chars().count())
+                            ),
+                            Some(value) => {
+                                tr!("{0} characters", cell_format::count(value.chars().count()))
+                            }
+                            None => String::new(),
+                        })
+                        .flex_1()
+                        .min_w_0(),
+                    )
+                    .child(div().flex_none().child(
+                        button("copy-value", I::Copy, tr!("Copy")).on_click(
+                            cx.listener(|this, _, window, cx| this.copy_value(window, cx)),
+                        ),
+                    )),
             )
     }
 
@@ -2374,7 +3862,7 @@ impl ResultGrid {
                                     div()
                                         .min_w_0()
                                         .truncate()
-                                        .font_family("Cascadia Mono")
+                                        .font_family(fonts().mono.clone())
                                         .text_size(px(13.))
                                         .text_color(rgb(value_color(Some(text), family)))
                                         .child(value(text).replace(['\n', '\r'], "↵")),
@@ -2397,24 +3885,53 @@ impl ResultGrid {
         window: &mut Window,
         cx: &mut Context<PopupMenu>,
     ) -> PopupMenu {
-        let (has_selection, records, inspector, has_column, column_stats) = weak
+        // GPUI draws tooltips over every layer: the grid sets none while its
+        // menu is open, until the menu is dismissed.
+        let _ = weak.update(cx, |this, cx| {
+            this.menu_open = true;
+            cx.notify();
+        });
+        let closed = weak.clone();
+        cx.subscribe_self(move |_, _: &DismissEvent, cx| {
+            let _ = closed.update(cx, |this, cx| {
+                this.menu_open = false;
+                cx.notify();
+            });
+        })
+        .detach();
+        let (has_selection, records, inspector, has_column, column_stats, edits) = weak
             .upgrade()
             .map(|this| {
                 let this = this.read(cx);
+                let read_only = this.shown.and_then(|(id, _)| match this.editing.get(&id) {
+                    Some(Editing::ReadOnly(reason)) => Some(grid_edit::read_only_text(reason)),
+                    _ => None,
+                });
                 (
                     this.selection.is_some(),
                     this.records,
                     this.inspector,
                     this.stats_column().is_some(),
                     this.shows_stats(StatsScope::Column),
+                    edit_items(this.shown.is_some(), read_only, this.selection.is_some()),
                 )
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                (
+                    false,
+                    false,
+                    None,
+                    false,
+                    false,
+                    edit_items(false, None, false),
+                )
+            });
         let action =
             |weak: WeakEntity<ResultGrid>,
              run: fn(&mut ResultGrid, &mut Window, &mut Context<ResultGrid>)| {
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     let _ = weak.update(cx, |this, cx| {
+                        this.keyboard_back(window, cx);
                         run(this, window, cx);
                         cx.notify();
                     });
@@ -2422,18 +3939,59 @@ impl ResultGrid {
             };
         let copy_as_weak = weak.clone();
         let format = super::copying::options(cx).format;
+        // The keys in use, named in the items.
+        let copy_key = super::shortcuts::label::<super::shortcuts::GridCopy>(cx);
+        let copy_names_key = super::shortcuts::label::<super::shortcuts::GridCopyWithNames>(cx);
+        let find_key = super::shortcuts::label::<super::FindColumn>(cx);
+        // What the column items act on: the column right-clicked, else the
+        // focused one.
+        let columns = weak
+            .upgrade()
+            .map(|this| {
+                let this = this.read(cx);
+                let layout = this.layout.clone();
+                let column = this
+                    .stats_column()
+                    .filter(|column| layout.position(*column).is_some());
+                let hidden: Vec<(usize, SharedString)> = layout
+                    .hidden_columns()
+                    .take(HIDDEN_IN_MENU)
+                    .filter_map(|column| {
+                        let name = this.result.columns().get(column)?.name.clone();
+                        Some((column, name.into()))
+                    })
+                    .collect();
+                (layout, column, hidden)
+            })
+            .unwrap_or_default();
+        let (layout, column, hidden) = columns;
+        let can = |delta: isize| column.is_some_and(|column| layout.can_move(column, delta));
+        let frozen = column.is_some_and(|column| layout.is_frozen(column));
+        let hidden_count = layout.hidden();
+        let column_action =
+            move |weak: WeakEntity<ResultGrid>, change: fn(&mut ColumnLayout, usize) -> bool| {
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.keyboard_back(window, cx);
+                        if let Some(column) = column {
+                            this.change_layout(|layout| change(layout, column), cx);
+                        }
+                    });
+                }
+            };
+        let show_weak = weak.clone();
         menu.item(
-            PopupMenuItem::new(tr!("Copy as {0} (Ctrl+C)", format_name(format)))
+            PopupMenuItem::new(tr!("Copy as {0} ({1})", format_name(format), copy_key))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, window, cx| {
-                    this.copy_selection(false, false, window, cx)
+                    this.copy_selection(false, window, cx)
                 })),
         )
         .item(
-            PopupMenuItem::new(tr!("Copy with headers (Ctrl+Shift+C)"))
+            PopupMenuItem::new(tr!("Copy with headers ({0})", copy_names_key))
                 .disabled(!has_selection)
                 .on_click(action(weak.clone(), |this, window, cx| {
-                    this.copy_selection(true, false, window, cx)
+                    this.copy_selection(true, window, cx)
                 })),
         )
         .submenu(tr!("Copy as"), window, cx, move |menu, _, _| {
@@ -2443,8 +4001,10 @@ impl ResultGrid {
                     PopupMenuItem::new(format_name(format))
                         .disabled(!has_selection)
                         .on_click(move |_, window, cx| {
-                            let _ =
-                                weak.update(cx, |this, cx| this.copy_as(format, false, window, cx));
+                            let _ = weak.update(cx, |this, cx| {
+                                this.keyboard_back(window, cx);
+                                this.copy_as(format, window, cx)
+                            });
                         }),
                 )
             })
@@ -2506,13 +4066,217 @@ impl ResultGrid {
         )
         .separator()
         .item(
+            PopupMenuItem::new(tr!("Hide the column"))
+                .disabled(column.is_none() || layout.visible().len() <= 1)
+                .on_click(column_action(weak.clone(), ColumnLayout::hide)),
+        )
+        .item(
+            PopupMenuItem::new(tr!("Freeze the column at the left"))
+                .checked(frozen)
+                .disabled(column.is_none())
+                .on_click(column_action(weak.clone(), |layout, column| {
+                    if layout.is_frozen(column) {
+                        layout.unfreeze(column)
+                    } else {
+                        layout.freeze(column)
+                    }
+                })),
+        )
+        .item(
+            PopupMenuItem::new(tr!("Move the column left"))
+                .disabled(!can(-1))
+                .on_click(column_action(weak.clone(), |layout, column| {
+                    layout.move_by(column, -1)
+                })),
+        )
+        .item(
+            PopupMenuItem::new(tr!("Move the column right"))
+                .disabled(!can(1))
+                .on_click(column_action(weak.clone(), |layout, column| {
+                    layout.move_by(column, 1)
+                })),
+        )
+        .item(
+            PopupMenuItem::new(tr!("Move the column to the start"))
+                .disabled(!can(-1))
+                .on_click(column_action(weak.clone(), |layout, column| {
+                    layout.move_by(column, isize::MIN)
+                })),
+        )
+        .item(
+            PopupMenuItem::new(tr!("Move the column to the end"))
+                .disabled(!can(1))
+                .on_click(column_action(weak.clone(), |layout, column| {
+                    layout.move_by(column, isize::MAX)
+                })),
+        )
+        .submenu(
+            tr!("Show a hidden column"),
+            window,
+            cx,
+            move |menu, _, _| {
+                let more = hidden_count.saturating_sub(hidden.len());
+                let menu = if hidden.is_empty() {
+                    menu.item(PopupMenuItem::new(tr!("No column is hidden")).disabled(true))
+                } else {
+                    menu
+                };
+                let menu = hidden.iter().fold(menu, |menu, (column, name)| {
+                    let (weak, column) = (show_weak.clone(), *column);
+                    menu.item(
+                        PopupMenuItem::new(name.clone()).on_click(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.keyboard_back(window, cx);
+                                this.change_layout(|layout| layout.show(column), cx)
+                            });
+                        }),
+                    )
+                });
+                if more > 0 {
+                    menu.item(
+                        PopupMenuItem::new(tr!(
+                            "{0} more: find them by name ({1})",
+                            cell_format::count(more),
+                            find_key
+                        ))
+                        .disabled(true),
+                    )
+                } else {
+                    menu
+                }
+            },
+        )
+        .item(
+            PopupMenuItem::new(tr!(
+                "Show all columns ({0} hidden)",
+                cell_format::count(hidden_count)
+            ))
+            .disabled(hidden_count == 0)
+            .on_click(action(weak.clone(), |this, _, cx| {
+                this.change_layout(ColumnLayout::show_all, cx)
+            })),
+        )
+        .item(
+            PopupMenuItem::new(tr!("Reset the column layout"))
+                .disabled(layout.is_identity())
+                .on_click(action(weak.clone(), |this, _, cx| {
+                    this.change_layout(ColumnLayout::reset, cx)
+                })),
+        )
+        .separator()
+        .when_some(edits.reason.clone(), |menu, reason| {
+            menu.item(PopupMenuItem::new(reason).disabled(true))
+        })
+        .item(
+            PopupMenuItem::new(tr!(
+                "Edit the cell ({0})",
+                super::shortcuts::label::<super::shortcuts::GridEditCell>(cx)
+            ))
+            .disabled(!edits.cell)
+            .on_click(action(weak.clone(), |this, window, cx| {
+                this.edit(EditAction::Cell, window, cx)
+            })),
+        )
+        .item(
+            PopupMenuItem::new(tr!(
+                "Set to NULL ({0})",
+                super::shortcuts::label::<super::shortcuts::GridSetNull>(cx)
+            ))
+            .disabled(!edits.null)
+            .on_click(action(weak.clone(), |this, window, cx| {
+                this.edit(EditAction::Null, window, cx)
+            })),
+        )
+        .item(
+            PopupMenuItem::new(tr!(
+                "Insert a row ({0})",
+                super::shortcuts::label::<super::shortcuts::GridInsertRow>(cx)
+            ))
+            .disabled(!edits.insert)
+            .on_click(action(weak.clone(), |this, window, cx| {
+                this.edit(EditAction::Insert, window, cx)
+            })),
+        )
+        .item(
+            PopupMenuItem::new(tr!(
+                "Delete the rows ({0})",
+                super::shortcuts::label::<super::shortcuts::GridDeleteRows>(cx)
+            ))
+            .disabled(!edits.delete)
+            .on_click(action(weak.clone(), |this, window, cx| {
+                this.edit(EditAction::Delete, window, cx)
+            })),
+        )
+        .separator()
+        .item(
             PopupMenuItem::new(tr!("Select all"))
                 .on_click(action(weak.clone(), |this, _, cx| this.select_all(cx))),
         )
     }
+
+    /// Gives the grid the keyboard back before an item of its menu acts.
+    /// The menu would hand it back to what had it when the menu opened,
+    /// and after Shift F10 that is the column's header, which **Hide** or
+    /// a move takes away or redraws: the keyboard then went nowhere and the
+    /// grid's next key (Ctrl Shift F) did nothing. An action that moves the
+    /// keyboard on (the column search) still does, since it runs after.
+    fn keyboard_back(&self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+    }
+
+    /// Starts editing the focused cell (the toolbar's **Edit**).
+    pub fn edit_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Cell, window, cx);
+    }
+
+    /// Adds a row to insert (the edit bar's **Insert a row**).
+    pub fn insert_row(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Insert, window, cx);
+    }
+
+    /// Marks the selected rows for deletion (the edit bar's **Delete**).
+    pub fn delete_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Delete, window, cx);
+    }
+
+    /// Sets the selected cells to NULL (the edit bar's **Set to NULL**).
+    pub fn set_null(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit(EditAction::Null, window, cx);
+    }
+
+    /// The result columns of the visible selection, for naming a key.
+    pub fn selected_columns(&self) -> Vec<usize> {
+        self.selected_block()
+            .map(|(_, columns)| columns)
+            .unwrap_or_default()
+    }
+
+    /// Gives the grid the keyboard.
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus, cx);
+    }
 }
 
-/// The text colour of a value, by its family ([Results](../../docs/results.md#value-presentation)).
+/// Gives data row `row` of the page (an inserted row past the result's
+/// rows) the value `value` in `column`.
+fn set_cell(
+    session: &mut EditSession,
+    result: &ResultData,
+    first_row: usize,
+    row: usize,
+    column: usize,
+    value: EditValue,
+) -> Result<(), grid_edit::Refused> {
+    match row.checked_sub(result.row_count()) {
+        Some(inserted) => session.set_inserted(inserted, column, value),
+        None => {
+            let read = |column: usize| result.value(row, column).map(str::to_owned);
+            session.set(first_row + row, &read, column, value)
+        }
+    }
+}
+
+/// The text colour of a value, by its family ([Results](../../docs/reference/results.md#value-presentation)).
 fn value_color(raw: Option<&str>, family: ValueFamily) -> u32 {
     if raw.is_none() {
         colors().value_null
@@ -2545,6 +4309,8 @@ fn viewer_text(value: &str) -> String {
 /// values of the `numeric` columns into `sample`.
 /// Columns the statistics of a block list; the others say how many more.
 const STATS_COLUMNS: usize = 100;
+/// Hidden columns the menu lists by name; finding a column reaches the rest.
+const HIDDEN_IN_MENU: usize = 20;
 
 /// A statistic: its name, then its value in the values' font.
 fn stat_line(name: &'static str, value: String) -> Div {
@@ -2552,7 +4318,7 @@ fn stat_line(name: &'static str, value: String) -> Div {
         div()
             .min_w_0()
             .truncate()
-            .font_family("Cascadia Mono")
+            .font_family(fonts().mono.clone())
             .text_size(px(13.))
             .text_color(rgb(colors().text))
             .child(value),
@@ -2581,7 +4347,7 @@ fn swatch_line(name: &'static str, value: String, color: u32) -> Div {
             div()
                 .min_w_0()
                 .truncate()
-                .font_family("Cascadia Mono")
+                .font_family(fonts().mono.clone())
                 .text_size(px(13.))
                 .text_color(rgb(colors().text))
                 .child(value),
@@ -2682,11 +4448,22 @@ impl Render for ResultGrid {
             self.table(cx)
         };
         let gesture = self.gesture.is_some();
-        div()
+        let hidden_bar = self.hidden_bar(cx);
+        let find_bar = self.find_bar(cx);
+        let match_list = self.match_list(cx);
+        // The bars sit outside the grid's own keys, so typing in them or
+        // pressing their buttons never moves the selection.
+        let grid = div()
             .id("result-grid")
-            .size_full()
+            .flex_1()
+            .min_h_0()
+            .w_full()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key_down))
+            .map(|grid| grid_keys(grid, cx))
+            .on_action(cx.listener(|this, _: &super::ResultGridMenu, window, cx| {
+                this.open_menu_from_keyboard(window, cx)
+            }))
             .flex()
             .bg(rgb(colors().grid_bg))
             .text_color(rgb(colors().value_text))
@@ -2698,6 +4475,34 @@ impl Render for ResultGrid {
                     .min_w_0()
                     .h_full()
                     .child(main)
+                    .when_some(
+                        self.copy_job.as_ref().and_then(super::copying::status),
+                        |s, status| {
+                            s.child(
+                                row()
+                                    .id("copy-progress")
+                                    .role(Role::Status)
+                                    .absolute()
+                                    .top_2()
+                                    .right_2()
+                                    .p_2()
+                                    .gap_3()
+                                    .bg(rgb(colors().panel))
+                                    .border_1()
+                                    .border_color(rgb(colors().border))
+                                    .rounded_md()
+                                    .child(label(status))
+                                    .child(
+                                        button("cancel-copy", I::X, tr!("Cancel copy")).on_click(
+                                            cx.listener(|this, _, window, cx| {
+                                                this.cancel_copy(cx);
+                                                window.focus(&this.focus, cx);
+                                            }),
+                                        ),
+                                    ),
+                            )
+                        },
+                    )
                     .context_menu(move |menu, window, cx| {
                         Self::menu(menu_weak.clone(), menu, window, cx)
                     })
@@ -2745,6 +4550,280 @@ impl Render for ResultGrid {
             )
             .when_some(self.inspector, |s, inspector| {
                 s.child(self.inspector_panel(inspector, cx))
-            })
+            });
+        column()
+            .id("result-grid-area")
+            .key_context(GRID_CONTEXT)
+            .relative()
+            .size_full()
+            .gap_0()
+            .bg(rgb(colors().grid_bg))
+            // From the table, the bars or the field itself, whose text it
+            // selects again.
+            .on_action(cx.listener(|this, _: &super::FindColumn, window, cx| {
+                this.open_column_search(window, cx)
+            }))
+            .children(find_bar)
+            .children(hidden_bar)
+            .child(grid)
+            // Last, so it is drawn over the table.
+            .children(match_list)
+    }
+}
+
+/// What a key of the grid does ([`ResultGrid::grid_key`]).
+#[derive(Clone, Copy, Debug)]
+enum KeyAction {
+    Copy {
+        names: bool,
+    },
+    SelectAll,
+    Move {
+        rows: isize,
+        cols: isize,
+        extend: bool,
+    },
+    Jump {
+        jump: Jump,
+        extend: bool,
+    },
+    Page {
+        down: bool,
+        extend: bool,
+    },
+    Inspect,
+    Edit(EditAction),
+    Write,
+    Discard,
+}
+
+/// What a grid key does while a cell's field is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WhileEditing {
+    /// Nothing: the field has the keyboard. Its Enter commits the edit
+    /// itself, and an arrow at the end of its text stays in it.
+    Nothing,
+    /// Keep what was typed, then ask to write.
+    CommitAndWrite,
+    /// Drop what was typed, then ask to discard.
+    DropAndDiscard,
+}
+
+/// The single-line field lets Enter, and an arrow at the end of its text,
+/// through to the grid. Those keys must neither open the value panel on the
+/// value read nor move the selection under the field.
+fn while_editing(key: KeyAction) -> WhileEditing {
+    match key {
+        KeyAction::Write => WhileEditing::CommitAndWrite,
+        KeyAction::Discard => WhileEditing::DropAndDiscard,
+        _ => WhileEditing::Nothing,
+    }
+}
+
+/// Whether the menu's editing items act, and why not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EditItems {
+    cell: bool,
+    null: bool,
+    insert: bool,
+    delete: bool,
+    /// Why the result cannot be edited, shown as a disabled item.
+    reason: Option<String>,
+}
+
+/// The menu's editing items: only a query tab's result can be edited
+/// (ADR-0039, section 1), so a report panel's or a job's grid shows them
+/// disabled with the reason, as does a query tab known to be read-only.
+fn edit_items(query_tab: bool, read_only: Option<String>, has_selection: bool) -> EditItems {
+    let reason = if query_tab {
+        read_only
+    } else {
+        Some(tr!("Only a query tab's result can be edited.").into())
+    };
+    let can = reason.is_none();
+    EditItems {
+        cell: can && has_selection,
+        null: can && has_selection,
+        insert: can,
+        delete: can && has_selection,
+        reason,
+    }
+}
+
+/// Whether the grid's cells and headers carry tooltips: not while its menu
+/// is open, since GPUI draws a tooltip over every layer, the menu included.
+fn tooltips_shown(menu_open: bool) -> bool {
+    !menu_open
+}
+
+/// The grid's actions on the table: each one is a key of the keymap.
+fn grid_keys(grid: Stateful<Div>, cx: &mut Context<ResultGrid>) -> Stateful<Div> {
+    use super::shortcuts::*;
+    fn on<A: Action>(
+        grid: Stateful<Div>,
+        key: KeyAction,
+        cx: &mut Context<ResultGrid>,
+    ) -> Stateful<Div> {
+        grid.on_action(cx.listener(move |this, _: &A, window, cx| this.grid_key(key, window, cx)))
+    }
+    let moved = |rows, cols, extend| KeyAction::Move { rows, cols, extend };
+    let jumped = |jump, extend| KeyAction::Jump { jump, extend };
+    let grid = on::<GridCopy>(grid, KeyAction::Copy { names: false }, cx);
+    let grid = on::<GridCopyWithNames>(grid, KeyAction::Copy { names: true }, cx);
+    let grid = on::<GridSelectAll>(grid, KeyAction::SelectAll, cx);
+    let grid = on::<GridUp>(grid, moved(-1, 0, false), cx);
+    let grid = on::<GridDown>(grid, moved(1, 0, false), cx);
+    let grid = on::<GridLeft>(grid, moved(0, -1, false), cx);
+    let grid = on::<GridRight>(grid, moved(0, 1, false), cx);
+    let grid = on::<GridExtendUp>(grid, moved(-1, 0, true), cx);
+    let grid = on::<GridExtendDown>(grid, moved(1, 0, true), cx);
+    let grid = on::<GridExtendLeft>(grid, moved(0, -1, true), cx);
+    let grid = on::<GridExtendRight>(grid, moved(0, 1, true), cx);
+    let grid = on::<GridRowStart>(grid, jumped(Jump::RowStart, false), cx);
+    let grid = on::<GridRowEnd>(grid, jumped(Jump::RowEnd, false), cx);
+    let grid = on::<GridExtendRowStart>(grid, jumped(Jump::RowStart, true), cx);
+    let grid = on::<GridExtendRowEnd>(grid, jumped(Jump::RowEnd, true), cx);
+    let grid = on::<GridFirstCell>(grid, jumped(Jump::First, false), cx);
+    let grid = on::<GridLastCell>(grid, jumped(Jump::Last, false), cx);
+    let grid = on::<GridExtendFirstCell>(grid, jumped(Jump::First, true), cx);
+    let grid = on::<GridExtendLastCell>(grid, jumped(Jump::Last, true), cx);
+    let grid = on::<GridPageUp>(
+        grid,
+        KeyAction::Page {
+            down: false,
+            extend: false,
+        },
+        cx,
+    );
+    let grid = on::<GridPageDown>(
+        grid,
+        KeyAction::Page {
+            down: true,
+            extend: false,
+        },
+        cx,
+    );
+    let grid = on::<GridExtendPageUp>(
+        grid,
+        KeyAction::Page {
+            down: false,
+            extend: true,
+        },
+        cx,
+    );
+    let grid = on::<GridExtendPageDown>(
+        grid,
+        KeyAction::Page {
+            down: true,
+            extend: true,
+        },
+        cx,
+    );
+    let grid = on::<GridEditCell>(grid, KeyAction::Edit(EditAction::Cell), cx);
+    let grid = on::<GridSetNull>(grid, KeyAction::Edit(EditAction::Null), cx);
+    let grid = on::<GridInsertRow>(grid, KeyAction::Edit(EditAction::Insert), cx);
+    let grid = on::<GridDeleteRows>(grid, KeyAction::Edit(EditAction::Delete), cx);
+    let grid = on::<GridWriteEdits>(grid, KeyAction::Write, cx);
+    let grid = on::<GridDiscardEdits>(grid, KeyAction::Discard, cx);
+    on::<GridInspect>(grid, KeyAction::Inspect, cx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EditAction, EditItems, Jump, KeyAction, WhileEditing, edit_items, tooltips_shown,
+        while_editing,
+    };
+
+    #[test]
+    fn keys_the_cell_field_lets_through_never_act_on_the_grid() {
+        crate::app::source_text();
+        // Enter (Inspect by default) and the arrows at the end of the text
+        // reach the grid only through the field; none of them may open the
+        // value panel or move the selection under it.
+        for key in [
+            KeyAction::Inspect,
+            KeyAction::Move {
+                rows: 1,
+                cols: 0,
+                extend: false,
+            },
+            KeyAction::Move {
+                rows: 0,
+                cols: -1,
+                extend: true,
+            },
+            KeyAction::Jump {
+                jump: Jump::RowEnd,
+                extend: false,
+            },
+            KeyAction::Page {
+                down: true,
+                extend: false,
+            },
+            KeyAction::SelectAll,
+            KeyAction::Copy { names: false },
+            KeyAction::Edit(EditAction::Cell),
+            KeyAction::Edit(EditAction::Null),
+            KeyAction::Edit(EditAction::Insert),
+            KeyAction::Edit(EditAction::Delete),
+        ] {
+            assert_eq!(while_editing(key), WhileEditing::Nothing, "{key:?}");
+        }
+        // Writing keeps what was typed; discarding drops it.
+        assert_eq!(
+            while_editing(KeyAction::Write),
+            WhileEditing::CommitAndWrite
+        );
+        assert_eq!(
+            while_editing(KeyAction::Discard),
+            WhileEditing::DropAndDiscard
+        );
+    }
+
+    #[test]
+    fn only_a_query_tab_offers_the_editing_items() {
+        crate::app::source_text();
+        // A report panel's or a job's grid: disabled, and the menu says why.
+        for selected in [false, true] {
+            let items = edit_items(false, None, selected);
+            assert!(!items.cell && !items.null && !items.insert && !items.delete);
+            assert_eq!(
+                items.reason.as_deref(),
+                Some("Only a query tab's result can be edited.")
+            );
+        }
+        // A query tab known to be read-only gives its own reason.
+        let items = edit_items(true, Some("Computed columns only".into()), true);
+        assert!(!items.cell && !items.null && !items.insert && !items.delete);
+        assert_eq!(items.reason.as_deref(), Some("Computed columns only"));
+        // A query tab: inserting needs no selection, the others do.
+        assert_eq!(
+            edit_items(true, None, false),
+            EditItems {
+                cell: false,
+                null: false,
+                insert: true,
+                delete: false,
+                reason: None,
+            }
+        );
+        assert_eq!(
+            edit_items(true, None, true),
+            EditItems {
+                cell: true,
+                null: true,
+                insert: true,
+                delete: true,
+                reason: None,
+            }
+        );
+    }
+
+    #[test]
+    fn no_tooltip_is_drawn_while_the_menu_is_open() {
+        crate::app::source_text();
+        assert!(!tooltips_shown(true));
+        assert!(tooltips_shown(false));
     }
 }

@@ -7,6 +7,7 @@ pub mod config;
 pub use config::SqliteConfig;
 
 use jykre_core::*;
+mod edit;
 mod runtime;
 
 /// The schema every SQLite connection has: the database file itself.
@@ -40,6 +41,7 @@ impl Driver for SqliteDriver {
             status: DriverStatus::Ready,
             capabilities: DriverCapabilities {
                 named_parameters: true,
+                row_writes: true,
                 sql: true,
                 metadata: true,
                 transactions: true,

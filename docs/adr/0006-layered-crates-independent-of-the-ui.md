@@ -31,4 +31,4 @@ that adding a database does not touch the others.
 - Positive: backend tests run without GPUI; a new database is one crate and
   one registration line.
 - Negative: more crates and `Cargo.toml` files to keep in sync.
-- Required: the [dependency rules](../architecture.md#dependency-rules).
+- Required: the [dependency rules](../reference/architecture.md#dependency-rules).

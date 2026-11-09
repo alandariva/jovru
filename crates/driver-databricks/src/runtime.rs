@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 mod cluster;
+mod edit;
 
 fn error(code: ErrorCode, message: &str) -> DriverError {
     DriverError::new(code, message)
@@ -1267,6 +1268,12 @@ fn decimal_type(value: &str) -> Option<String> {
 
 #[async_trait]
 impl Session for DatabricksSession {
+    /// Every request goes over HTTPS: CLI profiles are accepted only with an
+    /// `https` workspace URL (`auth::parse_profiles`).
+    async fn encryption(&mut self, _: CancellationToken) -> DriverResult<Encryption> {
+        Ok(Encryption::Tls { version: None })
+    }
+
     async fn execute(
         &mut self,
         request: &QueryRequest,
@@ -1342,7 +1349,14 @@ impl Session for DatabricksSession {
                         response = self.client.request(Method::GET, &path, &[], None).await?;
                     }
                     Some("CANCELED") => return Err(DriverError::cancelled()),
-                    _ => return Err(statement_error(&response["status"]["error"])),
+                    // Parameters travel apart from the statement, so the
+                    // text sent is the request's.
+                    _ => {
+                        return Err(crate::position::locate(
+                            statement_error(&response["status"]["error"]),
+                            &request.sql,
+                        ));
+                    }
                 }
             }
             // Statements without a result (USE, DDL) may leave the column
@@ -1365,6 +1379,7 @@ impl Session for DatabricksSession {
                             .ok_or_else(protocol)?
                             .to_owned(),
                         nullable: None,
+                        origin: Default::default(),
                     })
                 })
                 .collect::<DriverResult<Vec<_>>>()?;
@@ -1447,6 +1462,28 @@ impl Session for DatabricksSession {
     }
     async fn ping(&mut self) -> DriverResult<()> {
         Ok(())
+    }
+    /// Inferred from the statement's text and resolved against Unity
+    /// Catalog (ADR-0039, section 9); no compute runs and an open result
+    /// stays open.
+    async fn edit_target(
+        &mut self,
+        statement: &str,
+        columns: &[ColumnInfo],
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        edit::edit_target(
+            &self.client,
+            self.catalog.as_deref(),
+            self.schema.as_deref(),
+            statement,
+            columns,
+            &cancel,
+        )
+        .await
+    }
+    fn write_script(&self, request: &write::WriteRequest) -> DriverResult<write::WriteScript> {
+        edit::write_script(request)
     }
     async fn close(self: Box<Self>) -> DriverResult<()> {
         Ok(())
@@ -2090,6 +2127,39 @@ mod tests {
         let bare = statement_error(&json!(null));
         assert_eq!(bare.message, "Databricks SQL statement failed");
         assert_eq!(bare.server, None);
+    }
+
+    #[tokio::test]
+    async fn a_failed_statement_is_marked_where_the_message_says() {
+        let failed = json!({"statement_id":"abd","status":{"state":"FAILED","error":{
+            "error_code":"BAD_REQUEST",
+            "message":"[PARSE_SYNTAX_ERROR] Syntax error at or near 'FORM'. SQLSTATE: 42601 (line 2, pos 2)\n\n== SQL ==\nSELECT *\n  FORM orders\n--^^^\n"
+        }}});
+        let (client, task) = fixture(vec![(200, failed), (200, json!({}))]).await;
+        struct Ignore;
+        impl RowSink for Ignore {
+            fn columns(&mut self, _: Vec<ColumnInfo>) -> SinkControl {
+                SinkControl::Continue
+            }
+            fn row(&mut self, _: Row) -> SinkControl {
+                SinkControl::Continue
+            }
+        }
+        let mut session = DatabricksSession::new(client);
+        let request = QueryRequest {
+            parameters: Vec::new(),
+            sql: "SELECT *\n  FORM orders".into(),
+            options: ExecutionOptions::default(),
+        };
+        let error = session
+            .execute(&request, &mut Ignore, CancellationToken::new())
+            .await
+            .unwrap_err();
+        let server = error.server.unwrap();
+        assert_eq!(server.sqlstate.as_deref(), Some("42601"));
+        // `FORM`: the third character of the second line.
+        assert_eq!(server.position, Some(12));
+        task.await.unwrap();
     }
 
     #[tokio::test]

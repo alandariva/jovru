@@ -1,5 +1,5 @@
 //! Export of a result to a file, on the database runtime
-//! ([Results](../../docs/results.md#export)).
+//! ([Results](../../docs/reference/results.md#export)).
 //!
 //! The rows go to the file in parts: first the pages the tab already holds,
 //! then the rest of the result, read from the session in parts of about
@@ -21,7 +21,7 @@ use tracing::Instrument as _;
 
 /// How long writing one part to disk may take. A disk that stops answering
 /// (a network share that went away) fails the export instead of holding it
-/// ([Reliability](../../docs/reliability.md#timeouts)).
+/// ([Reliability](../../docs/standards/reliability.md#timeouts)).
 pub const FILE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// About how much one part read from the session holds.
@@ -60,6 +60,10 @@ pub struct ExportRequest {
     pub options: ExportOptions,
     /// The result's columns, as its first page has them.
     pub columns: Vec<ResultColumn>,
+    /// The result columns the file holds, in order: the grid's shown
+    /// columns in display order. `None` writes every column in the
+    /// result's order.
+    pub shown: Option<Vec<usize>>,
     pub sql: SqlTarget,
     /// The pages the tab holds, from the first row of the result, in order.
     pub pages: Vec<Arc<ResultData>>,
@@ -101,6 +105,14 @@ pub struct ExportRun {
     pub reopened: bool,
     /// The session was lost during the export.
     pub ended: bool,
+    /// The export read from the open result ([`ExportRead::Rest`]): what
+    /// it read went to the file, so the tab can no longer page past what it
+    /// holds. `false` when it failed or was cancelled before its first read,
+    /// and the result is still open for the tab.
+    pub rest_read: bool,
+    /// The export failed while putting the file in the destination's place:
+    /// the rename may still happen, so the chosen file may be replaced.
+    pub target_unknown: bool,
 }
 
 /// Writes the result of `request` to its file. The file appears only when
@@ -140,6 +152,8 @@ pub async fn export_with(
         transaction: None,
         reopened: false,
         ended: false,
+        rest_read: false,
+        target_unknown: false,
     };
     let outcome = write(
         driver,
@@ -202,13 +216,17 @@ async fn write(
         target,
         options,
         columns,
+        shown,
         sql,
         pages,
         read,
     } = request;
     let created = {
         let columns = columns.clone();
-        on_disk(move || ExportFile::create(&target, &options, &columns, &sql)).await
+        on_disk(move || {
+            ExportFile::create_shown(&target, &options, &columns, shown.as_deref(), &sql)
+        })
+        .await
     };
     let file = match created {
         Ok(file) => file,
@@ -228,6 +246,7 @@ async fn write(
         memory_ceiling,
         cancel,
         progress,
+        fetched: false,
     };
     let truncated = match read {
         ExportRead::Held => {
@@ -243,6 +262,7 @@ async fn write(
                 Ok(()) => parts.rest(&mut **session, &options, rows).await,
                 Err(error) => Err(error),
             };
+            run.rest_read = parts.fetched;
             finish_session(run, read.is_ok(), cancel).await;
             read?
         }
@@ -264,7 +284,10 @@ async fn write(
                     return Err(error);
                 }
             };
-            let (session, reopened) = session_for_run(&*driver, &input, session, cancel).await;
+            // Only a read runs again, so a lost session is replaced; the tab
+            // says whether a transaction went with it.
+            let (session, reopened) =
+                session_for_run(&*driver, &input, session, cancel, true).await;
             run.reopened = reopened;
             let session = run.session.insert(session?);
             let read = parts
@@ -274,7 +297,7 @@ async fn write(
             read?
         }
     };
-    let written = parts.finish().await?;
+    let written = parts.finish(&mut run.target_unknown).await?;
     Ok(Exported {
         rows: written.rows,
         bytes: written.bytes,
@@ -310,6 +333,8 @@ struct Parts<'a> {
     memory_ceiling: usize,
     cancel: &'a CancellationToken,
     progress: Option<&'a watch::Sender<ExportProgress>>,
+    /// A part was asked from the session's open result.
+    fetched: bool,
 }
 
 impl Parts<'_> {
@@ -339,6 +364,7 @@ impl Parts<'_> {
                 ..options.clone()
             };
             let mut builder = ResultBuilder::page(self.columns.clone(), rows, self.memory_ceiling);
+            self.fetched = true;
             let outcome = session
                 .fetch(&part, &mut builder, self.cancel.clone())
                 .await?;
@@ -433,12 +459,45 @@ impl Parts<'_> {
         Ok(())
     }
 
-    async fn finish(mut self) -> DriverResult<Written> {
+    /// Seals the file, then puts it in the destination's place. Until the
+    /// rename starts, a failure, a cancellation or the time limit leaves the
+    /// destination as it was: a sealing abandoned past [`FILE_TIMEOUT`]
+    /// removes its file when it ends, and never renames it. A rename that
+    /// outlives its own limit may still happen; `target_unknown` says so.
+    async fn finish(mut self, target_unknown: &mut bool) -> DriverResult<Written> {
         if self.cancel.is_cancelled() {
             return Err(DriverError::cancelled());
         }
         let file = self.file.take().ok_or_else(gone)?;
-        on_disk(move || file.finish()).await
+        let sealed = on_disk(move || file.seal()).await?;
+        if self.cancel.is_cancelled() {
+            // Removing the file is disk work too.
+            drop(tokio::task::spawn_blocking(move || drop(sealed)));
+            return Err(DriverError::cancelled());
+        }
+        match tokio::time::timeout(
+            FILE_TIMEOUT,
+            tokio::task::spawn_blocking(move || sealed.place()),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => {
+                tracing::error!(panicked = error.is_panic(), "export rename failed");
+                *target_unknown = true;
+                Err(gone())
+            }
+            Err(_) => {
+                *target_unknown = true;
+                Err(DriverError::new(
+                    ErrorCode::Timeout,
+                    tr!(
+                        "Putting the file in place took longer than {0} s. Check the disk.",
+                        FILE_TIMEOUT.as_secs()
+                    ),
+                ))
+            }
+        }
     }
 }
 

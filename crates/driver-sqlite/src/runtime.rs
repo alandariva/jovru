@@ -40,7 +40,7 @@ const SQLITE_AUTH: i32 = 23;
 /// Classifies an SQLx error. A database error keeps SQLite's own message
 /// and its extended result code; anything else gets a fixed message, since
 /// it may name the file.
-fn map_error(error: sqlx::Error) -> DriverError {
+pub(crate) fn map_error(error: sqlx::Error) -> DriverError {
     match &error {
         sqlx::Error::Database(db) => {
             let extended = db.code().and_then(|code| code.parse::<i32>().ok());
@@ -181,9 +181,92 @@ enum Command {
     Ping {
         reply: oneshot::Sender<DriverResult<()>>,
     },
+    Transaction {
+        reply: oneshot::Sender<DriverResult<Option<TransactionStatus>>>,
+    },
+    EditTarget {
+        columns: Vec<ColumnInfo>,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    Write {
+        request: Box<write::WriteRequest>,
+        reply: oneshot::Sender<DriverResult<write::WriteOutcome>>,
+        cancel: CancellationToken,
+    },
+    TableTarget {
+        path: ObjectPath,
+        reply: oneshot::Sender<DriverResult<write::EditTarget>>,
+        cancel: CancellationToken,
+    },
+    BeginWrites {
+        reply: oneshot::Sender<DriverResult<()>>,
+        cancel: CancellationToken,
+    },
+    EndWrites {
+        commit: bool,
+        reply: oneshot::Sender<DriverResult<()>>,
+    },
     Close {
         reply: oneshot::Sender<DriverResult<()>>,
     },
+}
+
+/// How long reading a table's schema for editing may take.
+const CATALOG: Duration = Duration::from_secs(60);
+
+/// Runs a session command the driver writes itself (no value in it).
+async fn simple(connection: &mut SqliteConnection, sql: String) -> DriverResult<()> {
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+        .execute(&mut *connection)
+        .await
+        .map(|_| ())
+        .map_err(map_error)
+}
+
+/// Whether the connection is outside any transaction.
+async fn autocommit(connection: &mut SqliteConnection) -> DriverResult<bool> {
+    let mut handle = connection.lock_handle().await.map_err(map_error)?;
+    Ok(handle.is_autocommit())
+}
+
+/// Commits (`commit`) or rolls back the import's transaction. A `COMMIT`
+/// that fails (the file is locked) leaves the transaction open, so it is
+/// rolled back too.
+async fn end_writes(connection: &mut SqliteConnection, commit: bool) -> (DriverResult<()>, Flow) {
+    match end_edit(connection, false, commit).await {
+        Ok(()) => (Ok(()), Flow::Ready),
+        Err(error) => {
+            let flow = match end_edit(connection, false, false).await {
+                Ok(()) => Flow::Ready,
+                Err(_) => Flow::Broken,
+            };
+            (Err(error), flow)
+        }
+    }
+}
+
+/// Ends what a write opened, within [`RECOVERY`]: its savepoint (`nested`)
+/// or its own transaction, kept (`keep`) or rolled back. A rollback finds
+/// nothing to undo when SQLite already rolled the transaction back (an
+/// interrupted write), which is what it was for.
+async fn end_edit(connection: &mut SqliteConnection, nested: bool, keep: bool) -> DriverResult<()> {
+    let savepoint = crate::edit::SAVEPOINT;
+    let sql = match (nested, keep) {
+        (true, true) => format!("RELEASE SAVEPOINT {savepoint}"),
+        (true, false) => {
+            format!("ROLLBACK TO SAVEPOINT {savepoint}; RELEASE SAVEPOINT {savepoint}")
+        }
+        (false, true) => "COMMIT".to_owned(),
+        (false, false) => "ROLLBACK".to_owned(),
+    };
+    let ended = tokio::time::timeout(RECOVERY, simple(connection, sql))
+        .await
+        .unwrap_or_else(|_| Err(timed_out()));
+    match ended {
+        Err(_) if !keep && autocommit(connection).await.unwrap_or(false) => Ok(()),
+        ended => ended,
+    }
 }
 
 enum Event {
@@ -254,6 +337,11 @@ impl DatabaseSession {
 
 #[async_trait]
 impl Session for DatabaseSession {
+    /// A database file on this computer: nothing travels on a network.
+    async fn encryption(&mut self, _: CancellationToken) -> DriverResult<Encryption> {
+        Ok(Encryption::Local)
+    }
+
     async fn execute(
         &mut self,
         request: &QueryRequest,
@@ -312,9 +400,104 @@ impl Session for DatabaseSession {
         })
     }
 
-    // The transaction state (`sqlite3_get_autocommit`) is not exposed by
-    // SQLx without unsafe code, so the default `None` leaves it to the
-    // caller, which infers it from the statements it ran.
+    /// Read from the connection (`sqlite3_get_autocommit`), so it runs
+    /// nothing and sees a transaction SQLite ended on its own (an
+    /// interrupted write, `OR ROLLBACK`). Whether it wrote is not known.
+    async fn transaction(
+        &mut self,
+        cancel: CancellationToken,
+    ) -> DriverResult<Option<TransactionStatus>> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Transaction { reply })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    /// Read from the database's `sqlite_schema` and the table's pragmas
+    /// (`table_xinfo`, `index_list`, `index_info`, `foreign_key_list`).
+    async fn edit_target(
+        &mut self,
+        _statement: &str,
+        columns: &[ColumnInfo],
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::EditTarget {
+                columns: columns.to_vec(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    async fn write(
+        &mut self,
+        request: &write::WriteRequest,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::WriteOutcome> {
+        request.validate()?;
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::Write {
+                request: Box::new(request.clone()),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    /// Read from the database's `sqlite_schema` and the table's pragmas for
+    /// the table at `path`.
+    async fn table_target(
+        &mut self,
+        path: &ObjectPath,
+        cancel: CancellationToken,
+    ) -> DriverResult<write::EditTarget> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Command::TableTarget {
+                path: path.clone(),
+                reply,
+                cancel,
+            })
+            .await
+            .map_err(|_| session_closed())?;
+        answer.await.map_err(|_| session_closed())?
+    }
+
+    /// `BEGIN IMMEDIATE`: the file's write lock is held from the start to
+    /// the end of the import.
+    async fn begin_writes(&mut self, cancel: CancellationToken) -> DriverResult<()> {
+        if cancel.is_cancelled() {
+            return Err(DriverError::cancelled());
+        }
+        self.ask(|reply| Command::BeginWrites { reply, cancel })
+            .await
+    }
+
+    /// Never cancelled: a commit or a rollback is not left half done.
+    async fn end_writes(&mut self, commit: bool, _cancel: CancellationToken) -> DriverResult<()> {
+        self.ask(|reply| Command::EndWrites { commit, reply }).await
+    }
 
     async fn close(self: Box<Self>) -> DriverResult<()> {
         if !self.is_open() {
@@ -424,6 +607,87 @@ impl Server {
                             Flow::Broken
                         }
                     }
+                }
+                Command::Transaction { reply } => {
+                    match tokio::time::timeout(RECOVERY, connection.lock_handle()).await {
+                        Ok(Ok(mut handle)) => {
+                            let status = if handle.is_autocommit() {
+                                TransactionStatus::Idle
+                            } else {
+                                TransactionStatus::Open { changes: None }
+                            };
+                            let _ = reply.send(Ok(Some(status)));
+                            Flow::Ready
+                        }
+                        Ok(Err(error)) => {
+                            let _ = reply.send(Err(map_error(error)));
+                            Flow::Ready
+                        }
+                        Err(_) => {
+                            let _ = reply.send(Err(timed_out()));
+                            Flow::Broken
+                        }
+                    }
+                }
+                Command::EditTarget {
+                    columns,
+                    reply,
+                    cancel,
+                } => {
+                    let limit = Limit::new(&cancel, Some(CATALOG));
+                    let read = self
+                        .step(&limit, crate::edit::edit_target(&mut connection, &columns))
+                        .await;
+                    let (result, flow) = match read {
+                        Ok(target) => (Ok(target), Flow::Ready),
+                        Err((error, unfinished)) => {
+                            (Err(error), self.recover(&mut connection, unfinished).await)
+                        }
+                    };
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::Write {
+                    request,
+                    reply,
+                    cancel,
+                } => {
+                    let (result, flow) = self.write(&mut connection, &request, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::TableTarget {
+                    path,
+                    reply,
+                    cancel,
+                } => {
+                    let limit = Limit::new(&cancel, Some(CATALOG));
+                    let read = self
+                        .step(&limit, crate::edit::table_target(&mut connection, &path))
+                        .await;
+                    let (result, flow) = match read {
+                        Ok(target) => (Ok(target), Flow::Ready),
+                        Err((error, unfinished)) => {
+                            (Err(error), self.recover(&mut connection, unfinished).await)
+                        }
+                    };
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::BeginWrites { reply, cancel } => {
+                    let (result, flow) = self.begin_writes(&mut connection, &cancel).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
+                }
+                Command::EndWrites { commit, reply } => {
+                    let (result, flow) = end_writes(&mut connection, commit).await;
+                    // The handle may have stopped waiting.
+                    let _ = reply.send(result);
+                    flow
                 }
                 Command::Close { reply } => {
                     self.open.store(false, Ordering::SeqCst);
@@ -599,6 +863,158 @@ impl Server {
         }
     }
 
+    /// Opens the import's transaction with `BEGIN IMMEDIATE`, which takes
+    /// the file's write lock until `end_writes`.
+    async fn begin_writes(
+        &self,
+        connection: &mut SqliteConnection,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<()>, Flow) {
+        match autocommit(connection).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return (
+                    Err(DriverError::validation(
+                        "The session already holds a transaction",
+                    )),
+                    Flow::Ready,
+                );
+            }
+            Err(error) => return (Err(error), Flow::Ready),
+        }
+        let opening = Limit::new(cancel, Some(RECOVERY));
+        match self
+            .step(&opening, simple(connection, "BEGIN IMMEDIATE".to_owned()))
+            .await
+        {
+            Ok(()) => (Ok(()), Flow::Ready),
+            Err((error, unfinished)) => {
+                let flow = self.recover(connection, unfinished).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// A write that joins the import's transaction (`WriteScope::Caller`):
+    /// nothing is committed or rolled back, and a change that fails or
+    /// affects another number of rows than one fails the write at its
+    /// index. The transaction is left to `end_writes`.
+    async fn write_in_caller(
+        &self,
+        connection: &mut SqliteConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        match autocommit(connection).await {
+            Ok(false) => {}
+            Ok(true) => {
+                return (
+                    Err(DriverError::validation("Begin the writes first")),
+                    Flow::Ready,
+                );
+            }
+            Err(error) => return (Err(error), Flow::Ready),
+        }
+        let limit = Limit::new(cancel, request.timeout);
+        let applied = self
+            .step(&limit, crate::edit::apply(connection, request))
+            .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => (
+                Ok(write::WriteOutcome::Written {
+                    rows,
+                    committed: false,
+                }),
+                Flow::Ready,
+            ),
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => (
+                Err(DriverError::validation(format!(
+                    "The row affected {matched} rows of the table, not one"
+                ))
+                .at_change(index)),
+                Flow::Ready,
+            ),
+            Err((error, unfinished)) => {
+                let flow = self.recover(connection, unfinished).await;
+                (Err(error), flow)
+            }
+        }
+    }
+
+    /// Writes `request` in a transaction of its own (`BEGIN IMMEDIATE`, so
+    /// the file's write lock is taken first), or in a savepoint of the open
+    /// one, and commits (or releases the savepoint) only when every change
+    /// affected exactly one row. A failure, a cancellation or the timeout
+    /// rolls back what the write did; an interrupted write inside an open
+    /// transaction makes SQLite roll that whole transaction back. A write
+    /// with `WriteScope::Caller` joins the import's transaction instead.
+    async fn write(
+        &self,
+        connection: &mut SqliteConnection,
+        request: &write::WriteRequest,
+        cancel: &CancellationToken,
+    ) -> (DriverResult<write::WriteOutcome>, Flow) {
+        if request.scope == write::WriteScope::Caller {
+            return self.write_in_caller(connection, request, cancel).await;
+        }
+        let nested = match autocommit(connection).await {
+            Ok(outside) => !outside,
+            Err(error) => return (Err(error), Flow::Ready),
+        };
+        let open = if nested {
+            format!("SAVEPOINT {}", crate::edit::SAVEPOINT)
+        } else {
+            "BEGIN IMMEDIATE".to_owned()
+        };
+        let opening = Limit::new(cancel, Some(RECOVERY));
+        if let Err((error, unfinished)) = self.step(&opening, simple(connection, open)).await {
+            let flow = self.recover(connection, unfinished).await;
+            return (Err(error), flow);
+        }
+        let limit = Limit::new(cancel, request.timeout);
+        let applied = self
+            .step(&limit, crate::edit::apply(connection, request))
+            .await;
+        match applied {
+            Ok(crate::edit::Applied::Written(rows)) => {
+                match end_edit(connection, nested, true).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::Written {
+                            rows,
+                            committed: !nested,
+                        }),
+                        Flow::Ready,
+                    ),
+                    Err(error) => {
+                        // A COMMIT that failed (the file is locked) leaves
+                        // the transaction open: it is rolled back.
+                        let flow = match end_edit(connection, nested, false).await {
+                            Ok(()) => Flow::Ready,
+                            Err(_) => Flow::Broken,
+                        };
+                        (Err(error), flow)
+                    }
+                }
+            }
+            Ok(crate::edit::Applied::Mismatch { index, matched }) => {
+                match end_edit(connection, nested, false).await {
+                    Ok(()) => (
+                        Ok(write::WriteOutcome::RolledBack { index, matched }),
+                        Flow::Ready,
+                    ),
+                    Err(error) => (Err(error), Flow::Broken),
+                }
+            }
+            Err((error, unfinished)) => {
+                let flow = match self.recover(connection, unfinished).await {
+                    Flow::Ready if end_edit(connection, nested, false).await.is_ok() => Flow::Ready,
+                    _ => Flow::Broken,
+                };
+                (Err(error), flow)
+            }
+        }
+    }
+
     /// Runs one step of a statement within `limit`. Dropping an SQLx SQLite
     /// future is safe (the statement runs on the connection's own thread),
     /// so a step that reaches its limit is dropped and the statement is
@@ -732,9 +1148,18 @@ impl<'a> Limit<'a> {
     }
 
     /// Resolves, with the error to report, once the statement must stop.
+    ///
+    /// A deadline that has passed is read from the clock, not left to the
+    /// timer: while the connection's thread hands rows on faster than they
+    /// are read, SQLx's row channel never makes the reading wait, the
+    /// session's task keeps its thread and Tokio's timer is not turned, so a
+    /// timer set then does not fire before the reading waits. Every step and
+    /// every delivery asks first, so the statement still stops at its next
+    /// row.
     async fn reached(&self) -> DriverError {
         let expired = async {
             match self.deadline {
+                Some(deadline) if tokio::time::Instant::now() >= deadline => {}
                 Some(deadline) => tokio::time::sleep_until(deadline).await,
                 None => std::future::pending().await,
             }
@@ -792,6 +1217,7 @@ fn column_info(column: &SqliteColumn) -> ColumnInfo {
             kind.name().into()
         },
         nullable: None,
+        origin: crate::edit::origin(column.origin()),
     }
 }
 
@@ -1236,8 +1662,12 @@ pub async fn definition(
 
 #[cfg(test)]
 mod tests {
-    use super::parameter_reference;
-    use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+    use super::{Limit, parameter_reference};
+    use futures_util::FutureExt;
+    use jykre_core::{
+        CancellationToken, ErrorCode, ExecutionOptions, ParameterKind, QueryParameter, QueryRequest,
+    };
+    use std::time::Duration;
 
     fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> QueryParameter {
         QueryParameter {
@@ -1276,5 +1706,22 @@ mod tests {
             "SELECT ?1, CAST(?2 AS NUMERIC), ?3, ?4, CAST(?5 AS NUMERIC), ?1"
         );
         assert!(!bound.contains("DROP"));
+    }
+
+    /// While the connection's thread hands rows on faster than they are
+    /// read, the session's task keeps its thread and Tokio's timer is not
+    /// turned: a timer set after the deadline has passed does not fire.
+    /// Blocking the runtime's only thread does the same here.
+    #[tokio::test]
+    async fn a_passed_deadline_stops_the_statement_without_the_timer() {
+        let cancel = CancellationToken::new();
+        let limit = Limit::new(&cancel, Some(Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(20));
+        let reached = limit.reached().now_or_never();
+        assert_eq!(reached.map(|error| error.code), Some(ErrorCode::Timeout));
+        // A cancellation still comes first.
+        cancel.cancel();
+        let reached = limit.reached().now_or_never();
+        assert_eq!(reached.map(|error| error.code), Some(ErrorCode::Cancelled));
     }
 }
