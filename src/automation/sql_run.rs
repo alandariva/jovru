@@ -89,6 +89,11 @@ pub(super) async fn run(
         tracing::warn!(run = %id, error_code = ?error.code, "automation run not admitted: history unavailable");
         return Ended::Refused(Refusal::History);
     }
+    // Its schedule names the run once this row exists (a chain's step is
+    // named through its chain).
+    if scheduled.is_some() && chain.is_none() {
+        engine.scheduled_row_written();
+    }
     // A schedule opens no dialog: without a remembered password the run
     // fails before anything is sent, its effect known (section 9.5.7).
     if scheduled.is_some() && crate::connection_store::needs_password(&connection.resolved) {

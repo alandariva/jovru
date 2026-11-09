@@ -845,6 +845,13 @@ impl Engine {
         self.inner.shutting_down()
     }
 
+    /// The owner of a schedule's run or chain run wrote its row: the
+    /// scheduler names it at its next pass, which this starts now rather
+    /// than when the run ends or the next due time comes.
+    pub(super) fn scheduled_row_written(&self) {
+        self.inner.schedules.wake();
+    }
+
     /// One look at every schedule; returns the earliest next due time.
     async fn pass(
         &self,

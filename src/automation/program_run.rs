@@ -91,6 +91,11 @@ pub(super) async fn run(
         tracing::warn!(run = %id, error_code = ?error.code, "automation run not admitted: history unavailable");
         return Ended::Refused(Refusal::History);
     }
+    // Its schedule names the run once this row exists (a chain's step is
+    // named through its chain).
+    if scheduled.is_some() && chain.is_none() {
+        engine.scheduled_row_written();
+    }
     let program = launch.map(|launch| launch.program.clone());
     let started = Instant::now();
     let deadline = started + definition.timeout();

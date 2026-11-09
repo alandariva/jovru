@@ -130,6 +130,10 @@ pub(super) async fn run(
         tracing::warn!(chain_run = %id, error_code = ?error.code, "automation chain not admitted: history unavailable");
         return ChainStatus::Refused(Refusal::History);
     }
+    // Its schedule names the chain run once this row exists.
+    if scheduled.is_some() {
+        engine.scheduled_row_written();
+    }
     let deadline = started + Duration::from_millis(body.timeout_ms.max(1));
     let mut steps: Vec<Arc<RunOutcome>> = Vec::new();
     let mut earlier: HashMap<String, Vec<Output>> = HashMap::new();

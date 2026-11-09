@@ -420,6 +420,42 @@ and the evidence.
   and 0 of 15 without it; the time-limited statement then ended in 140 to
   373 ms.
 
+### `an_on_time_due_time_runs_once_recorded_as_scheduled` (schedules)
+
+- **Seen:** 2026-11-09, twice in `cargo xtask check` on a loaded machine:
+  the schedule named no run (`last_run_id` was `None`). It passed alone.
+- **Owner:** the maintainer.
+- **Status:** Fixed on 2026-11-09.
+- **Cause:** not the manual clock, a timeout or a shared folder. A run's
+  owner writes its row after the scheduler submitted it, and the scheduler
+  names the run (`link_schedule_run`) at a later pass, once the row
+  exists. When the pass right after the submission came before the row,
+  nothing started another pass until the run ended. The test read the
+  schedule as soon as the run ended, while that pass was still going.
+  - In the test: it asserted on what a later pass writes without waiting
+    for one.
+  - In the engine: nothing told the scheduler that the row was written.
+    A run admitted late (behind another run in the queue, or on a loaded
+    machine) was named only when it ended or at the next pass (up to 30 s
+    later), and never if the application quit first.
+- **Fix:**
+  - The owner of a scheduled run or chain run wakes the scheduler once its
+    row is written, so the next pass names it while it runs.
+    `a_scheduled_run_admitted_from_the_queue_is_named_while_it_runs`
+    covers it with a run admitted from the queue.
+  - The test waits for a pass that starts after the run ended
+    (`Bench::next_pass`, which moves the manual clock by 1 ms and waits
+    for the pass that read it) before reading the schedule. The other
+    schedule tests read only what the pass they wait for writes.
+- **Evidence:** the lib test binary, 24 copies of the test at once on 20
+  logical cores. Unchanged: 12 failures in 600 runs, and 8 failed runs of
+  60 of the whole schedule module (12 at once), all this test. Fixed: 0 of
+  600, 0 of 300 for the new test, and 0 of 60 module runs. With the
+  scheduler's pass temporarily slowed by 100 ms, the unchanged test failed
+  15 of 20 times and the fixed one passed 40 of 40. With admission
+  temporarily slowed by 100 ms, the new test failed 10 of 10 without the
+  wake and passed 10 of 10 with it.
+
 ## Lightweight hook
 
 The `.githooks/pre-commit` hook only checks formatting. Enable it per checkout:

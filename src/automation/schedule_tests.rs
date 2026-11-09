@@ -150,6 +150,28 @@ impl Bench {
         assert!(matches!(waited, Ok(Ok(_))), "no pass at {time:?}");
     }
 
+    /// Waits for a pass that starts after everything the test saw so far.
+    /// The scheduler names a run at a pass after its row was written, so
+    /// a run that ended is named once this returns. The clock moves by a
+    /// millisecond, past times already handled: no rule here notices.
+    async fn next_pass(&self) {
+        self.set(self.clock.now().plus(Duration::from_millis(1)))
+            .await;
+    }
+
+    /// Waits until the schedule names a run.
+    async fn wait_named(&self, schedule: ScheduleId) -> StoredSchedule {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let stored = self.stored(schedule).await;
+            if stored.last_run_id.is_some() {
+                return stored;
+            }
+            assert!(Instant::now() < until, "the schedule names no run");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     async fn stored(&self, schedule: ScheduleId) -> StoredSchedule {
         self.engine
             .repository()
@@ -255,6 +277,8 @@ async fn an_on_time_due_time_runs_once_recorded_as_scheduled() {
     assert_eq!(run.job_version, Some(job.1));
     bench.idle().await;
     assert_eq!(bench.runs(job.0).await[0].state, RunState::Succeeded);
+    // The pass that names the run may still be going when the run ends.
+    bench.next_pass().await;
     let stored = bench.stored(schedule).await;
     assert_eq!(stored.last_outcome, Some(ScheduleOutcome::Started));
     assert_eq!(
@@ -589,6 +613,43 @@ async fn a_scheduled_run_behind_a_manual_one_waits_and_turning_off_withdraws_it(
     assert!(bench.runs(job.0).await.is_empty());
     bench.engine.stop_run(manual.id);
     manual.finished().await;
+}
+
+#[tokio::test]
+async fn a_scheduled_run_admitted_from_the_queue_is_named_while_it_runs() {
+    let limits = Limits {
+        global: 1,
+        ..Limits::default()
+    };
+    let bench = Bench::new(Script::Blocks, limits).await;
+    let job = bench.job().await;
+    let schedule = bench
+        .schedule(job, MissedPolicy::Ignore, None, OverlapPolicy::Skip)
+        .await;
+    let mut manual = bench
+        .engine
+        .submit(scripted_run(
+            &bench.driver,
+            sql_job(ConnectionId::new(), "SELECT 1"),
+        ))
+        .unwrap();
+    bench.set(t0().plus(15 * MINUTE)).await;
+    // Queued: started, but without a row it cannot be named yet.
+    let stored = bench.stored(schedule).await;
+    assert_eq!(
+        (stored.last_outcome, stored.last_run_id),
+        (Some(ScheduleOutcome::Started), None)
+    );
+    bench.engine.stop_run(manual.id);
+    manual.finished().await;
+    let runs = bench.wait_runs(job.0, 1).await;
+    // The clock stands still and the run blocks: its admission alone makes
+    // the scheduler name it, not its end nor the next due time.
+    let named = bench.wait_named(schedule).await;
+    assert_eq!(named.last_run_id, Some(runs[0].id));
+    assert_eq!(bench.active().len(), 1, "still running");
+    bench.engine.stop_run(runs[0].id);
+    bench.idle().await;
 }
 
 #[tokio::test]
