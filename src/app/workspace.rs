@@ -26,7 +26,7 @@ use jykre::{
         apply,
         facts::{ErrorFacts, RunFacts, SchemaScope},
         prompts,
-        released::{self, QueryPreview},
+        released::QueryPreview,
     },
     backend, cell_format, connection_store,
     drivers::*,
@@ -3803,7 +3803,8 @@ impl Workspace {
     /// Runs a statement the user approved for the assistant, in the
     /// assistant's own session, and hands the panel its result cut to what
     /// may be sent ([`QueryPreview`]); the panel then asks the user whether
-    /// to send it. It is not a result tab and not in the history.
+    /// to send it. The run is `jykre::assistant_query::run_once`. It is not
+    /// a result tab and not in the history.
     fn run_assistant_query(&mut self, query: AssistantQuery, cx: &mut Context<Self>) {
         let Some(input) = self.input.clone() else {
             let error = DriverError::new(
@@ -3831,39 +3832,21 @@ impl Workspace {
         let lease = self.assistant_lease;
         let connection = self.cache_id;
         let context = self.context.clone();
-        let request = QueryRequest::new(
-            sql.clone(),
-            ExecutionOptions {
-                max_rows: released::READ_ROWS,
-                ..self.options()
-            },
-        );
         cx.spawn(async move |weak, cx| {
             // The result becomes a preview on the runtime; its rows are
             // dropped there.
             let outcome = backend::run(async move {
                 let stopped = cancel.clone();
-                let run = backend::query_in_context(
-                    connection,
-                    input,
-                    context,
-                    session,
-                    vec![request],
-                    ASSISTANT_MEMORY_CEILING,
-                    cancel,
+                let run = jykre::assistant_query::run_once(
+                    connection, input, context, session, sql, cancel,
                 )
                 .await;
-                let (preview, session) = match run {
-                    Ok(run) => {
-                        let preview = match &run.batch {
-                            Ok(batch) => QueryPreview::from_batch(batch, &sql),
-                            Err(error) => QueryPreview::from_error(error, &sql),
-                        };
-                        (preview, run.session)
-                    }
-                    Err(error) => (QueryPreview::from_error(&error, &sql), None),
-                };
-                Ok(((!stopped.is_cancelled()).then_some(preview), session))
+                // A stop still produced a preview; the panel treats it as
+                // not run, the same as when no password was given.
+                Ok((
+                    (!stopped.is_cancelled()).then_some(run.preview),
+                    run.session,
+                ))
             })
             .await;
             let (preview, session) = outcome.unwrap_or((None, None));
@@ -3947,10 +3930,6 @@ impl Workspace {
         cx.notify();
     }
 }
-
-/// The memory one query of the assistant may read: far more than the
-/// [`released::MAX_ROWS`] rows it may send, far less than a tab's result.
-const ASSISTANT_MEMORY_CEILING: usize = 4 << 20;
 
 /// A statement the user approved for the assistant, on its way.
 struct AssistantQuery {

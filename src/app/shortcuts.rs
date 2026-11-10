@@ -272,6 +272,7 @@ pub(super) fn catalog() -> Vec<Entry> {
         entry::<ToggleExplorer>(Window, tr!("Show or hide the explorer")),
         entry::<ToggleAssistant>(Window, tr!("Show or hide the assistant")),
         entry::<ShowPreferences>(Window, tr!("Open or close Preferences")),
+        entry::<ShowMcp>(Window, tr!("Open MCP")),
         entry::<LargerFont>(Window, tr!("Larger SQL font")),
         entry::<SmallerFont>(Window, tr!("Smaller SQL font")),
         entry::<ResetFont>(Window, tr!("SQL font at its default size")),

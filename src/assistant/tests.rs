@@ -3,13 +3,13 @@
 //! user would have reviewed and against values that must never leave.
 use super::facts::{ErrorFacts, RunFacts, SchemaScope};
 use super::run::{Conversation, DeclineQueries, Next, QueryDecision, QueryGate, RoundState, drive};
-use super::tools::CacheTools;
+use super::tools::{CacheTools, DESCRIBE_RELATION, ToolAnswer};
 use super::*;
 use crate::backend::cache_config;
 use crate::error_report::ErrorReport;
 use crate::result::{ResultColumn, ResultData};
 use crate::result_tabs::{Completed, Placement, ResultTabs};
-use jykre_assistant::{Assistant, Message, Timeouts};
+use jykre_assistant::{Assistant, Message, Timeouts, ToolCall};
 use jykre_core::{
     CancellationToken, ConnectionConfig, ConnectionId, DriverKind, IntrospectionReport,
     MetadataObject, ObjectKind, ObjectPath, ParameterKind, QueryParameter, SessionContext,
@@ -117,6 +117,12 @@ fn answers(text: &str) -> Vec<serde_json::Value> {
 }
 
 async fn cache() -> SchemaScope {
+    orders_cache(COMMENT, "'pending'").await
+}
+
+/// `shop.orders` in a synthetic metadata cache, with the comment and default
+/// of its `status` column.
+async fn orders_cache(comment: &str, default_value: &str) -> SchemaScope {
     let dir = std::env::temp_dir().join(format!("jykre-assistant-{}", ConnectionId::new()));
     let id = ConnectionId::new();
     let config = ConnectionConfig {
@@ -135,8 +141,8 @@ async fn cache() -> SchemaScope {
     let mut status = MetadataObject::new(ObjectKind::Column, &orders.path, "status");
     status.ordinal = Some(2);
     status.data_type = Some("varchar(20)".into());
-    status.default_value = Some("'pending'".into());
-    status.comment = Some(COMMENT.into());
+    status.default_value = Some(default_value.into());
+    status.comment = Some(comment.into());
     let mut pending = repository.begin(&ObjectPath::default()).await.unwrap();
     pending.batch(vec![db, orders, key, status]).await.unwrap();
     pending
@@ -620,4 +626,108 @@ async fn assistant_turns_never_log_prompts_answers_schema_or_keys_above_trace() 
     ] {
         assert!(!text.contains(secret), "{secret} leaked: {text}");
     }
+}
+
+async fn describe_call(tools: &CacheTools, arguments: serde_json::Value) -> ToolAnswer {
+    tools
+        .call(&ToolCall {
+            id: "d".into(),
+            name: DESCRIBE_RELATION.into(),
+            arguments,
+        })
+        .await
+}
+
+#[tokio::test]
+async fn describe_relation_omits_comments_and_defaults_when_asked() {
+    let tools = CacheTools::new(cache().await);
+    let omitted = describe_call(&tools, serde_json::json!({"path": "orders"})).await;
+    let enabled = describe_call(
+        &tools,
+        serde_json::json!({"path": "orders", "include_comments": true}),
+    )
+    .await;
+    let null_flag = describe_call(
+        &tools,
+        serde_json::json!({"path": "orders", "include_comments": null}),
+    )
+    .await;
+    let not_a_bool = describe_call(
+        &tools,
+        serde_json::json!({"path": "orders", "include_comments": "false"}),
+    )
+    .await;
+    let disabled = describe_call(
+        &tools,
+        serde_json::json!({"path": "orders", "include_comments": false}),
+    )
+    .await;
+
+    let column = format!("status varchar(20) DEFAULT 'pending' -- {COMMENT}");
+    for answer in [&omitted, &enabled, &null_flag, &not_a_bool] {
+        assert!(!answer.failed, "{}", answer.text);
+        assert!(answer.text.contains(&column), "{}", answer.text);
+    }
+    assert_eq!(omitted.text, enabled.text);
+    assert_eq!(omitted.text, null_flag.text);
+    assert_eq!(omitted.text, not_a_bool.text);
+
+    assert!(!disabled.failed, "{}", disabled.text);
+    assert!(
+        disabled.text.contains("status varchar(20)\n"),
+        "{}",
+        disabled.text
+    );
+    assert!(disabled.text.contains("id bigint\n"), "{}", disabled.text);
+    assert!(
+        disabled.text.contains("primary key: (id)"),
+        "{}",
+        disabled.text
+    );
+    assert!(
+        disabled.text.contains("shop.orders (table)"),
+        "{}",
+        disabled.text
+    );
+    assert!(!disabled.text.contains("DEFAULT"), "{}", disabled.text);
+    assert!(!disabled.text.contains(COMMENT), "{}", disabled.text);
+
+    // A comment or default that contains the word Error is still a success.
+    let noted =
+        CacheTools::new(orders_cache("Error: synthetic-comment-ok", "Error: 'pending'").await);
+    let noted_full = describe_call(&noted, serde_json::json!({"path": "orders"})).await;
+    assert!(!noted_full.failed, "{}", noted_full.text);
+    assert!(
+        noted_full.text.contains("DEFAULT Error: 'pending'"),
+        "{}",
+        noted_full.text
+    );
+    assert!(
+        noted_full.text.contains("-- Error: synthetic-comment-ok"),
+        "{}",
+        noted_full.text
+    );
+    let noted_bare = describe_call(
+        &noted,
+        serde_json::json!({"path": "orders", "include_comments": false}),
+    )
+    .await;
+    assert!(!noted_bare.failed, "{}", noted_bare.text);
+    assert!(!noted_bare.text.contains("Error:"), "{}", noted_bare.text);
+    assert!(!noted_bare.text.contains("DEFAULT"), "{}", noted_bare.text);
+}
+
+#[tokio::test]
+async fn a_missing_path_is_a_failed_answer_with_the_same_text() {
+    let tools = CacheTools::new(cache().await);
+    let missing = describe_call(&tools, serde_json::json!({})).await;
+    assert!(missing.failed);
+    assert_eq!(missing.text, "Error: `path` is required.");
+
+    let unknown = describe_call(&tools, serde_json::json!({"path": "missing"})).await;
+    assert!(unknown.failed);
+    assert_eq!(
+        unknown.text,
+        "Error: missing is not in this computer's metadata cache; the user may need to refresh the explorer."
+    );
 }

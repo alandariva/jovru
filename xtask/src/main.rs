@@ -356,12 +356,13 @@ fn library_without_language_features(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// What the AI assistant's code may not touch (ADR-0028): result values,
-/// bound parameter values, sessions, credentials and server reads. Its
-/// requests are built from the allow-list in `src/assistant/facts.rs` and
-/// the metadata cache only, and from a query's result only through
-/// `src/assistant/released.rs` ([`RELEASED_MAY_NAME`]). Test files may
-/// build fixtures with them.
+/// What `src/assistant` and `src/mcp` may not name (ADR-0028, ADR-0042):
+/// result values, bound parameter values, sessions, credentials and server
+/// reads. The assistant's requests are built from the allow-list in
+/// `src/assistant/facts.rs` and the metadata cache only, and from a query's
+/// result only through `src/assistant/released.rs` ([`RELEASED_MAY_NAME`]).
+/// `tests.rs` may build fixtures with these names. The result names are
+/// allowed only in `src/assistant/released.rs`, not under `src/mcp`.
 const ASSISTANT_FORBIDDEN: [&str; 11] = [
     "ResultData",
     "QueryBatch",
@@ -381,7 +382,12 @@ const ASSISTANT_FORBIDDEN: [&str; 11] = [
 const RELEASED_MAY_NAME: [&str; 3] = ["ResultData", "QueryBatch", "QueryResult"];
 
 fn assistant_privacy(root: &Path) -> Result<(), String> {
-    let mut pending = vec![root.join("src").join("assistant")];
+    // `src/mcp` is held to the same list as `src/assistant` (ADR-0042).
+    // A missing directory is skipped, as a checkout without that tree is.
+    let mut pending = vec![
+        root.join("src").join("assistant"),
+        root.join("src").join("mcp"),
+    ];
     let mut files = Vec::new();
     for single in ["assistant_panel.rs", "assistant_settings.rs"] {
         let path = root.join("src").join("app").join(single);
@@ -415,7 +421,7 @@ fn assistant_privacy(root: &Path) -> Result<(), String> {
             .find(|name| source.contains(**name) && !(released && RELEASED_MAY_NAME.contains(name)))
         {
             return Err(format!(
-                "{} uses {name}; the assistant may read only the facts allow-list and the metadata cache",
+                "{} uses {name}; the assistant and the MCP server may read only the facts allow-list and the metadata cache",
                 path.display()
             ));
         }
@@ -768,6 +774,14 @@ mod tests {
             "src/assistant/tests.rs",
             "let data = ResultData::from_rows(columns, rows);",
         );
+        // The same fixture is allowed in the MCP tests file, and nowhere else
+        // under src/mcp.
+        write("src/mcp/mod.rs", "mod registry;\n");
+        write("src/mcp/registry.rs", "pub fn records() -> usize { 0 }\n");
+        write(
+            "src/mcp/tests.rs",
+            "let data = ResultData::from_rows(columns, rows);",
+        );
         // A query's result is cut to what may be sent in one file only.
         write(
             "src/assistant/released.rs",
@@ -791,8 +805,18 @@ mod tests {
             "fn bound(request: &QueryRequest) { request.parameters.len(); }",
         );
         let refused = assistant_privacy(&root);
-        fs::remove_dir_all(&root).unwrap();
         assert!(refused.is_err_and(|error| error.contains("released.rs")));
+        write(
+            "src/assistant/released.rs",
+            "pub fn from_batch(batch: &QueryBatch) { let data: &ResultData = &batch.completed[0].data; }",
+        );
+        write("src/mcp/registry.rs", "fn leak(value: &Credentials) {}");
+        let refused = assistant_privacy(&root);
+        fs::remove_dir_all(&root).unwrap();
+        assert!(
+            refused
+                .is_err_and(|error| error.contains("registry.rs") && error.contains("Credentials"))
+        );
     }
 
     #[test]

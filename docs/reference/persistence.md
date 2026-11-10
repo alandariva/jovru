@@ -102,6 +102,54 @@ conversation are not saved. The API key is
 never here: it is in the OS vault ([Security](../standards/security.md#where-they-live)).
 Conversations are not saved.
 
+`assistant.mcp` keeps the MCP server's switch, port and token records
+([ADR-0042](../adr/0042-mcp-server-for-the-assistant-tools.md)). The secret
+is not in this setting: it is in the OS vault. The setting is read once at
+start and written when the server switch, the port or a token record
+changes. A missing setting, or a value that is not this object, reads as
+the server off, port 47321 and no tokens. The object in `tokens` is the
+shape of one record. A missing or unknown field on a token takes the
+default below. `connection_id` is the connection's id as stored today (the
+text of `ConnectionId`). `connection_revision` is the integer
+`connections.revision`, which increments on every successful save of that
+profile. `environment_label` is that connection's environment key
+(`development`, `staging` or `production`), or `""` when it has none; the
+key lives in `connection.<id>.appearance`. A differing revision or
+environment key suspends the token until the user confirms it.
+`created_unix_ms` and `expires_unix_ms` are Unix milliseconds; null means
+the token does not expire. `review` is `every-call`, `first-session` or
+`never` (`first-session` is the first cache answer for that token since
+this process started). `suspended` null means not suspended; this version
+writes `connection-changed`, and any other string still suspends the token
+and is kept. An `id` that is not 10 lowercase base32 characters is left
+out. Last used time, activity, cursors and pending cards are not
+written.
+
+```json
+{
+  "enabled": false,
+  "port": 47321,
+  "tokens": [
+    {
+      "id": "<10 lowercase base32>",
+      "name": "<label, at most 60 characters>",
+      "connection_id": "<ConnectionId as stored today>",
+      "connection_revision": 0,
+      "environment_label": "",
+      "created_unix_ms": 0,
+      "expires_unix_ms": null,
+      "tools": {
+        "search_objects": true,
+        "describe_relation": true,
+        "run_query": false
+      },
+      "review": "every-call",
+      "suspended": null
+    }
+  ]
+}
+```
+
 `telemetry.preferences` keeps the telemetry choices
 (`jykre::telemetry::TelemetryPreferences`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)):
 `{"logs": false, "traces": false, "protocol": "http", "endpoint": ""}`.

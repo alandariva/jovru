@@ -120,6 +120,7 @@ impl AppView {
     /// tabs and engine follow the same changes.
     pub(super) fn sync_reports(&self, cx: &mut Context<Self>) {
         self.sync_automation(cx);
+        self.sync_mcp(cx);
         if self.report_tabs.is_empty() {
             return;
         }

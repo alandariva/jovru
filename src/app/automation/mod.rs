@@ -974,16 +974,22 @@ impl AppView {
                 let engine = engine.clone();
                 let _ = view.update(cx, |this, cx| {
                     this.automation.stopping = Some(active);
+                    this.mcp_mark_shutdown();
+                    let endpoint = this.mcp_endpoint();
                     cx.notify();
                     cx.spawn_in(window, async move |weak, cx| {
                         let _ = backend::run(async move {
                             engine.shutdown().await;
+                            if let Some(endpoint) = endpoint {
+                                endpoint.shutdown().await;
+                            }
                             Ok(())
                         })
                         .await;
                         let _ = weak.update_in(cx, |this, window, cx| {
                             this.automation.stopping = None;
                             this.automation.quit_settled = true;
+                            this.mcp_mark_closed();
                             this.closing = true;
                             window.remove_window();
                             cx.notify();

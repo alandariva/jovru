@@ -12,6 +12,7 @@ mod fonts;
 mod import;
 mod layout;
 mod library_files;
+mod mcp_section;
 mod password;
 pub mod performance;
 mod probe;
@@ -189,6 +190,8 @@ actions!(
         NewTab,
         /// Ctrl+,: opens Preferences.
         ShowPreferences,
+        /// Ctrl+Shift+M: opens the MCP section and its Requests tab.
+        ShowMcp,
         /// Shift+F10 in a result grid: its menu on the focused header's
         /// column, or the focused cell's, to hide, freeze or move it.
         ResultGridMenu,
@@ -214,6 +217,7 @@ enum Section {
     Saved,
     Reports,
     Automation,
+    Mcp,
     History,
 }
 
@@ -302,6 +306,8 @@ struct AppView {
     reports: jykre::reports::ReportLibrary,
     /// The automation engine, its jobs and tabs ([`automation`]).
     automation: automation::Host,
+    /// The MCP listener, its tokens and the Requests tab ([`mcp_section`]).
+    mcp: mcp_section::Host,
     /// The reports were read, so writing them loses nothing.
     persist_reports: bool,
     /// Bumped by every change, so only the last of a burst is written.
@@ -577,7 +583,8 @@ impl AppView {
                 // A report's own group offers no new tab.
                 GroupedTabsEvent::NewTabRequested(group)
                     if this.is_report_group(*group)
-                        || this.automation.tab_groups().any(|own| own == *group) => {}
+                        || this.automation.tab_groups().any(|own| own == *group)
+                        || this.mcp.tab_groups().any(|own| own == *group) => {}
                 GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
                 GroupedTabsEvent::TabClosed(tab) => {
                     // What the tab keeps (never its results or session) can
@@ -594,6 +601,8 @@ impl AppView {
                     }
                     this.unsaved_marked.remove(tab);
                     this.report_tabs.remove(tab);
+                    this.clear_mcp_secret(*tab, window, cx);
+                    this.mcp.forget(*tab);
                     this.automation.forget(*tab);
                     this.save_state_soon(cx);
                 }
@@ -693,6 +702,7 @@ impl AppView {
             report_tabs: HashMap::new(),
             reports: jykre::reports::ReportLibrary::default(),
             automation: automation::Host::default(),
+            mcp: mcp_section::Host::default(),
             persist_reports: false,
             reports_revision: 0,
             sql_catalogs: std::sync::Arc::default(),
@@ -1075,6 +1085,7 @@ impl AppView {
         app.load_connections(window, cx);
         app.load_shortcuts(cx);
         app.start_automation(window, cx);
+        app.start_mcp(window, cx);
         assistant_settings::load(cx);
         telemetry_settings::load(cx);
         jykre::telemetry::startup_finished();
@@ -1109,7 +1120,7 @@ impl AppView {
                     .collect();
                 return;
             }
-            Section::Explorer | Section::Automation => {
+            Section::Explorer | Section::Automation | Section::Mcp => {
                 self.library_shown.clear();
                 return;
             }
@@ -1318,8 +1329,8 @@ impl AppView {
             panel.update(cx, |panel, cx| panel.focus_editor(window, cx));
         } else if let Some(report) = self.report_tabs.get(&tab) {
             report.view.update(cx, |view, cx| view.focus(window, cx));
-        } else {
-            self.focus_automation_tab(tab, window, cx);
+        } else if !self.focus_automation_tab(tab, window, cx) {
+            self.focus_mcp_tab(tab, window, cx);
         }
     }
 
@@ -1737,7 +1748,10 @@ impl AppView {
             .count();
         // Last, runs still active are named and stopped (ADR-0034).
         if open == 0 || self.transactions_settled {
-            return self.automation_may_close(window, cx);
+            if !self.automation_may_close(window, cx) {
+                return false;
+            }
+            return self.mcp_may_close(window, cx);
         }
         let (title, description) = if open == 1 {
             (
@@ -1793,6 +1807,10 @@ impl AppView {
         }
         if self.automation.owns(tab) {
             self.request_automation_close(tab, window, cx);
+            return;
+        }
+        if self.mcp.owns(tab) {
+            self.request_mcp_close(tab, window, cx);
             return;
         }
         let (busy, unsaved, transaction, exporting) =
@@ -1914,12 +1932,14 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let same_group = self.tabs.read(cx).group_of(tab) == Some(group);
-        // A report's or a job's tab stays in its own group, and no other tab
-        // joins one.
+        // A report's, a job's or an MCP tab stays in its own group, and no
+        // other tab joins one.
         if self.report_tabs.contains_key(&tab)
             || self.is_report_group(group)
             || self.automation.owns(tab)
             || self.automation.tab_groups().any(|own| own == group)
+            || self.mcp.owns(tab)
+            || self.mcp.tab_groups().any(|own| own == group)
         {
             if same_group {
                 let _ = self
@@ -2238,7 +2258,14 @@ impl AppView {
             .focusable()
             .tab_index(0)
             .focus_visible(|s| s.bg(rgb(colors().hover)))
-            .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
+            .tooltip(move |window, cx| {
+                if section == Section::Mcp {
+                    Tooltip::new(tr!("MCP · {0}", shortcuts::label::<ShowMcp>(cx)))
+                        .build(window, cx)
+                } else {
+                    Tooltip::new(title).build(window, cx)
+                }
+            })
             .size(px(34.))
             .flex_none()
             .rounded(px(7.))
@@ -2259,6 +2286,9 @@ impl AppView {
             // Scheduled runs that ended badly since the user last looked.
             .when(section == Section::Automation, |s| {
                 s.relative().children(self.automation_rail_badge())
+            })
+            .when(section == Section::Mcp, |s| {
+                s.relative().children(self.mcp_rail_badge())
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.section == section {
@@ -2297,6 +2327,7 @@ impl AppView {
                     (Section::Saved, I::Bookmark, tr!("Saved queries")),
                     (Section::Reports, I::FileChartColumn, tr!("Reports")),
                     (Section::Automation, I::Zap, tr!("Automation")),
+                    (Section::Mcp, I::Cable, tr!("MCP")),
                     (Section::History, I::Clock, tr!("History")),
                 ]
                 .into_iter()
@@ -2351,6 +2382,7 @@ impl AppView {
             Section::Saved => tr!("Saved queries"),
             Section::Reports => tr!("Reports"),
             Section::Automation => tr!("Automation"),
+            Section::Mcp => tr!("MCP"),
             Section::History => tr!("History"),
         };
         column()
@@ -2394,6 +2426,13 @@ impl AppView {
                             })
                             .when(self.section == Section::Automation, |s| {
                                 s.child(self.automation_add_menu(cx))
+                            })
+                            .when(self.section == Section::Mcp, |s| {
+                                s.child(self.mcp_new_token_button(
+                                    "mcp-add-token",
+                                    self.mcp.demo(),
+                                    cx,
+                                ))
                             })
                             .child(
                                 icon_button(
@@ -3019,6 +3058,7 @@ impl AppView {
             .when(self.section == Section::Automation, |s| {
                 self.automation_list(s, cx)
             })
+            .when(self.section == Section::Mcp, |s| self.mcp_list(s, cx))
     }
 
     /// Hands the SQL catalogs to every tab, and to the ones opened later.
@@ -3159,7 +3199,11 @@ impl AppView {
     /// The tabs, or a welcome state with the next step when there is nothing
     /// to show yet.
     fn main_area(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.connections_loading || !self.connections.is_empty() || self.automation.has_tabs() {
+        if self.connections_loading
+            || !self.connections.is_empty()
+            || self.automation.has_tabs()
+            || self.mcp.has_tabs()
+        {
             return self.tabs.clone().into_any_element();
         }
         column()
@@ -3558,6 +3602,17 @@ impl Render for AppView {
                     this.open_settings(page, window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ShowMcp, window, cx| {
+                if this.connection_open
+                    || this.command_open
+                    || this.settings_open
+                    || this.password_prompt.is_some()
+                    || this.dialog_open()
+                {
+                    return;
+                }
+                this.show_mcp(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &FindColumn, window, cx| {
                 if this.connection_open
                     || this.command_open
@@ -3724,6 +3779,7 @@ impl Render for AppView {
                         )
                     })
                     .children(self.automation_news_line(cx))
+                    .children(self.mcp_status_line(cx))
                     .child(
                         row()
                             .gap_3()
@@ -3809,6 +3865,8 @@ pub(crate) fn application_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-t", NewTab, Some(editor)),
         KeyBinding::new("ctrl-,", ShowPreferences, None),
         KeyBinding::new("ctrl-,", ShowPreferences, Some(editor)),
+        KeyBinding::new("ctrl-shift-m", ShowMcp, None),
+        KeyBinding::new("ctrl-shift-m", ShowMcp, Some(editor)),
         KeyBinding::new(
             "shift-f10",
             ExplorerContextMenu,
