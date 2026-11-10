@@ -255,7 +255,7 @@ impl JobView {
                     .child(self.versions_section(cx)),
                 JobBody::Process(process) => {
                     let jjp = process.protocol == Protocol::Jjp1;
-                    s.child(self.program_section(cx))
+                    s.child(self.program_section())
                         .child(self.environment_section(cx))
                         .child(self.protocol_section(cx))
                         .when(jjp, |s| s.child(self.specs_section(true, cx)))
@@ -1120,47 +1120,39 @@ impl JobView {
     // -----------------------------------------------------------------------
     // A program.
 
-    fn program_section(&self, cx: &mut Context<Self>) -> Div {
+    fn program_section(&self) -> Div {
         let Some(fields) = &self.program else {
             return div();
         };
+        use super::super::program_bits as bits;
         section(tr!("Program"))
             .child(field(
-                tr!("Program"),
-                Input::new(&fields.program)
+                tr!("Command"),
+                Input::new(&fields.command)
                     .small()
-                    .aria_label(tr!("The program to start")),
+                    .aria_label(tr!("The command: the program and its arguments")),
             ))
-            .child(note(tr!(
-                "Started without a shell: an absolute path, or a name looked up on PATH when the run starts."
-            )))
-            .child(label(tr!("Arguments, one per row, passed as they are")))
-            .children(fields.arguments.iter().enumerate().map(|(index, argument)| {
-                row()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(argument).small().aria_label(tr!("Argument"))),
-                    )
-                    .child(
-                        icon_button(("argument-remove", index), I::Trash, tr!("Remove the argument"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.edit_program(window, cx, |body| {
-                                    if index < body.arguments.len() {
-                                        body.arguments.remove(index);
-                                    }
-                                })
-                            })),
-                    )
-            }))
-            .child(
-                button("argument-add", I::Plus, tr!("Add an argument")).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.edit_program(window, cx, |body| body.arguments.push(String::new()))
+            .map(|s| match &fields.read {
+                Err(error) => s.child(
+                    div()
+                        .id("job-command-problem")
+                        .role(Role::Alert)
+                        .child(warning(bits::command_problem(*error))),
+                ),
+                Ok(command) if command.words.is_empty() => s,
+                Ok(command) => s.child(self.command_words(command)).when_some(
+                    command.shell_syntax.as_deref(),
+                    |s, word| {
+                        s.child(
+                            div()
+                                .id("job-command-shell")
+                                .role(Role::Status)
+                                .child(warning(bits::shell_syntax_note(word))),
+                        )
                     },
-                )),
-            )
+                ),
+            })
+            .child(note(bits::command_note()))
             .child(field(
                 tr!("Entrypoint"),
                 Input::new(&fields.entrypoint)
@@ -1179,6 +1171,65 @@ impl JobView {
             .child(note(words::logs_note()))
             .child(note(words::stdin_note()))
             .child(note(words::stop_note()))
+    }
+
+    /// How the command is read: the program, then each argument as one
+    /// piece, so what the quotes did is on screen before the run.
+    fn command_words(&self, command: &super::super::program_bits::Command) -> Stateful<Div> {
+        /// The words drawn; a longer command says how many more it has.
+        const SHOWN: usize = 24;
+        let piece = |text: &str, program: bool| {
+            div()
+                .px_2()
+                .py(px(1.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(rgb(if program {
+                    colors().mint
+                } else {
+                    colors().border
+                }))
+                .bg(rgb(colors().grid_bg))
+                .font_family(fonts().mono.clone())
+                .text_size(px(12.))
+                .max_w(px(420.))
+                .truncate()
+                .child(if text.is_empty() {
+                    "\u{2205}".to_owned()
+                } else {
+                    text.to_owned()
+                })
+        };
+        let arguments = command.arguments();
+        let summary = if arguments.len() == 1 {
+            tr!("Read as the program {0} and 1 argument.", command.program())
+        } else {
+            tr!(
+                "Read as the program {0} and {1} arguments.",
+                command.program(),
+                arguments.len()
+            )
+        };
+        row()
+            .id("job-command-words")
+            .role(Role::Status)
+            .aria_label(summary)
+            .flex_wrap()
+            .gap_1()
+            .child(label(tr!("Program")))
+            .child(piece(command.program(), true))
+            .when(!arguments.is_empty(), |s| {
+                s.child(label(tr!("Arguments")))
+                    .children(
+                        arguments
+                            .iter()
+                            .take(SHOWN)
+                            .map(|argument| piece(argument, false)),
+                    )
+                    .when(arguments.len() > SHOWN, |s| {
+                        s.child(label(tr!("and {0} more", arguments.len() - SHOWN)))
+                    })
+            })
     }
 
     fn edit_program(

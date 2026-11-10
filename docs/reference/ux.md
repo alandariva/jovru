@@ -151,8 +151,15 @@ job's run is active; under it, three inner tabs, and a fourth,
   timeout, the declared outputs (name, type, result column by position),
   which row the outputs take with what each rule does with zero, one and
   several rows, **Store outputs**, and the published versions (number and
-  date, each with a delete button). A program: the program, its arguments
-  one per row, the entrypoint, the working folder, the environment
+  date, each with a delete button). A program: its **Command**, the
+  program and its arguments typed as one line (`php -r "print('x');"`) and
+  read without a shell (`jykre::automation::command_line`): the first word
+  is the program, each other word one argument, quotes keep several words
+  as one, and a backslash outside quotes is an ordinary character, so
+  Windows paths need no escaping. Under the field, the program and each
+  argument are drawn as separate pieces, a quote left open is named, and a
+  word a shell would act on (`|`, `>`, `&&`, `$NAME`) says that it reaches
+  the program as an argument; then the entrypoint, the working folder, the environment
   (variables removed, those set, and which of Studio's variables are
   removed now), the protocol (**No protocol** or `jjp/1`; inputs and
   outputs only with `jjp/1`), the timeout, outputs, and the versions, each

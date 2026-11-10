@@ -136,10 +136,15 @@ struct SqlFields {
 
 /// A program's fields.
 struct ProgramFields {
-    program: Entity<InputState>,
+    /// The program and its arguments, as one command line.
+    command: Entity<InputState>,
+    /// The command line the field started with, and the program and
+    /// arguments it stands for: left alone, they are kept as stored.
+    stored: (String, String, Vec<String>),
+    /// The command line as typed, read when it changes.
+    read: Result<super::program_bits::Command, super::program_bits::SplitError>,
     entrypoint: Entity<InputState>,
     working_directory: Entity<InputState>,
-    arguments: Vec<Entity<InputState>>,
     unset: Vec<Entity<InputState>>,
     /// The variables of the environment now that the program will not
     /// receive, read again as the lists change.
@@ -577,12 +582,21 @@ impl JobView {
                 self.sql_changed(window, cx);
             }
             JobBody::Process(body) => {
-                let program = input(
+                let text = super::program_bits::command_text(&body.program, &body.arguments);
+                let command = input(
                     window,
                     cx,
-                    body.program.clone(),
-                    tr!("node, python3, or an absolute path"),
+                    text.clone(),
+                    tr!("For example: python3 /home/me/jobs/export.py --format csv"),
                 );
+                self._subscriptions.push(cx.subscribe(
+                    &command,
+                    |this, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            this.command_changed(cx);
+                        }
+                    },
+                ));
                 let entrypoint = input(
                     window,
                     cx,
@@ -595,7 +609,7 @@ impl JobView {
                     body.working_directory.clone().unwrap_or_default(),
                     tr!("The entrypoint's folder"),
                 );
-                for field in [&program, &entrypoint, &working_directory] {
+                for field in [&entrypoint, &working_directory] {
                     self._subscriptions.push(cx.subscribe(
                         field,
                         |this, _, event: &InputEvent, cx| {
@@ -606,10 +620,11 @@ impl JobView {
                     ));
                 }
                 self.program = Some(ProgramFields {
-                    program,
+                    read: super::program_bits::read_command(&text),
+                    command,
+                    stored: (text, body.program.clone(), body.arguments.clone()),
                     entrypoint,
                     working_directory,
-                    arguments: Vec::new(),
                     unset: Vec::new(),
                     removed: super::program_bits::removed_variables(&body.environment),
                     set: Vec::new(),
@@ -758,18 +773,20 @@ impl JobView {
             JobBody::Process(body) => {
                 body.timeout_ms = timeout_ms;
                 if let Some(fields) = &self.program {
-                    body.program = fields.program.read(cx).value().trim().to_owned();
+                    let (text, program, arguments) = &fields.stored;
+                    if fields.command.read(cx).value().as_ref() == text.as_str() {
+                        body.program.clone_from(program);
+                        body.arguments.clone_from(arguments);
+                    } else if let Ok(command) = &fields.read {
+                        body.program = command.program().to_owned();
+                        body.arguments = command.arguments().to_vec();
+                    }
                     let optional = |field: &Entity<InputState>| {
                         let text = field.read(cx).value().trim().to_owned();
                         (!text.is_empty()).then_some(text)
                     };
                     body.entrypoint = optional(&fields.entrypoint);
                     body.working_directory = optional(&fields.working_directory);
-                    body.arguments = fields
-                        .arguments
-                        .iter()
-                        .map(|field| field.read(cx).value().to_string())
-                        .collect();
                     body.environment.unset = fields
                         .unset
                         .iter()
@@ -820,16 +837,34 @@ impl JobView {
     /// stored one is worked out now, not while drawing.
     fn changed(&mut self, cx: &mut Context<Self>) {
         let current = self.current(cx);
-        self.unsaved = match &self.saved {
-            Some(saved) => !saved.same_definition(&current),
-            None => true,
-        };
+        self.unsaved = self.command_problem().is_some()
+            || match &self.saved {
+                Some(saved) => !saved.same_definition(&current),
+                None => true,
+            };
         if let (Some(program), JobBody::Process(body)) = (self.program.as_mut(), &current.body) {
             program.removed = super::program_bits::removed_variables(&body.environment);
         }
         self.definition.name = current.name;
         self.plan_soon(cx);
         cx.notify();
+    }
+
+    /// The command line was typed: it is read into the program and its
+    /// arguments now, not while drawing.
+    fn command_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some(fields) = self.program.as_mut() {
+            let text = fields.command.read(cx).value().to_string();
+            fields.read = super::program_bits::read_command(&text);
+        }
+        self.changed(cx);
+    }
+
+    /// Why the command line cannot be read, when it cannot: nothing is
+    /// saved or run from a command cut in the middle of a quote.
+    fn command_problem(&self) -> Option<String> {
+        let error = self.program.as_ref()?.read.as_ref().err()?;
+        Some(super::program_bits::command_problem(*error))
     }
 
     /// A chain's step IDs and constants were typed: its plan is read again
@@ -926,11 +961,6 @@ impl JobView {
         }
         if let (Some(program), JobBody::Process(body)) = (&mut self.program, &self.definition.body)
         {
-            program.arguments = body
-                .arguments
-                .iter()
-                .map(|argument| input(window, cx, argument.clone(), tr!("An argument")))
-                .collect();
             program.unset = body
                 .environment
                 .unset
@@ -948,7 +978,6 @@ impl JobView {
                     )
                 })
                 .collect();
-            fields.extend(program.arguments.iter().cloned());
             fields.extend(program.unset.iter().cloned());
             for (name, value) in &program.set {
                 fields.extend([name.clone(), value.clone()]);
@@ -1098,6 +1127,11 @@ impl JobView {
                 Tone::Warning,
                 tr!("Automation is read-only or off here, so nothing can be saved."),
             ));
+            cx.notify();
+            return;
+        }
+        if let Some(problem) = self.command_problem() {
+            self.notice = Some(Feedback::new(Tone::Warning, problem));
             cx.notify();
             return;
         }
@@ -1391,6 +1425,10 @@ impl JobView {
         };
         if !self.writable() {
             self.refuse(words::refusal(&Refusal::Unavailable), cx);
+            return;
+        }
+        if let Some(problem) = self.command_problem() {
+            self.refuse(tr!("Not run: {0}", problem), cx);
             return;
         }
         let definition = self.current(cx);

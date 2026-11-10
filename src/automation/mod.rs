@@ -18,6 +18,7 @@
 
 pub mod chain;
 mod chain_run;
+pub mod command_line;
 pub mod definition;
 mod engine;
 mod executor;

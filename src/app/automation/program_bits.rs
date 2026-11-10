@@ -5,6 +5,8 @@
 //! them.
 //!
 //! GPUI-free: what it gives back is plain data and sentences.
+use jykre::automation::command_line;
+pub use jykre::automation::command_line::{Command, SplitError};
 use jykre::automation::definition::EnvironmentSpec;
 use jykre::automation::{ProgramOutcome, RunId};
 use jykre::automation::{jjp, logs, process};
@@ -28,6 +30,46 @@ pub fn removed_variables(environment: &EnvironmentSpec) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// A program and its arguments as the one command line the editor shows:
+/// nothing for a job that names no program yet.
+pub fn command_text(program: &str, arguments: &[String]) -> String {
+    if program.is_empty() && arguments.is_empty() {
+        String::new()
+    } else {
+        command_line::join(program, arguments)
+    }
+}
+
+/// The command line as typed, read into the program and its arguments.
+pub fn read_command(line: &str) -> Result<Command, SplitError> {
+    command_line::split(line)
+}
+
+/// Why a command line cannot be read, in words.
+pub fn command_problem(error: SplitError) -> String {
+    match error {
+        SplitError::UnclosedQuote(quote) => tr!(
+            "The command opens a quote ({0}) and never closes it. Close it, or remove it.",
+            quote
+        ),
+    }
+}
+
+/// How the command is started, where it is typed (section 9.1.2).
+pub fn command_note() -> &'static str {
+    tr!(
+        "Started without a shell. The first word is the program: an absolute path, or a name looked up on PATH when the run starts. Each other word is one argument, passed as it is; quotes ('a b' or \"a b\") keep several words as one."
+    )
+}
+
+/// A word a shell would act on is passed to the program as it is.
+pub fn shell_syntax_note(word: &str) -> String {
+    tr!(
+        "{0} reaches the program as an argument: there is no shell, so pipes, redirections, && and $NAME do nothing. To use them, start a shell knowingly, for example sh -c '…'.",
+        word
+    )
 }
 
 /// The most a log file keeps (ADR-0037).
