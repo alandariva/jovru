@@ -72,6 +72,53 @@ pub fn production_confirmation(
     Some((tr!("Run on {0}?", connection), parts.join("\n\n")))
 }
 
+/// What the SQL Job's connection control shows, and what is wrong with the
+/// choice, said under the control before a run refuses it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionChoice {
+    pub label: String,
+    pub problem: Option<String>,
+}
+
+/// The connection control of a SQL Job. `chosen` is the job's connection
+/// when it still exists (its name, and whether it can run now), `named`
+/// whether the job names one at all, `none_saved` whether there is no
+/// connection to choose.
+pub fn connection_choice(
+    chosen: Option<(&str, bool)>,
+    named: bool,
+    none_saved: bool,
+) -> ConnectionChoice {
+    match chosen {
+        Some((name, runs)) => ConnectionChoice {
+            label: name.to_owned(),
+            problem: (!runs).then(|| tr!("The connection {0} cannot run now.", name)),
+        },
+        None if named => ConnectionChoice {
+            label: tr!("A connection that no longer exists").to_owned(),
+            problem: Some(
+                tr!("The job's connection no longer exists. Choose another one here.").to_owned(),
+            ),
+        },
+        None => ConnectionChoice {
+            label: tr!("Choose a connection").to_owned(),
+            problem: Some(if none_saved {
+                tr!("There is no connection yet. Add one in the explorer, then choose it here.")
+                    .to_owned()
+            } else {
+                tr!("Choose the connection the job runs on.").to_owned()
+            }),
+        },
+    }
+}
+
+/// The item of `items` when it is the only one: a new SQL Job takes the
+/// only saved connection, and none when there are several to choose from.
+pub fn only<T>(items: &mut impl Iterator<Item = T>) -> Option<T> {
+    let first = items.next()?;
+    items.next().is_none().then_some(first)
+}
+
 /// One step of a chain's plan, as the one confirmation lists it
 /// (section 9.3.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -476,6 +523,41 @@ mod tests {
             )
         );
         assert_eq!(statements_note(&[]), None);
+    }
+
+    #[test]
+    fn the_connection_control_says_what_is_chosen_and_what_is_missing() {
+        crate::app::source_text();
+        let chosen = connection_choice(Some(("Sales", true)), true, false);
+        assert_eq!(chosen.label, "Sales");
+        assert_eq!(chosen.problem, None);
+        let demo = connection_choice(Some(("Demo", false)), true, false);
+        assert_eq!(
+            demo.problem.as_deref(),
+            Some("The connection Demo cannot run now.")
+        );
+        let deleted = connection_choice(None, true, false);
+        assert_eq!(deleted.label, "A connection that no longer exists");
+        assert!(
+            deleted
+                .problem
+                .is_some_and(|text| text.contains("Choose another"))
+        );
+        let unset = connection_choice(None, false, false);
+        assert_eq!(unset.label, "Choose a connection");
+        assert_eq!(
+            unset.problem.as_deref(),
+            Some("Choose the connection the job runs on.")
+        );
+        let none = connection_choice(None, false, true);
+        assert!(none.problem.is_some_and(|text| text.contains("explorer")));
+    }
+
+    #[test]
+    fn a_new_job_takes_a_connection_only_when_there_is_one() {
+        assert_eq!(only(&mut [7].into_iter()), Some(7));
+        assert_eq!(only(&mut [7, 8].into_iter()), None);
+        assert_eq!(only(&mut std::iter::empty::<u8>()), None);
     }
 
     #[test]

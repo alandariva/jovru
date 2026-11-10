@@ -137,9 +137,13 @@ not saved. Its toolbar holds the kind, save, **Publish** (not for a chain),
 job's run is active; under it, three inner tabs, and a fourth,
 **Schedule**, once the job is saved:
 
-- **Editor**, a form. A SQL Job: name, description, the connection and where
-  unqualified names resolve (a menu of the connections, each with
-  **Session default** and its namespaces, as report panels offer), the SQL
+- **Editor**, a form. A SQL Job: name, description, a **Connection**
+  section of its own (a menu of the connections and, once one is chosen, a
+  **Database** menu with **Session default** and its namespaces, where
+  unqualified names resolve; a job without a connection, or whose connection
+  was deleted or cannot run, says so under the menu before **Run** refuses
+  it; a new job takes the only saved connection, and none when there are
+  several to choose from), the SQL
   editor with the same completion as a query tab (statements beyond the
   first are outlined in amber and named by their line before saving), one
   row per `:name` parameter (label, type, default, **Required**, **List of

@@ -2,7 +2,6 @@
 //! program or a chain as a form, each stating the engine's rules where
 //! they apply (specification, section 8.1.1).
 use super::*;
-use crate::app::report_panel::{PickSource, source_menu};
 use crate::app::report_view::{invalid_hint, kind_name as parameter_kind};
 use crate::app::workspace::SQL_EDITOR_CONTEXT;
 use gpui_kit::assets::IconName as I;
@@ -248,6 +247,7 @@ impl JobView {
             )
             .map(|s| match &definition.body {
                 JobBody::Sql(_) => s
+                    .child(self.connection_section(cx))
                     .child(self.sql_section(cx))
                     .child(self.specs_section(false, cx))
                     .child(self.limits_section(cx))
@@ -273,50 +273,144 @@ impl JobView {
     // -----------------------------------------------------------------------
     // SQL.
 
-    fn sql_section(&self, cx: &mut Context<Self>) -> Div {
+    /// Where the job runs: its connection and the database unqualified
+    /// names resolve in, as a control that reads as one, with what is wrong
+    /// with the choice said under it.
+    fn connection_section(&self, cx: &mut Context<Self>) -> Div {
         let JobBody::Sql(body) = &self.definition.body else {
-            return div();
-        };
-        let Some(fields) = &self.sql else {
             return div();
         };
         let source = body
             .connection
             .and_then(|id| source_of(&self.sources.sources, id));
-        let where_label = match source {
-            Some(source) => jykre::reports::source_label(&source.connection.name, &body.context),
-            None if body.connection.is_some() => {
-                tr!("A connection that no longer exists").to_owned()
-            }
-            None => tr!("Choose a connection").to_owned(),
-        };
+        let choice = logic::connection_choice(
+            source.map(|source| (source.connection.name.as_str(), source.input.is_some())),
+            body.connection.is_some(),
+            self.sources.sources.is_empty(),
+        );
         let view = cx.entity().downgrade();
         let sources = self.sources.sources.clone();
-        let current = source.map(|source| (source.connection.clone(), body.context.clone()));
-        let pick: PickSource = Rc::new(move |connection: ConnectionRef, context, _, cx| {
-            let _ = view.update(cx, |this, cx| this.set_connection(connection, context, cx));
+        let chosen = source.map(|source| source.connection.clone());
+        let connection_menu = {
+            let view = view.clone();
+            let chosen = chosen.clone();
+            move |mut menu: gpui_kit::component::menu::PopupMenu,
+                  _: &mut Window,
+                  _: &mut Context<gpui_kit::component::menu::PopupMenu>| {
+                if sources.is_empty() {
+                    return menu.label(tr!("No connections yet. Add one in the explorer."));
+                }
+                for source in sources.iter() {
+                    let view = view.clone();
+                    let connection = source.connection.clone();
+                    let checked = chosen
+                        .as_ref()
+                        .is_some_and(|chosen| chosen.same(&connection));
+                    menu = menu.item(
+                        PopupMenuItem::new(connection.name.clone())
+                            .checked(checked)
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.set_connection(
+                                        connection.clone(),
+                                        SessionContext::default(),
+                                        cx,
+                                    )
+                                });
+                            }),
+                    );
+                }
+                menu
+            }
+        };
+        // The database unqualified names resolve in, once a connection is
+        // chosen: the session's default, or one of its namespaces.
+        let database = source.map(|source| {
+            let connection = source.connection.clone();
+            let choices = source.choices.clone();
+            let current = body.context.clone();
+            let shown = if current == SessionContext::default() {
+                tr!("Session default").to_owned()
+            } else {
+                jykre::ddl::context_label(&current)
+            };
+            Button::new("job-database")
+                .outline()
+                .small()
+                .label(shown)
+                .dropdown_caret(true)
+                .accessibility_label(tr!("The database unqualified names resolve in"))
+                .dropdown_menu(move |mut menu, _, _| {
+                    let item = |label: String, context: SessionContext| {
+                        let view = view.clone();
+                        let connection = connection.clone();
+                        PopupMenuItem::new(label)
+                            .checked(context == current)
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.set_connection(connection.clone(), context.clone(), cx)
+                                });
+                            })
+                    };
+                    menu = menu.item(item(
+                        tr!("Session default").to_owned(),
+                        SessionContext::default(),
+                    ));
+                    if choices.is_empty() {
+                        menu = menu.label(tr!("Refresh the metadata to list namespaces"));
+                    }
+                    for choice in &choices {
+                        menu = menu.item(item(jykre::ddl::context_label(choice), choice.clone()));
+                    }
+                    menu
+                })
         });
+        let production = source.is_some_and(|source| {
+            source.environment == Some(jykre::connection_appearance::Environment::Production)
+        });
+        section(tr!("Connection"))
+            .child(
+                row()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("job-connection")
+                            .outline()
+                            .small()
+                            .icon(I::Database)
+                            .label(choice.label)
+                            .dropdown_caret(true)
+                            .accessibility_label(tr!("The connection the job runs on"))
+                            .dropdown_menu(connection_menu),
+                    )
+                    .when(production, |s| {
+                        s.child(environment_badge(
+                            jykre::connection_appearance::Environment::Production,
+                        ))
+                    })
+                    .when_some(database, |s, database| {
+                        s.child(label(tr!("Database"))).child(database)
+                    }),
+            )
+            .when_some(choice.problem, |s, text| {
+                s.child(
+                    div()
+                        .id("job-connection-problem")
+                        .role(Role::Alert)
+                        .child(warning(text)),
+                )
+            })
+            .child(note(tr!(
+                "The job runs on this connection, in a session of its own. Unqualified names resolve in the database chosen, or in the session's default."
+            )))
+    }
+
+    fn sql_section(&self, cx: &mut Context<Self>) -> Div {
+        let Some(fields) = &self.sql else {
+            return div();
+        };
         let editor = fields.editor.clone();
         section(tr!("Statement"))
-            .child(field(
-                tr!("Connection and where unqualified names resolve"),
-                Button::new("job-connection")
-                    .ghost()
-                    .small()
-                    .label(where_label)
-                    .dropdown_caret(true)
-                    .accessibility_label(tr!("The job's connection and database"))
-                    .dropdown_menu(move |menu, window, cx| {
-                        source_menu(
-                            menu.label(tr!("Where the job runs")),
-                            window,
-                            cx,
-                            &sources,
-                            current.clone(),
-                            pick.clone(),
-                        )
-                    }),
-            ))
             .child(
                 div()
                     .relative()

@@ -625,10 +625,13 @@ impl AppView {
         let count = self.automation.jobs.len() + 1;
         let definition = match kind {
             JobKind::Sql => {
-                let connection = self
+                // The only saved connection is the job's; with several the
+                // user chooses, rather than run on whichever comes first.
+                let mut saved = self
                     .connections
                     .iter()
-                    .find_map(|connection| connection.profile.as_ref().map(|profile| profile.id));
+                    .filter_map(|connection| connection.profile.as_ref().map(|profile| profile.id));
+                let connection = logic::only(&mut saved);
                 JobDefinition::new_sql(tr!("SQL Job {0}", count), connection)
             }
             JobKind::Process => JobDefinition::new_process(tr!("Program {0}", count)),
