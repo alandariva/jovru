@@ -228,6 +228,10 @@ pub struct ProgramOutcome {
     /// After Stop, the deadline or a protocol failure: whether the tree
     /// ended on its own within 5 s or was killed.
     pub stop: Option<process::StopResult>,
+    /// The program as the job names it: a path, or a name for `PATH`.
+    pub named: String,
+    /// The entrypoint as the job names it, when it names one.
+    pub entrypoint: Option<String>,
     /// What the run asked to start, resolved.
     pub program: Option<PathBuf>,
     pub program_fingerprint: Option<String>,
@@ -236,6 +240,8 @@ pub struct ProgramOutcome {
     pub protocol: Option<jjp::ProtocolProblem>,
     /// Why the program could not start.
     pub start_error: Option<process::StartError>,
+    /// What the system said when it refused to start it. In memory only.
+    pub start_message: Option<String>,
 }
 
 /// How a run ended. Held in memory only: closing every handle to the run

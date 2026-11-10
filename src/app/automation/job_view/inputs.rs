@@ -296,12 +296,76 @@ impl JobView {
                 )
             })
             .children(lines.iter().map(line))
+            .when_some(self.run_error.as_ref(), |s, error| {
+                s.child(self.error_card(error, cx))
+            })
             .when_some(self.changed_file.clone(), |s, _| {
                 s.child(
                     button("job-republish", I::Upload, tr!("Publish"))
                         .on_click(cx.listener(|this, _, _, cx| this.publish(cx))),
                 )
             })
+    }
+
+    /// The database's error, in the shape every error has: a title, the
+    /// database's own message, its codes and position, a suggested action
+    /// and **Copy details**.
+    fn error_card(&self, error: &words::RunError, cx: &mut Context<Self>) -> Stateful<Div> {
+        let details = error.details.clone();
+        let title = match &error.step {
+            Some(step) => tr!("{0}: {1}", step, error.title),
+            None => error.title.clone(),
+        };
+        column()
+            .id("job-run-error")
+            .role(Role::Alert)
+            .aria_label(format!("{title}. {}", error.message))
+            .mt_1()
+            .p_3()
+            .gap_2()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgb(colors().red))
+            .child(
+                row().gap_2().child(icon(I::CircleX, colors().red)).child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(colors().red))
+                        .child(title),
+                ),
+            )
+            .child(
+                div()
+                    .pl(px(24.))
+                    .font_family(fonts().mono.clone())
+                    .text_size(px(12.))
+                    .line_height(relative(1.5))
+                    .text_color(rgb(colors().text))
+                    .child(error.message.clone()),
+            )
+            .when_some(error.codes.clone(), |s, codes| {
+                s.child(div().pl(px(24.)).child(label(codes)))
+            })
+            .when_some(error.action.clone(), |s, action| {
+                s.child(
+                    div()
+                        .pl(px(24.))
+                        .text_size(px(12.))
+                        .text_color(rgb(colors().muted))
+                        .child(action),
+                )
+            })
+            .child(row().pl(px(24.)).child(
+                button("job-copy-error", I::Copy, tr!("Copy details")).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                        this.notice =
+                            Some(Feedback::new(Tone::Success, tr!("Error details copied.")));
+                        cx.notify();
+                    },
+                )),
+            ))
     }
 
     pub(super) fn runs_panel(&self, _cx: &mut Context<Self>) -> Div {

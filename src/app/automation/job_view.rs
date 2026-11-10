@@ -231,6 +231,11 @@ pub struct JobView {
     notice: Option<Feedback>,
     /// What the last run said: its outcome, or why it did not run.
     run_lines: Vec<Line>,
+    /// The database's error of the last run, shown as every error is.
+    run_error: Option<words::RunError>,
+    /// The statement of the run on its way, when it is sent as written (no
+    /// `:name` parameters): an error's position is read against it.
+    ran_sql: Option<String>,
     /// A refused program run names its changed file: **Publish** fixes it.
     changed_file: Option<String>,
     /// The form was prefilled from a chain step's stored outputs.
@@ -346,6 +351,8 @@ impl JobView {
             pending: None,
             notice: None,
             run_lines: Vec::new(),
+            run_error: None,
+            ran_sql: None,
             changed_file: None,
             prefill_note: None,
             grid: cx.new(|cx| ResultGrid::new(Arc::default(), false, cx)),
@@ -1344,6 +1351,8 @@ impl JobView {
             programs_known: None,
         });
         self.run_lines.clear();
+        self.run_error = None;
+        self.ran_sql = None;
         self.changed_file = None;
         self.value_errors.clear();
         self.continue_run(cx);
@@ -1720,6 +1729,10 @@ impl JobView {
 
     fn submit(&mut self, request: JobRequest, dialect: Option<SqlDialect>, cx: &mut Context<Self>) {
         self.pending = None;
+        self.ran_sql = match &request.definition.body {
+            JobBody::Sql(body) if body.parameters.is_empty() => Some(body.sql.clone()),
+            _ => None,
+        };
         match self.engine.submit(request) {
             Ok(handle) => {
                 // The last run's result is not this run's.
@@ -1786,6 +1799,12 @@ impl JobView {
             RunStatus::Finished(outcome) => {
                 self.tick = None;
                 self.run_lines = words::outcome_lines(outcome, dialect);
+                self.run_error = words::run_error(
+                    outcome,
+                    self.ran_sql.as_deref(),
+                    &self.definition.name,
+                    None,
+                );
                 if outcome.sql.is_some() {
                     let outcome = outcome.clone();
                     let grid = self.grid.clone();
@@ -1916,7 +1935,23 @@ impl JobView {
                     *step_status = None;
                 }
                 ChainStatus::Finished(outcome) => {
-                    self.run_lines = chain_outcome_lines(outcome, &connections);
+                    let changed = (outcome.cause == Some(jykre::automation::Cause::PlanChanged))
+                        .then_some(outcome.failed_step.as_ref())
+                        .flatten()
+                        .and_then(|step| {
+                            Some(logic::plan_changed_text(connections.get(step)?, step))
+                        });
+                    self.run_lines = words::chain_outcome_lines(outcome, changed);
+                    // The step that stopped the chain says what the database
+                    // said, as its own run would.
+                    self.run_error =
+                        outcome
+                            .steps
+                            .iter()
+                            .zip(&outcome.step_ids)
+                            .find_map(|(step, id)| {
+                                words::run_error(step, None, &self.definition.name, Some(id))
+                            });
                     self.step_watch = None;
                     self.tick = None;
                     self.history.update(cx, |history, cx| history.refresh(cx));
@@ -2049,68 +2084,6 @@ impl JobView {
         self.changed(cx);
         self.refresh_plan(cx);
     }
-}
-
-/// What a finished chain says: its state and cause, `effect_unknown`, and
-/// each step's outcome; steps after the one that stopped it did not run.
-fn chain_outcome_lines(
-    outcome: &jykre::automation::ChainOutcome,
-    connections: &HashMap<String, String>,
-) -> Vec<Line> {
-    let mut lines = Vec::new();
-    let elapsed = Some(outcome.elapsed);
-    let state = words::state_label(outcome.state, outcome.cause, elapsed);
-    let level = match outcome.state {
-        jykre::automation::RunState::Succeeded => Level::Success,
-        jykre::automation::RunState::Cancelled => Level::Warning,
-        _ => Level::Error,
-    };
-    let mut first = state;
-    if let Some(cause) = outcome.cause {
-        first.push_str(". ");
-        first.push_str(words::cause_sentence(cause, Some(JobKind::Chain)));
-    }
-    if let Some(step) = &outcome.failed_step {
-        first.push(' ');
-        first.push_str(&tr!("It stopped at {0}.", step));
-    }
-    lines.push(Line { level, text: first });
-    if outcome.cause == Some(jykre::automation::Cause::PlanChanged)
-        && let Some(step) = &outcome.failed_step
-        && let Some(connection) = connections.get(step)
-    {
-        lines.push(Line {
-            level: Level::Error,
-            text: logic::plan_changed_text(connection, step),
-        });
-    }
-    if let Some(problem) = &outcome.input_problem {
-        lines.push(Line {
-            level: Level::Error,
-            text: words::input_problems(std::slice::from_ref(problem)),
-        });
-    }
-    if outcome.effect_unknown {
-        lines.push(Line {
-            level: Level::Warning,
-            text: words::effect_unknown().to_owned(),
-        });
-    }
-    for (index, id) in outcome.step_ids.iter().enumerate() {
-        let text = match outcome.steps.get(index) {
-            Some(step) => tr!(
-                "{0}: {1}",
-                id,
-                words::state_label(step.state, step.cause, Some(step.elapsed))
-            ),
-            None => tr!("{0}: Not run.", id),
-        };
-        lines.push(Line {
-            level: Level::Info,
-            text,
-        });
-    }
-    lines
 }
 
 impl Render for JobView {

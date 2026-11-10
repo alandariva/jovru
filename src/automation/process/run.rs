@@ -173,6 +173,7 @@ async fn execute(request: ProgramRequest) -> ProgramReport {
             }
             drop((stdout_log, stderr_log));
             discard_logs(&data_dir, run).await;
+            report.start_message = Some(error.to_string());
             return not_started(report, kind, started);
         }
     };
@@ -334,6 +335,7 @@ fn empty_report(
         run,
         protocol,
         decided_by: Decider::Exit,
+        start_message: None,
         exit: None,
         stop: None,
         terminal: None,
