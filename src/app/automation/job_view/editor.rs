@@ -97,15 +97,21 @@ impl JobView {
                 s.child(spinning_icon("job-busy", I::LoaderCircle, colors().amber))
             })
             .child(
-                icon_button(
+                button(
                     "job-save",
                     if self.unsaved { I::Save } else { I::BookmarkCheck },
                     if self.unsaved {
-                        tr!("Save the job")
+                        tr!("Save")
                     } else {
                         tr!("Saved")
                     },
                 )
+                .aria_label(if self.unsaved {
+                    tr!("Save the job")
+                } else {
+                    tr!("Saved")
+                })
+                .when(!self.unsaved, |s| s.text_color(rgb(colors().muted)))
                 .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             )
             .when(self.kind != JobKind::Chain, |s| {
@@ -141,13 +147,80 @@ impl JobView {
             } else {
                 primary_button("job-run", I::Play, tr!("Run")).on_click(cx.listener(
                     |this, _, window, cx| {
-                        if this.inner != Inner::Inputs && !this.values.is_empty() {
-                            this.set_inner(Inner::Inputs, window, cx);
+                        if this.inner != Inner::Run && !this.values.is_empty() {
+                            this.set_inner(Inner::Run, window, cx);
                         }
                         this.run(cx)
                     },
                 ))
             })
+    }
+
+    /// A section that folds to its title and one line saying what it
+    /// holds. Returns the section, with its header, and whether its
+    /// contents are drawn.
+    fn fold(
+        &self,
+        which: logic::Section,
+        title: &'static str,
+        summary: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> (Div, bool) {
+        let open = self.open.contains(&which);
+        let summary = summary.into();
+        let header = row()
+            .id(("job-section", which as usize))
+            .role(Role::Button)
+            .aria_label(title)
+            .aria_description(summary.clone())
+            .aria_expanded(open)
+            .focusable()
+            .tab_index(0)
+            .focus_visible(|s| s.bg(rgb(colors().hover)))
+            .rounded(px(4.))
+            .gap_2()
+            .cursor_pointer()
+            .child(icon(
+                if open {
+                    I::ChevronDown
+                } else {
+                    I::ChevronRight
+                },
+                colors().muted,
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .when(!open, |s| {
+                s.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(rgb(colors().muted))
+                        .child(summary),
+                )
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.open.remove(&which) {
+                    this.open.insert(which);
+                }
+                cx.notify();
+            }));
+        let section = column()
+            .flex_none()
+            .gap_2()
+            .p_3()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(colors().border))
+            .child(header);
+        (section, open)
     }
 
     pub(super) fn inner_tabs(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -195,13 +268,13 @@ impl JobView {
                 ),
             )
             .child(
-                tab("job-tab-inputs", Inner::Inputs, tr!("Inputs"), self).on_click(
-                    cx.listener(|this, _, window, cx| this.set_inner(Inner::Inputs, window, cx)),
+                tab("job-tab-run", Inner::Run, tr!("Run and result"), self).on_click(
+                    cx.listener(|this, _, window, cx| this.set_inner(Inner::Run, window, cx)),
                 ),
             )
             .child(
-                tab("job-tab-runs", Inner::Runs, tr!("Runs"), self).on_click(
-                    cx.listener(|this, _, window, cx| this.set_inner(Inner::Runs, window, cx)),
+                tab("job-tab-history", Inner::History, tr!("History"), self).on_click(
+                    cx.listener(|this, _, window, cx| this.set_inner(Inner::History, window, cx)),
                 ),
             )
             .when(self.revision.is_some(), |s| {
@@ -256,11 +329,13 @@ impl JobView {
                 JobBody::Process(process) => {
                     let jjp = process.protocol == Protocol::Jjp1;
                     s.child(self.program_section())
+                        .child(self.files_section(cx))
                         .child(self.environment_section(cx))
                         .child(self.protocol_section(cx))
                         .when(jjp, |s| s.child(self.specs_section(true, cx)))
-                        .child(self.limits_section(cx))
                         .when(jjp, |s| s.child(self.outputs_section(cx)))
+                        .child(self.limits_section(cx))
+                        .child(self.running_section(cx))
                         .child(self.versions_section(cx))
                 }
                 JobBody::Chain(_) => s
@@ -459,7 +534,7 @@ impl JobView {
             })
             .child(note(words::one_statement_note()))
             .child(note(tr!(
-                "{0} and the other run shortcuts of a query tab never run a job: Run does, from the toolbar or the Inputs.",
+                "{0} and the other run shortcuts of a query tab never run a job: Run does, in the toolbar or in Run and result.",
                 crate::app::shortcuts::label::<crate::app::ExecuteCurrentQuery>(cx)
             )))
     }
@@ -745,7 +820,22 @@ impl JobView {
             ),
         };
         let _ = default;
-        section(tr!("Limits"))
+        let rows = self.sql.as_ref().map(|fields| {
+            whole(&fields.max_rows.read(cx).value())
+                .and_then(|rows| u32::try_from(rows).ok())
+                .unwrap_or(0)
+        });
+        let effective = if current == 0 { default } else { current };
+        let (section, open) = self.fold(
+            logic::Section::Limits,
+            tr!("Limits"),
+            logic::limits_summary(effective, rows),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(
                 row()
                     .gap_3()
@@ -788,7 +878,16 @@ impl JobView {
             JobBody::Process(body) => (None, body.persist_outputs),
             JobBody::Chain(_) => (None, false),
         };
-        section(tr!("Declared outputs"))
+        let (section, open) = self.fold(
+            logic::Section::Outputs,
+            tr!("Declared outputs"),
+            logic::outputs_summary(outputs.len(), persist),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(note(if sql {
                 tr!(
                     "What a later chain step may read: each output names a result column by its position (from 1), since names may repeat."
@@ -1035,7 +1134,16 @@ impl JobView {
 
     fn versions_section(&self, cx: &mut Context<Self>) -> Div {
         let count = self.versions.len();
-        section(tr!("Published versions"))
+        let (section, open) = self.fold(
+            logic::Section::Versions,
+            tr!("Published versions"),
+            logic::versions_summary(self.versions.first().map(|version| version.version)),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(note(words::versions_note()))
             .when(count == 0, |s| {
                 s.child(label(tr!(
@@ -1153,6 +1261,27 @@ impl JobView {
                 ),
             })
             .child(note(bits::command_note()))
+            .child(warning(words::trusted_note()))
+    }
+
+    /// The file a version pins and the folder the program starts in.
+    fn files_section(&self, cx: &mut Context<Self>) -> Div {
+        let Some(fields) = &self.program else {
+            return div();
+        };
+        let (section, open) = self.fold(
+            logic::Section::Files,
+            tr!("Entrypoint and working folder"),
+            logic::files_summary(
+                &fields.entrypoint.read(cx).value(),
+                &fields.working_directory.read(cx).value(),
+            ),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(field(
                 tr!("Entrypoint"),
                 Input::new(&fields.entrypoint)
@@ -1167,7 +1296,21 @@ impl JobView {
                     .aria_label(tr!("The working folder")),
             ))
             .child(note(words::working_directory_note()))
-            .child(warning(words::trusted_note()))
+    }
+
+    /// What holds for every run of a program: its logs, its stdin and how
+    /// Stop ends it.
+    fn running_section(&self, cx: &mut Context<Self>) -> Div {
+        let (section, open) = self.fold(
+            logic::Section::Running,
+            tr!("Logs, stdin and Stop"),
+            tr!("Logs kept 7 days · stdin reserved · Stop waits 5 s"),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(note(words::logs_note()))
             .child(note(words::stdin_note()))
             .child(note(words::stop_note()))
@@ -1250,7 +1393,16 @@ impl JobView {
         let Some(fields) = &self.program else {
             return div();
         };
-        section(tr!("Environment"))
+        let (section, open) = self.fold(
+            logic::Section::Environment,
+            tr!("Environment"),
+            logic::environment_summary(fields.unset.len(), fields.set.len()),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(warning(words::environment_note(
                 super::super::program_bits::denylist(),
             )))
@@ -1343,7 +1495,16 @@ impl JobView {
                 .aria_selected(on)
                 .when(on, |s| s.text_color(rgb(colors().mint)))
         };
-        section(tr!("Protocol"))
+        let (section, open) = self.fold(
+            logic::Section::Protocol,
+            tr!("Protocol"),
+            logic::protocol_summary(current),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(
                 row()
                     .id("job-protocol")

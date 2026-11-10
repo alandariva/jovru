@@ -461,12 +461,105 @@ pub fn chain_snapshot(snapshot: &str) -> Option<(JobDefinition, Vec<SnapshotStep
     Some((chain, steps))
 }
 
-/// Whether a job's **Inputs** shows the result grid: only a finished run's
+/// Whether a job's **Run and result** shows the result grid: only a finished run's
 /// result. A run that is queued or running has none yet, and the previous
 /// run's would read as its own; the status above says **Queued** or what
 /// it is doing (section 8.1.1).
 pub fn shows_result(has_result: bool, running: bool) -> bool {
     has_result && !running
+}
+
+/// A section of a job's editor that folds to its title and one line saying
+/// what it holds, so the form opens on what a job needs first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Section {
+    Limits,
+    Outputs,
+    Versions,
+    /// A program's entrypoint and working folder.
+    Files,
+    Environment,
+    Protocol,
+    /// A program's logs, its stdin and how Stop ends it.
+    Running,
+}
+
+/// The sections a job's editor opens unfolded: those that hold something
+/// the job sets, so nothing chosen is out of sight.
+pub fn open_sections(definition: &JobDefinition) -> Vec<Section> {
+    let mut open = Vec::new();
+    if !definition.outputs().is_empty() || definition.persists_outputs() {
+        open.push(Section::Outputs);
+    }
+    if let JobBody::Process(process) = &definition.body {
+        if process.entrypoint.is_some() || process.working_directory.is_some() {
+            open.push(Section::Files);
+        }
+        if !process.environment.unset.is_empty() || !process.environment.set.is_empty() {
+            open.push(Section::Environment);
+        }
+        if process.protocol == Protocol::Jjp1 {
+            open.push(Section::Protocol);
+        }
+    }
+    open
+}
+
+/// What the folded **Limits** says: the timeout and, for a SQL Job, the
+/// rows a run keeps.
+pub fn limits_summary(timeout_ms: u64, rows: Option<u32>) -> String {
+    let timeout = jykre::cell_format::duration(timeout_ms);
+    match rows {
+        Some(1) => tr!("Timeout {0} · at most 1 row", timeout),
+        Some(rows) => tr!("Timeout {0} · at most {1} rows", timeout, rows),
+        None => tr!("Timeout {0}", timeout),
+    }
+}
+
+/// What the folded **Declared outputs** says.
+pub fn outputs_summary(count: usize, stored: bool) -> String {
+    match (count, stored) {
+        (0, _) => tr!("None").to_owned(),
+        (1, false) => tr!("1 output").to_owned(),
+        (1, true) => tr!("1 output, stored").to_owned(),
+        (count, false) => tr!("{0} outputs", count),
+        (count, true) => tr!("{0} outputs, stored", count),
+    }
+}
+
+/// What the folded **Published versions** says.
+pub fn versions_summary(latest: Option<i64>) -> String {
+    match latest {
+        Some(version) => tr!("Latest: version {0}", version),
+        None => tr!("Not published").to_owned(),
+    }
+}
+
+/// What the folded entrypoint and working folder say.
+pub fn files_summary(entrypoint: &str, folder: &str) -> String {
+    match (entrypoint.trim(), folder.trim()) {
+        ("", "") => tr!("The program itself, in its own folder").to_owned(),
+        (entrypoint, "") => entrypoint.to_owned(),
+        ("", folder) => tr!("In {0}", folder),
+        (entrypoint, folder) => tr!("{0}, in {1}", entrypoint, folder),
+    }
+}
+
+/// What the folded **Environment** says.
+pub fn environment_summary(unset: usize, set: usize) -> String {
+    if unset == 0 && set == 0 {
+        tr!("Jykre Studio's, minus its own variables").to_owned()
+    } else {
+        tr!("{0} removed, {1} set", unset, set)
+    }
+}
+
+/// What the folded **Protocol** says.
+pub fn protocol_summary(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::None => tr!("None: fixed arguments, no inputs or outputs"),
+        Protocol::Jjp1 => tr!("jjp/1: inputs and outputs"),
+    }
 }
 
 /// The stream of a program's output shown first: what it printed to
@@ -906,6 +999,57 @@ mod tests {
         assert_eq!(steps[0].version, 2);
         assert_eq!(steps[0].definition, Some(job));
         assert!(snapshot_definition("not json").is_none());
+    }
+
+    #[test]
+    fn a_job_opens_unfolded_only_what_it_sets() {
+        crate::app::source_text();
+        let plain = program_version(Protocol::None);
+        assert!(open_sections(&plain).is_empty());
+        let mut set = program_version(Protocol::Jjp1);
+        if let JobBody::Process(process) = &mut set.body {
+            process.entrypoint = Some("/jobs/export.js".into());
+            process.environment.unset.push("AWS_PROFILE".into());
+        }
+        // The jjp/1 version declares an output, so its outputs open too.
+        assert_eq!(
+            open_sections(&set),
+            [
+                Section::Outputs,
+                Section::Files,
+                Section::Environment,
+                Section::Protocol
+            ]
+        );
+        assert_eq!(open_sections(&sql_version(&["rows"])), [Section::Outputs]);
+        assert!(open_sections(&sql_version(&[])).is_empty());
+    }
+
+    #[test]
+    fn a_folded_section_says_what_it_holds() {
+        crate::app::source_text();
+        assert_eq!(
+            limits_summary(300_000, Some(1000)),
+            "Timeout 5 min 0 s · at most 1000 rows"
+        );
+        assert_eq!(limits_summary(60_000, None), "Timeout 1 min 0 s");
+        assert_eq!(outputs_summary(0, false), "None");
+        assert_eq!(outputs_summary(1, true), "1 output, stored");
+        assert_eq!(outputs_summary(3, false), "3 outputs");
+        assert_eq!(versions_summary(None), "Not published");
+        assert_eq!(versions_summary(Some(4)), "Latest: version 4");
+        assert_eq!(
+            files_summary("", " "),
+            "The program itself, in its own folder"
+        );
+        assert_eq!(files_summary("/jobs/a.js", ""), "/jobs/a.js");
+        assert_eq!(files_summary("a.js", "/jobs"), "a.js, in /jobs");
+        assert_eq!(
+            environment_summary(0, 0),
+            "Jykre Studio's, minus its own variables"
+        );
+        assert_eq!(environment_summary(1, 2), "1 removed, 2 set");
+        assert!(protocol_summary(Protocol::None).starts_with("None"));
     }
 
     #[test]

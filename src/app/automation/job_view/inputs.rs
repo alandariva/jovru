@@ -1,5 +1,5 @@
-//! The job tab's **Inputs** (the run form, the run's progress and the
-//! latest SQL result) and **Runs** (this job's history).
+//! The job tab's **Run and result** (the run form, the run's progress and
+//! what it left to look at) and **History** (this job's past runs).
 use super::*;
 use crate::app::report_view::invalid_hint;
 use gpui_kit::assets::IconName as I;
@@ -19,7 +19,7 @@ impl JobView {
         column()
             .id("job-inputs")
             .role(Role::TabPanel)
-            .aria_label(tr!("Inputs"))
+            .aria_label(tr!("Run and result"))
             .flex_1()
             .min_h_0()
             .child(
@@ -166,6 +166,7 @@ impl JobView {
             .flex_none()
             .p_3()
             .gap_2()
+                    .child(self.target_line(cx))
                     .when(!takes_inputs(definition), |s| {
                         s.child(label(tr!(
                             "A program without a protocol takes no inputs: it runs with its fixed arguments."
@@ -207,8 +208,67 @@ impl JobView {
                                 s.child(label(tr!("Waiting for your answer…")))
                             }),
                     )
-                    .child(note_line(words::refused_note()))
-                    .when(self.kind == JobKind::Process, |s| s.child(note_line(words::stop_note())))
+    }
+
+    /// What **Run** starts, in one line: where a SQL Job runs, a program's
+    /// command, or how many steps a chain has.
+    fn target_line(&self, cx: &App) -> Stateful<Div> {
+        let line = row().id("job-run-target").role(Role::Status).gap_2();
+        let missing = |text: &'static str| {
+            row()
+                .gap_2()
+                .text_size(px(13.))
+                .text_color(rgb(colors().amber))
+                .child(icon(I::TriangleAlert, colors().amber))
+                .child(text)
+        };
+        match &self.definition.body {
+            JobBody::Sql(body) => {
+                let source = body
+                    .connection
+                    .and_then(|id| source_of(&self.sources.sources, id));
+                match source {
+                    Some(source) => {
+                        line.child(icon(I::Database, colors().muted))
+                            .child(label(tr!(
+                                "Runs on {0}",
+                                jykre::reports::source_label(
+                                    &source.connection.name,
+                                    &body.context
+                                )
+                            )))
+                    }
+                    None => line.child(missing(tr!(
+                        "No connection to run on: choose one in the Editor."
+                    ))),
+                }
+            }
+            JobBody::Process(_) => {
+                let command = self
+                    .program
+                    .as_ref()
+                    .map(|fields| fields.command.read(cx).value())
+                    .unwrap_or_default();
+                if command.trim().is_empty() {
+                    line.child(missing(tr!("No command to run: type one in the Editor.")))
+                } else {
+                    line.child(icon(I::SquareTerminal, colors().muted))
+                        .child(label(tr!("Command")))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(fonts().mono.clone())
+                                .text_size(px(12.))
+                                .child(command),
+                        )
+                }
+            }
+            JobBody::Chain(chain) => line
+                .child(icon(I::ListChecks, colors().muted))
+                .child(label(tr!("Runs {0} steps, in order", chain.steps.len()))),
+        }
     }
 
     fn value_field(
@@ -487,13 +547,4 @@ impl JobView {
             })
             .child(self.history.clone())
     }
-}
-
-fn note_line(text: &'static str) -> Div {
-    row()
-        .items_start()
-        .text_size(px(12.))
-        .text_color(rgb(colors().faint))
-        .child(icon(I::Info, colors().faint))
-        .child(div().flex_1().min_w_0().child(text))
 }

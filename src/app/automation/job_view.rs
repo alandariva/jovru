@@ -1,7 +1,7 @@
 //! A job's tab: its **Editor** (a SQL Job, a program or a chain, as a
-//! form), its **Inputs** (the run form, **Run** and **Stop**, the run's
-//! progress and the latest SQL result) and its **Runs** (this job's
-//! history).
+//! form), its **Run and result** (the run form, **Run** and **Stop**, the
+//! run's progress and what it left to look at: a SQL Job's rows, or what a
+//! program printed) and its **History** (this job's past runs).
 //!
 //! The view holds the definition being edited and the run it started; the
 //! engine decides and runs. A run goes: the form's values, the password of
@@ -82,8 +82,10 @@ pub enum Ask {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Inner {
     Editor,
-    Inputs,
-    Runs,
+    /// The run form, the run's account and what it left to look at.
+    Run,
+    /// This job's past runs.
+    History,
     /// A saved job's schedule (section 9.5).
     Schedule,
 }
@@ -271,6 +273,8 @@ pub struct JobView {
     grid: Entity<ResultGrid>,
     has_result: bool,
     shown: Shown,
+    /// The editor's sections shown unfolded.
+    open: std::collections::HashSet<logic::Section>,
     history: Entity<HistoryList>,
     sources: JobSources,
     catalogs: Arc<SqlCatalogs>,
@@ -356,6 +360,7 @@ impl JobView {
         subscriptions.push(cx.subscribe(&history, |_, _, event: &HistoryEvent, cx| {
             cx.emit(JobEvent::History(event.clone()));
         }));
+        let open = logic::open_sections(&definition).into_iter().collect();
         let mut view = Self {
             kind: definition.kind(),
             id: definition.id,
@@ -387,6 +392,7 @@ impl JobView {
             grid: cx.new(|cx| ResultGrid::new(Arc::default(), false, cx)),
             has_result: false,
             shown: Shown::Nothing,
+            open,
             history,
             sources,
             catalogs,
@@ -428,7 +434,7 @@ impl JobView {
         self.set_inner(inner, window, cx);
     }
 
-    /// The job's **Runs** list.
+    /// The job's **History** list.
     pub(super) fn benchmark_history(&self) -> Entity<HistoryList> {
         self.history.clone()
     }
@@ -488,11 +494,11 @@ impl JobView {
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.inner {
             Inner::Editor => self.name.update(cx, |input, cx| input.focus(window, cx)),
-            Inner::Inputs => match self.values.first() {
+            Inner::Run => match self.values.first() {
                 Some(field) => field.input.update(cx, |input, cx| input.focus(window, cx)),
                 None => window.focus(&self.focus, cx),
             },
-            Inner::Runs => self
+            Inner::History => self
                 .history
                 .update(cx, |history, cx| history.focus(window, cx)),
             Inner::Schedule => match &self.schedule {
@@ -534,7 +540,7 @@ impl JobView {
 
     fn set_inner(&mut self, inner: Inner, window: &mut Window, cx: &mut Context<Self>) {
         self.inner = inner;
-        if inner == Inner::Runs {
+        if inner == Inner::History {
             self.history.update(cx, |history, cx| history.refresh(cx));
         }
         if inner == Inner::Schedule && self.schedule.is_none() {
@@ -1419,7 +1425,7 @@ impl JobView {
             level: Level::Error,
             text,
         }];
-        self.inner = Inner::Inputs;
+        self.inner = Inner::Run;
         cx.notify();
     }
 
@@ -1751,7 +1757,7 @@ impl JobView {
             Ok(handle) => {
                 self.has_result = false;
                 self.shown = Shown::Nothing;
-                self.inner = Inner::Inputs;
+                self.inner = Inner::Run;
                 self.watch_chain(handle, step_ids, cx);
             }
             Err(refusal) => self.refuse(words::refusal(&refusal), cx),
@@ -1769,7 +1775,7 @@ impl JobView {
                 // The last run's result is not this run's.
                 self.has_result = false;
                 self.shown = Shown::Nothing;
-                self.inner = Inner::Inputs;
+                self.inner = Inner::Run;
                 self.watch_run(handle, dialect, cx);
             }
             Err(refusal) => {
@@ -2137,7 +2143,7 @@ impl JobView {
                 missing.join(", ")
             )
         });
-        self.set_inner(Inner::Inputs, window, cx);
+        self.set_inner(Inner::Run, window, cx);
     }
 
     // -----------------------------------------------------------------------
@@ -2229,8 +2235,8 @@ impl Render for JobView {
             })
             .child(match self.inner {
                 Inner::Editor => self.editor_panel(window, cx).into_any_element(),
-                Inner::Inputs => self.inputs_panel(cx).into_any_element(),
-                Inner::Runs => self.runs_panel(cx).into_any_element(),
+                Inner::Run => self.inputs_panel(cx).into_any_element(),
+                Inner::History => self.runs_panel(cx).into_any_element(),
                 Inner::Schedule => self.schedule_panel(cx).into_any_element(),
             })
     }

@@ -2,7 +2,8 @@
 //! 8.1; Q-20…Q-22): the engine as an application-root service
 //! ([ADR-0034](../../../docs/adr/0034-automation-database-service-and-lock.md)),
 //! the list of jobs and chains in the sidebar, a tab per job with its
-//! **Editor**, **Inputs** and **Runs**, and the global **Runs** list.
+//! **Editor**, **Run and result** and **History**, and the global **Runs**
+//! list.
 //!
 //! `AppView` creates one [`Engine`] at start. Runs belong to the engine,
 //! not to a tab: closing a job's tab never stops its run. Closing the
