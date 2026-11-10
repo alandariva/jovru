@@ -2,7 +2,6 @@
 //! program or a chain as a form, each stating the engine's rules where
 //! they apply (specification, section 8.1.1).
 use super::*;
-use crate::app::report_panel::{PickSource, source_menu};
 use crate::app::report_view::{invalid_hint, kind_name as parameter_kind};
 use crate::app::workspace::SQL_EDITOR_CONTEXT;
 use gpui_kit::assets::IconName as I;
@@ -98,15 +97,21 @@ impl JobView {
                 s.child(spinning_icon("job-busy", I::LoaderCircle, colors().amber))
             })
             .child(
-                icon_button(
+                button(
                     "job-save",
                     if self.unsaved { I::Save } else { I::BookmarkCheck },
                     if self.unsaved {
-                        tr!("Save the job")
+                        tr!("Save")
                     } else {
                         tr!("Saved")
                     },
                 )
+                .aria_label(if self.unsaved {
+                    tr!("Save the job")
+                } else {
+                    tr!("Saved")
+                })
+                .when(!self.unsaved, |s| s.text_color(rgb(colors().muted)))
                 .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
             )
             .when(self.kind != JobKind::Chain, |s| {
@@ -142,13 +147,80 @@ impl JobView {
             } else {
                 primary_button("job-run", I::Play, tr!("Run")).on_click(cx.listener(
                     |this, _, window, cx| {
-                        if this.inner != Inner::Inputs && !this.values.is_empty() {
-                            this.set_inner(Inner::Inputs, window, cx);
+                        if this.inner != Inner::Run && !this.values.is_empty() {
+                            this.set_inner(Inner::Run, window, cx);
                         }
                         this.run(cx)
                     },
                 ))
             })
+    }
+
+    /// A section that folds to its title and one line saying what it
+    /// holds. Returns the section, with its header, and whether its
+    /// contents are drawn.
+    fn fold(
+        &self,
+        which: logic::Section,
+        title: &'static str,
+        summary: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) -> (Div, bool) {
+        let open = self.open.contains(&which);
+        let summary = summary.into();
+        let header = row()
+            .id(("job-section", which as usize))
+            .role(Role::Button)
+            .aria_label(title)
+            .aria_description(summary.clone())
+            .aria_expanded(open)
+            .focusable()
+            .tab_index(0)
+            .focus_visible(|s| s.bg(rgb(colors().hover)))
+            .rounded(px(4.))
+            .gap_2()
+            .cursor_pointer()
+            .child(icon(
+                if open {
+                    I::ChevronDown
+                } else {
+                    I::ChevronRight
+                },
+                colors().muted,
+            ))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(title),
+            )
+            .when(!open, |s| {
+                s.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(rgb(colors().muted))
+                        .child(summary),
+                )
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.open.remove(&which) {
+                    this.open.insert(which);
+                }
+                cx.notify();
+            }));
+        let section = column()
+            .flex_none()
+            .gap_2()
+            .p_3()
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(colors().border))
+            .child(header);
+        (section, open)
     }
 
     pub(super) fn inner_tabs(&self, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -196,13 +268,13 @@ impl JobView {
                 ),
             )
             .child(
-                tab("job-tab-inputs", Inner::Inputs, tr!("Inputs"), self).on_click(
-                    cx.listener(|this, _, window, cx| this.set_inner(Inner::Inputs, window, cx)),
+                tab("job-tab-run", Inner::Run, tr!("Run and result"), self).on_click(
+                    cx.listener(|this, _, window, cx| this.set_inner(Inner::Run, window, cx)),
                 ),
             )
             .child(
-                tab("job-tab-runs", Inner::Runs, tr!("Runs"), self).on_click(
-                    cx.listener(|this, _, window, cx| this.set_inner(Inner::Runs, window, cx)),
+                tab("job-tab-history", Inner::History, tr!("History"), self).on_click(
+                    cx.listener(|this, _, window, cx| this.set_inner(Inner::History, window, cx)),
                 ),
             )
             .when(self.revision.is_some(), |s| {
@@ -248,6 +320,7 @@ impl JobView {
             )
             .map(|s| match &definition.body {
                 JobBody::Sql(_) => s
+                    .child(self.connection_section(cx))
                     .child(self.sql_section(cx))
                     .child(self.specs_section(false, cx))
                     .child(self.limits_section(cx))
@@ -255,12 +328,14 @@ impl JobView {
                     .child(self.versions_section(cx)),
                 JobBody::Process(process) => {
                     let jjp = process.protocol == Protocol::Jjp1;
-                    s.child(self.program_section(cx))
+                    s.child(self.program_section())
+                        .child(self.files_section(cx))
                         .child(self.environment_section(cx))
                         .child(self.protocol_section(cx))
                         .when(jjp, |s| s.child(self.specs_section(true, cx)))
-                        .child(self.limits_section(cx))
                         .when(jjp, |s| s.child(self.outputs_section(cx)))
+                        .child(self.limits_section(cx))
+                        .child(self.running_section(cx))
                         .child(self.versions_section(cx))
                 }
                 JobBody::Chain(_) => s
@@ -273,50 +348,144 @@ impl JobView {
     // -----------------------------------------------------------------------
     // SQL.
 
-    fn sql_section(&self, cx: &mut Context<Self>) -> Div {
+    /// Where the job runs: its connection and the database unqualified
+    /// names resolve in, as a control that reads as one, with what is wrong
+    /// with the choice said under it.
+    fn connection_section(&self, cx: &mut Context<Self>) -> Div {
         let JobBody::Sql(body) = &self.definition.body else {
-            return div();
-        };
-        let Some(fields) = &self.sql else {
             return div();
         };
         let source = body
             .connection
             .and_then(|id| source_of(&self.sources.sources, id));
-        let where_label = match source {
-            Some(source) => jykre::reports::source_label(&source.connection.name, &body.context),
-            None if body.connection.is_some() => {
-                tr!("A connection that no longer exists").to_owned()
-            }
-            None => tr!("Choose a connection").to_owned(),
-        };
+        let choice = logic::connection_choice(
+            source.map(|source| (source.connection.name.as_str(), source.input.is_some())),
+            body.connection.is_some(),
+            self.sources.sources.is_empty(),
+        );
         let view = cx.entity().downgrade();
         let sources = self.sources.sources.clone();
-        let current = source.map(|source| (source.connection.clone(), body.context.clone()));
-        let pick: PickSource = Rc::new(move |connection: ConnectionRef, context, _, cx| {
-            let _ = view.update(cx, |this, cx| this.set_connection(connection, context, cx));
+        let chosen = source.map(|source| source.connection.clone());
+        let connection_menu = {
+            let view = view.clone();
+            let chosen = chosen.clone();
+            move |mut menu: gpui_kit::component::menu::PopupMenu,
+                  _: &mut Window,
+                  _: &mut Context<gpui_kit::component::menu::PopupMenu>| {
+                if sources.is_empty() {
+                    return menu.label(tr!("No connections yet. Add one in the explorer."));
+                }
+                for source in sources.iter() {
+                    let view = view.clone();
+                    let connection = source.connection.clone();
+                    let checked = chosen
+                        .as_ref()
+                        .is_some_and(|chosen| chosen.same(&connection));
+                    menu = menu.item(
+                        PopupMenuItem::new(connection.name.clone())
+                            .checked(checked)
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.set_connection(
+                                        connection.clone(),
+                                        SessionContext::default(),
+                                        cx,
+                                    )
+                                });
+                            }),
+                    );
+                }
+                menu
+            }
+        };
+        // The database unqualified names resolve in, once a connection is
+        // chosen: the session's default, or one of its namespaces.
+        let database = source.map(|source| {
+            let connection = source.connection.clone();
+            let choices = source.choices.clone();
+            let current = body.context.clone();
+            let shown = if current == SessionContext::default() {
+                tr!("Session default").to_owned()
+            } else {
+                jykre::ddl::context_label(&current)
+            };
+            Button::new("job-database")
+                .outline()
+                .small()
+                .label(shown)
+                .dropdown_caret(true)
+                .accessibility_label(tr!("The database unqualified names resolve in"))
+                .dropdown_menu(move |mut menu, _, _| {
+                    let item = |label: String, context: SessionContext| {
+                        let view = view.clone();
+                        let connection = connection.clone();
+                        PopupMenuItem::new(label)
+                            .checked(context == current)
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |this, cx| {
+                                    this.set_connection(connection.clone(), context.clone(), cx)
+                                });
+                            })
+                    };
+                    menu = menu.item(item(
+                        tr!("Session default").to_owned(),
+                        SessionContext::default(),
+                    ));
+                    if choices.is_empty() {
+                        menu = menu.label(tr!("Refresh the metadata to list namespaces"));
+                    }
+                    for choice in &choices {
+                        menu = menu.item(item(jykre::ddl::context_label(choice), choice.clone()));
+                    }
+                    menu
+                })
         });
+        let production = source.is_some_and(|source| {
+            source.environment == Some(jykre::connection_appearance::Environment::Production)
+        });
+        section(tr!("Connection"))
+            .child(
+                row()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(
+                        Button::new("job-connection")
+                            .outline()
+                            .small()
+                            .icon(I::Database)
+                            .label(choice.label)
+                            .dropdown_caret(true)
+                            .accessibility_label(tr!("The connection the job runs on"))
+                            .dropdown_menu(connection_menu),
+                    )
+                    .when(production, |s| {
+                        s.child(environment_badge(
+                            jykre::connection_appearance::Environment::Production,
+                        ))
+                    })
+                    .when_some(database, |s, database| {
+                        s.child(label(tr!("Database"))).child(database)
+                    }),
+            )
+            .when_some(choice.problem, |s, text| {
+                s.child(
+                    div()
+                        .id("job-connection-problem")
+                        .role(Role::Alert)
+                        .child(warning(text)),
+                )
+            })
+            .child(note(tr!(
+                "The job runs on this connection, in a session of its own. Unqualified names resolve in the database chosen, or in the session's default."
+            )))
+    }
+
+    fn sql_section(&self, cx: &mut Context<Self>) -> Div {
+        let Some(fields) = &self.sql else {
+            return div();
+        };
         let editor = fields.editor.clone();
         section(tr!("Statement"))
-            .child(field(
-                tr!("Connection and where unqualified names resolve"),
-                Button::new("job-connection")
-                    .ghost()
-                    .small()
-                    .label(where_label)
-                    .dropdown_caret(true)
-                    .accessibility_label(tr!("The job's connection and database"))
-                    .dropdown_menu(move |menu, window, cx| {
-                        source_menu(
-                            menu.label(tr!("Where the job runs")),
-                            window,
-                            cx,
-                            &sources,
-                            current.clone(),
-                            pick.clone(),
-                        )
-                    }),
-            ))
             .child(
                 div()
                     .relative()
@@ -365,7 +534,7 @@ impl JobView {
             })
             .child(note(words::one_statement_note()))
             .child(note(tr!(
-                "{0} and the other run shortcuts of a query tab never run a job: Run does, from the toolbar or the Inputs.",
+                "{0} and the other run shortcuts of a query tab never run a job: Run does, in the toolbar or in Run and result.",
                 crate::app::shortcuts::label::<crate::app::ExecuteCurrentQuery>(cx)
             )))
     }
@@ -651,7 +820,22 @@ impl JobView {
             ),
         };
         let _ = default;
-        section(tr!("Limits"))
+        let rows = self.sql.as_ref().map(|fields| {
+            whole(&fields.max_rows.read(cx).value())
+                .and_then(|rows| u32::try_from(rows).ok())
+                .unwrap_or(0)
+        });
+        let effective = if current == 0 { default } else { current };
+        let (section, open) = self.fold(
+            logic::Section::Limits,
+            tr!("Limits"),
+            logic::limits_summary(effective, rows),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(
                 row()
                     .gap_3()
@@ -694,7 +878,16 @@ impl JobView {
             JobBody::Process(body) => (None, body.persist_outputs),
             JobBody::Chain(_) => (None, false),
         };
-        section(tr!("Declared outputs"))
+        let (section, open) = self.fold(
+            logic::Section::Outputs,
+            tr!("Declared outputs"),
+            logic::outputs_summary(outputs.len(), persist),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(note(if sql {
                 tr!(
                     "What a later chain step may read: each output names a result column by its position (from 1), since names may repeat."
@@ -941,7 +1134,16 @@ impl JobView {
 
     fn versions_section(&self, cx: &mut Context<Self>) -> Div {
         let count = self.versions.len();
-        section(tr!("Published versions"))
+        let (section, open) = self.fold(
+            logic::Section::Versions,
+            tr!("Published versions"),
+            logic::versions_summary(self.versions.first().map(|version| version.version)),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(note(words::versions_note()))
             .when(count == 0, |s| {
                 s.child(label(tr!(
@@ -1026,47 +1228,60 @@ impl JobView {
     // -----------------------------------------------------------------------
     // A program.
 
-    fn program_section(&self, cx: &mut Context<Self>) -> Div {
+    fn program_section(&self) -> Div {
         let Some(fields) = &self.program else {
             return div();
         };
+        use super::super::program_bits as bits;
         section(tr!("Program"))
             .child(field(
-                tr!("Program"),
-                Input::new(&fields.program)
+                tr!("Command"),
+                Input::new(&fields.command)
                     .small()
-                    .aria_label(tr!("The program to start")),
+                    .aria_label(tr!("The command: the program and its arguments")),
             ))
-            .child(note(tr!(
-                "Started without a shell: an absolute path, or a name looked up on PATH when the run starts."
-            )))
-            .child(label(tr!("Arguments, one per row, passed as they are")))
-            .children(fields.arguments.iter().enumerate().map(|(index, argument)| {
-                row()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(Input::new(argument).small().aria_label(tr!("Argument"))),
-                    )
-                    .child(
-                        icon_button(("argument-remove", index), I::Trash, tr!("Remove the argument"))
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.edit_program(window, cx, |body| {
-                                    if index < body.arguments.len() {
-                                        body.arguments.remove(index);
-                                    }
-                                })
-                            })),
-                    )
-            }))
-            .child(
-                button("argument-add", I::Plus, tr!("Add an argument")).on_click(cx.listener(
-                    |this, _, window, cx| {
-                        this.edit_program(window, cx, |body| body.arguments.push(String::new()))
+            .map(|s| match &fields.read {
+                Err(error) => s.child(
+                    div()
+                        .id("job-command-problem")
+                        .role(Role::Alert)
+                        .child(warning(bits::command_problem(*error))),
+                ),
+                Ok(command) if command.words.is_empty() => s,
+                Ok(command) => s.child(self.command_words(command)).when_some(
+                    command.shell_syntax.as_deref(),
+                    |s, word| {
+                        s.child(
+                            div()
+                                .id("job-command-shell")
+                                .role(Role::Status)
+                                .child(warning(bits::shell_syntax_note(word))),
+                        )
                     },
-                )),
-            )
+                ),
+            })
+            .child(note(bits::command_note()))
+            .child(warning(words::trusted_note()))
+    }
+
+    /// The file a version pins and the folder the program starts in.
+    fn files_section(&self, cx: &mut Context<Self>) -> Div {
+        let Some(fields) = &self.program else {
+            return div();
+        };
+        let (section, open) = self.fold(
+            logic::Section::Files,
+            tr!("Entrypoint and working folder"),
+            logic::files_summary(
+                &fields.entrypoint.read(cx).value(),
+                &fields.working_directory.read(cx).value(),
+            ),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(field(
                 tr!("Entrypoint"),
                 Input::new(&fields.entrypoint)
@@ -1081,10 +1296,83 @@ impl JobView {
                     .aria_label(tr!("The working folder")),
             ))
             .child(note(words::working_directory_note()))
-            .child(warning(words::trusted_note()))
+    }
+
+    /// What holds for every run of a program: its logs, its stdin and how
+    /// Stop ends it.
+    fn running_section(&self, cx: &mut Context<Self>) -> Div {
+        let (section, open) = self.fold(
+            logic::Section::Running,
+            tr!("Logs, stdin and Stop"),
+            tr!("Logs kept 7 days · stdin reserved · Stop waits 5 s"),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(note(words::logs_note()))
             .child(note(words::stdin_note()))
             .child(note(words::stop_note()))
+    }
+
+    /// How the command is read: the program, then each argument as one
+    /// piece, so what the quotes did is on screen before the run.
+    fn command_words(&self, command: &super::super::program_bits::Command) -> Stateful<Div> {
+        /// The words drawn; a longer command says how many more it has.
+        const SHOWN: usize = 24;
+        let piece = |text: &str, program: bool| {
+            div()
+                .px_2()
+                .py(px(1.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(rgb(if program {
+                    colors().mint
+                } else {
+                    colors().border
+                }))
+                .bg(rgb(colors().grid_bg))
+                .font_family(fonts().mono.clone())
+                .text_size(px(12.))
+                .max_w(px(420.))
+                .truncate()
+                .child(if text.is_empty() {
+                    "\u{2205}".to_owned()
+                } else {
+                    text.to_owned()
+                })
+        };
+        let arguments = command.arguments();
+        let summary = if arguments.len() == 1 {
+            tr!("Read as the program {0} and 1 argument.", command.program())
+        } else {
+            tr!(
+                "Read as the program {0} and {1} arguments.",
+                command.program(),
+                arguments.len()
+            )
+        };
+        row()
+            .id("job-command-words")
+            .role(Role::Status)
+            .aria_label(summary)
+            .flex_wrap()
+            .gap_1()
+            .child(label(tr!("Program")))
+            .child(piece(command.program(), true))
+            .when(!arguments.is_empty(), |s| {
+                s.child(label(tr!("Arguments")))
+                    .children(
+                        arguments
+                            .iter()
+                            .take(SHOWN)
+                            .map(|argument| piece(argument, false)),
+                    )
+                    .when(arguments.len() > SHOWN, |s| {
+                        s.child(label(tr!("and {0} more", arguments.len() - SHOWN)))
+                    })
+            })
     }
 
     fn edit_program(
@@ -1105,7 +1393,16 @@ impl JobView {
         let Some(fields) = &self.program else {
             return div();
         };
-        section(tr!("Environment"))
+        let (section, open) = self.fold(
+            logic::Section::Environment,
+            tr!("Environment"),
+            logic::environment_summary(fields.unset.len(), fields.set.len()),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(warning(words::environment_note(
                 super::super::program_bits::denylist(),
             )))
@@ -1198,7 +1495,16 @@ impl JobView {
                 .aria_selected(on)
                 .when(on, |s| s.text_color(rgb(colors().mint)))
         };
-        section(tr!("Protocol"))
+        let (section, open) = self.fold(
+            logic::Section::Protocol,
+            tr!("Protocol"),
+            logic::protocol_summary(current),
+            cx,
+        );
+        if !open {
+            return section;
+        }
+        section
             .child(
                 row()
                     .id("job-protocol")

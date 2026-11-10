@@ -56,8 +56,10 @@ pub enum Refused {
 /// since nothing ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartError {
-    /// The program, or the entrypoint, does not exist.
+    /// The program does not exist, or no folder of `PATH` holds it.
     NotFound,
+    /// The entrypoint the job names does not exist.
+    EntrypointNotFound,
     /// The program is not executable, or the system refused to start it.
     PermissionDenied,
     /// The run's log files could not be created.
@@ -225,6 +227,11 @@ pub fn prepare(
                 Err(error) => cannot_start(error),
                 Ok(_) => cannot_start(StartError::NotFound),
             };
+        }
+        // The file the job names as its entrypoint, or the program itself
+        // when it names none.
+        (Some(_), None) if body.entrypoint.is_some() => {
+            return cannot_start(StartError::EntrypointNotFound);
         }
         (Some(_), None) => return cannot_start(StartError::NotFound),
     };

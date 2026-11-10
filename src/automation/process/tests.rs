@@ -390,7 +390,7 @@ fn a_changed_or_missing_pinned_file_refuses_the_run() {
     assert_eq!(
         prepare(&body, base()),
         Ok(Prepared::CannotStart {
-            error: StartError::NotFound,
+            error: StartError::EntrypointNotFound,
             protocol: Protocol::None
         })
     );
@@ -465,7 +465,32 @@ async fn a_file_without_the_execute_permission_fails_with_permission_denied() {
     );
     assert_eq!(report.verdict().cause, Some(Cause::PermissionDenied));
     assert!(!report.verdict().effect_unknown);
+    assert!(
+        report.start_message.is_some(),
+        "the system's own words are kept for the user"
+    );
     assert!(!logs::log_dir(&data, report.run).exists());
+    std::fs::remove_dir_all(data).unwrap();
+}
+
+/// A script whose first line names an interpreter that is not there exists
+/// and is executable, so only the system's refusal says what is wrong.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_program_the_system_refuses_keeps_the_system_s_words() {
+    use std::os::unix::fs::PermissionsExt;
+    let data = data_dir("no-interpreter");
+    let program = data.join("tool");
+    std::fs::write(&program, b"#!/jykre-no-such-interpreter\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut body = test_child::body("exit:0", Protocol::None, &[]);
+    body.program = program.to_string_lossy().into_owned();
+    body.arguments = Vec::new();
+    let report = Trial::new(body).run(&data).await;
+    assert_eq!(report.decided_by, Decider::NotStarted(StartError::NotFound));
+    let message = report.start_message.clone().unwrap_or_default();
+    assert!(message.contains("os error"), "{message}");
+    assert!(!report.verdict().effect_unknown);
     std::fs::remove_dir_all(data).unwrap();
 }
 
@@ -599,6 +624,13 @@ fn verdicts_follow_the_outcome_table() {
         (
             Protocol::None,
             Decider::NotStarted(StartError::NotFound),
+            None,
+            None,
+            ok(RunState::Failed, Some(Cause::NotFound), false),
+        ),
+        (
+            Protocol::None,
+            Decider::NotStarted(StartError::EntrypointNotFound),
             None,
             None,
             ok(RunState::Failed, Some(Cause::NotFound), false),

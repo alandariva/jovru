@@ -1,7 +1,7 @@
 //! A job's tab: its **Editor** (a SQL Job, a program or a chain, as a
-//! form), its **Inputs** (the run form, **Run** and **Stop**, the run's
-//! progress and the latest SQL result) and its **Runs** (this job's
-//! history).
+//! form), its **Run and result** (the run form, **Run** and **Stop**, the
+//! run's progress and what it left to look at: a SQL Job's rows, or what a
+//! program printed) and its **History** (this job's past runs).
 //!
 //! The view holds the definition being edited and the run it started; the
 //! engine decides and runs. A run goes: the form's values, the password of
@@ -13,7 +13,8 @@ mod editor;
 mod inputs;
 mod schedule;
 
-use super::history::{HistoryEvent, HistoryList};
+use super::history::{HistoryEvent, HistoryList, LogLines, log_lines, read_log_lines};
+use super::program_bits::Stream;
 use super::words::{self, Level, Line};
 use super::{FRAME, JobSources, Jobs, logic, source_of, whole};
 use crate::app::result_grid::ResultGrid;
@@ -81,8 +82,10 @@ pub enum Ask {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Inner {
     Editor,
-    Inputs,
-    Runs,
+    /// The run form, the run's account and what it left to look at.
+    Run,
+    /// This job's past runs.
+    History,
     /// A saved job's schedule (section 9.5).
     Schedule,
 }
@@ -136,10 +139,15 @@ struct SqlFields {
 
 /// A program's fields.
 struct ProgramFields {
-    program: Entity<InputState>,
+    /// The program and its arguments, as one command line.
+    command: Entity<InputState>,
+    /// The command line the field started with, and the program and
+    /// arguments it stands for: left alone, they are kept as stored.
+    stored: (String, String, Vec<String>),
+    /// The command line as typed, read when it changes.
+    read: Result<super::program_bits::Command, super::program_bits::SplitError>,
     entrypoint: Entity<InputState>,
     working_directory: Entity<InputState>,
-    arguments: Vec<Entity<InputState>>,
     unset: Vec<Entity<InputState>>,
     /// The variables of the environment now that the program will not
     /// receive, read again as the lists change.
@@ -177,6 +185,33 @@ struct Pending {
     /// Whether each program the run starts has run before at its revision
     /// or version (Q-10), read once.
     programs_known: Option<Vec<bool>>,
+}
+
+/// What the last finished run left to look at, under its account.
+enum Shown {
+    Nothing,
+    /// A SQL run's rows, in the grid.
+    Rows {
+        rows: usize,
+        columns: usize,
+        /// The chain's step they came from.
+        step: Option<String>,
+    },
+    /// What a program printed.
+    Output(Box<ProgramOutput>),
+}
+
+/// A program run's stdout and stderr, read from its logs when it ended.
+struct ProgramOutput {
+    run: jykre::automation::RunId,
+    /// The chain's step that printed it.
+    step: Option<String>,
+    /// The stream on screen.
+    stream: Stream,
+    stdout: Option<LogLines>,
+    stderr: Option<LogLines>,
+    reading: bool,
+    scroll: UniformListScrollHandle,
 }
 
 /// The run this tab started, while it is active or until another starts.
@@ -226,12 +261,20 @@ pub struct JobView {
     notice: Option<Feedback>,
     /// What the last run said: its outcome, or why it did not run.
     run_lines: Vec<Line>,
+    /// The database's error of the last run, shown as every error is.
+    run_error: Option<words::RunError>,
+    /// The statement of the run on its way, when it is sent as written (no
+    /// `:name` parameters): an error's position is read against it.
+    ran_sql: Option<String>,
     /// A refused program run names its changed file: **Publish** fixes it.
     changed_file: Option<String>,
     /// The form was prefilled from a chain step's stored outputs.
     prefill_note: Option<String>,
     grid: Entity<ResultGrid>,
     has_result: bool,
+    shown: Shown,
+    /// The editor's sections shown unfolded.
+    open: std::collections::HashSet<logic::Section>,
     history: Entity<HistoryList>,
     sources: JobSources,
     catalogs: Arc<SqlCatalogs>,
@@ -317,6 +360,7 @@ impl JobView {
         subscriptions.push(cx.subscribe(&history, |_, _, event: &HistoryEvent, cx| {
             cx.emit(JobEvent::History(event.clone()));
         }));
+        let open = logic::open_sections(&definition).into_iter().collect();
         let mut view = Self {
             kind: definition.kind(),
             id: definition.id,
@@ -341,10 +385,14 @@ impl JobView {
             pending: None,
             notice: None,
             run_lines: Vec::new(),
+            run_error: None,
+            ran_sql: None,
             changed_file: None,
             prefill_note: None,
             grid: cx.new(|cx| ResultGrid::new(Arc::default(), false, cx)),
             has_result: false,
+            shown: Shown::Nothing,
+            open,
             history,
             sources,
             catalogs,
@@ -386,7 +434,7 @@ impl JobView {
         self.set_inner(inner, window, cx);
     }
 
-    /// The job's **Runs** list.
+    /// The job's **History** list.
     pub(super) fn benchmark_history(&self) -> Entity<HistoryList> {
         self.history.clone()
     }
@@ -446,11 +494,11 @@ impl JobView {
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
         match self.inner {
             Inner::Editor => self.name.update(cx, |input, cx| input.focus(window, cx)),
-            Inner::Inputs => match self.values.first() {
+            Inner::Run => match self.values.first() {
                 Some(field) => field.input.update(cx, |input, cx| input.focus(window, cx)),
                 None => window.focus(&self.focus, cx),
             },
-            Inner::Runs => self
+            Inner::History => self
                 .history
                 .update(cx, |history, cx| history.focus(window, cx)),
             Inner::Schedule => match &self.schedule {
@@ -492,7 +540,7 @@ impl JobView {
 
     fn set_inner(&mut self, inner: Inner, window: &mut Window, cx: &mut Context<Self>) {
         self.inner = inner;
-        if inner == Inner::Runs {
+        if inner == Inner::History {
             self.history.update(cx, |history, cx| history.refresh(cx));
         }
         if inner == Inner::Schedule && self.schedule.is_none() {
@@ -577,12 +625,21 @@ impl JobView {
                 self.sql_changed(window, cx);
             }
             JobBody::Process(body) => {
-                let program = input(
+                let text = super::program_bits::command_text(&body.program, &body.arguments);
+                let command = input(
                     window,
                     cx,
-                    body.program.clone(),
-                    tr!("node, python3, or an absolute path"),
+                    text.clone(),
+                    tr!("For example: python3 /home/me/jobs/export.py --format csv"),
                 );
+                self._subscriptions.push(cx.subscribe(
+                    &command,
+                    |this, _, event: &InputEvent, cx| {
+                        if matches!(event, InputEvent::Change) {
+                            this.command_changed(cx);
+                        }
+                    },
+                ));
                 let entrypoint = input(
                     window,
                     cx,
@@ -595,7 +652,7 @@ impl JobView {
                     body.working_directory.clone().unwrap_or_default(),
                     tr!("The entrypoint's folder"),
                 );
-                for field in [&program, &entrypoint, &working_directory] {
+                for field in [&entrypoint, &working_directory] {
                     self._subscriptions.push(cx.subscribe(
                         field,
                         |this, _, event: &InputEvent, cx| {
@@ -606,10 +663,11 @@ impl JobView {
                     ));
                 }
                 self.program = Some(ProgramFields {
-                    program,
+                    read: super::program_bits::read_command(&text),
+                    command,
+                    stored: (text, body.program.clone(), body.arguments.clone()),
                     entrypoint,
                     working_directory,
-                    arguments: Vec::new(),
                     unset: Vec::new(),
                     removed: super::program_bits::removed_variables(&body.environment),
                     set: Vec::new(),
@@ -758,18 +816,20 @@ impl JobView {
             JobBody::Process(body) => {
                 body.timeout_ms = timeout_ms;
                 if let Some(fields) = &self.program {
-                    body.program = fields.program.read(cx).value().trim().to_owned();
+                    let (text, program, arguments) = &fields.stored;
+                    if fields.command.read(cx).value().as_ref() == text.as_str() {
+                        body.program.clone_from(program);
+                        body.arguments.clone_from(arguments);
+                    } else if let Ok(command) = &fields.read {
+                        body.program = command.program().to_owned();
+                        body.arguments = command.arguments().to_vec();
+                    }
                     let optional = |field: &Entity<InputState>| {
                         let text = field.read(cx).value().trim().to_owned();
                         (!text.is_empty()).then_some(text)
                     };
                     body.entrypoint = optional(&fields.entrypoint);
                     body.working_directory = optional(&fields.working_directory);
-                    body.arguments = fields
-                        .arguments
-                        .iter()
-                        .map(|field| field.read(cx).value().to_string())
-                        .collect();
                     body.environment.unset = fields
                         .unset
                         .iter()
@@ -820,16 +880,34 @@ impl JobView {
     /// stored one is worked out now, not while drawing.
     fn changed(&mut self, cx: &mut Context<Self>) {
         let current = self.current(cx);
-        self.unsaved = match &self.saved {
-            Some(saved) => !saved.same_definition(&current),
-            None => true,
-        };
+        self.unsaved = self.command_problem().is_some()
+            || match &self.saved {
+                Some(saved) => !saved.same_definition(&current),
+                None => true,
+            };
         if let (Some(program), JobBody::Process(body)) = (self.program.as_mut(), &current.body) {
             program.removed = super::program_bits::removed_variables(&body.environment);
         }
         self.definition.name = current.name;
         self.plan_soon(cx);
         cx.notify();
+    }
+
+    /// The command line was typed: it is read into the program and its
+    /// arguments now, not while drawing.
+    fn command_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some(fields) = self.program.as_mut() {
+            let text = fields.command.read(cx).value().to_string();
+            fields.read = super::program_bits::read_command(&text);
+        }
+        self.changed(cx);
+    }
+
+    /// Why the command line cannot be read, when it cannot: nothing is
+    /// saved or run from a command cut in the middle of a quote.
+    fn command_problem(&self) -> Option<String> {
+        let error = self.program.as_ref()?.read.as_ref().err()?;
+        Some(super::program_bits::command_problem(*error))
     }
 
     /// A chain's step IDs and constants were typed: its plan is read again
@@ -926,11 +1004,6 @@ impl JobView {
         }
         if let (Some(program), JobBody::Process(body)) = (&mut self.program, &self.definition.body)
         {
-            program.arguments = body
-                .arguments
-                .iter()
-                .map(|argument| input(window, cx, argument.clone(), tr!("An argument")))
-                .collect();
             program.unset = body
                 .environment
                 .unset
@@ -948,7 +1021,6 @@ impl JobView {
                     )
                 })
                 .collect();
-            fields.extend(program.arguments.iter().cloned());
             fields.extend(program.unset.iter().cloned());
             for (name, value) in &program.set {
                 fields.extend([name.clone(), value.clone()]);
@@ -1098,6 +1170,11 @@ impl JobView {
                 Tone::Warning,
                 tr!("Automation is read-only or off here, so nothing can be saved."),
             ));
+            cx.notify();
+            return;
+        }
+        if let Some(problem) = self.command_problem() {
+            self.notice = Some(Feedback::new(Tone::Warning, problem));
             cx.notify();
             return;
         }
@@ -1310,6 +1387,8 @@ impl JobView {
             programs_known: None,
         });
         self.run_lines.clear();
+        self.run_error = None;
+        self.ran_sql = None;
         self.changed_file = None;
         self.value_errors.clear();
         self.continue_run(cx);
@@ -1346,7 +1425,7 @@ impl JobView {
             level: Level::Error,
             text,
         }];
-        self.inner = Inner::Inputs;
+        self.inner = Inner::Run;
         cx.notify();
     }
 
@@ -1391,6 +1470,10 @@ impl JobView {
         };
         if !self.writable() {
             self.refuse(words::refusal(&Refusal::Unavailable), cx);
+            return;
+        }
+        if let Some(problem) = self.command_problem() {
+            self.refuse(tr!("Not run: {0}", problem), cx);
             return;
         }
         let definition = self.current(cx);
@@ -1673,7 +1756,8 @@ impl JobView {
         }) {
             Ok(handle) => {
                 self.has_result = false;
-                self.inner = Inner::Inputs;
+                self.shown = Shown::Nothing;
+                self.inner = Inner::Run;
                 self.watch_chain(handle, step_ids, cx);
             }
             Err(refusal) => self.refuse(words::refusal(&refusal), cx),
@@ -1682,11 +1766,16 @@ impl JobView {
 
     fn submit(&mut self, request: JobRequest, dialect: Option<SqlDialect>, cx: &mut Context<Self>) {
         self.pending = None;
+        self.ran_sql = match &request.definition.body {
+            JobBody::Sql(body) if body.parameters.is_empty() => Some(body.sql.clone()),
+            _ => None,
+        };
         match self.engine.submit(request) {
             Ok(handle) => {
                 // The last run's result is not this run's.
                 self.has_result = false;
-                self.inner = Inner::Inputs;
+                self.shown = Shown::Nothing;
+                self.inner = Inner::Run;
                 self.watch_run(handle, dialect, cx);
             }
             Err(refusal) => {
@@ -1748,29 +1837,13 @@ impl JobView {
             RunStatus::Finished(outcome) => {
                 self.tick = None;
                 self.run_lines = words::outcome_lines(outcome, dialect);
-                if outcome.sql.is_some() {
-                    let outcome = outcome.clone();
-                    let grid = self.grid.clone();
-                    cx.spawn(async move |weak, cx| {
-                        // A copy of the rows, made off the UI thread: the
-                        // outcome stays shared with the engine's channel.
-                        let data = cx
-                            .background_executor()
-                            .spawn(async move {
-                                outcome.sql.as_ref().map(|sql| Arc::new(sql.data.clone()))
-                            })
-                            .await;
-                        let _ = weak.update(cx, |this, cx| {
-                            if let Some(data) = data {
-                                let _timer = jykre::logging::UiTimer::start("automation result");
-                                this.has_result = data.column_count() > 0;
-                                grid.update(cx, |grid, cx| grid.set_page(data, false, 0, None, cx));
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .detach();
-                }
+                self.run_error = words::run_error(
+                    outcome,
+                    self.ran_sql.as_deref(),
+                    &self.definition.name,
+                    None,
+                );
+                self.show_result(outcome.clone(), None, cx);
                 self.history.update(cx, |history, cx| history.refresh(cx));
             }
             RunStatus::Refused(refusal) => {
@@ -1788,6 +1861,89 @@ impl JobView {
             }
         }
         cx.notify();
+    }
+
+    /// What a finished run left to look at, under its account: a SQL run's
+    /// rows in the grid, or what a program printed, read from its logs.
+    /// `step` names the chain's step it belongs to.
+    fn show_result(
+        &mut self,
+        outcome: Arc<jykre::automation::RunOutcome>,
+        step: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let run = outcome.id;
+        if outcome.sql.is_some() {
+            let grid = self.grid.clone();
+            cx.spawn(async move |weak, cx| {
+                // A copy of the rows, made off the UI thread: the outcome
+                // stays shared with the engine's channel.
+                let data = cx
+                    .background_executor()
+                    .spawn(
+                        async move { outcome.sql.as_ref().map(|sql| Arc::new(sql.data.clone())) },
+                    )
+                    .await;
+                let _ = weak.update(cx, |this, cx| {
+                    if let Some(data) = data {
+                        let _timer = jykre::logging::UiTimer::start("automation result");
+                        this.has_result = data.column_count() > 0;
+                        this.shown = if this.has_result {
+                            Shown::Rows {
+                                rows: data.row_count(),
+                                columns: data.column_count(),
+                                step,
+                            }
+                        } else {
+                            Shown::Nothing
+                        };
+                        grid.update(cx, |grid, cx| grid.set_page(data, false, 0, None, cx));
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+        let Some(program) = &outcome.program else {
+            return;
+        };
+        let [stdout, stderr, _] = super::program_bits::log_sizes(program);
+        if stdout.is_none() && stderr.is_none() {
+            // It never started: there is nothing it printed.
+            return;
+        }
+        self.shown = Shown::Output(Box::new(ProgramOutput {
+            run,
+            step,
+            stream: Stream::Stdout,
+            stdout: None,
+            stderr: None,
+            reading: true,
+            scroll: UniformListScrollHandle::new(),
+        }));
+        let failed = outcome.state != jykre::automation::RunState::Succeeded;
+        let dir = self.engine.data_dir().to_path_buf();
+        cx.spawn(async move |weak, cx| {
+            let stdout = read_log_lines(dir.clone(), run, Stream::Stdout).await;
+            let stderr = read_log_lines(dir, run, Stream::Stderr).await;
+            let _ = weak.update(cx, |this, cx| {
+                let Shown::Output(output) = &mut this.shown else {
+                    return;
+                };
+                if output.run != run {
+                    return;
+                }
+                let printed =
+                    |log: &Option<LogLines>| log.as_ref().is_some_and(|log| !log.lines.is_empty());
+                output.stream = logic::first_stream(failed, printed(&stdout), printed(&stderr));
+                output.stdout = stdout;
+                output.stderr = stderr;
+                output.reading = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// While queued, the time left is redrawn each second.
@@ -1839,6 +1995,7 @@ impl JobView {
     fn show_chain_status(&mut self, status: ChainStatus, cx: &mut Context<Self>) {
         let _timer = jykre::logging::UiTimer::start("automation chain status");
         let mut follow = None;
+        let mut last_step = None;
         // Each SQL step's connection by name, to say which one changed.
         let connections: HashMap<String, String> = self
             .chain
@@ -1878,9 +2035,32 @@ impl JobView {
                     *step_status = None;
                 }
                 ChainStatus::Finished(outcome) => {
-                    self.run_lines = chain_outcome_lines(outcome, &connections);
+                    let changed = (outcome.cause == Some(jykre::automation::Cause::PlanChanged))
+                        .then_some(outcome.failed_step.as_ref())
+                        .flatten()
+                        .and_then(|step| {
+                            Some(logic::plan_changed_text(connections.get(step)?, step))
+                        });
+                    self.run_lines = words::chain_outcome_lines(outcome, changed);
+                    // The step that stopped the chain says what the database
+                    // said, as its own run would.
+                    self.run_error =
+                        outcome
+                            .steps
+                            .iter()
+                            .zip(&outcome.step_ids)
+                            .find_map(|(step, id)| {
+                                words::run_error(step, None, &self.definition.name, Some(id))
+                            });
                     self.step_watch = None;
                     self.tick = None;
+                    // The last step that ran left the chain's result.
+                    last_step = outcome.steps.last().cloned().zip(
+                        outcome
+                            .step_ids
+                            .get(outcome.steps.len().saturating_sub(1))
+                            .cloned(),
+                    );
                     self.history.update(cx, |history, cx| history.refresh(cx));
                 }
                 ChainStatus::Refused(refusal) => {
@@ -1891,6 +2071,9 @@ impl JobView {
                     self.step_watch = None;
                 }
             }
+        }
+        if let Some((last, id)) = last_step {
+            self.show_result(last, Some(id), cx);
         }
         if let Some(mut handle) = follow {
             self.step_watch = Some(cx.spawn(async move |weak, cx| {
@@ -1960,7 +2143,7 @@ impl JobView {
                 missing.join(", ")
             )
         });
-        self.set_inner(Inner::Inputs, window, cx);
+        self.set_inner(Inner::Run, window, cx);
     }
 
     // -----------------------------------------------------------------------
@@ -2013,68 +2196,6 @@ impl JobView {
     }
 }
 
-/// What a finished chain says: its state and cause, `effect_unknown`, and
-/// each step's outcome; steps after the one that stopped it did not run.
-fn chain_outcome_lines(
-    outcome: &jykre::automation::ChainOutcome,
-    connections: &HashMap<String, String>,
-) -> Vec<Line> {
-    let mut lines = Vec::new();
-    let elapsed = Some(outcome.elapsed);
-    let state = words::state_label(outcome.state, outcome.cause, elapsed);
-    let level = match outcome.state {
-        jykre::automation::RunState::Succeeded => Level::Success,
-        jykre::automation::RunState::Cancelled => Level::Warning,
-        _ => Level::Error,
-    };
-    let mut first = state;
-    if let Some(cause) = outcome.cause {
-        first.push_str(". ");
-        first.push_str(words::cause_sentence(cause, Some(JobKind::Chain)));
-    }
-    if let Some(step) = &outcome.failed_step {
-        first.push(' ');
-        first.push_str(&tr!("It stopped at {0}.", step));
-    }
-    lines.push(Line { level, text: first });
-    if outcome.cause == Some(jykre::automation::Cause::PlanChanged)
-        && let Some(step) = &outcome.failed_step
-        && let Some(connection) = connections.get(step)
-    {
-        lines.push(Line {
-            level: Level::Error,
-            text: logic::plan_changed_text(connection, step),
-        });
-    }
-    if let Some(problem) = &outcome.input_problem {
-        lines.push(Line {
-            level: Level::Error,
-            text: words::input_problems(std::slice::from_ref(problem)),
-        });
-    }
-    if outcome.effect_unknown {
-        lines.push(Line {
-            level: Level::Warning,
-            text: words::effect_unknown().to_owned(),
-        });
-    }
-    for (index, id) in outcome.step_ids.iter().enumerate() {
-        let text = match outcome.steps.get(index) {
-            Some(step) => tr!(
-                "{0}: {1}",
-                id,
-                words::state_label(step.state, step.cause, Some(step.elapsed))
-            ),
-            None => tr!("{0}: Not run.", id),
-        };
-        lines.push(Line {
-            level: Level::Info,
-            text,
-        });
-    }
-    lines
-}
-
 impl Render for JobView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::app::probe::rendered("JobView");
@@ -2114,8 +2235,8 @@ impl Render for JobView {
             })
             .child(match self.inner {
                 Inner::Editor => self.editor_panel(window, cx).into_any_element(),
-                Inner::Inputs => self.inputs_panel(cx).into_any_element(),
-                Inner::Runs => self.runs_panel(cx).into_any_element(),
+                Inner::Run => self.inputs_panel(cx).into_any_element(),
+                Inner::History => self.runs_panel(cx).into_any_element(),
                 Inner::Schedule => self.schedule_panel(cx).into_any_element(),
             })
     }

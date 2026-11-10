@@ -132,14 +132,25 @@ job its next run in the schedule's zone, **Suspended** in amber or
 entry, with the number of runs active, that opens the global runs list. A
 job opens in a tab of its own, in a grey tab group of its own named after
 the job, as a report's does; the tab's title ends with `●` while the job is
-not saved. Its toolbar holds the kind, save, **Publish** (not for a chain),
+not saved. Its toolbar holds the kind, **Save** (**Saved**, muted, when nothing changed), **Publish** (not for a chain),
 **Duplicate**, **Delete** and **Run**, which turns into **Stop** while the
 job's run is active; under it, three inner tabs, and a fourth,
 **Schedule**, once the job is saved:
 
-- **Editor**, a form. A SQL Job: name, description, the connection and where
-  unqualified names resolve (a menu of the connections, each with
-  **Session default** and its namespaces, as report panels offer), the SQL
+- **Editor**, a form that opens on what a job needs first. Its other
+  sections (**Limits**, **Declared outputs**, **Published versions** and,
+  for a program, **Entrypoint and working folder**, **Environment**,
+  **Protocol** and **Logs, stdin and Stop**) fold to their title and one
+  line saying what they hold (`logic::Section`, the summaries beside it):
+  a section opens unfolded when the job sets something in it, and its
+  header is a button that `Enter` or `Space` folds and unfolds. The rules
+  of section 8.1.1 stay inside the section they apply to. A SQL Job: name, description, a **Connection**
+  section of its own (a menu of the connections and, once one is chosen, a
+  **Database** menu with **Session default** and its namespaces, where
+  unqualified names resolve; a job without a connection, or whose connection
+  was deleted or cannot run, says so under the menu before **Run** refuses
+  it; a new job takes the only saved connection, and none when there are
+  several to choose from), the SQL
   editor with the same completion as a query tab (statements beyond the
   first are outlined in amber and named by their line before saving), one
   row per `:name` parameter (label, type, default, **Required**, **List of
@@ -147,8 +158,15 @@ job's run is active; under it, three inner tabs, and a fourth,
   timeout, the declared outputs (name, type, result column by position),
   which row the outputs take with what each rule does with zero, one and
   several rows, **Store outputs**, and the published versions (number and
-  date, each with a delete button). A program: the program, its arguments
-  one per row, the entrypoint, the working folder, the environment
+  date, each with a delete button). A program: its **Command**, the
+  program and its arguments typed as one line (`php -r "print('x');"`) and
+  read without a shell (`jykre::automation::command_line`): the first word
+  is the program, each other word one argument, quotes keep several words
+  as one, and a backslash outside quotes is an ordinary character, so
+  Windows paths need no escaping. Under the field, the program and each
+  argument are drawn as separate pieces, a quote left open is named, and a
+  word a shell would act on (`|`, `>`, `&&`, `$NAME`) says that it reaches
+  the program as an argument; then the entrypoint, the working folder, the environment
   (variables removed, those set, and which of Studio's variables are
   removed now), the protocol (**No protocol** or `jjp/1`; inputs and
   outputs only with `jjp/1`), the timeout, outputs, and the versions, each
@@ -160,11 +178,19 @@ job's run is active; under it, three inner tabs, and a fourth,
   NULL, a chain input, a declared output of an earlier step, or a constant
   typed beside it). What `chain_problems` finds is said under its step and
   input, read again after each change and once typing pauses.
-- **Inputs**: the run form, as a report's (a list input shows a menu),
-  **Run** or **Stop**, then the run's state and, for a SQL Job, the latest
-  result in a grid while the tab is open. A job that differs from what is
+- **Run and result**: one line saying what **Run** starts (the connection
+  and database a SQL Job runs on, a program's command, or a chain's number
+  of steps; a job with none says to choose it in the Editor), the run
+  form, as a report's (a list input shows a menu),
+  **Run** or **Stop**, then the run's state and, under it, what the run
+  left to look at while the tab is open: **Result**, a SQL Job's rows in a
+  grid with their count of rows and columns, or **Output**, what a program
+  printed (**stdout** and **stderr** with their sizes, read from its logs
+  when it ends; a run that did not succeed opens on stderr). A chain shows
+  what its last step left, naming the step. Before the first run the area
+  says what will appear in it; a queued or running run shows neither. A job that differs from what is
   saved runs as a draft, and the form says so.
-- **Runs**: the job's history (below).
+- **History**: the job's past runs (below).
 - **Schedule** ([specification](../plans/automation-engine-specification.md),
   section 9.5; [ADR-0041](../adr/0041-schedules-and-grants.md)): the
   schedule's state (off, on with its **next run** in its zone, abbreviation
@@ -192,6 +218,12 @@ job's run is active; under it, three inner tabs, and a fourth,
   confirmation), each program's file and hash, and the defaults; confirming
   again first says why it was suspended and which connections changed.
 
+Where this differs from the specification's section 8.1: the inner tabs it
+names **Inputs** and **Runs** are **Run and result** and **History** (the
+first holds what a run returns, the second is apart from the global **Runs**
+list), and a program's arguments are typed with its program, as one command
+line, rather than one per row (0.3.1).
+
 The rules the engine follows are stated where they apply (section 8.1.1):
 the limits and the queue beside the timeout, one statement per job, the
 4 KiB, 7-day and 90-day limits of stored outputs, the 7-day and 1 MiB
@@ -204,7 +236,7 @@ on Windows a program without `jjp/1` is killed after the 5 s), and that a
 chain runs published versions, never nests and stops at the first step
 that fails. Shortcuts that run SQL in a query tab never run a job.
 
-The history (a job's **Runs**, and the global **Runs** list) lists runs and
+The history (a job's **History**, and the global **Runs** list) lists runs and
 chain runs newest first, virtualized and read 50 at a time
 (**Load older runs**), each with its state icon, job, kind, how long ago and
 how long it took (a run without a job reads as a draft or a deleted job);
@@ -226,7 +258,9 @@ opens the step's job with its form filled from what earlier steps stored
 (constants, and outputs whose values were stored and have not expired)
 and says which inputs are left to fill in; it never runs by itself. The
 history says that refused runs are not recorded and how long runs, values
-and logs are kept. The global list has a **State** filter and, above the
+and logs are kept. A SQL run says that the rows it returned are
+never stored, only their count: they are in the job's tab right after the
+run. The global list has a **State** filter and, above the
 history, the runs and chain runs active or queued now, each with its state
 and **Stop**.
 
@@ -389,7 +423,7 @@ Each state has one consistent representation.
 | Copy of a grid selection, a query page, the inspector's value or a report panel's result | Status over the grid after 100 ms; for a report panel, in its notice line | **Preparing copy…** while estimating; **Copying…** with rows completed and total while encoding, elapsed time after 2 s, and **Cancel copy** (also `Esc`). Above 50 MiB, a confirmation comes before encoding. The clipboard changes only after a successful, still-current copy |
 | Data of a table | A query tab opened for the table (a double click or `Enter` in the explorer, **View data** in its menu, `Enter` in the search) | The editor holds `SELECT * FROM` the table, without a `LIMIT`, and the tab reads it at once into a result tab called **Data**: the first page has the connection's row limit and the footer's arrows read the next ones from the session, never running the statement again. Opening the table again shows that tab, and reads the rows again only when none of its result tabs holds them: in place of a read that failed or was cancelled, otherwise in a new result tab, never over another result (a restored tab offers **View data**). Running something else in the tab closes the open result, as for any query; `↻` reads the table again |
 | Automation available | The Automation section | Nothing while it works. **Starting automation…** while the engine opens its file; **Read-only** when another Jykre Studio holds the data folder's automation lock (its jobs and history can be read, nothing runs or is saved), with **Try again**, also tried each time the section opens; **Automation is off** when `automation.db` comes from a newer version or the file or the lock cannot be opened, the rest of the application working. At start, what recovery found is said once: runs marked interrupted, and a damaged file set aside (job definitions lost, also in the explorer's notice) |
-| A job's run | The job's Inputs, toolbar and tab | **Queued, place N**: which limit it waits for (2 runs at once, 1 per connection), the runs that hold it and the time left before it leaves the queue (redrawn each second); then its phase (opening a session, running the statement, reading the rest of a write's result, the program running with its percent and stage), rows read, **Stopping…**, and how it ended: state and cause, `effect_unknown`, the database's message, a transaction rolled back, rows kept and discarded or left unread, whether the program ended on its own after Stop or was killed, outputs stored or why not. A run that did not start says why in place, with that refused runs are not recorded; a program refused because its file changed names it and offers **Publish**. A chain shows the step running ("step 2 of 3") with that step's state. The tab shows a spinner, then a check, a cross or a ban sign, as a query tab's |
+| A job's run | The job's **Run and result**, toolbar and tab | **Queued, place N**: which limit it waits for (2 runs at once, 1 per connection), the runs that hold it and the time left before it leaves the queue (redrawn each second); then its phase (opening a session, running the statement, reading the rest of a write's result, the program running with its percent and stage), rows read, **Stopping…**, and how it ended: state and cause, `effect_unknown`, a database error in the shape every error has ([Error messages](#error-messages): its title, the database's own message, its codes and position, a suggested action and **Copy details**; a chain shows the error of the step that stopped it, named, with that step's whole account under its line), a program that could not start naming what is missing (the program by the name the job gives it and whether it was looked up on `PATH`, or the entrypoint) and what the system said when it refused, a transaction rolled back, rows kept and discarded or left unread, whether the program ended on its own after Stop or was killed, outputs stored or why not. A run that did not start says why in place, with that refused runs are not recorded; a program refused because its file changed names it and offers **Publish**. A chain shows the step running ("step 2 of 3") with that step's state. The tab shows a spinner, then a check, a cross or a ban sign, as a query tab's |
 | Active runs | The Automation section's **Runs** entry | "N active" while runs or chains are active or queued |
 | A schedule | The job's **Schedule** tab, the sidebar's job entry | Off, on with its next run in the schedule's zone (abbreviation, offset, and this computer's time when it differs), or **Suspended** with the reason and **Confirm again**; the last outcome (started, a catch-up started, waiting for the run still going, skipped, missed, refused with the reason, suspended) and how many times were missed, with the last |
 | Scheduled runs that ended badly | The rail's Automation icon and the status bar | A red count of scheduled runs that failed or did not run since the Automation section or **Runs** was last opened; the status bar names the latest (the job, the outcome and the cause) and opens its job. A schedule that asked for it also shows an operating-system notification with the same words, never a value or a server message |
@@ -540,7 +574,7 @@ inside one focused control, marked *fixed*.
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Stop the run of the tab on screen, as Stop does (a query tab's statements, a report's panels, or a job's or chain's run, which leaves the queue when it waits), without asking | `Ctrl F2` |
-| In a job's run form (**Inputs**): run the job with the values typed, as **Run** does. `Ctrl Enter` never runs a job | `Enter` (fixed) |
+| In a job's run form (**Run and result**): run the job with the values typed, as **Run** does. `Ctrl Enter` never runs a job | `Enter` (fixed) |
 | Run the panel whose SQL has the keyboard; elsewhere in a report tab, every panel | `Ctrl Enter` (or `Enter` in a parameter field, which runs every panel; fixed) |
 | Run every panel of the report on screen | `Ctrl Alt Enter` |
 | In a query tab's parameter field: run what `Ctrl Enter` runs (the selection or the statement at the cursor) | `Enter` (fixed) |
@@ -597,7 +631,7 @@ inside one focused control, marked *fixed*.
 | Column search dialog: choose a column, go to it (showing it when hidden) and close the dialog, or close it; a click outside the card closes it too | `↑`, `↓`, `Enter`, `Esc`, click outside (fixed) |
 | Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
 | Tab bar: move between tabs | Arrows, `Home`, `End` (fixed) |
-| A job's tab: reach **Editor**, **Inputs** or **Runs**, open it (the keyboard goes to its first field, or the history) | `Tab`, then `Enter` or `Space` (fixed) |
+| A job's tab: reach **Editor**, **Run and result** or **History**, open it (the keyboard goes to its first field, or the history); reach a folded section of the Editor and fold or unfold it | `Tab`, then `Enter` or `Space` (fixed) |
 
 Shortcuts are GPUI actions in one keymap ([UI guidelines](../standards/ui-guidelines.md#actions-and-shortcuts)).
 A new shortcut updates this table, avoids keys the editor already uses, and

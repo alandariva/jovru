@@ -218,6 +218,10 @@ pub struct ProgramReport {
     pub run: RunId,
     pub protocol: Protocol,
     pub decided_by: Decider,
+    /// What the system said when it refused to start the program (its own
+    /// words for the error, such as "Exec format error"), for the user to
+    /// read. Never recorded or logged.
+    pub start_message: Option<String>,
     /// The exit code or Unix signal, recorded also when Stop, the deadline
     /// or a protocol failure decided.
     pub exit: Option<Exit>,
@@ -309,7 +313,7 @@ pub fn verdict(
         Decider::NotStarted(error) => Verdict {
             state: RunState::Failed,
             cause: Some(match error {
-                StartError::NotFound => Cause::NotFound,
+                StartError::NotFound | StartError::EntrypointNotFound => Cause::NotFound,
                 StartError::PermissionDenied => Cause::PermissionDenied,
                 StartError::Logs
                 | StartError::Listener

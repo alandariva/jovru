@@ -2,7 +2,8 @@
 //! 8.1; Q-20…Q-22): the engine as an application-root service
 //! ([ADR-0034](../../../docs/adr/0034-automation-database-service-and-lock.md)),
 //! the list of jobs and chains in the sidebar, a tab per job with its
-//! **Editor**, **Inputs** and **Runs**, and the global **Runs** list.
+//! **Editor**, **Run and result** and **History**, and the global **Runs**
+//! list.
 //!
 //! `AppView` creates one [`Engine`] at start. Runs belong to the engine,
 //! not to a tab: closing a job's tab never stops its run. Closing the
@@ -625,10 +626,13 @@ impl AppView {
         let count = self.automation.jobs.len() + 1;
         let definition = match kind {
             JobKind::Sql => {
-                let connection = self
+                // The only saved connection is the job's; with several the
+                // user chooses, rather than run on whichever comes first.
+                let mut saved = self
                     .connections
                     .iter()
-                    .find_map(|connection| connection.profile.as_ref().map(|profile| profile.id));
+                    .filter_map(|connection| connection.profile.as_ref().map(|profile| profile.id));
+                let connection = logic::only(&mut saved);
                 JobDefinition::new_sql(tr!("SQL Job {0}", count), connection)
             }
             JobKind::Process => JobDefinition::new_process(tr!("Program {0}", count)),

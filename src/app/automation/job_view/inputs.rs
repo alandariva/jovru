@@ -1,5 +1,5 @@
-//! The job tab's **Inputs** (the run form, the run's progress and the
-//! latest SQL result) and **Runs** (this job's history).
+//! The job tab's **Run and result** (the run form, the run's progress and
+//! what it left to look at) and **History** (this job's past runs).
 use super::*;
 use crate::app::report_view::invalid_hint;
 use gpui_kit::assets::IconName as I;
@@ -19,7 +19,7 @@ impl JobView {
         column()
             .id("job-inputs")
             .role(Role::TabPanel)
-            .aria_label(tr!("Inputs"))
+            .aria_label(tr!("Run and result"))
             .flex_1()
             .min_h_0()
             .child(
@@ -34,20 +34,128 @@ impl JobView {
                     .child(self.form_rows(&specs, running, cx)),
             )
             .child(self.run_status(cx))
-            .when(logic::shows_result(self.has_result, running), |s| {
-                s.child(
+            .child(self.result_area(running, cx))
+    }
+
+    /// Under the run's account: the rows a SQL run returned, in the grid,
+    /// or what a program printed. A run that is queued or running shows
+    /// neither (the previous run's would read as its own); before the
+    /// first run, the area says what will appear in it.
+    fn result_area(&self, running: bool, cx: &mut Context<Self>) -> Div {
+        let area = column()
+            .flex_1()
+            .min_h(px(160.))
+            .border_t_1()
+            .border_color(rgb(colors().border));
+        let heading = |title: &'static str, step: &Option<String>| {
+            row()
+                .flex_none()
+                .h(px(32.))
+                .px_3()
+                .gap_2()
+                .child(
                     div()
-                        .flex_1()
-                        .min_h(px(160.))
-                        .border_t_1()
-                        .border_color(rgb(colors().border))
-                        .child(
-                            self.grid
-                                .clone()
-                                .cached(StyleRefinement::default().size_full()),
-                        ),
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
                 )
-            })
+                .when_some(step.clone(), |s, step| {
+                    s.child(badge(tr!("Step {0}", step), colors().faint))
+                })
+        };
+        if running {
+            return area;
+        }
+        match &self.shown {
+            Shown::Rows {
+                rows,
+                columns,
+                step,
+            } if logic::shows_result(self.has_result, running) => area
+                .child(
+                    heading(tr!("Result"), step)
+                        .id("job-result-heading")
+                        .role(Role::Status)
+                        .child(label(words::result_size(*rows, *columns))),
+                )
+                .child(
+                    div().flex_1().min_h_0().child(
+                        self.grid
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
+                ),
+            Shown::Output(output) => {
+                let stream_button = |id: &'static str, stream: Stream, log: &Option<LogLines>| {
+                    let size = log.as_ref().map_or(0, |log| log.bytes);
+                    button(
+                        id,
+                        I::ScrollText,
+                        format!("{} · {}", stream.name(), jykre::cell_format::size(size)),
+                    )
+                    .role(Role::Tab)
+                    .aria_selected(output.stream == stream)
+                    .when(output.stream == stream, |s| {
+                        s.text_color(rgb(colors().mint))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Shown::Output(output) = &mut this.shown {
+                            output.stream = stream;
+                            output.scroll = UniformListScrollHandle::new();
+                        }
+                        cx.notify();
+                    }))
+                };
+                let log = match output.stream {
+                    Stream::Stderr => &output.stderr,
+                    _ => &output.stdout,
+                };
+                let body = match log {
+                    _ if output.reading => div()
+                        .p_3()
+                        .child(label(tr!("Reading what the program printed…"))),
+                    Some(log) if !log.lines.is_empty() => div().flex_1().min_h_0().p_2().child(
+                        log_lines("job-output-lines", log.lines.clone(), &output.scroll)
+                            .size_full(),
+                    ),
+                    _ => div().p_3().child(label(tr!(
+                        "The program printed nothing to {0}.",
+                        output.stream.name()
+                    ))),
+                };
+                let dropped = log.as_ref().and_then(|log| log.dropped);
+                area.child(
+                    heading(tr!("Output"), &output.step)
+                        .id("job-output-heading")
+                        .role(Role::TabList)
+                        .aria_label(tr!("What the program printed"))
+                        .child(stream_button(
+                            "job-output-stdout",
+                            Stream::Stdout,
+                            &output.stdout,
+                        ))
+                        .child(stream_button(
+                            "job-output-stderr",
+                            Stream::Stderr,
+                            &output.stderr,
+                        )),
+                )
+                .child(body)
+                .when_some(dropped, |s, bytes| {
+                    s.child(div().px_3().pb_2().child(label(tr!(
+                        "The file holds {0}; only its first {1} are shown.",
+                        jykre::cell_format::size(bytes),
+                        jykre::cell_format::size(super::super::program_bits::LOG_LIMIT)
+                    ))))
+                })
+            }
+            _ => area.child(
+                div()
+                    .id("job-no-result")
+                    .p_3()
+                    .child(label(words::no_result_yet(self.kind))),
+            ),
+        }
     }
 
     /// The form's fields, **Run** or **Stop**, and the note that refused
@@ -58,6 +166,7 @@ impl JobView {
             .flex_none()
             .p_3()
             .gap_2()
+                    .child(self.target_line(cx))
                     .when(!takes_inputs(definition), |s| {
                         s.child(label(tr!(
                             "A program without a protocol takes no inputs: it runs with its fixed arguments."
@@ -99,8 +208,67 @@ impl JobView {
                                 s.child(label(tr!("Waiting for your answer…")))
                             }),
                     )
-                    .child(note_line(words::refused_note()))
-                    .when(self.kind == JobKind::Process, |s| s.child(note_line(words::stop_note())))
+    }
+
+    /// What **Run** starts, in one line: where a SQL Job runs, a program's
+    /// command, or how many steps a chain has.
+    fn target_line(&self, cx: &App) -> Stateful<Div> {
+        let line = row().id("job-run-target").role(Role::Status).gap_2();
+        let missing = |text: &'static str| {
+            row()
+                .gap_2()
+                .text_size(px(13.))
+                .text_color(rgb(colors().amber))
+                .child(icon(I::TriangleAlert, colors().amber))
+                .child(text)
+        };
+        match &self.definition.body {
+            JobBody::Sql(body) => {
+                let source = body
+                    .connection
+                    .and_then(|id| source_of(&self.sources.sources, id));
+                match source {
+                    Some(source) => {
+                        line.child(icon(I::Database, colors().muted))
+                            .child(label(tr!(
+                                "Runs on {0}",
+                                jykre::reports::source_label(
+                                    &source.connection.name,
+                                    &body.context
+                                )
+                            )))
+                    }
+                    None => line.child(missing(tr!(
+                        "No connection to run on: choose one in the Editor."
+                    ))),
+                }
+            }
+            JobBody::Process(_) => {
+                let command = self
+                    .program
+                    .as_ref()
+                    .map(|fields| fields.command.read(cx).value())
+                    .unwrap_or_default();
+                if command.trim().is_empty() {
+                    line.child(missing(tr!("No command to run: type one in the Editor.")))
+                } else {
+                    line.child(icon(I::SquareTerminal, colors().muted))
+                        .child(label(tr!("Command")))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(fonts().mono.clone())
+                                .text_size(px(12.))
+                                .child(command),
+                        )
+                }
+            }
+            JobBody::Chain(chain) => line
+                .child(icon(I::ListChecks, colors().muted))
+                .child(label(tr!("Runs {0} steps, in order", chain.steps.len()))),
+        }
     }
 
     fn value_field(
@@ -296,12 +464,76 @@ impl JobView {
                 )
             })
             .children(lines.iter().map(line))
+            .when_some(self.run_error.as_ref(), |s, error| {
+                s.child(self.error_card(error, cx))
+            })
             .when_some(self.changed_file.clone(), |s, _| {
                 s.child(
                     button("job-republish", I::Upload, tr!("Publish"))
                         .on_click(cx.listener(|this, _, _, cx| this.publish(cx))),
                 )
             })
+    }
+
+    /// The database's error, in the shape every error has: a title, the
+    /// database's own message, its codes and position, a suggested action
+    /// and **Copy details**.
+    fn error_card(&self, error: &words::RunError, cx: &mut Context<Self>) -> Stateful<Div> {
+        let details = error.details.clone();
+        let title = match &error.step {
+            Some(step) => tr!("{0}: {1}", step, error.title),
+            None => error.title.clone(),
+        };
+        column()
+            .id("job-run-error")
+            .role(Role::Alert)
+            .aria_label(format!("{title}. {}", error.message))
+            .mt_1()
+            .p_3()
+            .gap_2()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgb(colors().red))
+            .child(
+                row().gap_2().child(icon(I::CircleX, colors().red)).child(
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(colors().red))
+                        .child(title),
+                ),
+            )
+            .child(
+                div()
+                    .pl(px(24.))
+                    .font_family(fonts().mono.clone())
+                    .text_size(px(12.))
+                    .line_height(relative(1.5))
+                    .text_color(rgb(colors().text))
+                    .child(error.message.clone()),
+            )
+            .when_some(error.codes.clone(), |s, codes| {
+                s.child(div().pl(px(24.)).child(label(codes)))
+            })
+            .when_some(error.action.clone(), |s, action| {
+                s.child(
+                    div()
+                        .pl(px(24.))
+                        .text_size(px(12.))
+                        .text_color(rgb(colors().muted))
+                        .child(action),
+                )
+            })
+            .child(row().pl(px(24.)).child(
+                button("job-copy-error", I::Copy, tr!("Copy details")).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(details.clone()));
+                        this.notice =
+                            Some(Feedback::new(Tone::Success, tr!("Error details copied.")));
+                        cx.notify();
+                    },
+                )),
+            ))
     }
 
     pub(super) fn runs_panel(&self, _cx: &mut Context<Self>) -> Div {
@@ -315,13 +547,4 @@ impl JobView {
             })
             .child(self.history.clone())
     }
-}
-
-fn note_line(text: &'static str) -> Div {
-    row()
-        .items_start()
-        .text_size(px(12.))
-        .text_color(rgb(colors().faint))
-        .child(icon(I::Info, colors().faint))
-        .child(div().flex_1().min_w_0().child(text))
 }

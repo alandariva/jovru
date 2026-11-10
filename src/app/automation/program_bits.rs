@@ -5,6 +5,8 @@
 //! them.
 //!
 //! GPUI-free: what it gives back is plain data and sentences.
+use jykre::automation::command_line;
+pub use jykre::automation::command_line::{Command, SplitError};
 use jykre::automation::definition::EnvironmentSpec;
 use jykre::automation::{ProgramOutcome, RunId};
 use jykre::automation::{jjp, logs, process};
@@ -28,6 +30,46 @@ pub fn removed_variables(environment: &EnvironmentSpec) -> Vec<String> {
     names.sort();
     names.dedup();
     names
+}
+
+/// A program and its arguments as the one command line the editor shows:
+/// nothing for a job that names no program yet.
+pub fn command_text(program: &str, arguments: &[String]) -> String {
+    if program.is_empty() && arguments.is_empty() {
+        String::new()
+    } else {
+        command_line::join(program, arguments)
+    }
+}
+
+/// The command line as typed, read into the program and its arguments.
+pub fn read_command(line: &str) -> Result<Command, SplitError> {
+    command_line::split(line)
+}
+
+/// Why a command line cannot be read, in words.
+pub fn command_problem(error: SplitError) -> String {
+    match error {
+        SplitError::UnclosedQuote(quote) => tr!(
+            "The command opens a quote ({0}) and never closes it. Close it, or remove it.",
+            quote
+        ),
+    }
+}
+
+/// How the command is started, where it is typed (section 9.1.2).
+pub fn command_note() -> &'static str {
+    tr!(
+        "Started without a shell. The first word is the program: an absolute path, or a name looked up on PATH when the run starts. Each other word is one argument, passed as it is; quotes ('a b' or \"a b\") keep several words as one."
+    )
+}
+
+/// A word a shell would act on is passed to the program as it is.
+pub fn shell_syntax_note(word: &str) -> String {
+    tr!(
+        "{0} reaches the program as an argument: there is no shell, so pipes, redirections, && and $NAME do nothing. To use them, start a shell knowingly, for example sh -c '…'.",
+        word
+    )
 }
 
 /// The most a log file keeps (ADR-0037).
@@ -131,27 +173,53 @@ pub fn protocol_problem(program: &ProgramOutcome) -> Option<String> {
     )
 }
 
-/// Why the program could not start, in words.
+/// Why the program could not start, in words: which file is missing, by
+/// the name the job gives it, and what the system said when it refused.
 pub fn start_error(program: &ProgramOutcome) -> Option<String> {
     let error = program.start_error?;
-    Some(
-        match error {
-            process::StartError::NotFound => tr!("The program or its entrypoint was not found."),
-            process::StartError::PermissionDenied => {
-                tr!("The system refused to start the program (not executable, or no permission).")
-            }
-            process::StartError::Logs => tr!("The run's log files could not be created."),
-            process::StartError::Listener => {
-                tr!("The jjp/1 listener could not take the run.")
-            }
-            process::StartError::Stopped => {
-                tr!("Stopped before the program started: nothing ran.")
-            }
-            // `Other`, and reasons the executor may add later.
-            _ => tr!("The system refused to start the program."),
+    let named = program.named.as_str();
+    let system = program.start_message.as_deref();
+    Some(match (error, system) {
+        // The file was there when it was checked, and the system still
+        // could not find something: a script's interpreter, most often.
+        (process::StartError::NotFound, Some(system)) => tr!(
+            "The system could not start {0}: {1}. If it is a script, the interpreter its first line names may not be installed.",
+            named,
+            system
+        ),
+        (process::StartError::NotFound, None) if Path::new(named).is_absolute() => {
+            tr!("The program {0} does not exist.", named)
         }
-        .to_owned(),
-    )
+        (process::StartError::NotFound, None) => tr!(
+            "The program {0} was not found: no folder of PATH holds an executable file of that name. Give its full path, or check that it is installed and that the PATH Jykre Studio started with reaches it.",
+            named
+        ),
+        (process::StartError::EntrypointNotFound, _) => tr!(
+            "The entrypoint {0} does not exist.",
+            program.entrypoint.as_deref().unwrap_or_default()
+        ),
+        (process::StartError::PermissionDenied, Some(system)) => tr!(
+            "The system refused to start {0}: {1}. Check that the file is executable.",
+            named,
+            system
+        ),
+        (process::StartError::PermissionDenied, None) => tr!(
+            "{0} is on PATH but is not executable: it has no execute permission.",
+            named
+        ),
+        (process::StartError::Logs, _) => {
+            tr!("The run's log files could not be created.").to_owned()
+        }
+        (process::StartError::Listener, _) => {
+            tr!("The jjp/1 listener could not take the run.").to_owned()
+        }
+        (process::StartError::Stopped, _) => {
+            tr!("Stopped before the program started: nothing ran.").to_owned()
+        }
+        // `Other`, and reasons the executor may add later.
+        (_, Some(system)) => tr!("The system refused to start {0}: {1}.", named, system),
+        (_, None) => tr!("The system refused to start {0}.", named),
+    })
 }
 
 /// One of a program run's log files (ADR-0037).
@@ -195,4 +263,75 @@ pub async fn read_log(data_dir: &Path, run: RunId, stream: Stream) -> std::io::R
         bytes: log.bytes,
         complete: log.complete,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failed(named: &str, error: process::StartError, system: Option<&str>) -> String {
+        start_error(&ProgramOutcome {
+            named: named.to_owned(),
+            entrypoint: Some("/jobs/export.php".to_owned()),
+            start_error: Some(error),
+            start_message: system.map(str::to_owned),
+            ..ProgramOutcome::default()
+        })
+        .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_program_that_cannot_start_names_what_is_missing() {
+        crate::app::source_text();
+        let on_path = failed("php", process::StartError::NotFound, None);
+        assert!(
+            on_path.starts_with("The program php was not found: no folder of PATH"),
+            "{on_path}"
+        );
+        let absolute = if cfg!(windows) {
+            r"C:\tools\php.exe"
+        } else {
+            "/opt/php/bin/php"
+        };
+        assert_eq!(
+            failed(absolute, process::StartError::NotFound, None),
+            format!("The program {absolute} does not exist.")
+        );
+        assert_eq!(
+            failed("php", process::StartError::EntrypointNotFound, None),
+            "The entrypoint /jobs/export.php does not exist."
+        );
+        let refused = failed(
+            "/jobs/tool",
+            process::StartError::Other,
+            Some("Exec format error (os error 8)"),
+        );
+        assert_eq!(
+            refused,
+            "The system refused to start /jobs/tool: Exec format error (os error 8)."
+        );
+        let script = failed(
+            "/jobs/tool",
+            process::StartError::NotFound,
+            Some("No such file or directory (os error 2)"),
+        );
+        assert!(script.contains("interpreter"), "{script}");
+        assert_eq!(
+            start_error(&ProgramOutcome::default()),
+            None,
+            "a program that started has no start error"
+        );
+    }
+
+    #[test]
+    fn a_command_cut_in_a_quote_names_the_quote() {
+        crate::app::source_text();
+        let error = read_command("php -r \"print(1)").err();
+        assert_eq!(
+            error.map(command_problem).as_deref(),
+            Some("The command opens a quote (\") and never closes it. Close it, or remove it.")
+        );
+        assert_eq!(command_text("", &[]), "");
+        assert_eq!(command_text("php", &["a b".to_owned()]), "php 'a b'");
+    }
 }
