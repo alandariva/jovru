@@ -3411,12 +3411,21 @@ impl ResultGrid {
             .as_ref()
             .filter(|find| find.open && !find.text.trim().is_empty())
         {
-            Some(find) => find
-                .matches
-                .iter()
-                .filter(|found| !found.hidden)
-                .map(|found| found.column)
-                .collect(),
+            Some(find) => {
+                // The matches are alphabetical; the records keep display order.
+                let mut found = vec![false; self.result.column_count()];
+                for each in &find.matches {
+                    if let Some(slot) = found.get_mut(each.column) {
+                        *slot = true;
+                    }
+                }
+                self.layout
+                    .visible()
+                    .iter()
+                    .copied()
+                    .filter(|column| found.get(*column).copied().unwrap_or(false))
+                    .collect()
+            }
             None => self.layout.visible().iter().copied().collect(),
         }
     }

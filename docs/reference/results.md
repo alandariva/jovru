@@ -211,9 +211,9 @@ alignment only; the value itself is never converted.
   ignoring case and accents (`jykre::column_search`: `cao` finds `Ação`,
   `strasse` finds `Straße`), with the matching part marked in the
   `MATCH_TEXT` and `MATCH_BG` colours. With nothing typed it lists every
-  column; otherwise only the ones whose name holds the text. Shown columns
-  come first, in display order, then the hidden ones, each saying it is
-  hidden and that choosing it shows it. `↑` and `↓` choose a column,
+  column; otherwise only the ones whose name holds the text. They are in
+  alphabetical order, ignoring case and accents, with the hidden ones among
+  the shown ones, each saying it is hidden and that choosing it shows it. `↑` and `↓` choose a column,
   `Enter` (or a click) goes to it and closes the dialog: the grid pans to
   the column and selects it over the displayed rows, after showing it when
   it was hidden, and takes the keyboard. `Esc`, the close button or a click
@@ -226,8 +226,8 @@ alignment only; the value itself is never converted.
   works in the grid that has the keyboard (a query tab's, a report panel's
   or a job's), the dialog included; elsewhere it opens the dialog in the
   query tab's result on screen. While the dialog is open with text, the
-  records view lists only the shown columns it finds; closing it lists
-  them all again.
+  records view lists only the shown columns it finds, still in display
+  order; closing it lists them all again.
   While any column is hidden, a line above the table (and the records)
   says how many, with **Show all columns**. The values, their types and
   NULLs are untouched; only where a column is drawn changes.
