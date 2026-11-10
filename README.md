@@ -38,8 +38,10 @@ Backups, role administration and server monitoring belong to other tools.
 ## Features
 
 - **Database explorer.** Move through schemas, tables and columns, and
-  refresh one branch without re-reading the whole connection. Search uses
-  the local metadata cache.
+  refresh one branch without re-reading the whole connection. The search
+  field marks matches in the local metadata cache or leaves only them,
+  closed branches included, and the arrows move from one connection to the
+  next.
 - **SQL editor.** Write SQL, run the selection, the statement at the cursor,
   or every statement, and keep several scripts open. **Format** follows the
   connection's dialect. PostgreSQL, MySQL and Databricks errors are marked
@@ -49,7 +51,8 @@ Backups, role administration and server monitoring belong to other tools.
   connection stay on this computer.
 - **Results.** Inspect rows in a grid, copy a selection into a spreadsheet,
   and export the whole result, every page, to CSV, Excel,
-  JSON, JSON Lines, SQL `INSERT`s or Markdown.
+  JSON, JSON Lines, SQL `INSERT`s or Markdown. `Ctrl F` searches the cells
+  on the page: matches are highlighted, or only those rows stay.
 - **Editing and import.** On a result that reads one table and has a primary
   key, or a unique key on `NOT NULL` columns, edit cells and review the
   statements before they are written. **Import from file…** loads a CSV or
@@ -59,6 +62,10 @@ Backups, role administration and server monitoring belong to other tools.
 - **Connections.** Add PostgreSQL, MySQL, Databricks and SQLite from the
   explorer, test the connection, and delete it later with its remembered
   password and metadata cache.
+- **Appearance.** Choose light, dark or the system theme. The choice
+  applies at once and stays across restarts. A JSON theme file in `themes/`
+  next to the application, or in the data folder, appears in
+  **Preferences › Appearance**.
 - **Reports.** A report collects panels — a table, a bar, line or pie chart,
   or a single number — each on its own connection. Panels share named
   parameters, filled in before the run and bound by the driver.
@@ -75,8 +82,10 @@ read-only, and why.
 Automation saves work you would otherwise run by hand: a **SQL Job** (one
 statement, with typed inputs bound by the driver), an **external program**
 started without a shell, or a **chain** that passes a job's declared outputs
-to the next step and stops at the first failure. A schedule can run a job or
-a chain while Jykre Studio is open.
+to the next step and stops at the first failure. A SQL Job's connection is
+its own control, and a program is typed as one command line, without a
+shell. After a run, the rows or the program's output sit under that run.
+A schedule can run a job or a chain while Jykre Studio is open.
 
 Limits that matter before you rely on it:
 
@@ -261,12 +270,16 @@ crates fit together is in
 ## Project status
 
 The project is in active development. The latest release is
-[v0.3.0](../../releases/tag/v0.3.0).
+[v0.3.1](../../releases/tag/v0.3.1).
 
 Version 0.2.0 made daily use reliable, including updates from signed
 releases. Version 0.3.0 adds automation while the application is open,
 editing in the result grid, CSV and Excel import, shortcuts you choose, and
-grid columns that can be hidden, moved, frozen and found.
+grid columns that can be hidden, moved, frozen and found. Version 0.3.1
+adds colour themes you can switch while the application is open, search in
+the result grid and the explorer, and a clearer automation editor: a SQL
+Job's connection on its own, a program typed as one command line, and the
+last run's rows or output under the run.
 
 Windows is the primary platform. Linux is validated on Ubuntu 24.04 with
 X11. Wayland and macOS are not validated. Behavior can change between
