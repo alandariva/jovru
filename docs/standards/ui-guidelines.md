@@ -109,7 +109,14 @@ See [Performance](performance.md) for budgets and how to measure.
   (`tr!("Query {0}: {1}", n, title)`). Do not concatenate translated fragments;
   translators need whole sentences.
 - After adding or changing strings, run `cargo xtask i18n pt-BR` and fill in
-  the new entries (empty entries fall back to English).
+  the new entries (empty entries fall back to English). Keep positional
+  placeholders (`{0}`, `{1}`), which may be reordered.
+- To ship another language, run `cargo xtask i18n <tag>`, fill
+  `locales/<tag>.json`, and add
+  `("<tag>", include_str!("../locales/<tag>.json"))` to `CATALOGS` in
+  `src/i18n.rs`. A unit test checks that each catalog parses and keeps its
+  placeholders. Error text from `jykre-storage` and `jykre-secrets` is not
+  passed through `tr!`.
 - Terminology is fixed; see [User experience](../reference/ux.md#text-and-terminology).
 - Fonts come from roles, `ui::fonts()`: `ui` for the interface, `code` for
   SQL (ligatures allowed), `mono` for values and messages, shown as typed.
