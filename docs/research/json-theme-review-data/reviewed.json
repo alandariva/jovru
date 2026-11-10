@@ -1,0 +1,1018 @@
+{
+  "version": "0.3.0",
+  "os": "windows",
+  "architecture": "x86_64",
+  "build_profile": "release",
+  "debug_build": false,
+  "logical_cpus": 20,
+  "window": {
+    "width": 1480.0,
+    "height": 920.0,
+    "scale_factor": 1.0
+  },
+  "frame_probe": true,
+  "started_unix_seconds": 1794283466,
+  "elapsed_seconds": 132.3064108,
+  "measurement": "frames and UI-thread stalls from the frame probe (JYKRE_PROBE=1) per phase; UI-thread work from the application's own UiTimer timings; process CPU (100% = one logical CPU) and resident memory at phase ends, and sampled during imports",
+  "input": "in-process production handlers (keys, toolbar actions, typing into the fields), on timers; not OS input injection",
+  "paths": {
+    "grid": {
+      "title": "Result grid (A14)",
+      "metrics": [
+        {
+          "metric": "Frame p95, selection, 1000 × 5 (0 frozen)",
+          "value": 3.9505,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, selection, 1000 × 5 (0 frozen)",
+          "value": 11.882200000000001,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, selection_bottom, 1000 × 5 (0 frozen)",
+          "value": 4.051500000000001,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, selection_bottom, 1000 × 5 (0 frozen)",
+          "value": 14.1268,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, scroll, 1000 × 5 (0 frozen)",
+          "value": 4.8606,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, scroll, 1000 × 5 (0 frozen)",
+          "value": 12.176400000000001,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, pan, 1000 × 5 (0 frozen)",
+          "value": 3.4678999999999998,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, pan, 1000 × 5 (0 frozen)",
+          "value": 12.434000000000001,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, selection, 100000 × 5 (0 frozen)",
+          "value": 3.818,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, selection, 100000 × 5 (0 frozen)",
+          "value": 12.7188,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, selection_bottom, 100000 × 5 (0 frozen)",
+          "value": 3.2434,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, selection_bottom, 100000 × 5 (0 frozen)",
+          "value": 12.600200000000001,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, scroll, 100000 × 5 (0 frozen)",
+          "value": 4.848800000000001,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, scroll, 100000 × 5 (0 frozen)",
+          "value": 12.4706,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, pan, 100000 × 5 (0 frozen)",
+          "value": 3.8088,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, pan, 100000 × 5 (0 frozen)",
+          "value": 12.5384,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, selection, 1000 × 400 (3 frozen)",
+          "value": 7.7545,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, selection, 1000 × 400 (3 frozen)",
+          "value": 14.8,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, selection_bottom, 1000 × 400 (3 frozen)",
+          "value": 6.0803,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, selection_bottom, 1000 × 400 (3 frozen)",
+          "value": 22.828999999999997,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, scroll, 1000 × 400 (3 frozen)",
+          "value": 8.4144,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "fail",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, scroll, 1000 × 400 (3 frozen)",
+          "value": 14.3697,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        },
+        {
+          "metric": "Frame p95, pan, 1000 × 400 (3 frozen)",
+          "value": 7.1031,
+          "unit": "ms",
+          "budget": "≤ 8 ms p95",
+          "budget_limit": 8.0,
+          "budget_source": "Performance: frame while scrolling, hovering or selecting in the result grid",
+          "status": "pass",
+          "reason": null
+        },
+        {
+          "metric": "Longest UI-thread stall, pan, 1000 × 400 (3 frozen)",
+          "value": 13.1068,
+          "unit": "ms",
+          "budget": null,
+          "budget_limit": null,
+          "budget_source": null,
+          "status": "info",
+          "reason": null
+        }
+      ],
+      "phases": [
+        {
+          "phase": "idle",
+          "elapsed_seconds": 3.4994259,
+          "cpu_percent_one_core": 0.8930036209653703,
+          "rss_before_bytes": 66654208,
+          "rss_after_bytes": 66560000,
+          "counter_errors": [],
+          "frames": null,
+          "stalls": {
+            "count": 226,
+            "median_ms": 10.5498,
+            "p95_ms": 11.1627,
+            "max_ms": 11.3857
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 75
+        },
+        {
+          "phase": "selection",
+          "elapsed_seconds": 11.6817646,
+          "cpu_percent_one_core": 6.955284820582672,
+          "rss_before_bytes": 68583424,
+          "rss_after_bytes": 67870720,
+          "counter_errors": [],
+          "frames": {
+            "count": 250,
+            "median_ms": 1.9657,
+            "p95_ms": 3.9505,
+            "max_ms": 7.3489
+          },
+          "stalls": {
+            "count": 750,
+            "median_ms": 10.578199999999999,
+            "p95_ms": 11.1576,
+            "max_ms": 11.882200000000001
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 250
+        },
+        {
+          "phase": "selection_bottom",
+          "elapsed_seconds": 11.6825264,
+          "cpu_percent_one_core": 13.508422287836645,
+          "rss_before_bytes": 68087808,
+          "rss_after_bytes": 69816320,
+          "counter_errors": [],
+          "frames": {
+            "count": 331,
+            "median_ms": 1.858,
+            "p95_ms": 4.051500000000001,
+            "max_ms": 7.1485
+          },
+          "stalls": {
+            "count": 750,
+            "median_ms": 10.561,
+            "p95_ms": 11.2484,
+            "max_ms": 14.1268
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 250
+        },
+        {
+          "phase": "scroll",
+          "elapsed_seconds": 5.840964,
+          "cpu_percent_one_core": 8.025216385514446,
+          "rss_before_bytes": 69394432,
+          "rss_after_bytes": 69595136,
+          "counter_errors": [],
+          "frames": {
+            "count": 156,
+            "median_ms": 2.2523,
+            "p95_ms": 4.8606,
+            "max_ms": 7.2673
+          },
+          "stalls": {
+            "count": 375,
+            "median_ms": 10.5996,
+            "p95_ms": 11.1528,
+            "max_ms": 12.176400000000001
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 125
+        },
+        {
+          "phase": "pan",
+          "elapsed_seconds": 5.8396785,
+          "cpu_percent_one_core": 10.435077889990005,
+          "rss_before_bytes": 69709824,
+          "rss_after_bytes": 69623808,
+          "counter_errors": [],
+          "frames": {
+            "count": 175,
+            "median_ms": 1.9295,
+            "p95_ms": 3.4678999999999998,
+            "max_ms": 8.5144
+          },
+          "stalls": {
+            "count": 376,
+            "median_ms": 10.5542,
+            "p95_ms": 11.1857,
+            "max_ms": 12.434000000000001
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 125
+        },
+        {
+          "phase": "idle",
+          "elapsed_seconds": 3.4885196,
+          "cpu_percent_one_core": 1.7915909086478974,
+          "rss_before_bytes": 76926976,
+          "rss_after_bytes": 75329536,
+          "counter_errors": [],
+          "frames": {
+            "count": 1,
+            "median_ms": 1.8477999999999999,
+            "p95_ms": 1.8477999999999999,
+            "max_ms": 1.8477999999999999
+          },
+          "stalls": {
+            "count": 225,
+            "median_ms": 10.5518,
+            "p95_ms": 11.1688,
+            "max_ms": 11.5936
+          },
+          "ui_thread": {},
+          "rows": 100000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 75
+        },
+        {
+          "phase": "selection",
+          "elapsed_seconds": 11.6723078,
+          "cpu_percent_one_core": 9.90592451648679,
+          "rss_before_bytes": 76652544,
+          "rss_after_bytes": 75603968,
+          "counter_errors": [],
+          "frames": {
+            "count": 250,
+            "median_ms": 2.1803,
+            "p95_ms": 3.818,
+            "max_ms": 5.7546
+          },
+          "stalls": {
+            "count": 750,
+            "median_ms": 10.562,
+            "p95_ms": 11.177100000000001,
+            "max_ms": 12.7188
+          },
+          "ui_thread": {},
+          "rows": 100000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 250
+        },
+        {
+          "phase": "selection_bottom",
+          "elapsed_seconds": 11.675343699999999,
+          "cpu_percent_one_core": 47.10782090295124,
+          "rss_before_bytes": 80048128,
+          "rss_after_bytes": 80121856,
+          "counter_errors": [],
+          "frames": {
+            "count": 332,
+            "median_ms": 2.0187999999999997,
+            "p95_ms": 3.2434,
+            "max_ms": 4.5257
+          },
+          "stalls": {
+            "count": 751,
+            "median_ms": 10.5535,
+            "p95_ms": 11.244,
+            "max_ms": 12.600200000000001
+          },
+          "ui_thread": {},
+          "rows": 100000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 250
+        },
+        {
+          "phase": "scroll",
+          "elapsed_seconds": 5.8223996,
+          "cpu_percent_one_core": 13.149647097392629,
+          "rss_before_bytes": 81481728,
+          "rss_after_bytes": 77209600,
+          "counter_errors": [],
+          "frames": {
+            "count": 157,
+            "median_ms": 2.1752,
+            "p95_ms": 4.848800000000001,
+            "max_ms": 6.9975000000000005
+          },
+          "stalls": {
+            "count": 375,
+            "median_ms": 10.486600000000001,
+            "p95_ms": 11.1799,
+            "max_ms": 12.4706
+          },
+          "ui_thread": {},
+          "rows": 100000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 125
+        },
+        {
+          "phase": "pan",
+          "elapsed_seconds": 5.8404168,
+          "cpu_percent_one_core": 13.37661380605576,
+          "rss_before_bytes": 75591680,
+          "rss_after_bytes": 77283328,
+          "counter_errors": [],
+          "frames": {
+            "count": 175,
+            "median_ms": 1.9442000000000002,
+            "p95_ms": 3.8088,
+            "max_ms": 4.7825999999999995
+          },
+          "stalls": {
+            "count": 375,
+            "median_ms": 10.6038,
+            "p95_ms": 11.186,
+            "max_ms": 12.5384
+          },
+          "ui_thread": {},
+          "rows": 100000,
+          "columns": 5,
+          "frozen_columns": 0,
+          "scheduled_steps": 125
+        },
+        {
+          "phase": "idle",
+          "elapsed_seconds": 3.5188256,
+          "cpu_percent_one_core": 2.664241160459899,
+          "rss_before_bytes": 86921216,
+          "rss_after_bytes": 81571840,
+          "counter_errors": [],
+          "frames": null,
+          "stalls": {
+            "count": 226,
+            "median_ms": 10.606300000000001,
+            "p95_ms": 11.2295,
+            "max_ms": 11.5683
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 400,
+          "frozen_columns": 3,
+          "scheduled_steps": 75
+        },
+        {
+          "phase": "selection",
+          "elapsed_seconds": 11.682077,
+          "cpu_percent_one_core": 15.64897235311837,
+          "rss_before_bytes": 85401600,
+          "rss_after_bytes": 81285120,
+          "counter_errors": [],
+          "frames": {
+            "count": 250,
+            "median_ms": 4.3287,
+            "p95_ms": 7.7545,
+            "max_ms": 9.4397
+          },
+          "stalls": {
+            "count": 751,
+            "median_ms": 10.5515,
+            "p95_ms": 11.1734,
+            "max_ms": 14.8
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 400,
+          "frozen_columns": 3,
+          "scheduled_steps": 250
+        },
+        {
+          "phase": "selection_bottom",
+          "elapsed_seconds": 11.6708854,
+          "cpu_percent_one_core": 62.52203453218725,
+          "rss_before_bytes": 88596480,
+          "rss_after_bytes": 90681344,
+          "counter_errors": [],
+          "frames": {
+            "count": 367,
+            "median_ms": 3.7681,
+            "p95_ms": 6.0803,
+            "max_ms": 11.5705
+          },
+          "stalls": {
+            "count": 749,
+            "median_ms": 10.5648,
+            "p95_ms": 11.3431,
+            "max_ms": 22.828999999999997
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 400,
+          "frozen_columns": 3,
+          "scheduled_steps": 250
+        },
+        {
+          "phase": "scroll",
+          "elapsed_seconds": 5.8439299,
+          "cpu_percent_one_core": 14.438058197789129,
+          "rss_before_bytes": 90898432,
+          "rss_after_bytes": 85102592,
+          "counter_errors": [],
+          "frames": {
+            "count": 157,
+            "median_ms": 4.3226,
+            "p95_ms": 8.4144,
+            "max_ms": 12.1286
+          },
+          "stalls": {
+            "count": 374,
+            "median_ms": 10.616499999999998,
+            "p95_ms": 11.293600000000001,
+            "max_ms": 14.3697
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 400,
+          "frozen_columns": 3,
+          "scheduled_steps": 125
+        },
+        {
+          "phase": "pan",
+          "elapsed_seconds": 5.8303831,
+          "cpu_percent_one_core": 18.75948769129768,
+          "rss_before_bytes": 85028864,
+          "rss_after_bytes": 82571264,
+          "counter_errors": [],
+          "frames": {
+            "count": 209,
+            "median_ms": 4.1338,
+            "p95_ms": 7.1031,
+            "max_ms": 9.0142
+          },
+          "stalls": {
+            "count": 376,
+            "median_ms": 10.5535,
+            "p95_ms": 11.405999999999999,
+            "max_ms": 13.1068
+          },
+          "ui_thread": {},
+          "rows": 1000,
+          "columns": 400,
+          "frozen_columns": 3,
+          "scheduled_steps": 125
+        }
+      ],
+      "notes": [
+        "Selection, scrolling and panning call the grid's own keyboard and scroll methods every 40 ms; frames are the probe's."
+      ]
+    }
+  },
+  "results": [
+    {
+      "phase": "idle",
+      "elapsed_seconds": 3.4994259,
+      "cpu_percent_one_core": 0.8930036209653703,
+      "rss_before_bytes": 66654208,
+      "rss_after_bytes": 66560000,
+      "counter_errors": [],
+      "frames": null,
+      "stalls": {
+        "count": 226,
+        "median_ms": 10.5498,
+        "p95_ms": 11.1627,
+        "max_ms": 11.3857
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 75,
+      "path": "grid"
+    },
+    {
+      "phase": "selection",
+      "elapsed_seconds": 11.6817646,
+      "cpu_percent_one_core": 6.955284820582672,
+      "rss_before_bytes": 68583424,
+      "rss_after_bytes": 67870720,
+      "counter_errors": [],
+      "frames": {
+        "count": 250,
+        "median_ms": 1.9657,
+        "p95_ms": 3.9505,
+        "max_ms": 7.3489
+      },
+      "stalls": {
+        "count": 750,
+        "median_ms": 10.578199999999999,
+        "p95_ms": 11.1576,
+        "max_ms": 11.882200000000001
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 250,
+      "path": "grid"
+    },
+    {
+      "phase": "selection_bottom",
+      "elapsed_seconds": 11.6825264,
+      "cpu_percent_one_core": 13.508422287836645,
+      "rss_before_bytes": 68087808,
+      "rss_after_bytes": 69816320,
+      "counter_errors": [],
+      "frames": {
+        "count": 331,
+        "median_ms": 1.858,
+        "p95_ms": 4.051500000000001,
+        "max_ms": 7.1485
+      },
+      "stalls": {
+        "count": 750,
+        "median_ms": 10.561,
+        "p95_ms": 11.2484,
+        "max_ms": 14.1268
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 250,
+      "path": "grid"
+    },
+    {
+      "phase": "scroll",
+      "elapsed_seconds": 5.840964,
+      "cpu_percent_one_core": 8.025216385514446,
+      "rss_before_bytes": 69394432,
+      "rss_after_bytes": 69595136,
+      "counter_errors": [],
+      "frames": {
+        "count": 156,
+        "median_ms": 2.2523,
+        "p95_ms": 4.8606,
+        "max_ms": 7.2673
+      },
+      "stalls": {
+        "count": 375,
+        "median_ms": 10.5996,
+        "p95_ms": 11.1528,
+        "max_ms": 12.176400000000001
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 125,
+      "path": "grid"
+    },
+    {
+      "phase": "pan",
+      "elapsed_seconds": 5.8396785,
+      "cpu_percent_one_core": 10.435077889990005,
+      "rss_before_bytes": 69709824,
+      "rss_after_bytes": 69623808,
+      "counter_errors": [],
+      "frames": {
+        "count": 175,
+        "median_ms": 1.9295,
+        "p95_ms": 3.4678999999999998,
+        "max_ms": 8.5144
+      },
+      "stalls": {
+        "count": 376,
+        "median_ms": 10.5542,
+        "p95_ms": 11.1857,
+        "max_ms": 12.434000000000001
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 125,
+      "path": "grid"
+    },
+    {
+      "phase": "idle",
+      "elapsed_seconds": 3.4885196,
+      "cpu_percent_one_core": 1.7915909086478974,
+      "rss_before_bytes": 76926976,
+      "rss_after_bytes": 75329536,
+      "counter_errors": [],
+      "frames": {
+        "count": 1,
+        "median_ms": 1.8477999999999999,
+        "p95_ms": 1.8477999999999999,
+        "max_ms": 1.8477999999999999
+      },
+      "stalls": {
+        "count": 225,
+        "median_ms": 10.5518,
+        "p95_ms": 11.1688,
+        "max_ms": 11.5936
+      },
+      "ui_thread": {},
+      "rows": 100000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 75,
+      "path": "grid"
+    },
+    {
+      "phase": "selection",
+      "elapsed_seconds": 11.6723078,
+      "cpu_percent_one_core": 9.90592451648679,
+      "rss_before_bytes": 76652544,
+      "rss_after_bytes": 75603968,
+      "counter_errors": [],
+      "frames": {
+        "count": 250,
+        "median_ms": 2.1803,
+        "p95_ms": 3.818,
+        "max_ms": 5.7546
+      },
+      "stalls": {
+        "count": 750,
+        "median_ms": 10.562,
+        "p95_ms": 11.177100000000001,
+        "max_ms": 12.7188
+      },
+      "ui_thread": {},
+      "rows": 100000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 250,
+      "path": "grid"
+    },
+    {
+      "phase": "selection_bottom",
+      "elapsed_seconds": 11.675343699999999,
+      "cpu_percent_one_core": 47.10782090295124,
+      "rss_before_bytes": 80048128,
+      "rss_after_bytes": 80121856,
+      "counter_errors": [],
+      "frames": {
+        "count": 332,
+        "median_ms": 2.0187999999999997,
+        "p95_ms": 3.2434,
+        "max_ms": 4.5257
+      },
+      "stalls": {
+        "count": 751,
+        "median_ms": 10.5535,
+        "p95_ms": 11.244,
+        "max_ms": 12.600200000000001
+      },
+      "ui_thread": {},
+      "rows": 100000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 250,
+      "path": "grid"
+    },
+    {
+      "phase": "scroll",
+      "elapsed_seconds": 5.8223996,
+      "cpu_percent_one_core": 13.149647097392629,
+      "rss_before_bytes": 81481728,
+      "rss_after_bytes": 77209600,
+      "counter_errors": [],
+      "frames": {
+        "count": 157,
+        "median_ms": 2.1752,
+        "p95_ms": 4.848800000000001,
+        "max_ms": 6.9975000000000005
+      },
+      "stalls": {
+        "count": 375,
+        "median_ms": 10.486600000000001,
+        "p95_ms": 11.1799,
+        "max_ms": 12.4706
+      },
+      "ui_thread": {},
+      "rows": 100000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 125,
+      "path": "grid"
+    },
+    {
+      "phase": "pan",
+      "elapsed_seconds": 5.8404168,
+      "cpu_percent_one_core": 13.37661380605576,
+      "rss_before_bytes": 75591680,
+      "rss_after_bytes": 77283328,
+      "counter_errors": [],
+      "frames": {
+        "count": 175,
+        "median_ms": 1.9442000000000002,
+        "p95_ms": 3.8088,
+        "max_ms": 4.7825999999999995
+      },
+      "stalls": {
+        "count": 375,
+        "median_ms": 10.6038,
+        "p95_ms": 11.186,
+        "max_ms": 12.5384
+      },
+      "ui_thread": {},
+      "rows": 100000,
+      "columns": 5,
+      "frozen_columns": 0,
+      "scheduled_steps": 125,
+      "path": "grid"
+    },
+    {
+      "phase": "idle",
+      "elapsed_seconds": 3.5188256,
+      "cpu_percent_one_core": 2.664241160459899,
+      "rss_before_bytes": 86921216,
+      "rss_after_bytes": 81571840,
+      "counter_errors": [],
+      "frames": null,
+      "stalls": {
+        "count": 226,
+        "median_ms": 10.606300000000001,
+        "p95_ms": 11.2295,
+        "max_ms": 11.5683
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 400,
+      "frozen_columns": 3,
+      "scheduled_steps": 75,
+      "path": "grid"
+    },
+    {
+      "phase": "selection",
+      "elapsed_seconds": 11.682077,
+      "cpu_percent_one_core": 15.64897235311837,
+      "rss_before_bytes": 85401600,
+      "rss_after_bytes": 81285120,
+      "counter_errors": [],
+      "frames": {
+        "count": 250,
+        "median_ms": 4.3287,
+        "p95_ms": 7.7545,
+        "max_ms": 9.4397
+      },
+      "stalls": {
+        "count": 751,
+        "median_ms": 10.5515,
+        "p95_ms": 11.1734,
+        "max_ms": 14.8
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 400,
+      "frozen_columns": 3,
+      "scheduled_steps": 250,
+      "path": "grid"
+    },
+    {
+      "phase": "selection_bottom",
+      "elapsed_seconds": 11.6708854,
+      "cpu_percent_one_core": 62.52203453218725,
+      "rss_before_bytes": 88596480,
+      "rss_after_bytes": 90681344,
+      "counter_errors": [],
+      "frames": {
+        "count": 367,
+        "median_ms": 3.7681,
+        "p95_ms": 6.0803,
+        "max_ms": 11.5705
+      },
+      "stalls": {
+        "count": 749,
+        "median_ms": 10.5648,
+        "p95_ms": 11.3431,
+        "max_ms": 22.828999999999997
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 400,
+      "frozen_columns": 3,
+      "scheduled_steps": 250,
+      "path": "grid"
+    },
+    {
+      "phase": "scroll",
+      "elapsed_seconds": 5.8439299,
+      "cpu_percent_one_core": 14.438058197789129,
+      "rss_before_bytes": 90898432,
+      "rss_after_bytes": 85102592,
+      "counter_errors": [],
+      "frames": {
+        "count": 157,
+        "median_ms": 4.3226,
+        "p95_ms": 8.4144,
+        "max_ms": 12.1286
+      },
+      "stalls": {
+        "count": 374,
+        "median_ms": 10.616499999999998,
+        "p95_ms": 11.293600000000001,
+        "max_ms": 14.3697
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 400,
+      "frozen_columns": 3,
+      "scheduled_steps": 125,
+      "path": "grid"
+    },
+    {
+      "phase": "pan",
+      "elapsed_seconds": 5.8303831,
+      "cpu_percent_one_core": 18.75948769129768,
+      "rss_before_bytes": 85028864,
+      "rss_after_bytes": 82571264,
+      "counter_errors": [],
+      "frames": {
+        "count": 209,
+        "median_ms": 4.1338,
+        "p95_ms": 7.1031,
+        "max_ms": 9.0142
+      },
+      "stalls": {
+        "count": 376,
+        "median_ms": 10.5535,
+        "p95_ms": 11.405999999999999,
+        "max_ms": 13.1068
+      },
+      "ui_thread": {},
+      "rows": 1000,
+      "columns": 400,
+      "frozen_columns": 3,
+      "scheduled_steps": 125,
+      "path": "grid"
+    }
+  ],
+  "cleanup": []
+}

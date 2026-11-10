@@ -63,8 +63,10 @@ A failure says what failed and that nothing was installed.
 The **theme** is **System** until the user chooses: it follows the
 operating system's light or dark appearance, also when it changes while the
 application runs. **Light** or **Dark** stay chosen across restarts, and
-choosing **System** again follows the system once more. The choice applies
-at once to every part of the window.
+choosing **System** again follows the system once more. A theme file in a
+themes directory appears as another choice. The choice applies at once to
+every part of the window. How a file is written and where it is placed is
+in [Themes](themes.md).
 
 **Import from file…**, in the explorer's menu of a table or of the namespace
 that holds tables (a schema, or a MySQL database), on connections whose driver has transactions,
@@ -679,9 +681,9 @@ stack traces and modal dialogs for query errors.
 
 ## Theme and motion
 
-- A light and a dark theme with the same colour tokens of `ui.rs`
-  ([UI guidelines](../standards/ui-guidelines.md#colours-and-theme)); result values use the
-  colours in [Results](results.md#value-presentation).
+- Colour themes are JSON files with one set of tokens
+  ([Themes](themes.md), [UI guidelines](../standards/ui-guidelines.md#colours-and-theme));
+  result values use the colours in [Results](results.md#value-presentation).
 - The SQL font size is adjustable (12 to 24 px) and remembered.
 - Motion is reserved for work in progress (spinners). No decorative
   animation delays an action.

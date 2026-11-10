@@ -63,6 +63,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | [Persistence](reference/persistence.md) | SQLite files, schemas, refresh, migrations and recovery |
 | [Results](reference/results.md) | Result model, limits, grid, copying, export and reports |
 | [User experience](reference/ux.md) | Layout, visible states, feedback, shortcuts and text |
+| [Themes](reference/themes.md) | JSON colour themes, tokens, inheritance, overrides and fallback |
 | [SQL catalogs](reference/sql-catalogs.md) | Implemented catalog storage, loading, generation and validation |
 
 ### Plans
@@ -87,6 +88,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | --- | --- |
 | [Behavioral audit](research/behavioral-audit.md) | Findings N001–N047, approvals, decisions and implementation evidence |
 | [SQL editor investigation](research/sql-editor-investigation.md) | Alternatives, proof of concept and editor findings |
+| [JSON theme review](research/json-theme-review.md) | Resolver and picker findings, corrections, verification and remaining gaps |
 | [Automation engine architecture review](research/automation-engine-architecture-review.md) | Technical findings, proposed changes, trade-offs and required maintainer decisions |
 | [Architecture decision records](adr/README.md) | Numbered records and their status |
 

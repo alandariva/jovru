@@ -376,6 +376,7 @@ struct AppView {
     sidebar_open: bool,
     /// The Preferences dialog is open, on this category ([`settings`]).
     settings_open: bool,
+    theme_reload: Option<Task<()>>,
     settings_page: settings::SettingsPage,
     /// Keeps Tab inside Preferences.
     settings_focus: FocusHandle,
@@ -744,6 +745,7 @@ impl AppView {
             next_query: 1,
             sidebar_open: true,
             settings_open: false,
+            theme_reload: None,
             settings_page: settings::SettingsPage::default(),
             settings_focus: cx.focus_handle(),
             assistant_settings: cx

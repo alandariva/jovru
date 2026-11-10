@@ -246,6 +246,18 @@ of them and the profile keeps its revision, so a retry is not refused.
 write superseded by a newer size is skipped, so the size saved is the last
 one shown.
 
+`appearance.theme` keeps the colour theme (`jykre::theme::ThemeChoice`):
+`"system"` (the default), `"light"`, `"dark"`, or the id of a theme file.
+A missing value, a non-string, or an id that could not be a file name reads
+as `"system"`. An id whose file is missing or invalid also draws the
+built-in theme for the system appearance. `appearance.theme_overrides`
+keeps only colour overrides (`{"tokens": {}, "editor": {}, "results": {}}`),
+not font size, density or layout. A value that is not that object is no
+override. Both are read at start with the other settings. Only the choice
+is written when it changes; Preferences does not edit overrides yet.
+Opening Preferences reads the theme files again. The
+files themselves are not in this database ([Themes](themes.md)).
+
 ## Schema: `metadata/<connection-id>.db`
 
 | Table | Purpose |

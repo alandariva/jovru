@@ -674,11 +674,23 @@ impl AppView {
                     Err(_) => connection_store::latest_backup(&dir).await,
                     Ok(_) => None,
                 };
-                let (font_size, copy, state, reports, theme, favorites, library) =
+                let themes_dir = dir.clone();
+                let theme_catalog = tokio::task::spawn_blocking(move || {
+                    let executable = std::env::current_exe().ok();
+                    jykre::theme::load_catalog(&jykre::theme::theme_directories(
+                        &themes_dir,
+                        executable.as_deref(),
+                    ))
+                })
+                .await
+                .unwrap_or_else(|_| jykre::theme::Catalog::bundled());
+                let (font_size, copy, state, reports, theme, theme_overrides, favorites, library) =
                     match ConfigRepository::open(&dir).await {
                         Ok(repository) => {
                             let font_size = repository.setting("editor.font_size").await;
                             let theme = repository.setting(jykre::theme::SETTINGS_KEY).await;
+                            let theme_overrides =
+                                repository.setting(jykre::theme::OVERRIDES_KEY).await;
                             let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
                             let state = super::state::read_state(&repository).await;
                             let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
@@ -688,9 +700,19 @@ impl AppView {
                                 .setting(jykre::query_files::library::SETTINGS_KEY)
                                 .await;
                             repository.close().await;
-                            (font_size, copy, state, reports, theme, favorites, library)
+                            (
+                                font_size,
+                                copy,
+                                state,
+                                reports,
+                                theme,
+                                theme_overrides,
+                                favorites,
+                                library,
+                            )
                         }
                         Err(error) => (
+                            Err(error.clone()),
                             Err(error.clone()),
                             Err(error.clone()),
                             Err(error.clone()),
@@ -730,6 +752,8 @@ impl AppView {
                     state,
                     reports,
                     theme,
+                    theme_overrides,
+                    theme_catalog,
                     favorites,
                     library,
                     filled,
@@ -745,6 +769,8 @@ impl AppView {
                     state,
                     reports,
                     theme,
+                    theme_overrides,
+                    theme_catalog,
                     favorites,
                     library,
                     filled,
@@ -759,12 +785,20 @@ impl AppView {
                         Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
+                        jykre::theme::Catalog::bundled(),
+                        Err(error.clone()),
                         Err(error),
                         Default::default(),
                         None,
                     ),
                 };
                 this.config_backup = backup;
+                super::theme::install_catalog(theme_catalog, cx);
+                if let Ok(value) = &theme_overrides {
+                    cx.set_global(super::theme::ThemeOverrides(
+                        jykre::theme::Overrides::from_value(value.as_ref()),
+                    ));
+                }
                 let mut problems = Vec::new();
                 match font_size {
                     Ok(font_size) => {
@@ -2781,7 +2815,7 @@ impl AppView {
                     // The selection covers the whole line, as a node's.
                     .when(selected, |s| {
                         let cell = self.selected_bounds.clone();
-                        s.bg(rgb(colors().selection)).child(
+                        s.bg(rgb(colors().tree_selection)).child(
                             canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
                                 .absolute()
                                 .top_0()
@@ -3283,8 +3317,8 @@ impl AppView {
             .w_full()
             // The selection and the pointer mark the whole line, from one
             // edge of the explorer to the other.
-            .when(selected, |s| s.bg(rgb(colors().selection)))
-            .when(!selected, |s| s.hover(|s| s.bg(rgb(colors().hover))))
+            .when(selected, |s| s.bg(rgb(colors().tree_selection)))
+            .when(!selected, |s| s.hover(|s| s.bg(rgb(colors().tree_hover))))
             // Where the selected node is, for the menu Shift F10 opens.
             .when(selected, |s| {
                 let cell = self.selected_bounds.clone();

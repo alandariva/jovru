@@ -4837,13 +4837,21 @@ fn run_button(
         StatementStatus::Ready => (I::Play, colors().mint, tr!("Run this query")),
         StatementStatus::Pending => (
             I::Clock,
-            colors().faint,
+            colors().state_disabled,
             tr!("Waiting for the statements before it · stop the run"),
         ),
-        StatementStatus::Running => (I::Square, colors().amber, tr!("Stop execution")),
-        StatementStatus::Success => (I::CircleCheck, colors().mint, tr!("Success · run again")),
-        StatementStatus::Error => (I::CircleX, colors().red, tr!("Error · run again")),
-        StatementStatus::Cancelled => (I::Play, colors().faint, tr!("Cancelled · run again")),
+        StatementStatus::Running => (I::Square, colors().state_execution, tr!("Stop execution")),
+        StatementStatus::Success => (
+            I::CircleCheck,
+            colors().state_success,
+            tr!("Success · run again"),
+        ),
+        StatementStatus::Error => (I::CircleX, colors().state_error, tr!("Error · run again")),
+        StatementStatus::Cancelled => (
+            I::Play,
+            colors().state_disabled,
+            tr!("Cancelled · run again"),
+        ),
     };
     div()
         .id(("query-run", index))

@@ -164,11 +164,11 @@ impl Render for ColumnDragPreview {
             .h(px(28.))
             .px_3()
             .rounded(px(5.))
-            .bg(rgb(colors().surface))
+            .bg(rgb(results_colors().surface))
             .border_1()
-            .border_color(rgb(colors().mint))
+            .border_color(rgb(results_colors().mint))
             .text_size(px(12.))
-            .text_color(rgb(colors().text))
+            .text_color(rgb(results_colors().text))
             .child(self.name.clone())
     }
 }
@@ -196,6 +196,8 @@ const FIND_BAR_HEIGHT: f32 = 40.;
 
 /// What the rows on screen share while they are built.
 struct RowsContext {
+    /// One palette snapshot for the visible batch, never retained as view state.
+    colors: GridPaint,
     grid: Arc<GridView>,
     widths: Rc<ColumnWidths>,
     /// The selection's display rows and columns.
@@ -206,6 +208,65 @@ struct RowsContext {
     /// The focused cell, as (data row, result column).
     focus: Option<(usize, usize)>,
     flexible: bool,
+}
+
+/// GPUI stores colours as HSLA. Convert once per visible batch, rather than
+/// repeating RGB-to-HSLA conversion for every border and value in every cell.
+struct GridPaint {
+    grid_bg: Hsla,
+    grid_header: Hsla,
+    grid_line: Hsla,
+    grid_hover: Hsla,
+    grid_selected: Hsla,
+    grid_focus: Hsla,
+    grid_change: Hsla,
+    grid_written: Hsla,
+    grid_error: Hsla,
+    grid_alt: Option<Hsla>,
+    match_bg: Hsla,
+    faint: Hsla,
+    value_text: Hsla,
+    value_number: Hsla,
+    value_temporal: Hsla,
+    value_binary: Hsla,
+    value_null: Hsla,
+}
+
+impl GridPaint {
+    fn new(c: &Palette) -> Self {
+        Self {
+            grid_bg: rgb(c.grid_bg).into(),
+            grid_header: rgb(c.grid_header).into(),
+            grid_line: rgb(c.grid_line).into(),
+            grid_hover: rgb(c.grid_hover).into(),
+            grid_selected: rgb(c.grid_selected).into(),
+            grid_focus: rgb(c.grid_focus).into(),
+            grid_change: rgb(c.grid_change).into(),
+            grid_written: rgb(c.grid_written).into(),
+            grid_error: rgb(c.grid_error).into(),
+            grid_alt: (c.grid_alt != c.grid_bg).then(|| rgb(c.grid_alt).into()),
+            match_bg: rgba(c.match_bg).into(),
+            faint: rgb(c.faint).into(),
+            value_text: rgb(c.value_text).into(),
+            value_number: rgb(c.value_number).into(),
+            value_temporal: rgb(c.value_temporal).into(),
+            value_binary: rgb(c.value_binary).into(),
+            value_null: rgb(c.value_null).into(),
+        }
+    }
+
+    fn value_color(&self, raw: Option<&str>, family: ValueFamily) -> Hsla {
+        if raw.is_none() {
+            self.value_null
+        } else {
+            match family {
+                ValueFamily::Number => self.value_number,
+                ValueFamily::Temporal => self.value_temporal,
+                ValueFamily::Binary => self.value_binary,
+                _ => self.value_text,
+            }
+        }
+    }
 }
 
 /// Paints its child as one layer of the scene: everything the child draws
@@ -2404,9 +2465,9 @@ impl ResultGrid {
             .h(px(HEADER_HEIGHT))
             .flex_none()
             .gap_0()
-            .bg(rgb(colors().grid_header))
+            .bg(rgb(results_colors().grid_header))
             .border_b_1()
-            .border_color(rgb(colors().grid_line));
+            .border_color(rgb(results_colors().grid_line));
         // Only the columns in view are built; the ones panned past keep
         // their room, so the scrollbar and the pan stay those of the whole
         // width.
@@ -2429,7 +2490,7 @@ impl ResultGrid {
         if strip.sticky {
             let mut frozen = self
                 .frozen_part(&strip)
-                .bg(rgb(colors().grid_header))
+                .bg(rgb(results_colors().grid_header))
                 .child(corner());
             for position in 0..strip.frozen {
                 if let Some(column) = visible.get(position).copied() {
@@ -2570,7 +2631,7 @@ impl ResultGrid {
             .h_full()
             .gap_0()
             .border_r_2()
-            .border_color(rgb(colors().grid_line))
+            .border_color(rgb(results_colors().grid_line))
             .block_mouse_except_scroll()
     }
 
@@ -2585,6 +2646,7 @@ impl ResultGrid {
         flexible: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let c = results_colors();
         let Some(column) = self.result.columns().get(index) else {
             return div().id(("result-header", index));
         };
@@ -2632,14 +2694,14 @@ impl ResultGrid {
                 |s, grow| s.flex_grow(grow),
             )
             .border_l_1()
-            .border_color(rgb(colors().grid_line))
+            .border_color(rgb(c.grid_line))
             .text_size(px(14.))
-            .text_color(rgb(colors().grid_header_text))
+            .text_color(rgb(c.grid_header_text))
             .cursor_pointer()
             .focusable()
             .tab_index(0)
-            .focus_visible(|s| s.bg(rgb(colors().hover)))
-            .hover(|s| s.bg(rgb(colors().grid_hover)))
+            .focus_visible(|s| s.bg(rgb(c.hover)))
+            .hover(|s| s.bg(rgb(c.grid_hover)))
             // GPUI draws a tooltip over every layer, so none is set while the
             // grid's menu is open.
             .when(tooltips_shown(self.menu_open), |s| {
@@ -2658,7 +2720,7 @@ impl ResultGrid {
                     .min_w_0()
                     .truncate()
                     .text_size(px(12.))
-                    .text_color(rgb(colors().grid_type_text))
+                    .text_color(rgb(c.grid_type_text))
                     .child(format!(": {kind}")),
             )
             .when_some(sorted, |s, descending| {
@@ -2668,7 +2730,7 @@ impl ResultGrid {
                     } else {
                         I::ArrowUp
                     },
-                    colors().mint,
+                    c.mint,
                 ))
             })
             .on_mouse_down(
@@ -2689,10 +2751,11 @@ impl ResultGrid {
                 })
             })
             .drag_over::<ColumnDrag>(|style, _, _, _| {
+                let c = results_colors();
                 style
-                    .bg(rgb(colors().hover))
+                    .bg(rgb(c.hover))
                     .border_l_2()
-                    .border_color(rgb(colors().mint))
+                    .border_color(rgb(c.mint))
             })
             .on_drop(cx.listener(move |this, drag: &ColumnDrag, _, cx| {
                 if drag.grid == cx.entity_id() {
@@ -2731,12 +2794,12 @@ impl ResultGrid {
                     .h_full()
                     .w(px(6.))
                     .cursor_col_resize()
-                    .hover(|s| s.bg(rgb(colors().grid_focus)))
+                    .hover(|s| s.bg(rgb(c.grid_focus)))
                     .when(
                         self.gesture.is_some_and(|gesture| {
                             matches!(gesture, Gesture::Resizing { column, .. } if column == index)
                         }),
-                        |s| s.bg(rgb(colors().grid_focus)),
+                        |s| s.bg(rgb(c.grid_focus)),
                     )
                     // Taken here, so the header neither sorts, selects nor
                     // moves.
@@ -2832,6 +2895,7 @@ impl ResultGrid {
             .selection
             .and_then(|selection| selection_block(selection, &grid.rows, &self.layout));
         let rows = RowsContext {
+            colors: GridPaint::new(&results_colors()),
             focus: self.selection.map(|selection| selection.focus),
             block,
             grid,
@@ -2869,7 +2933,7 @@ impl ResultGrid {
                     .h(px(ROW_HEIGHT))
                     .flex_none()
                     .gap_0();
-                let number = self.row_number(index, row_selected, cx);
+                let number = self.row_number(index, row_selected, &rows.colors, cx);
                 let mut number = Some(number);
                 line = if strip.sticky {
                     line.child(div().w(px(strip.lead)).flex_none())
@@ -2885,7 +2949,7 @@ impl ResultGrid {
                 if strip.sticky {
                     let mut frozen = self
                         .frozen_part(&strip)
-                        .bg(rgb(colors().grid_bg))
+                        .bg(rows.colors.grid_bg)
                         .children(number.take());
                     for display in 0..strip.frozen {
                         if let Some(column) = self.layout.column(display) {
@@ -2904,7 +2968,13 @@ impl ResultGrid {
 
     /// The number of data row `index`: pressing it selects the row (Shift
     /// extends) and dragging over other numbers selects them all.
-    fn row_number(&self, index: usize, selected: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn row_number(
+        &self,
+        index: usize,
+        selected: bool,
+        c: &GridPaint,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         div()
             .id(("row-number", index))
             .w(px(ROW_NUMBERS))
@@ -2914,17 +2984,17 @@ impl ResultGrid {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .bg(rgb(if selected {
-                colors().grid_selected
+            .bg(if selected {
+                c.grid_selected
             } else {
-                colors().grid_header
-            }))
-            .hover(|s| s.bg(rgb(colors().grid_hover)))
+                c.grid_header
+            })
+            .hover(|s| s.bg(c.grid_hover))
             .border_b_1()
-            .border_color(rgb(colors().grid_line))
+            .border_color(c.grid_line)
             .text_center()
             .text_size(px(12.))
-            .text_color(rgb(colors().faint))
+            .text_color(c.faint)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -2955,13 +3025,13 @@ impl ResultGrid {
                     });
                 let color = match mark {
                     RowMark::Unchanged => None,
-                    RowMark::Changed => Some(colors().amber),
+                    RowMark::Changed => Some(c.grid_change),
                     RowMark::Deleted | RowMark::WrittenDeleted | RowMark::Failed => {
-                        Some(colors().red)
+                        Some(c.grid_error)
                     }
-                    RowMark::Written => Some(colors().mint),
+                    RowMark::Written => Some(c.grid_written),
                 };
-                s.when_some(color, |s, color| s.text_color(rgb(color)))
+                s.when_some(color, |s, color| s.text_color(color))
                     .child(match inserted {
                         Some(_) => "+".to_owned(),
                         None => (self.first_row + index + 1).to_string(),
@@ -2980,6 +3050,7 @@ impl ResultGrid {
         col: usize,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
+        let c = &rows.colors;
         let family = rows
             .grid
             .families
@@ -3030,9 +3101,9 @@ impl ResultGrid {
         let is_null = raw.is_none();
         let deleted = matches!(mark, RowMark::Deleted | RowMark::WrittenDeleted);
         let edge = match (overlay, mark) {
-            (_, RowMark::Failed) => Some(colors().red),
-            (Some(Overlay::Pending(_)), _) => Some(colors().amber),
-            (Some(Overlay::Written(_)), _) => Some(colors().mint),
+            (_, RowMark::Failed) => Some(c.grid_error),
+            (Some(Overlay::Pending(_)), _) => Some(c.grid_change),
+            (Some(Overlay::Written(_)), _) => Some(c.grid_written),
             _ => None,
         };
         // Only values that do not fit get a tooltip, so it does not cover the
@@ -3068,12 +3139,15 @@ impl ResultGrid {
             .items_center()
             .px(px(8.))
             .border_1()
-            .border_color(rgb(colors().grid_line))
-            .when(!selected, |s| s.hover(|s| s.bg(rgb(colors().grid_hover))))
-            .when(whole && !selected, |s| s.bg(rgba(colors().match_bg)))
-            .when(selected, |s| s.bg(rgb(colors().grid_selected)))
-            .when_some(edge, |s, edge| s.border_color(rgb(edge)))
-            .when(focused, |s| s.border_color(rgb(colors().grid_focus)))
+            .border_color(c.grid_line)
+            .when_some(c.grid_alt.filter(|_| position % 2 == 1), |s, color| {
+                s.bg(color)
+            })
+            .when(!selected, |s| s.hover(|s| s.bg(c.grid_hover)))
+            .when(whole && !selected, |s| s.bg(c.match_bg))
+            .when(selected, |s| s.bg(c.grid_selected))
+            .when_some(edge, |s, edge| s.border_color(edge))
+            .when(focused, |s| s.border_color(c.grid_focus))
             // Pressing selects the cell (Shift extends from the anchor) and
             // starts a drag; a double click shows the full value.
             .on_mouse_down(
@@ -3126,13 +3200,13 @@ impl ResultGrid {
                 },
             )
             .when(family == ValueFamily::Number, |s| s.justify_end())
-            .text_color(rgb(if deleted {
-                colors().red
+            .text_color(if deleted {
+                c.grid_error
             } else if default {
-                colors().faint
+                c.faint
             } else {
-                value_color(raw, family)
-            }))
+                c.value_color(raw, family)
+            })
             .when(deleted, |s| s.line_through())
             .map(|s| match editor {
                 Some(input) => s.px_0().child(Input::new(&input).small().w_full()),
@@ -3179,10 +3253,10 @@ impl ResultGrid {
                 .h(px(30.))
                 .px_3()
                 .gap_2()
-                .bg(rgb(colors().panel))
+                .bg(rgb(results_colors().panel))
                 .border_b_1()
-                .border_color(rgb(colors().grid_line))
-                .child(icon(I::EyeOff, colors().muted))
+                .border_color(rgb(results_colors().grid_line))
+                .child(icon(I::EyeOff, results_colors().muted))
                 .child(label(if hidden == 1 {
                     tr!("1 column hidden").to_string()
                 } else {
@@ -3221,16 +3295,16 @@ impl ResultGrid {
             .h(px(HEADER_HEIGHT))
             .flex_none()
             .gap_0()
-            .bg(rgb(colors().grid_header))
+            .bg(rgb(results_colors().grid_header))
             .border_b_1()
-            .border_color(rgb(colors().grid_line))
+            .border_color(rgb(results_colors().grid_line))
             .child(
                 div()
                     .w(px(FIELD_WIDTH))
                     .flex_none()
                     .px_3()
                     .text_size(px(14.))
-                    .text_color(rgb(colors().grid_header_text))
+                    .text_color(rgb(results_colors().grid_header_text))
                     .child(tr!("Column")),
             )
             .children(shown.iter().map(|row| {
@@ -3242,9 +3316,9 @@ impl ResultGrid {
                     .items_center()
                     .px_3()
                     .border_l_1()
-                    .border_color(rgb(colors().grid_line))
+                    .border_color(rgb(results_colors().grid_line))
                     .text_size(px(14.))
-                    .text_color(rgb(colors().grid_header_text))
+                    .text_color(rgb(results_colors().grid_header_text))
                     .child(tr!("Row {0}", self.first_row + row + 1))
             }));
         let records = shown.clone();
@@ -3339,9 +3413,9 @@ impl ResultGrid {
                 .h(px(FIND_BAR_HEIGHT))
                 .px_3()
                 .gap_2()
-                .bg(rgb(colors().panel))
+                .bg(rgb(results_colors().panel))
                 .border_b_1()
-                .border_color(rgb(colors().grid_line))
+                .border_color(rgb(results_colors().grid_line))
                 .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     if event.keystroke.modifiers.modified() {
                         return;
@@ -3400,9 +3474,9 @@ impl ResultGrid {
                 .left(px(12.))
                 .w(px(460.))
                 .h(px(height + 2.))
-                .bg(rgb(colors().panel))
+                .bg(rgb(results_colors().panel))
                 .border_1()
-                .border_color(rgb(colors().border))
+                .border_color(rgb(results_colors().border))
                 .rounded_md()
                 .overflow_hidden()
                 .block_mouse_except_scroll()
@@ -3449,15 +3523,15 @@ impl ResultGrid {
                     .px_3()
                     .gap_2()
                     .cursor_pointer()
-                    .when(chosen, |s| s.bg(rgb(colors().hover)))
-                    .hover(|s| s.bg(rgb(colors().hover)))
+                    .when(chosen, |s| s.bg(rgb(results_colors().hover)))
+                    .hover(|s| s.bg(rgb(results_colors().hover)))
                     .child(
                         div()
                             .flex_shrink(1.)
                             .min_w_0()
                             .truncate()
                             .text_size(px(13.))
-                            .text_color(rgb(colors().text))
+                            .text_color(rgb(results_colors().text))
                             .child(marked(name, found.ranges.clone())),
                     )
                     .child(
@@ -3466,11 +3540,14 @@ impl ResultGrid {
                             .min_w_0()
                             .truncate()
                             .text_size(px(12.))
-                            .text_color(rgb(colors().grid_type_text))
+                            .text_color(rgb(results_colors().grid_type_text))
                             .child(format!(": {kind}")),
                     )
                     .when(found.hidden, |s| {
-                        s.child(badge(tr!("Hidden: choosing it shows it"), colors().amber))
+                        s.child(badge(
+                            tr!("Hidden: choosing it shows it"),
+                            results_colors().amber,
+                        ))
                     })
                     // A press, not a click: the field keeps the keyboard
                     // until the grid takes it.
@@ -3508,7 +3585,7 @@ impl ResultGrid {
                     .flex_none()
                     .gap_0()
                     .border_b_1()
-                    .border_color(rgb(colors().grid_line))
+                    .border_color(rgb(results_colors().grid_line))
                     .child(
                         row()
                             .w(px(FIELD_WIDTH))
@@ -3516,14 +3593,14 @@ impl ResultGrid {
                             .h_full()
                             .px_3()
                             .gap_1()
-                            .bg(rgb(colors().grid_header))
+                            .bg(rgb(results_colors().grid_header))
                             .child(
                                 div()
                                     .flex_shrink(1.)
                                     .min_w_0()
                                     .truncate()
                                     .text_size(px(13.))
-                                    .text_color(rgb(colors().grid_header_text))
+                                    .text_color(rgb(results_colors().grid_header_text))
                                     .child(info.name.clone()),
                             )
                             .child(
@@ -3532,7 +3609,7 @@ impl ResultGrid {
                                     .min_w_0()
                                     .truncate()
                                     .text_size(px(12.))
-                                    .text_color(rgb(colors().grid_type_text))
+                                    .text_color(rgb(results_colors().grid_type_text))
                                     .child(format!(": {}", info.data_type.to_lowercase())),
                             ),
                     )
@@ -3560,16 +3637,18 @@ impl ResultGrid {
                             .items_center()
                             .px(px(8.))
                             .border_l_1()
-                            .border_color(rgb(colors().grid_line))
+                            .border_color(rgb(results_colors().grid_line))
                             .cursor_pointer()
-                            .hover(|s| s.bg(rgb(colors().grid_hover)))
-                            .when(whole && !inspected, |s| s.bg(rgba(colors().match_bg)))
-                            .when(inspected, |s| s.bg(rgb(colors().grid_selected)))
+                            .hover(|s| s.bg(rgb(results_colors().grid_hover)))
+                            .when(whole && !inspected, |s| {
+                                s.bg(rgba(results_colors().match_bg))
+                            })
+                            .when(inspected, |s| s.bg(rgb(results_colors().grid_selected)))
                             .font_family(fonts().mono.clone())
                             .text_size(px(13.))
                             .when(raw.is_none(), |s| s.italic())
                             .when(family == ValueFamily::Number, |s| s.justify_end())
-                            .text_color(rgb(value_color(raw, family)))
+                            .text_color(rgb(value_color(raw, family, &results_colors())))
                             // A click picks the value the panel shows; a
                             // double click opens the panel on it.
                             .on_mouse_down(
@@ -3602,19 +3681,19 @@ impl ResultGrid {
                 .aria_selected(inspector == this)
                 .focusable()
                 .tab_index(0)
-                .focus_visible(|s| s.bg(rgb(colors().hover)))
+                .focus_visible(|s| s.bg(rgb(results_colors().hover)))
                 .h(px(28.))
                 .px_2()
                 .rounded(px(5.))
                 .cursor_pointer()
                 .text_size(px(12.))
                 .text_color(rgb(if inspector == this {
-                    colors().text
+                    results_colors().text
                 } else {
-                    colors().muted
+                    results_colors().muted
                 }))
-                .when(inspector == this, |s| s.bg(rgb(colors().surface)))
-                .hover(|s| s.bg(rgb(colors().hover)))
+                .when(inspector == this, |s| s.bg(rgb(results_colors().surface)))
+                .hover(|s| s.bg(rgb(results_colors().hover)))
                 .child(title)
                 .on_click(cx.listener(move |grid, _, _, cx| grid.open_inspector(this, cx)))
         };
@@ -3623,8 +3702,8 @@ impl ResultGrid {
             .flex_none()
             .h_full()
             .border_l_1()
-            .border_color(rgb(colors().border))
-            .bg(rgb(colors().panel))
+            .border_color(rgb(results_colors().border))
+            .bg(rgb(results_colors().panel))
             .child(
                 row()
                     .h(px(HEADER_HEIGHT + 6.))
@@ -3632,7 +3711,7 @@ impl ResultGrid {
                     .px_2()
                     .gap_1()
                     .border_b_1()
-                    .border_color(rgb(colors().border))
+                    .border_color(rgb(results_colors().border))
                     .child(
                         row()
                             .id("inspect-tabs")
@@ -3672,7 +3751,7 @@ impl ResultGrid {
                 .aria_selected(chosen)
                 .focusable()
                 .tab_index(0)
-                .focus_visible(|s| s.border_color(rgb(colors().mint)))
+                .focus_visible(|s| s.border_color(rgb(results_colors().mint)))
                 .flex_1()
                 .h(px(26.))
                 .flex()
@@ -3684,12 +3763,12 @@ impl ResultGrid {
                 .cursor_pointer()
                 .text_size(px(12.))
                 .text_color(rgb(if chosen {
-                    colors().text
+                    results_colors().text
                 } else {
-                    colors().muted
+                    results_colors().muted
                 }))
-                .when(chosen, |s| s.bg(rgb(colors().hover)))
-                .hover(|s| s.text_color(rgb(colors().text)))
+                .when(chosen, |s| s.bg(rgb(results_colors().hover)))
+                .hover(|s| s.text_color(rgb(results_colors().text)))
                 .child(title)
                 .on_click(cx.listener(move |grid, _, _, cx| grid.open_statistics(this, cx)))
         };
@@ -3707,7 +3786,7 @@ impl ResultGrid {
                     .p(px(2.))
                     .gap(px(2.))
                     .rounded(px(6.))
-                    .bg(rgb(colors().surface))
+                    .bg(rgb(results_colors().surface))
                     .child(scope(
                         "stats-selection",
                         StatsScope::Selection,
@@ -3816,8 +3895,8 @@ impl ResultGrid {
             .child(split_bar(
                 "block-split",
                 &[
-                    (summary.values, colors().chart_fill),
-                    (summary.nulls, colors().chart_null),
+                    (summary.values, results_colors().chart_fill),
+                    (summary.nulls, results_colors().chart_null),
                 ],
                 tr!(
                     "{0} values, {1} NULL",
@@ -3828,12 +3907,12 @@ impl ResultGrid {
             .child(swatch_line(
                 tr!("Values"),
                 count(summary.values),
-                colors().chart_fill,
+                results_colors().chart_fill,
             ))
             .child(swatch_line(
                 tr!("NULL"),
                 count(summary.nulls),
-                colors().chart_null,
+                results_colors().chart_null,
             ))
             .when_some(summary.numbers.as_ref().filter(|_| totals), |s, numbers| {
                 s.child(
@@ -3883,7 +3962,7 @@ impl ResultGrid {
                     ))
                     .focusable()
                     .tab_index(0)
-                    .focus_visible(|s| s.border_color(rgb(colors().mint)))
+                    .focus_visible(|s| s.border_color(rgb(results_colors().mint)))
                     .flex_none()
                     .gap_2()
                     .px_2()
@@ -3892,7 +3971,7 @@ impl ResultGrid {
                     .border_1()
                     .border_color(transparent_black())
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(colors().hover)))
+                    .hover(|s| s.bg(rgb(results_colors().hover)))
                     .child(
                         column()
                             .flex_1()
@@ -3906,14 +3985,14 @@ impl ResultGrid {
                                             .min_w_0()
                                             .truncate()
                                             .text_size(px(13.))
-                                            .text_color(rgb(colors().text))
+                                            .text_color(rgb(results_colors().text))
                                             .child(info.name.clone()),
                                     )
                                     .child(
                                         div()
                                             .flex_none()
                                             .text_size(px(12.))
-                                            .text_color(rgb(colors().faint))
+                                            .text_color(rgb(results_colors().faint))
                                             .child(info.data_type.to_lowercase()),
                                     ),
                             )
@@ -3921,7 +4000,7 @@ impl ResultGrid {
                                 div()
                                     .truncate()
                                     .text_size(px(12.))
-                                    .text_color(rgb(colors().muted))
+                                    .text_color(rgb(results_colors().muted))
                                     .child(details.join(" · ")),
                             )
                             // How much of the column holds a value.
@@ -3929,7 +4008,7 @@ impl ResultGrid {
                                 entry.values as f32 / (entry.values + entry.nulls).max(1) as f32,
                             ))),
                     )
-                    .child(icon(I::ChevronRight, colors().faint))
+                    .child(icon(I::ChevronRight, results_colors().faint))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.show_column_statistics(col, cx)),
                     )
@@ -3970,7 +4049,7 @@ impl ResultGrid {
                     .flex_1()
                     .text_size(px(13.))
                     .italic()
-                    .text_color(rgb(colors().value_null))
+                    .text_color(rgb(results_colors().value_null))
                     .child("NULL")
                     .into_any_element(),
                 (Some(_), Some(input)) => div()
@@ -4050,7 +4129,7 @@ impl ResultGrid {
                     .items_end()
                     .gap(px(2.))
                     .border_b_1()
-                    .border_color(rgb(colors().grid_line))
+                    .border_color(rgb(results_colors().grid_line))
                     .children(bins.iter().enumerate().map(|(index, bin)| {
                         let bin = bin.clone();
                         let share = bin.count as f32 / tallest as f32;
@@ -4062,7 +4141,7 @@ impl ResultGrid {
                             .flex_col()
                             .justify_end()
                             .rounded_t(px(4.))
-                            .hover(|s| s.bg(rgb(colors().hover)))
+                            .hover(|s| s.bg(rgb(results_colors().hover)))
                             .when(bin.count > 0, |s| {
                                 s.child(
                                     div()
@@ -4070,7 +4149,7 @@ impl ResultGrid {
                                         .h(relative(share))
                                         .min_h(px(2.))
                                         .rounded_t(px(4.))
-                                        .bg(rgb(colors().chart_fill)),
+                                        .bg(rgb(results_colors().chart_fill)),
                                 )
                             })
                             // Built only when shown.
@@ -4151,9 +4230,12 @@ impl ResultGrid {
         .child(split_bar(
             "column-split",
             &[
-                (filled, colors().chart_fill),
-                (summary.nulls, colors().chart_null),
-                (if text { summary.empty } else { 0 }, colors().chart_empty),
+                (filled, results_colors().chart_fill),
+                (summary.nulls, results_colors().chart_null),
+                (
+                    if text { summary.empty } else { 0 },
+                    results_colors().chart_empty,
+                ),
             ],
             tr!(
                 "{0} values, {1} NULL, {2} empty",
@@ -4165,18 +4247,18 @@ impl ResultGrid {
         .child(swatch_line(
             tr!("Values"),
             count(filled),
-            colors().chart_fill,
+            results_colors().chart_fill,
         ))
         .child(swatch_line(
             tr!("NULL"),
             count(summary.nulls),
-            colors().chart_null,
+            results_colors().chart_null,
         ))
         .when(text, |s| {
             s.child(swatch_line(
                 tr!("Empty"),
                 count(summary.empty),
-                colors().chart_empty,
+                results_colors().chart_empty,
             ))
         })
         .child(line(tr!("Distinct values"), count(summary.distinct)))
@@ -4224,7 +4306,11 @@ impl ResultGrid {
                                         .truncate()
                                         .font_family(fonts().mono.clone())
                                         .text_size(px(13.))
-                                        .text_color(rgb(value_color(Some(text), family)))
+                                        .text_color(rgb(value_color(
+                                            Some(text),
+                                            family,
+                                            &results_colors(),
+                                        )))
                                         .child(value(text).replace(['\n', '\r'], "↵")),
                                 )
                                 .child(label(tr!(
@@ -4637,17 +4723,17 @@ fn set_cell(
 }
 
 /// The text colour of a value, by its family ([Results](../../docs/reference/results.md#value-presentation)).
-fn value_color(raw: Option<&str>, family: ValueFamily) -> u32 {
+fn value_color(raw: Option<&str>, family: ValueFamily, c: &Palette) -> u32 {
     if raw.is_none() {
-        colors().value_null
+        c.value_null
     } else if family == ValueFamily::Number {
-        colors().value_number
+        c.value_number
     } else if family == ValueFamily::Temporal {
-        colors().value_temporal
+        c.value_temporal
     } else if family == ValueFamily::Binary {
-        colors().value_binary
+        c.value_binary
     } else {
-        colors().value_text
+        c.value_text
     }
 }
 
@@ -4680,7 +4766,7 @@ fn stat_line(name: &'static str, value: String) -> Div {
             .truncate()
             .font_family(fonts().mono.clone())
             .text_size(px(13.))
-            .text_color(rgb(colors().text))
+            .text_color(rgb(results_colors().text))
             .child(value),
     )
 }
@@ -4709,7 +4795,7 @@ fn swatch_line(name: &'static str, value: String, color: u32) -> Div {
                 .truncate()
                 .font_family(fonts().mono.clone())
                 .text_size(px(13.))
-                .text_color(rgb(colors().text))
+                .text_color(rgb(results_colors().text))
                 .child(value),
         )
 }
@@ -4753,13 +4839,13 @@ fn meter(share: f32) -> Div {
         .w_full()
         .h(px(4.))
         .rounded(px(2.))
-        .bg(rgb(colors().chart_track))
+        .bg(rgb(results_colors().chart_track))
         .child(
             div()
                 .h_full()
                 .w(relative(share.clamp(0., 1.)))
                 .rounded(px(2.))
-                .bg(rgb(colors().chart_fill)),
+                .bg(rgb(results_colors().chart_fill)),
         )
 }
 
@@ -4790,7 +4876,7 @@ fn calculating(id: &'static str) -> Div {
             .child(spinning_icon(
                 SharedString::from(format!("{id}-spinner")),
                 I::LoaderCircle,
-                colors().amber,
+                results_colors().amber,
             ))
             .child(label(tr!("Calculating…"))),
     )
@@ -4825,8 +4911,8 @@ impl Render for ResultGrid {
                 this.open_menu_from_keyboard(window, cx)
             }))
             .flex()
-            .bg(rgb(colors().grid_bg))
-            .text_color(rgb(colors().value_text))
+            .bg(rgb(results_colors().grid_bg))
+            .text_color(rgb(results_colors().value_text))
             .child(
                 div()
                     .id("result-table-area")
@@ -4847,9 +4933,9 @@ impl Render for ResultGrid {
                                     .right_2()
                                     .p_2()
                                     .gap_3()
-                                    .bg(rgb(colors().panel))
+                                    .bg(rgb(results_colors().panel))
                                     .border_1()
-                                    .border_color(rgb(colors().border))
+                                    .border_color(rgb(results_colors().border))
                                     .rounded_md()
                                     .child(label(status))
                                     .child(
@@ -4917,7 +5003,7 @@ impl Render for ResultGrid {
             .relative()
             .size_full()
             .gap_0()
-            .bg(rgb(colors().grid_bg))
+            .bg(rgb(results_colors().grid_bg))
             // From the table, the bars or the field itself, whose text it
             // selects again.
             .on_action(cx.listener(|this, _: &super::FindColumn, window, cx| {
@@ -5091,9 +5177,38 @@ fn grid_keys(grid: Stateful<Div>, cx: &mut Context<ResultGrid>) -> Stateful<Div>
 #[cfg(test)]
 mod tests {
     use super::{
-        EditAction, EditItems, Jump, KeyAction, WhileEditing, edit_items, tooltips_shown,
-        while_editing,
+        EditAction, EditItems, GridPaint, Jump, KeyAction, ValueFamily, WhileEditing, edit_items,
+        tooltips_shown, value_color, while_editing,
     };
+
+    #[test]
+    fn grid_paint_preserves_value_roles_alpha_and_optional_stripes() {
+        crate::app::source_text();
+        let mut palette = jykre::theme::builtin_dark().clone();
+        palette.value_number = 0x123456;
+        palette.value_null = 0xabcdef;
+        palette.match_bg = 0x12345678;
+        let paint = GridPaint::new(&palette);
+        assert!(paint.grid_alt.is_none());
+        assert_eq!(paint.match_bg, gpui_kit::rgba(palette.match_bg).into());
+        for family in [
+            ValueFamily::Text,
+            ValueFamily::Number,
+            ValueFamily::Temporal,
+            ValueFamily::Binary,
+            ValueFamily::Boolean,
+        ] {
+            for raw in [None, Some("fixture")] {
+                assert_eq!(
+                    paint.value_color(raw, family),
+                    gpui_kit::rgb(value_color(raw, family, &palette)).into()
+                );
+            }
+        }
+        palette.grid_alt = 0x2468ac;
+        let paint = GridPaint::new(&palette);
+        assert_eq!(paint.grid_alt, Some(gpui_kit::rgb(palette.grid_alt).into()));
+    }
 
     #[test]
     fn keys_the_cell_field_lets_through_never_act_on_the_grid() {
