@@ -97,7 +97,7 @@ See [Performance](performance.md) for budgets and how to measure.
   shortcut updates that table with the change.
 - Raw `on_key_down` handlers are only for text-like navigation inside a single
   focused control when an action would not fit: typing and moving in a text
-  field or a list it drives (the explorer's search field and quick search,
+  field or a list it drives (the explorer's search field and typing on its tree,
   the search's list, the column search), the tab bar and its picker
   (`grouped_tabs`), a splitter's arrows, and `Esc` closing a layer of the
   grid or a report panel after the window's `Dismiss` lets it through.

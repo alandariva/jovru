@@ -312,7 +312,7 @@ fn kind_rank(kind: &str) -> (usize, &str) {
 /// child of the previous page, in the order pages are read (kind as in
 /// [`KIND_ORDER`], then ordinal, name and key). A page read from a cursor
 /// costs the same at any depth, unlike an offset.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageCursor {
     kind: String,
     ordinal: Option<i64>,

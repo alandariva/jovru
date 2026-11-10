@@ -170,6 +170,33 @@ impl Tree {
         self.next.get(parent)
     }
 
+    /// Whether a page of `parent`'s children is being read.
+    pub fn is_loading(&self, parent: &ObjectPath) -> bool {
+        self.loading.contains(parent)
+    }
+
+    /// The shown nodes (and the root) whose children were read only in
+    /// part and whose next page is not being read: what the explorer goes
+    /// on reading in the background, so a search of the tree sees every
+    /// child of what is expanded. A collapsed node waits until it is
+    /// expanded again.
+    pub fn unfinished(&self) -> Vec<ObjectPath> {
+        let mut paths: Vec<_> = self
+            .next
+            .keys()
+            .filter(|path| !self.loading.contains(*path))
+            .filter(|path| {
+                (1..=path.0.len()).all(|length| {
+                    self.expanded
+                        .contains(&ObjectPath(path.0[..length].to_vec()))
+                })
+            })
+            .cloned()
+            .collect();
+        paths.sort_by_key(|path| path.0.len());
+        paths
+    }
+
     pub fn version(&self) -> i64 {
         self.version
     }
@@ -628,6 +655,20 @@ pub fn step(
                 .map_or(TreeMove::Stay, TreeMove::Focus)
         }
         _ => TreeMove::Stay,
+    }
+}
+
+/// Where Up, Down, Home or End lead from `current` among the `len` lines of
+/// the explorer that take the selection: every connection and every node
+/// shown, in order, so the arrows cross from one connection's tree to the
+/// next connection. `None` when the key does not move (an end, Left, Right).
+pub fn move_in(len: usize, current: usize, key: TreeKey) -> Option<usize> {
+    match key {
+        TreeKey::Up if current > 0 => Some(current - 1),
+        TreeKey::Down if current + 1 < len => Some(current + 1),
+        TreeKey::Home if current > 0 => Some(0),
+        TreeKey::End if current + 1 < len => Some(len - 1),
+        _ => None,
     }
 }
 
@@ -1163,6 +1204,66 @@ mod tests {
         );
         assert_eq!(TreeKey::from_key("down"), Some(TreeKey::Down));
         assert_eq!(TreeKey::from_key("enter"), None);
+    }
+
+    #[test]
+    fn up_and_down_cross_every_line_that_takes_the_selection() {
+        // Two connections and their nodes, as one list of four lines.
+        assert_eq!(move_in(4, 0, TreeKey::Down), Some(1));
+        assert_eq!(move_in(4, 2, TreeKey::Up), Some(1));
+        assert_eq!(move_in(4, 0, TreeKey::Up), None);
+        assert_eq!(move_in(4, 3, TreeKey::Down), None);
+        assert_eq!(move_in(4, 2, TreeKey::Home), Some(0));
+        assert_eq!(move_in(4, 0, TreeKey::End), Some(3));
+        assert_eq!(move_in(4, 3, TreeKey::End), None);
+        assert_eq!(move_in(4, 1, TreeKey::Left), None);
+        assert_eq!(move_in(0, 0, TreeKey::Down), None);
+    }
+
+    #[test]
+    fn the_rest_of_an_expanded_node_is_read_until_it_ends() {
+        let source = tree();
+        let cursor = |tree: &Tree, path: &ObjectPath| tree.cursor(path).cloned();
+        let mut tree = Tree::default();
+        let more = |objects: &[MetadataObject], next: Option<PageCursor>| ChildPage {
+            objects: objects.to_vec(),
+            next,
+        };
+        // A cursor to continue from, as the cache hands one.
+        let next = PageCursor::default();
+        tree.replace(
+            1,
+            vec![
+                (
+                    ObjectPath::default(),
+                    more(&[source[0].clone()], Some(next.clone())),
+                ),
+                (
+                    source[0].path.clone(),
+                    more(&[source[1].clone()], Some(next.clone())),
+                ),
+            ],
+        );
+        // The root goes on; a collapsed node waits until it is expanded.
+        assert_eq!(tree.unfinished(), [ObjectPath::default()]);
+        tree.toggle(&source[0].path);
+        assert_eq!(
+            tree.unfinished(),
+            [ObjectPath::default(), source[0].path.clone()]
+        );
+        // A page being read is not asked for twice.
+        tree.set_loading(&ObjectPath::default(), true);
+        assert!(tree.is_loading(&ObjectPath::default()));
+        assert_eq!(tree.unfinished(), [source[0].path.clone()]);
+        // The last page ends it.
+        assert!(tree.append(1, ObjectPath::default(), more(&[source[5].clone()], None)));
+        assert!(tree.append(1, source[0].path.clone(), more(&[source[4].clone()], None)));
+        assert!(tree.unfinished().is_empty());
+        assert_eq!(cursor(&tree, &source[0].path), None);
+        assert_eq!(
+            names(tree.rows()),
+            ["sales", "orders", "summary", "catalog"]
+        );
     }
 
     #[test]

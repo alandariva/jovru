@@ -32,6 +32,9 @@ pub struct Palette {
     pub accent_hover: u32,
     /// A faint wash of the accent behind what is chosen.
     pub accent_bg: u32,
+    /// The line chosen in a tree, from edge to edge: stronger than
+    /// `hover`, in the accent's hue.
+    pub selection: u32,
     pub blue: u32,
     pub purple: u32,
     pub red: u32,
@@ -102,6 +105,7 @@ pub const DARK: Palette = Palette {
     on_accent: 0x172820,
     accent_hover: 0xa2e6cc,
     accent_bg: 0x26342f,
+    selection: 0x2b4239,
     blue: 0x8eb9ef,
     purple: 0xb5a0e8,
     red: 0xef8b91,
@@ -160,6 +164,7 @@ pub const LIGHT: Palette = Palette {
     on_accent: 0xffffff,
     accent_hover: 0x125f48,
     accent_bg: 0xdaf0e6,
+    selection: 0xcfebde,
     blue: 0x0b5fc4,
     purple: 0x7444c9,
     red: 0xc4212c,

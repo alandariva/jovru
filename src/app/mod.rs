@@ -227,8 +227,6 @@ struct Connection {
     metadata_statuses: Vec<RefreshStatus>,
     /// The explorer tree read from the cache, page by page.
     tree: Tree,
-    /// When each chosen namespace was last read in full.
-    ages: HashMap<ObjectPath, std::time::SystemTime>,
     /// Nodes the last refresh could not read for lack of permission; their
     /// last good read stays.
     no_access: std::collections::HashSet<ObjectPath>,
@@ -500,8 +498,15 @@ struct AppView {
     orphan_groups: Vec<(String, TabGroupId)>,
     /// The explorer node selected by a click or the arrow keys.
     explorer_selected: Option<(usize, ObjectPath)>,
-    /// The explorer's quick search, while open ([`quick_search`]).
+    /// What the explorer's search field holds, once applied to the tree
+    /// ([`quick_search`]); `None` while the field is empty.
     explorer_quick: Option<quick_search::QuickSearch>,
+    /// Whether the field searches the whole local cache, closed nodes
+    /// included, instead of the nodes the tree shows.
+    explorer_everything: bool,
+    /// Bumped by every change of the field's text, so a search of a long
+    /// tree waiting for a pause in the typing applies only the latest.
+    quick_revision: u64,
     /// Whether the quick search marks its matches or shows only them; kept
     /// from one search to the next.
     explorer_quick_mode: jykre::explorer::QuickMode,
@@ -646,12 +651,16 @@ impl AppView {
         let command = cx.new(|cx| {
             InputState::new(window, cx).placeholder(tr!("Search saved queries and tables…"))
         });
-        let search_subscription = cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.search_changed(cx);
-            }
-            cx.notify();
-        });
+        let search_subscription = cx.subscribe_in(
+            &search,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.search_text_changed(window, cx);
+                }
+                cx.notify();
+            },
+        );
         let command_subscription = cx.subscribe_in(
             &command,
             window,
@@ -832,6 +841,8 @@ impl AppView {
             orphan_groups: Vec::new(),
             explorer_selected: None,
             explorer_quick: None,
+            explorer_everything: false,
+            quick_revision: 0,
             explorer_quick_mode: jykre::explorer::QuickMode::default(),
             explorer_quick_key: None,
             explorer_focus: cx.focus_handle(),
@@ -1008,7 +1019,6 @@ impl AppView {
                     profile: None,
                     metadata_statuses: Vec::new(),
                     tree: Tree::default(),
-                    ages: HashMap::new(),
                     no_access: Default::default(),
                     namespaces: Vec::new(),
                     names: None,
@@ -2399,53 +2409,7 @@ impl AppView {
                     ),
             )
             .when(self.section == Section::Explorer, |s| {
-                s.child(
-                    div()
-                        .px_3()
-                        .pb_3()
-                        // Esc clears the text, then gives the keyboard to the
-                        // tree; Down goes to the tree's first node.
-                        .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                            if event.keystroke.modifiers.modified() {
-                                return;
-                            }
-                            match event.keystroke.key.as_str() {
-                                "escape" if !this.search.read(cx).value().is_empty() => {
-                                    this.search
-                                        .update(cx, |input, cx| input.set_value("", window, cx));
-                                    this.search_changed(cx);
-                                }
-                                "escape" | "down" => this.focus_explorer_tree(window, cx),
-                                _ => return,
-                            }
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        }))
-                        .child({
-                            let input = Input::new(&self.search)
-                                .small()
-                                .prefix(I::Search)
-                                .w_full()
-                                .aria_label(tr!("Search objects in the explorer"));
-                            // A short search scans the whole cache, off the
-                            // UI thread; the field says it is running.
-                            if self.explorer_searching {
-                                input.suffix(
-                                    div()
-                                        .id("explorer-search-pending")
-                                        .role(Role::Status)
-                                        .aria_label(tr!("Searching…"))
-                                        .child(spinning_icon(
-                                            "explorer-search-spinner",
-                                            I::LoaderCircle,
-                                            colors().amber,
-                                        )),
-                                )
-                            } else {
-                                input
-                            }
-                        }),
-                )
+                s.child(self.explorer_search_bar(cx))
                 .when(!self.favorites.items.is_empty(), |s| {
                     s.child(self.favorites_section(cx))
                 })
@@ -2567,13 +2531,11 @@ impl AppView {
                                 )
                             },
                         )
-                        // Above the list, not over it, so the first rows
-                        // (often the matches) stay visible.
-                        .when_some(self.quick_search_bar(cx), |s, bar| s.child(bar))
                         .child({
                             let view = cx.entity();
-                            // Typing on the tree searches it (`quick_search`);
-                            // its keys are seen here before the focused node.
+                            // Typing on the tree fills the search field
+                            // (`quick_search`); its keys are seen here
+                            // before the focused node.
                             div()
                                 .id("explorer-keys")
                                 .role(Role::Tree)
