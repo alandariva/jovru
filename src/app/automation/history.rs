@@ -415,31 +415,7 @@ impl HistoryList {
         });
         cx.notify();
         cx.spawn(async move |weak, cx| {
-            let read = backend::run(async move {
-                let Ok(Some(log)) = program_bits::read_log(&dir, run, stream).await else {
-                    return Ok(None);
-                };
-                // Split into lines off the UI thread, each cut where shown.
-                let lines = tokio::task::spawn_blocking(move || {
-                    let lines: Vec<SharedString> = log
-                        .text
-                        .lines()
-                        .map(|line| {
-                            if line.len() > LOG_LINE_CHARS {
-                                let cut: String = line.chars().take(LOG_LINE_CHARS).collect();
-                                SharedString::from(format!("{cut}…"))
-                            } else {
-                                SharedString::from(line.to_owned())
-                            }
-                        })
-                        .collect();
-                    (lines, (!log.complete).then_some(log.bytes))
-                })
-                .await
-                .ok();
-                Ok(lines)
-            })
-            .await;
+            let read = read_log_lines(dir, run, stream).await;
             let _ = weak.update(cx, |this, cx| {
                 let Some(view) = this.log.as_mut() else {
                     return;
@@ -448,11 +424,11 @@ impl HistoryList {
                     return;
                 }
                 match read {
-                    Ok(Some((lines, dropped))) => {
-                        view.lines = Some(Rc::new(lines));
-                        view.dropped = dropped;
+                    Some(log) => {
+                        view.lines = Some(log.lines);
+                        view.dropped = log.dropped;
                     }
-                    _ => {
+                    None => {
                         view.lines = Some(Rc::default());
                         view.missing = true;
                     }
@@ -783,6 +759,9 @@ impl HistoryList {
                         label(format!("{} · {}", output.name, state))
                     }))
             })
+            .when(record.kind == JobKind::Sql, |s| {
+                s.child(label(words::rows_note()))
+            })
             .when(record.kind == JobKind::Process, |s| {
                 s.child(label(words::logs_note()))
                     .when(!has_logs, |s| {
@@ -841,42 +820,9 @@ impl HistoryList {
             .into_any_element(),
             Some(lines) if lines.is_empty() => label(tr!("The log is empty.")).into_any_element(),
             Some(lines) => {
-                let lines = lines.clone();
-                let count = lines.len();
-                let shown = count.min(16) as f32;
-                div()
-                    .relative()
+                let shown = lines.len().min(16) as f32;
+                log_lines("history-log-lines", lines.clone(), &log.scroll)
                     .h(px(shown * LOG_LINE + 8.))
-                    .rounded(px(6.))
-                    .bg(rgb(colors().grid_bg))
-                    .border_1()
-                    .border_color(rgb(colors().border))
-                    .child(
-                        uniform_list(
-                            "history-log-lines",
-                            count,
-                            move |range: Range<usize>, _, _| {
-                                range
-                                    .filter_map(|index| {
-                                        let text = lines.get(index)?.clone();
-                                        Some(
-                                            div()
-                                                .id(("log-line", index))
-                                                .h(px(LOG_LINE))
-                                                .px_2()
-                                                .whitespace_nowrap()
-                                                .font_family(fonts().mono.clone())
-                                                .text_size(px(12.))
-                                                .child(text),
-                                        )
-                                    })
-                                    .collect::<Vec<_>>()
-                            },
-                        )
-                        .size_full()
-                        .track_scroll(&log.scroll),
-                    )
-                    .vertical_scrollbar(&log.scroll)
                     .into_any_element()
             }
         };
@@ -988,6 +934,91 @@ impl HistoryList {
                 })
             })
     }
+}
+
+/// A program run's log as it is shown: its lines, each cut where it is
+/// drawn, and the file's size when only its first part was read.
+pub(super) struct LogLines {
+    pub lines: Rc<Vec<SharedString>>,
+    pub bytes: u64,
+    pub dropped: Option<u64>,
+}
+
+/// Reads one stream of a run's logs from disk and splits it into lines,
+/// off the UI thread (ADR-0037). `None` when the run has no such file.
+pub(super) async fn read_log_lines(
+    dir: std::path::PathBuf,
+    run: RunId,
+    stream: Stream,
+) -> Option<LogLines> {
+    let read = backend::run(async move {
+        let Ok(Some(log)) = program_bits::read_log(&dir, run, stream).await else {
+            return Ok(None);
+        };
+        let lines = tokio::task::spawn_blocking(move || {
+            let lines: Vec<SharedString> = log
+                .text
+                .lines()
+                .map(|line| {
+                    if line.len() > LOG_LINE_CHARS {
+                        let cut: String = line.chars().take(LOG_LINE_CHARS).collect();
+                        SharedString::from(format!("{cut}…"))
+                    } else {
+                        SharedString::from(line.to_owned())
+                    }
+                })
+                .collect();
+            (lines, log.bytes, (!log.complete).then_some(log.bytes))
+        })
+        .await
+        .ok();
+        Ok(lines)
+    })
+    .await;
+    let (lines, bytes, dropped) = read.ok()??;
+    Some(LogLines {
+        lines: Rc::new(lines),
+        bytes,
+        dropped,
+    })
+}
+
+/// A log's lines in a virtual list, as the program wrote them; the caller
+/// gives it its height.
+pub(super) fn log_lines(
+    id: &'static str,
+    lines: Rc<Vec<SharedString>>,
+    scroll: &UniformListScrollHandle,
+) -> Div {
+    let count = lines.len();
+    div()
+        .relative()
+        .rounded(px(6.))
+        .bg(rgb(colors().grid_bg))
+        .border_1()
+        .border_color(rgb(colors().border))
+        .child(
+            uniform_list(id, count, move |range: Range<usize>, _, _| {
+                range
+                    .filter_map(|index| {
+                        let text = lines.get(index)?.clone();
+                        Some(
+                            div()
+                                .id(("log-line", index))
+                                .h(px(LOG_LINE))
+                                .px_2()
+                                .whitespace_nowrap()
+                                .font_family(fonts().mono.clone())
+                                .text_size(px(12.))
+                                .child(text),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .size_full()
+            .track_scroll(scroll),
+        )
+        .vertical_scrollbar(scroll)
 }
 
 /// A line of a run's account, coloured by what it says, with its icon.

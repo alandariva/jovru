@@ -34,20 +34,128 @@ impl JobView {
                     .child(self.form_rows(&specs, running, cx)),
             )
             .child(self.run_status(cx))
-            .when(logic::shows_result(self.has_result, running), |s| {
-                s.child(
+            .child(self.result_area(running, cx))
+    }
+
+    /// Under the run's account: the rows a SQL run returned, in the grid,
+    /// or what a program printed. A run that is queued or running shows
+    /// neither (the previous run's would read as its own); before the
+    /// first run, the area says what will appear in it.
+    fn result_area(&self, running: bool, cx: &mut Context<Self>) -> Div {
+        let area = column()
+            .flex_1()
+            .min_h(px(160.))
+            .border_t_1()
+            .border_color(rgb(colors().border));
+        let heading = |title: &'static str, step: &Option<String>| {
+            row()
+                .flex_none()
+                .h(px(32.))
+                .px_3()
+                .gap_2()
+                .child(
                     div()
-                        .flex_1()
-                        .min_h(px(160.))
-                        .border_t_1()
-                        .border_color(rgb(colors().border))
-                        .child(
-                            self.grid
-                                .clone()
-                                .cached(StyleRefinement::default().size_full()),
-                        ),
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(title),
                 )
-            })
+                .when_some(step.clone(), |s, step| {
+                    s.child(badge(tr!("Step {0}", step), colors().faint))
+                })
+        };
+        if running {
+            return area;
+        }
+        match &self.shown {
+            Shown::Rows {
+                rows,
+                columns,
+                step,
+            } if logic::shows_result(self.has_result, running) => area
+                .child(
+                    heading(tr!("Result"), step)
+                        .id("job-result-heading")
+                        .role(Role::Status)
+                        .child(label(words::result_size(*rows, *columns))),
+                )
+                .child(
+                    div().flex_1().min_h_0().child(
+                        self.grid
+                            .clone()
+                            .cached(StyleRefinement::default().size_full()),
+                    ),
+                ),
+            Shown::Output(output) => {
+                let stream_button = |id: &'static str, stream: Stream, log: &Option<LogLines>| {
+                    let size = log.as_ref().map_or(0, |log| log.bytes);
+                    button(
+                        id,
+                        I::ScrollText,
+                        format!("{} · {}", stream.name(), jykre::cell_format::size(size)),
+                    )
+                    .role(Role::Tab)
+                    .aria_selected(output.stream == stream)
+                    .when(output.stream == stream, |s| {
+                        s.text_color(rgb(colors().mint))
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Shown::Output(output) = &mut this.shown {
+                            output.stream = stream;
+                            output.scroll = UniformListScrollHandle::new();
+                        }
+                        cx.notify();
+                    }))
+                };
+                let log = match output.stream {
+                    Stream::Stderr => &output.stderr,
+                    _ => &output.stdout,
+                };
+                let body = match log {
+                    _ if output.reading => div()
+                        .p_3()
+                        .child(label(tr!("Reading what the program printed…"))),
+                    Some(log) if !log.lines.is_empty() => div().flex_1().min_h_0().p_2().child(
+                        log_lines("job-output-lines", log.lines.clone(), &output.scroll)
+                            .size_full(),
+                    ),
+                    _ => div().p_3().child(label(tr!(
+                        "The program printed nothing to {0}.",
+                        output.stream.name()
+                    ))),
+                };
+                let dropped = log.as_ref().and_then(|log| log.dropped);
+                area.child(
+                    heading(tr!("Output"), &output.step)
+                        .id("job-output-heading")
+                        .role(Role::TabList)
+                        .aria_label(tr!("What the program printed"))
+                        .child(stream_button(
+                            "job-output-stdout",
+                            Stream::Stdout,
+                            &output.stdout,
+                        ))
+                        .child(stream_button(
+                            "job-output-stderr",
+                            Stream::Stderr,
+                            &output.stderr,
+                        )),
+                )
+                .child(body)
+                .when_some(dropped, |s, bytes| {
+                    s.child(div().px_3().pb_2().child(label(tr!(
+                        "The file holds {0}; only its first {1} are shown.",
+                        jykre::cell_format::size(bytes),
+                        jykre::cell_format::size(super::super::program_bits::LOG_LIMIT)
+                    ))))
+                })
+            }
+            _ => area.child(
+                div()
+                    .id("job-no-result")
+                    .p_3()
+                    .child(label(words::no_result_yet(self.kind))),
+            ),
+        }
     }
 
     /// The form's fields, **Run** or **Stop**, and the note that refused

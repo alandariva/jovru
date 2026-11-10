@@ -964,6 +964,39 @@ pub fn production_outputs(connection: &str) -> String {
     )
 }
 
+/// Where a SQL run's rows are, said where a past run is read (section
+/// 6.4: the history keeps how a run ended, never what it returned).
+pub fn rows_note() -> &'static str {
+    tr!(
+        "The rows a run returns are never stored, only how many it kept: the result is shown in the job's tab right after the run, while that tab stays open."
+    )
+}
+
+/// What the result area says before a run has anything to show.
+pub fn no_result_yet(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Sql => tr!(
+            "The rows of the last run appear here, in a grid, while this tab stays open. They are never stored."
+        ),
+        JobKind::Process => {
+            tr!("What the program prints (stdout and stderr) appears here after each run.")
+        }
+        JobKind::Chain => tr!(
+            "The result of the chain's last step appears here: the rows of a SQL Job, or what a program printed."
+        ),
+    }
+}
+
+/// The result's size, above its grid.
+pub fn result_size(rows: usize, columns: usize) -> String {
+    match (rows == 1, columns == 1) {
+        (true, true) => tr!("1 row, 1 column").to_owned(),
+        (true, false) => tr!("1 row, {0} columns", columns),
+        (false, true) => tr!("{0} rows, 1 column", rows),
+        (false, false) => tr!("{0} rows, {1} columns", rows, columns),
+    }
+}
+
 pub fn logs_note() -> &'static str {
     tr!(
         "Program logs (stdout, stderr and jjp/1 messages) are kept on this computer for 7 days, at most 1 MiB per stream. Do not print passwords, tokens or personal data."
@@ -1229,6 +1262,17 @@ mod tests {
         assert!(step < code && code < after, "{all:?}");
         let changed = chain_outcome_lines(&chain, Some("Sales changed.".into()));
         assert_eq!(changed[1].text, "Sales changed.");
+    }
+
+    #[test]
+    fn a_result_says_its_size_in_rows_and_columns() {
+        crate::app::source_text();
+        assert_eq!(result_size(4, 3), "4 rows, 3 columns");
+        assert_eq!(result_size(1, 1), "1 row, 1 column");
+        assert_eq!(result_size(0, 2), "0 rows, 2 columns");
+        assert_eq!(result_size(1, 5), "1 row, 5 columns");
+        assert!(no_result_yet(JobKind::Sql).contains("never stored"));
+        assert!(rows_note().contains("never stored"));
     }
 
     #[test]

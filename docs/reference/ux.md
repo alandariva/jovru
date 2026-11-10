@@ -172,8 +172,13 @@ job's run is active; under it, three inner tabs, and a fourth,
   typed beside it). What `chain_problems` finds is said under its step and
   input, read again after each change and once typing pauses.
 - **Inputs**: the run form, as a report's (a list input shows a menu),
-  **Run** or **Stop**, then the run's state and, for a SQL Job, the latest
-  result in a grid while the tab is open. A job that differs from what is
+  **Run** or **Stop**, then the run's state and, under it, what the run
+  left to look at while the tab is open: **Result**, a SQL Job's rows in a
+  grid with their count of rows and columns, or **Output**, what a program
+  printed (**stdout** and **stderr** with their sizes, read from its logs
+  when it ends; a run that did not succeed opens on stderr). A chain shows
+  what its last step left, naming the step. Before the first run the area
+  says what will appear in it; a queued or running run shows neither. A job that differs from what is
   saved runs as a draft, and the form says so.
 - **Runs**: the job's history (below).
 - **Schedule** ([specification](../plans/automation-engine-specification.md),
@@ -237,7 +242,9 @@ opens the step's job with its form filled from what earlier steps stored
 (constants, and outputs whose values were stored and have not expired)
 and says which inputs are left to fill in; it never runs by itself. The
 history says that refused runs are not recorded and how long runs, values
-and logs are kept. The global list has a **State** filter and, above the
+and logs are kept. A SQL run says that the rows it returned are
+never stored, only their count: they are in the job's tab right after the
+run. The global list has a **State** filter and, above the
 history, the runs and chain runs active or queued now, each with its state
 and **Stop**.
 

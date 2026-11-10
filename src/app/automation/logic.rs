@@ -469,6 +469,18 @@ pub fn shows_result(has_result: bool, running: bool) -> bool {
     has_result && !running
 }
 
+/// The stream of a program's output shown first: what it printed to
+/// stderr when the run did not succeed, or when stdout is empty; otherwise
+/// stdout.
+pub fn first_stream(failed: bool, stdout: bool, stderr: bool) -> super::program_bits::Stream {
+    use super::program_bits::Stream;
+    if stderr && (failed || !stdout) {
+        Stream::Stderr
+    } else {
+        Stream::Stdout
+    }
+}
+
 /// The notice **Try again** leaves while another window holds the lock.
 pub fn still_held() -> Feedback {
     Feedback::new(Tone::Info, tr!("Another window still holds automation."))
@@ -894,6 +906,16 @@ mod tests {
         assert_eq!(steps[0].version, 2);
         assert_eq!(steps[0].definition, Some(job));
         assert!(snapshot_definition("not json").is_none());
+    }
+
+    #[test]
+    fn a_failed_program_shows_what_it_wrote_to_stderr_first() {
+        use crate::app::automation::program_bits::Stream;
+        assert_eq!(first_stream(false, true, true), Stream::Stdout);
+        assert_eq!(first_stream(true, true, true), Stream::Stderr);
+        assert_eq!(first_stream(false, false, true), Stream::Stderr);
+        assert_eq!(first_stream(true, true, false), Stream::Stdout);
+        assert_eq!(first_stream(false, false, false), Stream::Stdout);
     }
 
     #[test]

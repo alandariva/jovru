@@ -13,7 +13,8 @@ mod editor;
 mod inputs;
 mod schedule;
 
-use super::history::{HistoryEvent, HistoryList};
+use super::history::{HistoryEvent, HistoryList, LogLines, log_lines, read_log_lines};
+use super::program_bits::Stream;
 use super::words::{self, Level, Line};
 use super::{FRAME, JobSources, Jobs, logic, source_of, whole};
 use crate::app::result_grid::ResultGrid;
@@ -184,6 +185,33 @@ struct Pending {
     programs_known: Option<Vec<bool>>,
 }
 
+/// What the last finished run left to look at, under its account.
+enum Shown {
+    Nothing,
+    /// A SQL run's rows, in the grid.
+    Rows {
+        rows: usize,
+        columns: usize,
+        /// The chain's step they came from.
+        step: Option<String>,
+    },
+    /// What a program printed.
+    Output(Box<ProgramOutput>),
+}
+
+/// A program run's stdout and stderr, read from its logs when it ended.
+struct ProgramOutput {
+    run: jykre::automation::RunId,
+    /// The chain's step that printed it.
+    step: Option<String>,
+    /// The stream on screen.
+    stream: Stream,
+    stdout: Option<LogLines>,
+    stderr: Option<LogLines>,
+    reading: bool,
+    scroll: UniformListScrollHandle,
+}
+
 /// The run this tab started, while it is active or until another starts.
 enum Active {
     Idle,
@@ -242,6 +270,7 @@ pub struct JobView {
     prefill_note: Option<String>,
     grid: Entity<ResultGrid>,
     has_result: bool,
+    shown: Shown,
     history: Entity<HistoryList>,
     sources: JobSources,
     catalogs: Arc<SqlCatalogs>,
@@ -357,6 +386,7 @@ impl JobView {
             prefill_note: None,
             grid: cx.new(|cx| ResultGrid::new(Arc::default(), false, cx)),
             has_result: false,
+            shown: Shown::Nothing,
             history,
             sources,
             catalogs,
@@ -1720,6 +1750,7 @@ impl JobView {
         }) {
             Ok(handle) => {
                 self.has_result = false;
+                self.shown = Shown::Nothing;
                 self.inner = Inner::Inputs;
                 self.watch_chain(handle, step_ids, cx);
             }
@@ -1737,6 +1768,7 @@ impl JobView {
             Ok(handle) => {
                 // The last run's result is not this run's.
                 self.has_result = false;
+                self.shown = Shown::Nothing;
                 self.inner = Inner::Inputs;
                 self.watch_run(handle, dialect, cx);
             }
@@ -1805,29 +1837,7 @@ impl JobView {
                     &self.definition.name,
                     None,
                 );
-                if outcome.sql.is_some() {
-                    let outcome = outcome.clone();
-                    let grid = self.grid.clone();
-                    cx.spawn(async move |weak, cx| {
-                        // A copy of the rows, made off the UI thread: the
-                        // outcome stays shared with the engine's channel.
-                        let data = cx
-                            .background_executor()
-                            .spawn(async move {
-                                outcome.sql.as_ref().map(|sql| Arc::new(sql.data.clone()))
-                            })
-                            .await;
-                        let _ = weak.update(cx, |this, cx| {
-                            if let Some(data) = data {
-                                let _timer = jykre::logging::UiTimer::start("automation result");
-                                this.has_result = data.column_count() > 0;
-                                grid.update(cx, |grid, cx| grid.set_page(data, false, 0, None, cx));
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .detach();
-                }
+                self.show_result(outcome.clone(), None, cx);
                 self.history.update(cx, |history, cx| history.refresh(cx));
             }
             RunStatus::Refused(refusal) => {
@@ -1845,6 +1855,89 @@ impl JobView {
             }
         }
         cx.notify();
+    }
+
+    /// What a finished run left to look at, under its account: a SQL run's
+    /// rows in the grid, or what a program printed, read from its logs.
+    /// `step` names the chain's step it belongs to.
+    fn show_result(
+        &mut self,
+        outcome: Arc<jykre::automation::RunOutcome>,
+        step: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let run = outcome.id;
+        if outcome.sql.is_some() {
+            let grid = self.grid.clone();
+            cx.spawn(async move |weak, cx| {
+                // A copy of the rows, made off the UI thread: the outcome
+                // stays shared with the engine's channel.
+                let data = cx
+                    .background_executor()
+                    .spawn(
+                        async move { outcome.sql.as_ref().map(|sql| Arc::new(sql.data.clone())) },
+                    )
+                    .await;
+                let _ = weak.update(cx, |this, cx| {
+                    if let Some(data) = data {
+                        let _timer = jykre::logging::UiTimer::start("automation result");
+                        this.has_result = data.column_count() > 0;
+                        this.shown = if this.has_result {
+                            Shown::Rows {
+                                rows: data.row_count(),
+                                columns: data.column_count(),
+                                step,
+                            }
+                        } else {
+                            Shown::Nothing
+                        };
+                        grid.update(cx, |grid, cx| grid.set_page(data, false, 0, None, cx));
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+            return;
+        }
+        let Some(program) = &outcome.program else {
+            return;
+        };
+        let [stdout, stderr, _] = super::program_bits::log_sizes(program);
+        if stdout.is_none() && stderr.is_none() {
+            // It never started: there is nothing it printed.
+            return;
+        }
+        self.shown = Shown::Output(Box::new(ProgramOutput {
+            run,
+            step,
+            stream: Stream::Stdout,
+            stdout: None,
+            stderr: None,
+            reading: true,
+            scroll: UniformListScrollHandle::new(),
+        }));
+        let failed = outcome.state != jykre::automation::RunState::Succeeded;
+        let dir = self.engine.data_dir().to_path_buf();
+        cx.spawn(async move |weak, cx| {
+            let stdout = read_log_lines(dir.clone(), run, Stream::Stdout).await;
+            let stderr = read_log_lines(dir, run, Stream::Stderr).await;
+            let _ = weak.update(cx, |this, cx| {
+                let Shown::Output(output) = &mut this.shown else {
+                    return;
+                };
+                if output.run != run {
+                    return;
+                }
+                let printed =
+                    |log: &Option<LogLines>| log.as_ref().is_some_and(|log| !log.lines.is_empty());
+                output.stream = logic::first_stream(failed, printed(&stdout), printed(&stderr));
+                output.stdout = stdout;
+                output.stderr = stderr;
+                output.reading = false;
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// While queued, the time left is redrawn each second.
@@ -1896,6 +1989,7 @@ impl JobView {
     fn show_chain_status(&mut self, status: ChainStatus, cx: &mut Context<Self>) {
         let _timer = jykre::logging::UiTimer::start("automation chain status");
         let mut follow = None;
+        let mut last_step = None;
         // Each SQL step's connection by name, to say which one changed.
         let connections: HashMap<String, String> = self
             .chain
@@ -1954,6 +2048,13 @@ impl JobView {
                             });
                     self.step_watch = None;
                     self.tick = None;
+                    // The last step that ran left the chain's result.
+                    last_step = outcome.steps.last().cloned().zip(
+                        outcome
+                            .step_ids
+                            .get(outcome.steps.len().saturating_sub(1))
+                            .cloned(),
+                    );
                     self.history.update(cx, |history, cx| history.refresh(cx));
                 }
                 ChainStatus::Refused(refusal) => {
@@ -1964,6 +2065,9 @@ impl JobView {
                     self.step_watch = None;
                 }
             }
+        }
+        if let Some((last, id)) = last_step {
+            self.show_result(last, Some(id), cx);
         }
         if let Some(mut handle) = follow {
             self.step_watch = Some(cx.spawn(async move |weak, cx| {
