@@ -9,6 +9,7 @@
 use super::copying::format_name;
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
+use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem};
@@ -173,26 +174,54 @@ impl Render for ColumnDragPreview {
     }
 }
 
-/// The field that finds a column by name, and what it found.
+/// The dialog that finds a column by name, and what it found.
 struct ColumnFind {
     input: Entity<InputState>,
     /// The text the matches are for.
     text: String,
-    /// Computed when the text or the layout changes, never per frame.
+    /// Computed when the text, the layout or the result changes, never per frame.
     matches: Vec<ColumnMatch>,
-    /// The match `Enter` chooses.
+    /// The column `Enter` chooses.
     highlighted: usize,
     scroll: UniformListScrollHandle,
-    /// The matches show while the field has the keyboard.
-    focused: bool,
+    /// The dialog is on screen. Closing it keeps the text for the next open
+    /// and stops filtering the records view.
+    open: bool,
+    /// Keeps Tab inside the dialog.
+    focus: FocusHandle,
     _events: Subscription,
 }
 
-/// Matches the list shows at once, and the height of each.
-const MATCH_ROWS: usize = 8;
+/// Matches the list shows at once before it scrolls, and the height of each.
+const MATCH_ROWS: usize = 10;
 const MATCH_HEIGHT: f32 = 30.;
-/// Height of the bar holding the field.
-const FIND_BAR_HEIGHT: f32 = 40.;
+/// Header, field and footer of the column search dialog. The list is what
+/// gets shorter when the grid is too small to show all of them.
+const COLUMN_SEARCH_CHROME: f32 = 136.;
+
+/// Where the column search card sits in a grid of `width` by `height`:
+/// `(card width, top offset, max height)`. `None` until the grid has been
+/// laid out.
+///
+/// The width is `min(560, width - 32)`. The card starts 48 px down when the
+/// grid can still show the header, the field, the footer and one match; a
+/// shorter grid gives that offset back to the card.
+fn column_search_frame(width: f32, height: f32) -> Option<(f32, f32, f32)> {
+    if width <= 32. || height <= 32. {
+        return None;
+    }
+    let card_width = (width - 32.).min(560.);
+    let room = (height - 16.).max(0.);
+    let with_row = COLUMN_SEARCH_CHROME + MATCH_HEIGHT;
+    let top = if room >= 48. + with_row {
+        48.
+    } else if room > COLUMN_SEARCH_CHROME {
+        (room - with_row).clamp(0., 48.)
+    } else {
+        0.
+    };
+    Some((card_width, top, (room - top).max(0.)))
+}
 
 /// What the rows on screen share while they are built.
 struct RowsContext {
@@ -537,8 +566,11 @@ pub struct ResultGrid {
     /// The table's width at the last layout, which decides the columns in
     /// view.
     viewport: Rc<Cell<f32>>,
-    /// The field that finds a column by name, while it is open; its text
-    /// also filters the records view's lines.
+    /// The grid area's size at the last layout, for the column search card.
+    grid_area: Rc<Cell<(f32, f32)>>,
+    /// The dialog that finds a column by name. It stays after it closes, so
+    /// the next open selects its text; while it is open, that text also
+    /// filters the records view's lines.
     column_find: Option<ColumnFind>,
     gesture: Option<Gesture>,
     /// Rows and columns a drag past an edge moves per step.
@@ -701,14 +733,14 @@ impl ResultGrid {
         }
     }
 
-    /// The performance run's column search (A15): opens the field, as
+    /// The performance run's column search (A15): opens the dialog, as
     /// `Ctrl Shift F` does, with its text selected.
     pub(super) fn benchmark_find_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_column_search(window, cx);
     }
 
     /// Types `text` into the column search: replacing what is selected
-    /// (`replace`), or at the caret. The field's change finds the matches,
+    /// (`replace`), or at the caret. The dialog's change finds the matches,
     /// as typing does.
     pub(super) fn benchmark_find_type(
         &mut self,
@@ -802,6 +834,7 @@ impl ResultGrid {
             menu_locked: false,
             menu_open: false,
             viewport: Rc::default(),
+            grid_area: Rc::default(),
             column_find: None,
             gesture: None,
             edge: (0, 0),
@@ -1380,35 +1413,29 @@ impl ResultGrid {
         self.refresh_find(cx);
     }
 
-    /// Opens the field that finds a column by name (`Ctrl Shift F` or the
-    /// toolbar's button), or gives it the keyboard again with its text
-    /// selected.
+    /// Opens the dialog that finds a column by name (`Ctrl Shift F` or the
+    /// toolbar's button). Opening it again selects the text it already holds.
     pub fn open_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.column_find.is_none() {
             let input =
                 cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Find a column by name…")));
-            let events =
-                cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-                    match event {
-                        InputEvent::Change => this.search_columns(cx),
-                        InputEvent::PressEnter { .. } => this.choose_column_match(window, cx),
-                        InputEvent::Focus | InputEvent::Blur => {
-                            if let Some(find) = &mut this.column_find {
-                                find.focused = matches!(event, InputEvent::Focus);
-                            }
-                            cx.notify();
-                        }
-                    }
-                });
+            let events = cx.subscribe_in(&input, window, |this, _, event: &InputEvent, _, cx| {
+                if let InputEvent::Change = event {
+                    this.search_columns(cx);
+                }
+            });
             self.column_find = Some(ColumnFind {
                 input,
                 text: String::new(),
                 matches: Vec::new(),
                 highlighted: 0,
                 scroll: UniformListScrollHandle::new(),
-                focused: false,
+                open: true,
+                focus: cx.focus_handle(),
                 _events: events,
             });
+        } else if let Some(find) = &mut self.column_find {
+            find.open = true;
         }
         if let Some(find) = &self.column_find {
             find.input.update(cx, |input, cx| {
@@ -1416,13 +1443,16 @@ impl ResultGrid {
                 input.select_all(window, cx);
             });
         }
-        cx.notify();
+        // An empty text lists every column; a later change searches again.
+        self.search_columns(cx);
     }
 
-    /// Closes the field, which stops filtering the records view, and gives
-    /// the grid the keyboard.
+    /// Closes the dialog, which stops filtering the records view, and gives
+    /// the grid the keyboard. The text stays, so the next open selects it.
     fn close_column_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.column_find = None;
+        if let Some(find) = &mut self.column_find {
+            find.open = false;
+        }
         window.focus(&self.focus, cx);
         cx.notify();
     }
@@ -1455,13 +1485,16 @@ impl ResultGrid {
         }
     }
 
-    /// Goes to the highlighted match.
+    /// Goes to the highlighted column and closes the dialog.
     fn choose_column_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let column = self
             .column_find
             .as_ref()
             .and_then(|find| find.matches.get(find.highlighted))
             .map(|found| found.column);
+        // Close first: the records view then lists every column, and
+        // `go_to_column` scrolls to the chosen one in that list.
+        self.close_column_search(window, cx);
         if let Some(column) = column {
             self.go_to_column(column, window, cx);
         }
@@ -1469,8 +1502,7 @@ impl ResultGrid {
 
     /// Shows `column` when the layout hides it, scrolls the grid to it and
     /// selects it over the displayed rows (in the records view, scrolls to
-    /// its line), and gives the grid the keyboard. The field stays open with
-    /// its text, which keeps filtering the records view.
+    /// its line), and gives the grid the keyboard.
     fn go_to_column(&mut self, column: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.layout.is_hidden(column) {
             self.change_layout(|layout| layout.show(column), cx);
@@ -3371,13 +3403,13 @@ impl ResultGrid {
     }
 
     /// The columns the records view lists, one line each: the shown ones,
-    /// in display order; while the field that finds a column has text, only
-    /// the shown ones it finds.
+    /// in display order; while the column search dialog is open with text,
+    /// only the shown ones it finds.
     fn record_lines(&self) -> Rc<[usize]> {
         match self
             .column_find
             .as_ref()
-            .filter(|find| !find.text.trim().is_empty())
+            .filter(|find| find.open && !find.text.trim().is_empty())
         {
             Some(find) => find
                 .matches
@@ -3389,108 +3421,149 @@ impl ResultGrid {
         }
     }
 
-    /// The field that finds a column by name, while it is open: the text,
-    /// how many columns it finds, and a button that closes it. `↑` and `↓`
-    /// choose a match, `Enter` goes to it and `Esc` closes the field.
-    fn find_bar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let find = self.column_find.as_ref()?;
+    /// The dialog that finds a column by name, drawn over the grid while it
+    /// is open. `↑` and `↓` choose a column, `Enter` goes to it and closes
+    /// the dialog, and `Esc` closes it. Only the match lines on screen are
+    /// built.
+    fn column_search(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let find = self.column_find.as_ref().filter(|find| find.open)?;
         let count = cell_format::count;
+        let total = count(self.result.column_count());
         let status = if find.text.trim().is_empty() {
-            tr!("Type part of a column's name.").to_string()
+            tr!("{0} columns", total).to_string()
         } else if find.matches.is_empty() {
             tr!("No column matches.").to_string()
         } else {
-            tr!(
-                "{0} of {1} columns",
-                count(find.matches.len()),
-                count(self.result.column_count())
-            )
+            tr!("{0} of {1} columns", count(find.matches.len()), total).to_string()
         };
-        Some(
-            row()
-                .id("find-column-bar")
-                .flex_none()
-                .h(px(FIND_BAR_HEIGHT))
-                .px_3()
-                .gap_2()
-                .bg(rgb(results_colors().panel))
-                .border_b_1()
-                .border_color(rgb(results_colors().grid_line))
-                .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                    if event.keystroke.modifiers.modified() {
-                        return;
-                    }
-                    match event.keystroke.key.as_str() {
-                        "up" => this.step_column_match(-1, cx),
-                        "down" => this.step_column_match(1, cx),
-                        "escape" => this.close_column_search(window, cx),
-                        _ => return,
-                    }
-                    window.prevent_default();
-                    cx.stop_propagation();
-                }))
-                .child(
-                    div().w(px(320.)).flex_none().child(
-                        Input::new(&find.input)
-                            .small()
-                            .prefix(I::TextSearch)
-                            .w_full()
-                            .aria_label(tr!("Find a column by name")),
-                    ),
-                )
-                .child(
-                    div()
-                        .id("find-column-status")
-                        .role(Role::Status)
-                        .min_w_0()
-                        .truncate()
-                        .child(label(status)),
-                )
-                .child(div().flex_1())
-                .child(
-                    icon_button("close-column-search", I::X, tr!("Close the column search"))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.close_column_search(window, cx)),
-                        ),
-                ),
-        )
-    }
-
-    /// The matches under the field while it has the keyboard, drawn over
-    /// the table; only the lines on screen are built.
-    fn match_list(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        let find = self
-            .column_find
-            .as_ref()
-            .filter(|find| find.focused && !find.matches.is_empty())?;
-        let height = find.matches.len().min(MATCH_ROWS) as f32 * MATCH_HEIGHT;
-        Some(
-            div()
-                .id("column-matches")
-                .role(Role::ListBox)
-                .aria_label(tr!("Columns found"))
-                .absolute()
-                .top(px(FIND_BAR_HEIGHT))
-                .left(px(12.))
-                .w(px(460.))
-                .h(px(height + 2.))
-                .bg(rgb(results_colors().panel))
-                .border_1()
-                .border_color(rgb(results_colors().border))
-                .rounded_md()
-                .overflow_hidden()
-                .block_mouse_except_scroll()
-                .child(
-                    uniform_list(
-                        "column-match-lines",
-                        find.matches.len(),
-                        cx.processor(|this, range: Range<usize>, _, cx| {
-                            this.match_lines(range, cx)
-                        }),
+        let title = tr!("Find a column");
+        let (area_w, area_h) = self.grid_area.get();
+        let frame = column_search_frame(area_w, area_h);
+        let preferred = find.matches.len().min(MATCH_ROWS) as f32 * MATCH_HEIGHT;
+        let list_h = frame.map_or(preferred, |(_, _, max_h)| {
+            preferred.min((max_h - COLUMN_SEARCH_CHROME).max(0.))
+        });
+        let card = column()
+            .id("column-search")
+            .role(Role::Dialog)
+            .aria_label(title)
+            .when_some(frame, |card, (width, top, max_h)| {
+                card.w(px(width)).mt(px(top)).max_h(px(max_h))
+            })
+            .when(frame.is_none(), |card| {
+                card.w_full()
+                    .max_w(px(560.))
+                    .mt(px(48.))
+                    .max_h(relative(0.92))
+            })
+            .min_h_0()
+            .flex_shrink_1()
+            .rounded(px(10.))
+            .bg(rgb(results_colors().panel))
+            .border_1()
+            .border_color(rgb(results_colors().border))
+            .shadow_lg()
+            .overflow_hidden()
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.modifiers.modified() {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "up" => this.step_column_match(-1, cx),
+                    "down" => this.step_column_match(1, cx),
+                    "enter" => this.choose_column_match(window, cx),
+                    "escape" => this.close_column_search(window, cx),
+                    _ => return,
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            }))
+            .child(
+                row()
+                    .flex_none()
+                    .px_3()
+                    .pt_2()
+                    .pb_1()
+                    .justify_between()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(results_colors().text))
+                            .child(title),
                     )
-                    .size_full()
-                    .track_scroll(&find.scroll),
+                    .child(
+                        icon_button("close-column-search", I::X, tr!("Close the column search"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_column_search(window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div().flex_none().px_3().pb_2().child(
+                    Input::new(&find.input)
+                        .small()
+                        .prefix(I::TextSearch)
+                        .w_full()
+                        .aria_label(tr!("Find a column by name")),
                 ),
+            )
+            .child(
+                div()
+                    .id("column-matches")
+                    .role(Role::ListBox)
+                    .aria_label(tr!("Columns found"))
+                    .flex_grow_0()
+                    .flex_shrink_1()
+                    .min_h_0()
+                    .h(px(list_h))
+                    .overflow_hidden()
+                    .child(
+                        uniform_list(
+                            "column-match-lines",
+                            find.matches.len(),
+                            cx.processor(|this, range: Range<usize>, _, cx| {
+                                this.match_lines(range, cx)
+                            }),
+                        )
+                        .size_full()
+                        .track_scroll(&find.scroll),
+                    ),
+            )
+            .child(
+                row()
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .justify_between()
+                    .border_t_1()
+                    .border_color(rgb(results_colors().border))
+                    .child(
+                        div()
+                            .id("find-column-status")
+                            .role(Role::Status)
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .child(label(status)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(label(tr!("↑ ↓ choose · Enter go to · Esc close"))),
+                    ),
+            )
+            .focus_trap("column-search-trap", &find.focus);
+        Some(
+            modal_backdrop("column-search-backdrop")
+                .when(frame.is_none(), |backdrop| backdrop.px(px(16.)))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, cx| this.close_column_search(window, cx)),
+                )
+                .child(card),
         )
     }
 
@@ -3549,8 +3622,8 @@ impl ResultGrid {
                             results_colors().amber,
                         ))
                     })
-                    // A press, not a click: the field keeps the keyboard
-                    // until the grid takes it.
+                    // A press, not a click: choosing closes the dialog and
+                    // the grid takes the keyboard before the click lands.
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, window, cx| {
@@ -4895,8 +4968,30 @@ impl Render for ResultGrid {
         };
         let gesture = self.gesture.is_some();
         let hidden_bar = self.hidden_bar(cx);
-        let find_bar = self.find_bar(cx);
-        let match_list = self.match_list(cx);
+        let column_search = self.column_search(cx);
+        let area = self.grid_area.clone();
+        let area_weak = cx.weak_entity();
+        let search_open = self.column_find.as_ref().is_some_and(|find| find.open);
+        // The card's width and offset follow the grid's size, known after
+        // layout. A size other than the one this frame was built for builds
+        // the next frame again, once, while the dialog is open.
+        let measure_area = canvas(
+            move |bounds, _, cx| {
+                let next = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                let previous = area.get();
+                if (next.0 - previous.0).abs() > 0.5 || (next.1 - previous.1).abs() > 0.5 {
+                    area.set(next);
+                    if search_open {
+                        cx.defer(move |cx| {
+                            let _ = area_weak.update(cx, |_, cx| cx.notify());
+                        });
+                    }
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
         // The bars sit outside the grid's own keys, so typing in them or
         // pressing their buttons never moves the selection.
         let grid = div()
@@ -5004,16 +5099,15 @@ impl Render for ResultGrid {
             .size_full()
             .gap_0()
             .bg(rgb(results_colors().grid_bg))
-            // From the table, the bars or the field itself, whose text it
-            // selects again.
+            // From the table or the dialog, whose text it selects again.
             .on_action(cx.listener(|this, _: &super::FindColumn, window, cx| {
                 this.open_column_search(window, cx)
             }))
-            .children(find_bar)
+            .child(measure_area)
             .children(hidden_bar)
             .child(grid)
             // Last, so it is drawn over the table.
-            .children(match_list)
+            .children(column_search)
     }
 }
 
@@ -5300,5 +5394,29 @@ mod tests {
         crate::app::source_text();
         assert!(!tooltips_shown(true));
         assert!(tooltips_shown(false));
+    }
+
+    #[test]
+    fn the_column_search_card_fits_the_grid() {
+        assert!(super::column_search_frame(0., 0.).is_none());
+        assert!(super::column_search_frame(800., 20.).is_none());
+        // Wide and tall: 560 px, 48 px down, 16 px left under the grid.
+        assert_eq!(
+            super::column_search_frame(800., 600.),
+            Some((560., 48., 536.))
+        );
+        // Narrow: the 32 px gutter comes off the grid's width.
+        assert_eq!(
+            super::column_search_frame(300., 600.),
+            Some((268., 48., 536.))
+        );
+        // Short: the 48 px offset shrinks so the card still has room.
+        assert_eq!(
+            super::column_search_frame(800., 220.),
+            Some((560., 38., 166.))
+        );
+        let short = super::column_search_frame(800., 150.).expect("a laid out grid");
+        assert!(short.1 < 48.);
+        assert!(short.1 + short.2 <= 150. - 16.);
     }
 }

@@ -3,7 +3,8 @@
 //!
 //! [`find`] lists the columns whose name holds the text, the shown ones in
 //! display order first, then the hidden ones, each with the byte ranges of
-//! its name that matched, for the grid to mark them. It runs when the text
+//! its name that matched, for the grid to mark them. An empty or whitespace
+//! text lists every column, with no ranges to mark. It runs when the text
 //! or the layout changes, never per frame.
 use crate::column_layout::ColumnLayout;
 use crate::result::ResultColumn;
@@ -117,13 +118,11 @@ pub fn ranges(name: &str, needle: &[char]) -> Vec<Range<usize>> {
 }
 
 /// The columns of `columns` whose name holds `text`, ignoring case and
-/// accents: the shown ones in display order, then the hidden ones in
-/// layout order. Nothing for an empty text.
+/// accents: the shown ones in display order, then the hidden ones.
+/// Each match carries the byte ranges of its name that matched.
+/// An empty or whitespace `text` lists every column, with empty ranges.
 pub fn find(columns: &[ResultColumn], layout: &ColumnLayout, text: &str) -> Vec<ColumnMatch> {
     let needle = needle(text);
-    if needle.is_empty() {
-        return Vec::new();
-    }
     let shown = layout.visible().iter().map(|column| (*column, false));
     let hidden = layout.hidden_columns().map(|column| (column, true));
     shown
@@ -131,7 +130,8 @@ pub fn find(columns: &[ResultColumn], layout: &ColumnLayout, text: &str) -> Vec<
         .filter_map(|(column, hidden)| {
             let name = &columns.get(column)?.name;
             let ranges = ranges(name, &needle);
-            (!ranges.is_empty()).then_some(ColumnMatch {
+            // An empty search still names every column, with nothing to mark.
+            (needle.is_empty() || !ranges.is_empty()).then_some(ColumnMatch {
                 column,
                 ranges,
                 hidden,
@@ -207,8 +207,30 @@ mod tests {
                 (1, true, 1, Some((3, 5))),
             ]
         );
-        assert!(find(&columns, &layout, "   ").is_empty());
         assert!(find(&columns, &layout, "zzz").is_empty());
+    }
+
+    #[test]
+    fn an_empty_text_lists_every_column_with_no_ranges() {
+        let columns = columns(&["id", "valid", "paid_at", "name"]);
+        let mut layout = ColumnLayout::new(4);
+        layout.move_onto(2, 0);
+        layout.hide(1);
+        // Shown as paid_at, id, name; valid hidden.
+        let summary = |text: &str| {
+            find(&columns, &layout, text)
+                .into_iter()
+                .map(|found| (found.column, found.hidden, found.ranges))
+                .collect::<Vec<_>>()
+        };
+        let every = [
+            (2, false, vec![]),
+            (0, false, vec![]),
+            (3, false, vec![]),
+            (1, true, vec![]),
+        ];
+        assert_eq!(summary("   "), every);
+        assert_eq!(summary(""), every);
     }
 
     #[test]

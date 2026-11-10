@@ -591,10 +591,10 @@ inside one focused control, marked *fixed*.
 | Grid: close the field of the cell being edited, then the side panel, then the records view, then clear the selection | `Esc` (fixed) |
 | Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |
 | Grid (a query tab's, a report panel's or a job's): the menu on the focused header's column, or the focused cell's, to hide, freeze at the left or move the column, show hidden columns or reset the layout. With the mouse, a header dragged onto another takes its place | `Shift F10` |
-| Find a column by name, ignoring case and accents, in the grid that has the keyboard, else in the query tab's result on screen (also the result toolbar's button); while its text is there, the records view lists only the columns it finds | `Ctrl Shift F` |
+| Find a column by name, ignoring case and accents, in the grid that has the keyboard, else in the query tab's result on screen (also the result toolbar's button); while the dialog is open with text, the records view lists only the columns it finds | `Ctrl Shift F` |
 | Query tab's result grid, while it has the keyboard: open the result search and focus its field (selects the text when the bar is already open). The toolbar's button opens it the same way, and a second click closes it | `Ctrl F` |
 | Result search field: the next or previous occurrence while highlighting, close the bar and give the keyboard back to the grid | `Enter`, `↓`, `Shift Enter`, `↑`, `Esc` (fixed) |
-| Column search field: choose a match, go to it (showing it when hidden), close the field | `↑`, `↓`, `Enter`, `Esc` (fixed) |
+| Column search dialog: choose a column, go to it (showing it when hidden) and close the dialog, or close it; a click outside the card closes it too | `↑`, `↓`, `Enter`, `Esc`, click outside (fixed) |
 | Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
 | Tab bar: move between tabs | Arrows, `Home`, `End` (fixed) |
 | A job's tab: reach **Editor**, **Inputs** or **Runs**, open it (the keyboard goes to its first field, or the history) | `Tab`, then `Enter` or `Space` (fixed) |
