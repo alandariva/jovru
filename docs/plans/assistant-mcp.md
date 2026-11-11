@@ -202,8 +202,9 @@ token. The section does not depend on a provider being configured, because
 the server does not call a model.
 
 The section follows Automation (`src/app/automation/mod.rs`, verified): the
-sidebar lists the things the section owns, and opening one opens a tab in a
-grey group of its own, which offers no new tab and takes no other tab. A
+sidebar lists the things the section owns, and opening one opens a tab in the
+grey **MCP** group, shared by the section's tabs, which offers no new tab and
+takes no other kind of tab. A
 token is not a query of its connection, so its tab is not filed under that
 connection's group.
 

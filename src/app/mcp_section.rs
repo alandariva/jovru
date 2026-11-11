@@ -472,20 +472,19 @@ impl AppView {
     }
 
     fn rename_mcp_tabs(&mut self, cx: &mut Context<Self>) {
-        let titles: Vec<(TabId, TabGroupId, String)> = self
+        let titles: Vec<(TabId, String)> = self
             .mcp
             .tabs
             .iter()
             .filter_map(|(id, tab)| match &tab.kind {
-                TabKind::Token(view) => Some((*id, tab.group, view.read(cx).title())),
+                TabKind::Token(view) => Some((*id, view.read(cx).title())),
                 TabKind::Requests(_) => None,
             })
             .collect();
-        for (tab, group, title) in titles {
-            let _ = self.tabs.update(cx, |tabs, cx| {
-                let _ = tabs.rename_group(group, title.clone(), cx);
-                tabs.set_tab_title(tab, title, cx)
-            });
+        for (tab, title) in titles {
+            let _ = self
+                .tabs
+                .update(cx, |tabs, cx| tabs.set_tab_title(tab, title, cx));
         }
     }
 
@@ -1104,11 +1103,8 @@ impl AppView {
             return;
         }
         let title = tr!("Requests").to_owned();
-        let group = self.tabs.update(cx, |tabs, cx| {
-            let group = tabs.add_group(title.clone(), rgb(colors().neutral).into(), cx);
-            let _ = tabs.set_group_new_tab(group, false, cx);
-            group
-        });
+        let open = self.mcp.tab_groups().next();
+        let group = self.kind_group(open, tr!("MCP"), cx);
         let view = cx.new(|cx| RequestsView::new(self.endpoint(), window, cx));
         let events =
             cx.subscribe_in(
@@ -1186,11 +1182,8 @@ impl AppView {
             .as_ref()
             .map(|record| show_controls(&record.name))
             .unwrap_or_else(|| tr!("New token").to_owned());
-        let group = self.tabs.update(cx, |tabs, cx| {
-            let group = tabs.add_group(title.clone(), rgb(colors().neutral).into(), cx);
-            let _ = tabs.set_group_new_tab(group, false, cx);
-            group
-        });
+        let open = self.mcp.tab_groups().next();
+        let group = self.kind_group(open, tr!("MCP"), cx);
         let names: Vec<String> = self
             .mcp
             .tokens
@@ -1210,21 +1203,18 @@ impl AppView {
         let watched = view.clone();
         let renamed = cx.observe(&watched, |this, view, cx| {
             let title = view.read(cx).title();
-            let found = this.mcp.tabs.iter().find_map(|(tab, open)| {
-                let group = open.group;
-                match &open.kind {
-                    TabKind::Token(token) if token.entity_id() == view.entity_id() => {
-                        Some((*tab, group))
-                    }
+            let found = this
+                .mcp
+                .tabs
+                .iter()
+                .find_map(|(tab, open)| match &open.kind {
+                    TabKind::Token(token) if token.entity_id() == view.entity_id() => Some(*tab),
                     _ => None,
-                }
-            });
-            // `found` borrowed tabs; the group is copied above.
-            if let Some((tab, group)) = found {
-                let _ = this.tabs.update(cx, |tabs, cx| {
-                    let _ = tabs.rename_group(group, title.clone(), cx);
-                    tabs.set_tab_title(tab, title, cx)
                 });
+            if let Some(tab) = found {
+                let _ = this
+                    .tabs
+                    .update(cx, |tabs, cx| tabs.set_tab_title(tab, title, cx));
             }
         });
         let Ok(tab) = self

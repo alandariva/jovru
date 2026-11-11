@@ -4,9 +4,9 @@
 //! their list, and the tabs that edit and run them.
 //!
 //! Report tabs are tracked apart from query tabs (`report_tabs`). A report's
-//! panels may run on several connections, so each report tab has a tab
-//! group of its own, named after the report, which no other tab joins and
-//! which goes away with the tab. Report tabs are not reopened after a
+//! panels may run on several connections, so report tabs sit in the
+//! Reports tab group, which no other kind of tab joins and which goes away
+//! with its last tab. Report tabs are not reopened after a
 //! restart. The library is written to `config.db` under its own setting,
 //! never with a result.
 use super::report_panel::{ReportSource, Sources};
@@ -281,13 +281,10 @@ impl AppView {
         } else {
             report.title.clone()
         };
-        // A report may run on several connections: its tab has a group of
-        // its own, which offers no new tab.
-        let group = self.tabs.update(cx, |tabs, cx| {
-            let group = tabs.add_group(title.clone(), rgb(colors().neutral).into(), cx);
-            let _ = tabs.set_group_new_tab(group, false, cx);
-            group
-        });
+        // A report may run on several connections: its tab belongs to the
+        // Reports group, which offers no new tab.
+        let open = self.report_tabs.values().next().map(|tab| tab.group);
+        let group = self.kind_group(open, tr!("Reports"), cx);
         let view = cx.new(|cx| ReportView::new(report, mode, window, cx));
         let catalogs = self.sql_catalogs.clone();
         let sources = self.report_sources();
@@ -345,13 +342,9 @@ impl AppView {
                     let title = stored.title.clone();
                     view.update(cx, |view, cx| view.saved(stored, cx));
                     if let Some(tab) = self.report_tab_of(view) {
-                        let group = self.report_tabs.get(&tab).map(|tab| tab.group);
-                        let _ = self.tabs.update(cx, |tabs, cx| {
-                            if let Some(group) = group {
-                                let _ = tabs.rename_group(group, title.clone(), cx);
-                            }
-                            tabs.set_tab_title(tab, title, cx)
-                        });
+                        let _ = self
+                            .tabs
+                            .update(cx, |tabs, cx| tabs.set_tab_title(tab, title, cx));
                     }
                 }
                 self.filter_library(cx);

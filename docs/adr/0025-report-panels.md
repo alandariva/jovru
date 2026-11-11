@@ -81,10 +81,11 @@ What constrains the change:
 
 ### Tabs
 
-- A report tab has a **tab group of its own**, named after the report and
-  renamed when it is saved. The group offers no new tab, no other tab is
-  dropped into it, and the report tab is not moved out of it; the group goes
-  away with the tab.
+- A report tab sits in the **Reports** tab group, shared by every report
+  tab (changed on 2026-11-11, at the maintainer's request; it was a group of
+  its own per report, named after it). The group offers no new tab, no other
+  kind of tab is dropped into it, and the report tab is not moved out of it;
+  the group goes away with its last tab.
 
 ### Sessions
 

@@ -11,8 +11,8 @@
 //! ([`AppView::automation_may_close`]). The engine's changes arrive through
 //! a counter that is read at most once per frame.
 //!
-//! Each job tab has a tab group of its own, as a report's does, which
-//! offers no new tab and takes no other tab.
+//! The job tabs and the Runs tab share the Automation tab group, as report
+//! tabs share the Reports group; it offers no new tab and takes no other tab.
 pub(super) mod benchmark;
 mod history;
 mod job_view;
@@ -682,11 +682,8 @@ impl AppView {
         } else {
             definition.name.clone()
         };
-        let group = self.tabs.update(cx, |tabs, cx| {
-            let group = tabs.add_group(title.clone(), rgb(colors().neutral).into(), cx);
-            let _ = tabs.set_group_new_tab(group, false, cx);
-            group
-        });
+        let open = self.automation.tab_groups().next();
+        let group = self.kind_group(open, tr!("Automation"), cx);
         let sources = JobSources {
             sources: self.report_sources(),
             revisions: Rc::new(
@@ -716,17 +713,13 @@ impl AppView {
             this.job_event(view, event, window, cx)
         });
         let status = cx.observe(&view, |this, view, cx| {
-            let (status, title, name) = {
+            let (status, title) = {
                 let view = view.read(cx);
-                (view.tab_status(), view.title(), view.name())
+                (view.tab_status(), view.title())
             };
             if let Some(tab) = this.automation_tab_of(view.entity_id()) {
-                let group = this.automation.tabs.get(&tab).map(|tab| tab.group);
                 let _ = this.tabs.update(cx, |tabs, cx| {
                     let _ = tabs.set_tab_status(tab, status, cx);
-                    if let Some(group) = group {
-                        let _ = tabs.rename_group(group, name, cx);
-                    }
                     tabs.set_tab_title(tab, title, cx)
                 });
             }
@@ -770,11 +763,8 @@ impl AppView {
             return;
         };
         let title = tr!("Runs").to_owned();
-        let group = self.tabs.update(cx, |tabs, cx| {
-            let group = tabs.add_group(title.clone(), rgb(colors().neutral).into(), cx);
-            let _ = tabs.set_group_new_tab(group, false, cx);
-            group
-        });
+        let open = self.automation.tab_groups().next();
+        let group = self.kind_group(open, tr!("Automation"), cx);
         let jobs = self.automation.jobs.clone();
         let connections = self.connection_names();
         let view = cx.new(|cx| RunsView::new(engine, jobs, connections, cx));

@@ -580,7 +580,7 @@ impl AppView {
         .detach();
         let tab_subscription =
             cx.subscribe_in(&tabs, window, |this, _, event, window, cx| match event {
-                // A report's own group offers no new tab.
+                // The Reports, Automation and MCP groups offer no new tab.
                 GroupedTabsEvent::NewTabRequested(group)
                     if this.is_report_group(*group)
                         || this.automation.tab_groups().any(|own| own == *group)
@@ -1932,8 +1932,8 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let same_group = self.tabs.read(cx).group_of(tab) == Some(group);
-        // A report's, a job's or an MCP tab stays in its own group, and no
-        // other tab joins one.
+        // A report's, a job's or an MCP tab stays in its kind's group, and
+        // no other kind of tab joins one.
         if self.report_tabs.contains_key(&tab)
             || self.is_report_group(group)
             || self.automation.owns(tab)

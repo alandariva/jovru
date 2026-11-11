@@ -29,8 +29,9 @@ is visible, and the keyboard reaches everything.
 ```
 
 A connection's tab group appears with its first tab and goes away with its
-last: the tab strip never shows a group without tabs, at start or later. A
-report's tab has a group of its own (below).
+last: the tab strip never shows a group without tabs, at start or later. Tabs
+that belong to no connection share one grey group per kind: **Reports**,
+**Automation** and **MCP** (below).
 
 The rail holds, from the top: Explorer, Saved queries, Reports, Automation,
 History and, at the bottom, Preferences.
@@ -92,11 +93,10 @@ options, the sheet, the table or the mapping change: it was about another
 import. `Esc` (or the key chosen to close a dialog) closes it; Tab stays inside while it is open.
 
 A **report** ([ADR-0024](../adr/0024-reports.md),
-[ADR-0025](../adr/0025-report-panels.md)) opens in a tab of its own, in a tab
-group of its own named after the report and drawn without a colour (grey),
-since it belongs to no connection: the group offers no new tab, takes
-no other tab and goes away with the report's tab, since the report's panels
-may run on several connections. The tab has a toolbar (title, **Edit**,
+[ADR-0025](../adr/0025-report-panels.md)) opens in a tab of its own, in the **Reports** tab group, drawn without a colour
+(grey), since it belongs to no connection: every report tab shares the group,
+which offers no new tab, takes no other kind of tab and goes away with its
+last tab, since a report's panels may run on several connections. The tab has a toolbar (title, **Edit**,
 **Add a panel**, save, **Export for printing or PDF…**, **Run**), the
 definition while editing (description and one row per `:name` parameter the
 panels share, with its label, type, default, whether it is required and its
@@ -130,8 +130,8 @@ job its next run in the schedule's zone, **Suspended** in amber or
 **Schedule off**, virtualized), with a
 **+** menu (**New SQL Job**, **New program**, **New chain**) and a **Runs**
 entry, with the number of runs active, that opens the global runs list. A
-job opens in a tab of its own, in a grey tab group of its own named after
-the job, as a report's does; the tab's title ends with `●` while the job is
+job opens in a tab of its own, in the grey **Automation** tab group that the
+**Runs** tab shares, as reports share theirs; the tab's title ends with `●` while the job is
 not saved. Its toolbar holds the kind, **Save** (**Saved**, muted, when nothing changed), **Publish** (not for a chain),
 **Duplicate**, **Delete** and **Run**, which turns into **Stop** while the
 job's run is active; under it, three inner tabs, and a fourth,
@@ -413,7 +413,7 @@ Each state has one consistent representation.
 | History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
 | Long lines of a large script | The SQL editor | Lines wrap at the editor's width, except in a tab whose text exceeds 256 KiB: there long lines scroll sideways, so a large file opens without freezing the window. Wrapping comes back once the text is 192 KiB or less ([Large `.sql` files in the editor](../plans/editor-large-files.md)) |
 | Query parameters | Above a query tab's editor, under its header | One field per `:name` of the SQL (none without markers): the name, its type (**Automatic**, which shows the type it reads from the value, or one chosen) and **NULL**, which disables the field. A missing or malformed value of a statement being run is outlined in red with what is expected, and nothing runs. **Run again** binds the current values; an export that runs a statement again binds those its result ran with. The fields come back with the tab after a restart. The values are bound by the driver ([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)) |
-| Saved report | Report toolbar, Reports list, tab group | The save icon is a filled bookmark while the tab holds the stored definition, and saving renames the report's tab group; the list shows each report's title, its connections (by name, or "N connections" past two), its number of panels and the start of its SQL, with its chart type as icon (a dashboard for several panels); a search filters by title, description, or a panel's title, connection or SQL |
+| Saved report | Report toolbar, Reports list, tab group | The save icon is a filled bookmark while the tab holds the stored definition, and saving renames the report's tab; the list shows each report's title, its connections (by name, or "N connections" past two), its number of panels and the start of its SQL, with its chart type as icon (a dashboard for several panels); a search filters by title, description, or a panel's title, connection or SQL |
 | Report parameters | The report's form | One field per `:name` of any panel, labelled as the definition says (`*` when required) with a placeholder for its type; a list parameter shows a menu of its choices (and **No value** when optional). A missing, malformed or unlisted value of a panel that runs is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)) |
 | Run of a report | Report toolbar, panel headers, footer, tab bar | **Run** turns into **Stop** while any panel runs; a connection without its password asks for it first, one after another; each panel shows **Waiting** (for its connection and database's session or a free place: at most four run at once), a spinner while it runs, **Failed** or **Stopped**, and its error in place of its result (a panel whose connection is gone says so and the others run); the tab shows the worst outcome; a panel's footer shows its rows, its time and "Stopped at the row limit" when more rows exist, and a panel whose session was lost says it was opened again |
 | Where a report panel runs | Panel header | A badge "connection · database" (just the connection for the session default), amber when the connection or database is no longer listed; while the report is edited, a menu of the connections with their namespaces, with a warning icon for one no longer listed |
@@ -485,8 +485,8 @@ Rules:
   choosing a connection in the editor toolbar) asks first: its results and
   session belong to the previous connection, and an open transaction is
   rolled back. A tab without a connection moves without asking: it has no
-  session or results to lose. A report's tab never leaves its own group, and no other tab is
-  dropped into it.
+  session or results to lose. A report's, a job's or an MCP tab never leaves its kind's group
+  (it can be reordered inside it), and no other kind of tab is dropped into it.
 - Saving changed connection settings asks first when a tab of that
   connection runs a query or holds an open transaction: applying them cancels
   the query and closes the session. Otherwise tabs keep their results and
