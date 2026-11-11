@@ -13,6 +13,11 @@ mod registry;
 mod server;
 mod token;
 
+// Fixtures using the application's global latest-write queue must not
+// supersede one another's writes to their independent temporary folders.
+#[cfg(test)]
+static SETTINGS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub use broker::{
     ACTIVITY_LIMIT, ANSWER_NOT_SHARED, ActivityEntry, Arrival, Broker, CardContent, CardEnd,
     CardId, CardPlace, CardSnapshot, ClientResponse, ClientResult, DECISION_TIMED_OUT,

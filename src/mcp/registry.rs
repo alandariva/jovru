@@ -2256,6 +2256,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_older_settings_write_cannot_land_after_a_newer_one() {
+        let _settings_guard = super::super::SETTINGS_TEST_LOCK.lock().await;
         let dir = std::env::temp_dir().join(format!("jykre-mcp-{}", ConnectionId::new()));
         let _remove = RemoveDir(dir.clone());
         assert_eq!(load_settings(&dir).await.unwrap(), McpSettings::default());

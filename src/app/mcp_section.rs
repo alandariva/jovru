@@ -558,19 +558,12 @@ impl AppView {
             return;
         }
         let endpoint = self.endpoint();
-        let dir = jykre::connection_store::data_dir();
         self.mcp.switching = true;
         cx.notify();
         cx.spawn(async move |weak, cx| {
             let result = jykre::backend::run(async move {
-                if on {
-                    if let Some(endpoint) = endpoint.as_ref() {
-                        endpoint.shutdown().await;
-                    }
-                    Ok(McpEndpoint::listen(dir, false).await)
-                } else if let Some(endpoint) = endpoint {
-                    endpoint.shutdown().await;
-                    Ok(endpoint)
+                if let Some(endpoint) = endpoint {
+                    endpoint.set_enabled(on).await
                 } else {
                     Ok(McpEndpoint::off())
                 }

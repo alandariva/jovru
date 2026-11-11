@@ -125,6 +125,13 @@ and is kept. An `id` that is not 10 lowercase base32 characters is left
 out. Last used time, activity, cursors and pending cards are not
 written.
 
+The MCP section's server switch saves `enabled` before replacing the
+listener. A failed write is shown in the section and leaves the current
+listener intact. **Off** closes the socket and pending requests; quitting
+closes them without changing `enabled`, so the next launch restores the
+saved choice. A replacement listener waits for the old socket to close
+before binding the same port.
+
 ```json
 {
   "enabled": false,

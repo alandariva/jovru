@@ -185,14 +185,22 @@ impl<S> McpEndpoint<S> {
         }
     }
 
-    fn abort_tasks(shared: &Shared<S>) {
+    async fn abort_tasks(shared: &Shared<S>) {
         let Some(tasks) = lock(&shared.tasks).take() else {
             return;
         };
         tasks.accept.abort();
         tasks.expire.abort();
-        for handle in lock(&tasks.connections).drain(..) {
+        // Stop accepting before draining connections; no task may append
+        // another connection after the drain or keep the port during a rebind.
+        let _ = tasks.accept.await; // Aborted tasks report cancellation.
+        let _ = tasks.expire.await;
+        let connections = std::mem::take(&mut *lock(&tasks.connections));
+        for handle in &connections {
             handle.abort();
+        }
+        for handle in connections {
+            let _ = handle.await; // Aborted tasks report cancellation.
         }
     }
 }
@@ -221,6 +229,32 @@ impl McpEndpoint<jykre_secrets::SystemSecretStore> {
             return Self::holding(data_dir, registry, ListenState::Off, port, records);
         }
         Self::start(data_dir, registry, port).await
+    }
+
+    /// Persists the server switch and returns its replacement endpoint.
+    /// A failed settings write leaves this endpoint running. Demo endpoints
+    /// stay inert. Application shutdown uses [`Self::shutdown`] instead,
+    /// so quitting does not change the user's saved choice.
+    pub async fn set_enabled(&self, enabled: bool) -> crate::drivers::DriverResult<Self> {
+        if self.local == ListenState::Demo {
+            return Ok(self.clone());
+        }
+        let Some(shared) = &self.shared else {
+            return Err(crate::drivers::DriverError::new(
+                crate::drivers::ErrorCode::NotFound,
+                tr!("The MCP server is off."),
+            ));
+        };
+        shared.registry.lock().await.set_enabled(enabled).await?;
+        let data_dir = shared.data_dir.clone();
+        let registry = TokenRegistry::open(&data_dir, jykre_secrets::SystemSecretStore).await?;
+        let port = registry.settings().port;
+        self.shutdown().await;
+        Ok(if enabled {
+            Self::start(data_dir, registry, port).await
+        } else {
+            Self::park(data_dir, registry, ListenState::Off)
+        })
     }
 }
 
@@ -623,7 +657,8 @@ where
         shared.host.close_all().await;
         shared.kept.lock().await.clear();
         lock(&shared.tools).clear();
-        Self::abort_tasks(shared);
+        Self::abort_tasks(shared).await;
+        *lock(&shared.listen) = ListenState::Off;
     }
 
     fn finish_card(
@@ -2100,9 +2135,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn server_switch_persists_and_releases_the_port_before_restarting() {
+        let _settings_guard = super::super::SETTINGS_TEST_LOCK.lock().await;
+        let dir = temp_dir();
+        let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = probe.local_addr().unwrap();
+        let settings = McpSettings {
+            port: addr.port(),
+            ..McpSettings::default()
+        };
+        save_fixture_settings(&dir, &settings).await;
+        let endpoint = McpEndpoint::listen(dir.clone(), false).await;
+        assert_eq!(endpoint.state(), ListenState::Off);
+
+        let endpoint = endpoint.set_enabled(true).await.unwrap();
+        assert_eq!(
+            endpoint.state(),
+            ListenState::PortInUse { port: addr.port() }
+        );
+        assert!(super::super::load_settings(&dir).await.unwrap().enabled);
+        drop(probe);
+
+        let endpoint = endpoint.set_enabled(true).await.unwrap();
+        assert_eq!(endpoint.state(), ListenState::Listening { addr });
+        assert!(
+            round_trip(
+                addr,
+                "GET /mcp HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .await
+            .contains("401")
+        );
+
+        // Rebinding a running endpoint must await the old listener's exit.
+        let endpoint = endpoint.set_enabled(true).await.unwrap();
+        assert_eq!(endpoint.state(), ListenState::Listening { addr });
+        endpoint.shutdown().await;
+        assert_eq!(endpoint.state(), ListenState::Off);
+        assert!(super::super::load_settings(&dir).await.unwrap().enabled);
+        let endpoint = McpEndpoint::listen(dir.clone(), false).await;
+        assert_eq!(endpoint.state(), ListenState::Listening { addr });
+
+        // A settings write failure must not close the working listener.
+        let backup = dir.with_extension("backup");
+        tokio::fs::rename(&dir, &backup).await.unwrap();
+        tokio::fs::write(&dir, b"not a directory").await.unwrap();
+        assert!(endpoint.set_enabled(false).await.is_err());
+        assert_eq!(endpoint.state(), ListenState::Listening { addr });
+        assert!(TcpStream::connect(addr).await.is_ok());
+        tokio::fs::remove_file(&dir).await.unwrap();
+        tokio::fs::rename(&backup, &dir).await.unwrap();
+        assert!(super::super::load_settings(&dir).await.unwrap().enabled);
+
+        let endpoint = endpoint.set_enabled(false).await.unwrap();
+        assert_eq!(endpoint.state(), ListenState::Off);
+        let saved = super::super::load_settings(&dir).await.unwrap();
+        assert!(!saved.enabled);
+        assert_eq!(saved.port, addr.port());
+        let probe = TcpListener::bind(addr).await.unwrap();
+        let endpoint = McpEndpoint::listen(dir.clone(), false).await;
+        assert_eq!(endpoint.state(), ListenState::Off);
+        endpoint.shutdown().await;
+        drop(probe);
+        tokio::fs::remove_dir_all(&dir).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn demo_does_not_bind() {
-        let endpoint = McpEndpoint::listen(temp_dir(), true).await;
+        let dir = temp_dir();
+        let endpoint = McpEndpoint::listen(dir.clone(), true).await;
         assert!(matches!(endpoint.state(), ListenState::Demo));
+        let endpoint = endpoint.set_enabled(true).await.unwrap();
+        assert_eq!(endpoint.state(), ListenState::Demo);
+        assert!(!dir.exists());
         endpoint.shutdown().await;
     }
 
