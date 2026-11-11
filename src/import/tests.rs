@@ -197,6 +197,48 @@ fn rows_know_their_line_past_blank_lines_and_either_line_ending() {
 }
 
 #[test]
+fn a_blank_line_of_a_one_column_file_is_a_row_with_nothing_in_it() {
+    let folder = Folder::new();
+    // The export of `a`, NULL, `b` and then NULL, written as this
+    // application writes it.
+    let path = folder.file("one.csv", b"nick\na\n\nb\n\n");
+    let (_, rows) = events(&path, &csv(CsvOptions::default())).unwrap();
+    assert_eq!(
+        values(&rows),
+        [
+            vec![text("a")],
+            vec![ImportValue::Null],
+            vec![text("b")],
+            vec![ImportValue::Null],
+        ]
+    );
+    assert_eq!(
+        rows.iter().map(|row| row.line).collect::<Vec<_>>(),
+        [2, 3, 4, 5]
+    );
+    // Either line ending, and a file whose last value has no line break.
+    let path = folder.file("crlf.csv", b"nick\r\na\r\n\r\n\r\nb");
+    let (_, rows) = events(&path, &csv(CsvOptions::default())).unwrap();
+    assert_eq!(
+        values(&rows),
+        [
+            vec![text("a")],
+            vec![ImportValue::Null],
+            vec![ImportValue::Null],
+            vec![text("b")],
+        ]
+    );
+    // Without a trailing blank line nothing is added.
+    let path = folder.file("plain.csv", b"nick\na\nb\n");
+    let (_, rows) = events(&path, &csv(CsvOptions::default())).unwrap();
+    assert_eq!(values(&rows), [vec![text("a")], vec![text("b")]]);
+    // Several columns still skip blank lines.
+    let path = folder.file("two.csv", b"a,b\n1,2\n\n3,4\n\n");
+    let (_, rows) = events(&path, &csv(CsvOptions::default())).unwrap();
+    assert_eq!(rows.len(), 2);
+}
+
+#[test]
 fn a_ragged_row_is_refused_at_its_line() {
     let folder = Folder::new();
     let path = folder.file("ragged.csv", b"a,b\n1,2\n3\n4,5\n");

@@ -123,7 +123,7 @@ pub(crate) fn apply_with(
         if std::fs::symlink_metadata(&target).is_ok() {
             let aside = trash.join(name);
             if let Err(failure) = rename(&target, &aside) {
-                return Err(undo(done, rename, &failure));
+                return Err(undo(done, rename, &failure, trash));
             }
             done.push(Step::MovedAside {
                 from: target.clone(),
@@ -131,7 +131,7 @@ pub(crate) fn apply_with(
             });
         }
         if let Err(failure) = rename(&incoming, &target) {
-            return Err(undo(done, rename, &failure));
+            return Err(undo(done, rename, &failure, trash));
         }
         done.push(Step::Placed {
             at: target,
@@ -153,6 +153,7 @@ fn undo(
     done: Vec<Step>,
     rename: &mut dyn FnMut(&Path, &Path) -> io::Result<()>,
     failure: &io::Error,
+    trash: &Path,
 ) -> crate::drivers::DriverError {
     tracing::warn!(kind = ?failure.kind(), "update swap failed; restoring the folder");
     let mut restored = true;
@@ -169,9 +170,29 @@ fn undo(
     if restored {
         error::from_io(failure)
     } else {
+        keep_trash(trash);
         error::not_restored()
     }
 }
+
+/// Renames a trash folder that holds the only copy of what an update
+/// replaced to `kept-*`, which [`cleanup_leftovers`] never removes, so the
+/// next start does not delete what could still be put back by hand.
+fn keep_trash(trash: &Path) {
+    let Some(name) = trash.file_name().and_then(|name| name.to_str()) else {
+        return;
+    };
+    let kept = trash.with_file_name(format!(
+        "{KEPT_PREFIX}{}",
+        name.trim_start_matches("trash-")
+    ));
+    if let Err(error) = std::fs::rename(trash, &kept) {
+        tracing::error!(kind = ?error.kind(), "could not mark the update's trash folder as kept");
+    }
+}
+
+/// The prefix of a trash folder an update could not restore from.
+const KEPT_PREFIX: &str = "kept-";
 
 /// A rename, retried a few times on Windows, where an antivirus or the
 /// indexer may hold a new file for a moment.
@@ -335,6 +356,13 @@ mod tests {
         };
         let error = apply_with(&dir, &staged, &trash, &mut rename).unwrap_err();
         assert!(error.message.contains("could not be put back"));
+        // What was moved aside is the only copy: the next start's cleanup
+        // must leave it, whatever its age.
+        let kept = dir.join(WORK_DIR).join("kept-1");
+        assert!(!trash.exists());
+        assert!(kept.is_dir());
+        cleanup_leftovers(&dir, Duration::ZERO);
+        assert!(kept.is_dir());
     }
 
     #[test]

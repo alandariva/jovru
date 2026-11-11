@@ -372,6 +372,8 @@ pub(super) fn read_from(
     };
     let mut index: u64 = 0;
     let mut width: Option<usize> = None;
+    // The line after the previous record, to see the blank lines between.
+    let mut next_line: u64 = 1;
     loop {
         check_cancel(cancel, index)?;
         let more = reader
@@ -387,9 +389,43 @@ pub(super) fn read_from(
         if index == 0 {
             summary.encoding = Some(reader.get_ref().decoder.encoding());
         }
+        // The CSV reader skips blank lines. In a file of one column a blank
+        // line is a row holding nothing (this application writes a NULL that
+        // way), so each one the reader skipped is read as an empty field.
+        // `line` is where this record starts, or the end of the file.
+        if width == Some(1) {
+            let until = if more { line } else { reader.position().line() };
+            for blank in next_line..until {
+                check_cancel(cancel, index)?;
+                index += 1;
+                summary.rows += 1;
+                let value = match options.empty {
+                    EmptyFields::Null => ImportValue::Null,
+                    _ => ImportValue::Text(String::new()),
+                };
+                let read = total
+                    .filter(|total| *total > 0)
+                    .map(|total| (reader.get_ref().raw as f64 / total as f64).min(1.0));
+                let row = Record {
+                    line: blank,
+                    values: vec![value],
+                    read,
+                };
+                if visit(ReadEvent::Row(row))? == Flow::Stop {
+                    summary.stopped = true;
+                    return Ok(summary);
+                }
+            }
+        }
         if !more {
             break;
         }
+        next_line = line
+            + record
+                .iter()
+                .map(|field| field.bytes().filter(|byte| *byte == b'\n').count() as u64)
+                .sum::<u64>()
+            + 1;
         index += 1;
         match options.header_row.map(u64::from) {
             Some(header) if index < header => continue,

@@ -164,7 +164,10 @@ pub fn prepare(
     };
     let resolved = if Path::new(program).is_absolute() {
         Ok(PathBuf::from(program))
-    } else if program.contains(['/', '\\']) {
+    } else if program.contains(['/', '\\']) || (cfg!(windows) && program.contains(':')) {
+        // On Windows `C:name.exe` is relative to the drive's current folder,
+        // and joining it to a PATH entry would replace the entry: the
+        // current folder is never searched.
         return Err(Refused::ProgramPath);
     } else {
         resolve_program(program, lookup("PATH"), lookup("PATHEXT"))

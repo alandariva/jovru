@@ -22,7 +22,7 @@ pub use broker::{
     ACTIVITY_LIMIT, ANSWER_NOT_SHARED, ActivityEntry, Arrival, Broker, CardContent, CardEnd,
     CardId, CardPlace, CardSnapshot, ClientResponse, ClientResult, DECISION_TIMED_OUT,
     DECISION_TIMEOUT, NOT_ACCEPTING, Outcome, QUERY_BUSY, QUERY_DECLINED, QUITTING,
-    RESULT_TIMED_OUT, RunPermit, STATEMENT_TIMED_OUT, Settled, ToolName,
+    RESULT_TIMED_OUT, RunPermit, STATEMENT_TIMED_OUT, Settled, TOKEN_ENDED, ToolName,
 };
 pub use registry::{
     CONNECTION_CHANGED, DEFAULT_PORT, DirectorySettings, EnabledTools, MCP_WRITES, McpSettings,

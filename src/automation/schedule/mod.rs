@@ -913,8 +913,11 @@ impl Engine {
         {
             Ok(checked) => checked,
             Err(Blocked::Suspend(reason)) => {
-                self.suspend(repository, schedule, slot, reason).await;
-                return (true, None);
+                // A suspension that could not be written changes nothing the
+                // scheduler watches. Reporting a write would wake it at once
+                // to find the same schedule again, in a loop with no sleep.
+                let recorded = self.suspend(repository, schedule, slot, reason).await;
+                return (recorded, None);
             }
             Err(Blocked::Unreadable) => return (wrote, None),
         };
@@ -1095,15 +1098,19 @@ impl Engine {
         schedule: &StoredSchedule,
         slot: &mut Slot,
         reason: &str,
-    ) {
+    ) -> bool {
         withdraw(self, slot);
         match repository
             .suspend_schedule(schedule.draft.id, reason, self.clock().now())
             .await
         {
-            Ok(_) => tracing::info!(schedule = %schedule.draft.id, reason, "schedule suspended"),
+            Ok(_) => {
+                tracing::info!(schedule = %schedule.draft.id, reason, "schedule suspended");
+                true
+            }
             Err(error) => {
                 tracing::warn!(error_code = ?error.code, "schedule suspension not recorded");
+                false
             }
         }
     }
@@ -1188,6 +1195,12 @@ impl Engine {
                     linked: false,
                 });
             }
+            Err(Refusal::ShuttingDown | Refusal::Withdrawn) => {
+                // The engine is closing or the schedule was withdrawn, not
+                // a refusal of this time: it stays unhandled, so the next
+                // start counts it as missed, and nothing is reported.
+                tracing::info!(schedule = %id, "scheduled run not submitted");
+            }
             Err(refusal) => {
                 let reason = refusal_code(&refusal);
                 let mut mark = ScheduleMark::new(due_at, ScheduleOutcome::Refused);
@@ -1253,9 +1266,9 @@ impl Engine {
                 End::Succeeded | End::Cancelled | End::Withdrawn => {}
                 End::Failed(cause) => self.bad_end(schedule, &name, due_at, Some(cause), None),
                 End::ProgramChanged => {
-                    self.suspend(repository, schedule, slot, "program_changed")
+                    wrote |= self
+                        .suspend(repository, schedule, slot, "program_changed")
                         .await;
-                    wrote = true;
                 }
                 End::Refused(reason) => {
                     let mut mark = ScheduleMark::new(due_at, ScheduleOutcome::Refused);

@@ -289,11 +289,25 @@ fn is_date(value: &str) -> bool {
     else {
         return false;
     };
-    digits(year, 4)
-        && digits(month, 2)
-        && digits(day, 2)
-        && (1..=12).contains(&month.parse::<u8>().unwrap_or(0))
-        && (1..=31).contains(&day.parse::<u8>().unwrap_or(0))
+    if !(digits(year, 4) && digits(month, 2) && digits(day, 2)) {
+        return false;
+    }
+    let (year, month, day) = (
+        year.parse::<u32>().unwrap_or(0),
+        month.parse::<u8>().unwrap_or(0),
+        day.parse::<u8>().unwrap_or(0),
+    );
+    // A day the calendar lacks (`2026-02-30`) is refused here: MySQL would
+    // turn it into NULL and the query would return nothing without an error.
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=last).contains(&day)
 }
 
 fn is_timestamp(value: &str) -> bool {

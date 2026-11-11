@@ -623,7 +623,8 @@ pub fn hex_bytes(text: &str) -> Option<Vec<u8>> {
     let digits = text
         .strip_prefix("0x")
         .or_else(|| text.strip_prefix("0X"))?;
-    if digits.len() % 2 != 0 {
+    // `from_str_radix` takes a leading `+`, which is not a hexadecimal digit.
+    if digits.len() % 2 != 0 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     (0..digits.len())
@@ -927,5 +928,7 @@ mod tests {
         assert_eq!(hex_bytes("0xabc"), None);
         assert_eq!(hex_bytes("abcd"), None);
         assert_eq!(hex_bytes("0xzz"), None);
+        assert_eq!(hex_bytes("0x+1"), None);
+        assert_eq!(hex_bytes("0x-1"), None);
     }
 }

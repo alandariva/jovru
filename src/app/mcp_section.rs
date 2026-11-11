@@ -69,6 +69,13 @@ enum Listener {
     Demo,
 }
 
+/// A change to the server that replaces its endpoint.
+#[derive(Clone, Copy)]
+enum ServerChange {
+    Enabled(bool),
+    Port(u16),
+}
+
 fn listener_of(state: ListenState) -> Listener {
     match state {
         ListenState::Off => Listener::Off,
@@ -533,11 +540,16 @@ impl AppView {
         let text = input.read(cx).value().to_string();
         match text.parse::<u16>() {
             Ok(port) if port > 0 => {
-                if let Some(endpoint) = &self.mcp.endpoint {
-                    endpoint.set_port(port);
+                // The socket binds the new port before the field and the
+                // addresses shown elsewhere change. An unchanged port is
+                // not a reason to close the listener.
+                let unchanged = self.mcp.endpoint.as_ref().is_some_and(|endpoint| {
+                    endpoint.port() == port
+                        && !matches!(endpoint.state(), ListenState::PortInUse { .. })
+                });
+                if !unchanged {
+                    self.swap_endpoint(ServerChange::Port(port), cx);
                 }
-                self.mcp.port = port;
-                cx.notify();
             }
             _ => {
                 let restore = if self.mcp.port == 0 {
@@ -553,6 +565,12 @@ impl AppView {
     }
 
     fn set_server(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.swap_endpoint(ServerChange::Enabled(on), cx);
+    }
+
+    /// Persists the change and replaces the endpoint with the one that
+    /// applies it: the socket is closed and bound again when needed.
+    fn swap_endpoint(&mut self, change: ServerChange, cx: &mut Context<Self>) {
         if self.mcp.demo || self.mcp.switching {
             return;
         }
@@ -562,7 +580,10 @@ impl AppView {
         cx.spawn(async move |weak, cx| {
             let result = jykre::backend::run(async move {
                 if let Some(endpoint) = endpoint {
-                    endpoint.set_enabled(on).await
+                    match change {
+                        ServerChange::Enabled(on) => endpoint.set_enabled(on).await,
+                        ServerChange::Port(port) => endpoint.change_port(port).await,
+                    }
                 } else {
                     Ok(McpEndpoint::off())
                 }

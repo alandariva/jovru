@@ -250,7 +250,9 @@ mod tests {
         assert_eq!(value(&flag, "TRUE"), Ok(Some("true".into())));
         assert_eq!(value(&flag, "sim"), Err(ParameterProblem::Invalid));
         let day = spec("d", ParameterKind::Date, true);
-        assert_eq!(value(&day, "2024-02-30"), Ok(Some("2024-02-30".into())));
+        assert_eq!(value(&day, "2024-02-29"), Ok(Some("2024-02-29".into())));
+        // A day the calendar lacks would become NULL in MySQL, silently.
+        assert_eq!(value(&day, "2024-02-30"), Err(ParameterProblem::Invalid));
         assert_eq!(value(&day, "30/02/2024"), Err(ParameterProblem::Invalid));
     }
 

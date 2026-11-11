@@ -1424,15 +1424,26 @@ fn decode(row: &sqlx::mysql::MySqlRow) -> DriverResult<Row> {
         let bytes = <Vec<u8> as sqlx::Decode<sqlx::MySql>>::decode(value)
             .map_err(|_| DriverError::new(ErrorCode::Protocol, "Invalid database value"))?;
         let kind = row.columns()[index].type_info().name();
+        // A spatial value is an SRID and WKB bytes, not text, so it is
+        // binary like a BLOB. Any other value that is not UTF-8 is kept as
+        // bytes too, so one such column does not fail the whole query.
         if matches!(
             kind,
-            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "BIT"
+            "BLOB"
+                | "TINYBLOB"
+                | "MEDIUMBLOB"
+                | "LONGBLOB"
+                | "BINARY"
+                | "VARBINARY"
+                | "BIT"
+                | "GEOMETRY"
         ) {
             cells.push(Cell::Binary(bytes));
         } else {
-            cells.push(Cell::Text(String::from_utf8(bytes).map_err(|_| {
-                DriverError::new(ErrorCode::Protocol, "Invalid database text encoding")
-            })?));
+            match String::from_utf8(bytes) {
+                Ok(text) => cells.push(Cell::Text(text)),
+                Err(invalid) => cells.push(Cell::Binary(invalid.into_bytes())),
+            }
         }
     }
     Ok(cells)

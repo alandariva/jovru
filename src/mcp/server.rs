@@ -123,6 +123,9 @@ struct Shared<S> {
     /// The client's self-reported name, in memory only. Not logged.
     client_names: Mutex<HashMap<McpTokenId, String>>,
     waiters: Mutex<HashMap<CardId, tokio::sync::oneshot::Sender<Signal>>>,
+    /// Cancels the database statement of a card that is running. A decision
+    /// that settles the card (Stop, a revoked token, quitting) fires it.
+    running: Mutex<HashMap<CardId, CancellationToken>>,
     warned: Mutex<HashMap<&'static str, Instant>>,
     kept: tokio::sync::Mutex<HashMap<McpTokenId, Box<dyn Session>>>,
     host: McpQueryHost,
@@ -130,7 +133,6 @@ struct Shared<S> {
     listen: Mutex<ListenState>,
     port: Mutex<u16>,
     tasks: Mutex<Option<Tasks>>,
-    runtime: tokio::runtime::Handle,
 }
 
 struct PendingQuery {
@@ -256,6 +258,36 @@ impl McpEndpoint<jykre_secrets::SystemSecretStore> {
             Self::park(data_dir, registry, ListenState::Off)
         })
     }
+
+    /// Persists `port` and returns the endpoint that uses it. A listening
+    /// endpoint closes its socket and binds the new port; one that is off
+    /// only remembers it. A failed settings write leaves this endpoint
+    /// running on its old port. Port 0 is refused. Demo endpoints stay inert.
+    pub async fn change_port(&self, port: u16) -> crate::drivers::DriverResult<Self> {
+        if self.local == ListenState::Demo {
+            return Ok(self.clone());
+        }
+        let Some(shared) = &self.shared else {
+            return Err(crate::drivers::DriverError::new(
+                crate::drivers::ErrorCode::NotFound,
+                tr!("The MCP server is off."),
+            ));
+        };
+        let enabled = {
+            let mut registry = shared.registry.lock().await;
+            registry.set_port(port).await?;
+            registry.settings().enabled
+        };
+        let data_dir = shared.data_dir.clone();
+        let registry = TokenRegistry::open(&data_dir, jykre_secrets::SystemSecretStore).await?;
+        let port = registry.settings().port;
+        self.shutdown().await;
+        Ok(if enabled {
+            Self::start(data_dir, registry, port).await
+        } else {
+            Self::park(data_dir, registry, ListenState::Off)
+        })
+    }
 }
 
 impl<S> McpEndpoint<S>
@@ -350,25 +382,6 @@ where
         lock(&shared.risky).get(&card).copied().unwrap_or(false)
     }
 
-    /// Persists the port. The caller rebinds. Port 0 is ignored.
-    pub fn set_port(&self, port: u16) {
-        let Some(shared) = &self.shared else {
-            return;
-        };
-        if port == 0 {
-            return;
-        }
-        *lock(&shared.port) = port;
-        let runtime = shared.runtime.clone();
-        let shared = Arc::clone(shared);
-        runtime.spawn(async move {
-            let mut registry = shared.registry.lock().await;
-            if registry.set_port(port).await.is_ok() {
-                *lock(&shared.records) = registry.settings().tokens.clone();
-            }
-        });
-    }
-
     /// The setting currently in memory. Empty when this endpoint was not given a registry.
     pub async fn settings(&self) -> McpSettings {
         let Some(shared) = &self.shared else {
@@ -401,11 +414,23 @@ where
         let Some(shared) = &self.shared else {
             return false;
         };
+        // The cancel handle exists before the card can be stopped, so a Stop
+        // right after the approval still reaches the statement.
+        let added = match lock(&shared.running).entry(card) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(CancellationToken::new());
+                true
+            }
+        };
         let permit = {
             let mut broker = lock(&shared.broker);
             broker.approve_statement(card)
         };
         let Some(permit) = permit else {
+            if added {
+                lock(&shared.running).remove(&card);
+            }
             return false;
         };
         let sender = lock(&shared.waiters).remove(&card);
@@ -766,6 +791,7 @@ impl<S> Shared<S> {
             risky: Mutex::new(HashMap::new()),
             client_names: Mutex::new(HashMap::new()),
             waiters: Mutex::new(HashMap::new()),
+            running: Mutex::new(HashMap::new()),
             warned: Mutex::new(HashMap::new()),
             kept: tokio::sync::Mutex::new(HashMap::new()),
             host: McpQueryHost::new(),
@@ -773,7 +799,6 @@ impl<S> Shared<S> {
             listen: Mutex::new(state),
             port: Mutex::new(port),
             tasks: Mutex::new(None),
-            runtime: tokio::runtime::Handle::current(),
         }
     }
 }
@@ -792,6 +817,16 @@ where
     fn dispatch(&self, settled: Vec<Settled>) {
         if settled.is_empty() {
             return;
+        }
+        {
+            // A statement that is still running when its card settles is
+            // stopped on the server too, not left to finish unseen.
+            let mut running = lock(&self.running);
+            for one in &settled {
+                if let Some(cancel) = running.remove(&one.card) {
+                    cancel.cancel();
+                }
+            }
         }
         let mut waiters = lock(&self.waiters);
         let mut pending = lock(&self.pending);
@@ -818,6 +853,9 @@ where
     }
 
     async fn forget_token(&self, id: McpTokenId) {
+        // Cards the token left open cannot be approved after it ends.
+        let settled = lock(&self.broker).close_token(id, Instant::now());
+        self.dispatch(settled);
         lock(&self.tools).remove(&id);
         self.kept.lock().await.remove(&id);
         self.host.close_token(id).await;
@@ -1174,6 +1212,12 @@ async fn accept_loop<S>(
             accepted = listener.accept() => accepted,
         };
         let Ok((stream, _)) = accepted else {
+            // A failure that lasts (no file handles left) would otherwise
+            // spin here with no pause.
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                () = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
             continue;
         };
         let gate = gate.clone();
@@ -1774,7 +1818,10 @@ where
         context: &RequestContext<RoleServer>,
     ) -> Finished {
         let card = permit.card();
-        let cancel = CancellationToken::new();
+        let Some(cancel) = lock(&self.shared.running).get(&card).cloned() else {
+            // The card was stopped before the statement started.
+            return finished_client(error_text(Outcome::Declined, QUERY_DECLINED), false);
+        };
         let bridge = cancel.clone();
         let stop = self.shared.cancel.clone();
         let request_stop = context.ct.clone();
@@ -1798,6 +1845,7 @@ where
         )
         .await;
         watch.abort();
+        lock(&self.shared.running).remove(&card);
         if context.ct.is_cancelled() {
             let settled = lock(&self.shared.broker).cancel(card, Instant::now());
             self.shared.deliver(settled);

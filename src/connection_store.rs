@@ -417,21 +417,35 @@ async fn save_to(
         previous.remember_password && keeps_password(&previous.config, &profile.config)
     });
     let mut stored = false;
+    // The password the vault held before this save overwrote it, to put
+    // back when the profile cannot be saved after all.
+    let mut backup = None;
     if signs_in_with_password(profile.config.driver) && profile.remember_password {
         match credentials.password.clone() {
-            Some(password) => match vault("set", secrets.set(profile.id, password)).await {
-                Ok(()) => stored = true,
-                Err(error) => {
-                    profile.remember_password = false;
-                    add_warning(
-                        &mut warning,
-                        tr!(
-                            "Connection saved. Could not store the password in the vault, so Remember password was turned off: {0}",
-                            error
-                        ),
-                    );
+            Some(password) => {
+                if previous
+                    .as_ref()
+                    .is_some_and(|previous| previous.remember_password)
+                {
+                    backup = vault("get", secrets.get(profile.id))
+                        .await
+                        .ok()
+                        .and_then(|stored| stored.password);
                 }
-            },
+                match vault("set", secrets.set(profile.id, password)).await {
+                    Ok(()) => stored = true,
+                    Err(error) => {
+                        profile.remember_password = false;
+                        add_warning(
+                            &mut warning,
+                            tr!(
+                                "Connection saved. Could not store the password in the vault, so Remember password was turned off: {0}",
+                                error
+                            ),
+                        );
+                    }
+                }
+            }
             // Nothing new to store: the vault may still hold the password,
             // only for the same server and user.
             None if remembered_before
@@ -471,10 +485,19 @@ async fn save_to(
     let profile = match repository.save_with_settings(&profile, &settings).await {
         Ok(profile) => profile,
         Err(error) => {
-            // A new connection that was not saved must not leave its
-            // password behind.
-            if stored && previous.is_none() {
-                let _ = vault("delete", secrets.delete(profile.id)).await;
+            // A connection that was not saved must not change the password
+            // its saved profile signs in with: a new one leaves none, an
+            // existing one gets back the one it had.
+            if stored {
+                match (&previous, backup) {
+                    (Some(_), Some(old)) => {
+                        let _ = vault("set", secrets.set(profile.id, old)).await;
+                    }
+                    (Some(previous), None) if previous.remember_password => {}
+                    _ => {
+                        let _ = vault("delete", secrets.delete(profile.id)).await;
+                    }
+                }
             }
             return Err(error);
         }

@@ -70,7 +70,8 @@ pub enum Refused {
     EmptyInsert { row: usize },
     /// There is nothing to write.
     Nothing,
-    /// An inserted row the last write wrote: read the rows again to edit it.
+    /// A row the last write wrote, inserted or changed: read the rows again
+    /// to edit it.
     AlreadyWritten,
 }
 
@@ -398,6 +399,11 @@ impl EditSession {
     ) -> Result<(), Refused> {
         self.editable_column(column)?;
         self.write_value(column, &value)?;
+        if self.written_rows.contains_key(&row) {
+            // The page still holds the values from before the write: its
+            // key and "before" would name the wrong row or drop the edit.
+            return Err(Refused::AlreadyWritten);
+        }
         if self.rows.get(&row).is_some_and(|edit| edit.deleted) {
             return Err(Refused::Deleted);
         }
@@ -458,6 +464,9 @@ impl EditSession {
         row: usize,
         read: &dyn Fn(usize) -> Option<String>,
     ) -> Result<(), Refused> {
+        if self.written_rows.contains_key(&row) {
+            return Err(Refused::AlreadyWritten);
+        }
         match self.rows.get_mut(&row) {
             Some(edit) if edit.deleted => {
                 self.rows.remove(&row);
@@ -810,6 +819,26 @@ mod tests {
             edits.overlay(0, 1),
             Some(Overlay::Pending(&EditValue::Null))
         );
+    }
+
+    #[test]
+    fn a_row_the_last_write_wrote_is_not_edited_from_the_page_that_was_read_before() {
+        let mut edits = session();
+        let read = row(&[Some("1"), Some("A"), None, None]);
+        edits.set(0, &read, 1, text("B")).unwrap();
+        edits.written();
+        // Typing the value the stale page still holds must not be dropped as
+        // "unchanged", and a delete must not name the old key.
+        assert_eq!(
+            edits.set(0, &read, 1, text("A")),
+            Err(Refused::AlreadyWritten)
+        );
+        assert_eq!(edits.toggle_delete(0, &read), Err(Refused::AlreadyWritten));
+        assert_eq!(edits.pending(), 0);
+        // Another row of the same page is still editable.
+        let other = row(&[Some("2"), Some("x"), None, None]);
+        edits.set(1, &other, 1, text("y")).unwrap();
+        assert_eq!(edits.pending(), 1);
     }
 
     #[test]
