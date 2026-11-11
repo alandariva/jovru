@@ -170,6 +170,18 @@ struct HeldSession {
     checkout: u64,
 }
 
+struct SessionCheckout {
+    session: Option<Box<dyn Session>>,
+    checkout: u64,
+    discard: Vec<Box<dyn Session>>,
+}
+
+impl Default for McpQueryHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl McpQueryHost {
     pub fn new() -> Self {
         Self {
@@ -212,7 +224,11 @@ impl McpQueryHost {
         self.close_idle().await;
         let secrets = SystemSecretStore;
         let input = load_input(data_dir, connection, &secrets).await?;
-        let (session, checkout, discard) = {
+        let SessionCheckout {
+            session,
+            checkout,
+            discard,
+        } = {
             let mut state = self.state.lock().await;
             checkout_session(&mut state, token, connection)
         };
@@ -280,7 +296,7 @@ fn checkout_session(
     state: &mut HostState,
     token: McpTokenId,
     connection: ConnectionId,
-) -> (Option<Box<dyn Session>>, u64, Vec<Box<dyn Session>>) {
+) -> SessionCheckout {
     let checkout = state.next_checkout;
     state.next_checkout = state.next_checkout.wrapping_add(1);
     let mut discard = Vec::new();
@@ -295,7 +311,11 @@ fn checkout_session(
         held.in_use = true;
         held.checkout = checkout;
         held.last_used = Instant::now();
-        return (session, checkout, discard);
+        return SessionCheckout {
+            session,
+            checkout,
+            discard,
+        };
     }
     state.sessions.insert(
         token,
@@ -307,7 +327,11 @@ fn checkout_session(
             checkout,
         },
     );
-    (None, checkout, discard)
+    SessionCheckout {
+        session: None,
+        checkout,
+        discard,
+    }
 }
 
 /// Sessions that have been unused for [`IDLE_AFTER`] and are not checked out.

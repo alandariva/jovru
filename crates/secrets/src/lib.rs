@@ -290,7 +290,7 @@ mod tests {
         fn assert_not_implemented() {}
     }
     impl<T: ?Sized> NoFromString<()> for T {}
-    impl<T: ?Sized + From<String>> NoFromString<u8> for T {}
+    impl<T: From<String>> NoFromString<u8> for T {}
 
     fn platform_failure_mentioning_the_key() -> keyring::Error {
         keyring::Error::PlatformFailure(SYNTHETIC_KEY.into())

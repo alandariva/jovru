@@ -440,7 +440,6 @@ impl AppView {
         let labels = self.mcp.client_labels.clone();
         let names: Vec<String> = tokens.iter().map(|token| token.name.clone()).collect();
         let connections = self.saved_connections();
-        let now_ms = unix_now_ms();
         for tab in self.mcp.tabs.values() {
             match &tab.kind {
                 TabKind::Requests(view) => {
@@ -452,7 +451,7 @@ impl AppView {
                         labels.clone(),
                     );
                     view.update(cx, |view, cx| {
-                        view.apply(endpoint, cards, activity, tokens, labels, now_ms, cx)
+                        view.apply(endpoint, cards, activity, tokens, labels, cx)
                     });
                 }
                 TabKind::Token(view) => {
@@ -1428,7 +1427,6 @@ impl RequestsView {
         activity: Vec<ActivityEntry>,
         tokens: Vec<TokenRecord>,
         labels: Vec<(McpTokenId, String)>,
-        now_ms: u64,
         cx: &mut Context<Self>,
     ) {
         self.endpoint = endpoint;
@@ -1492,7 +1490,6 @@ impl RequestsView {
                     ShownCard { snap, changes_data }
                 })
                 .collect();
-            let _ = now_ms;
             groups.push(ShownGroup {
                 name,
                 connection,
@@ -2082,10 +2079,6 @@ impl TokenView {
                 .as_ref()
                 .map(|record| show_controls(&record.name))
                 .filter(|name| !name.is_empty())
-                .or_else(|| {
-                    // The field is the label until a record exists.
-                    None
-                })
                 .unwrap_or_else(|| tr!("New token").to_owned()),
         }
     }
@@ -2169,15 +2162,15 @@ impl TokenView {
         cx.spawn_in(window, async move |weak, cx| {
             let created = jykre::backend::run(async move {
                 endpoint
-                    .create_token(
+                    .create_token(jykre::mcp::CreateToken {
                         name,
-                        connection.id,
-                        connection.revision,
-                        connection.environment_key,
-                        expires,
+                        connection_id: connection.id,
+                        connection_revision: connection.revision,
+                        environment_label: connection.environment_key,
+                        expires_unix_ms: expires,
                         tools,
                         review,
-                    )
+                    })
                     .await
             })
             .await;

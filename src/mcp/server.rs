@@ -90,6 +90,17 @@ pub struct McpEndpoint<S = jykre_secrets::SystemSecretStore> {
     shared: Option<Arc<Shared<S>>>,
 }
 
+/// The choices for a new token. The endpoint generates its secret and timestamp.
+pub struct CreateToken {
+    pub name: String,
+    pub connection_id: ConnectionId,
+    pub connection_revision: i64,
+    pub environment_label: String,
+    pub expires_unix_ms: Option<u64>,
+    pub tools: EnabledTools,
+    pub review: super::ReviewPolicy,
+}
+
 struct Tasks {
     accept: JoinHandle<()>,
     expire: JoinHandle<()>,
@@ -442,16 +453,9 @@ where
         shared.forget_token(id).await;
     }
 
-    pub async fn create_token(
-        &self,
-        name: String,
-        connection_id: ConnectionId,
-        connection_revision: i64,
-        environment_label: String,
-        expires_unix_ms: Option<u64>,
-        tools: EnabledTools,
-        review: super::ReviewPolicy,
-    ) -> crate::drivers::DriverResult<String> {
+    /// Generates a token, saves its secret in the vault and stores its record.
+    /// Fails when the endpoint is off or the registry cannot save the token.
+    pub async fn create_token(&self, options: CreateToken) -> crate::drivers::DriverResult<String> {
         let Some(shared) = &self.shared else {
             return Err(crate::drivers::DriverError::new(
                 crate::drivers::ErrorCode::NotFound,
@@ -470,14 +474,14 @@ where
             .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
             .unwrap_or(0);
         let draft = super::TokenDraft {
-            name,
-            connection_id,
-            connection_revision,
-            environment_label,
+            name: options.name,
+            connection_id: options.connection_id,
+            connection_revision: options.connection_revision,
+            environment_label: options.environment_label,
             created_unix_ms,
-            expires_unix_ms,
-            tools,
-            review,
+            expires_unix_ms: options.expires_unix_ms,
+            tools: options.tools,
+            review: options.review,
             token,
         };
         let mut registry = shared.registry.lock().await;
@@ -891,14 +895,14 @@ where
                     let settled = lock(&self.broker).expire(Instant::now());
                     self.dispatch(settled);
                     ticks = ticks.saturating_add(1);
-                    if ticks.is_multiple_of(5) {
-                        if let Some(token) = &progress {
-                            let value = f64::from(ticks / 5 + 1);
-                            let _ = context
-                                .peer
-                                .notify_progress(ProgressNotificationParam::new(token.clone(), value))
-                                .await;
-                        }
+                    if ticks.is_multiple_of(5)
+                        && let Some(token) = &progress
+                    {
+                        let value = f64::from(ticks / 5 + 1);
+                        let _ = context
+                            .peer
+                            .notify_progress(ProgressNotificationParam::new(token.clone(), value))
+                            .await;
                     }
                 }
             }
@@ -1228,11 +1232,11 @@ where
     ) -> Poll<std::io::Result<usize>> {
         let this = self.get_mut();
         let poll = Pin::new(&mut this.inner).poll_write(cx, buf);
-        if let Poll::Ready(Ok(count)) = poll {
-            if count > 0 {
-                this.reading = false;
-                Self::arm(&mut this.deadline, IDLE_CONNECTION, cx);
-            }
+        if let Poll::Ready(Ok(count)) = poll
+            && count > 0
+        {
+            this.reading = false;
+            Self::arm(&mut this.deadline, IDLE_CONNECTION, cx);
         }
         poll
     }
@@ -1291,7 +1295,7 @@ where
         Box::pin(async move {
             let request = match authorize(&shared, request).await {
                 Ok(request) => request,
-                Err(response) => return Ok(response),
+                Err((status, body)) => return Ok(text_response(status, body)),
             };
             let response = tower_service::Service::call(&mut inner, request)
                 .await
@@ -1301,42 +1305,42 @@ where
     }
 }
 
-async fn authorize<S, B>(
+async fn authorize<S>(
     shared: &Shared<S>,
     request: Request<Incoming>,
-) -> Result<Request<Incoming>, Response<GateBody<B>>>
+) -> Result<Request<Incoming>, (StatusCode, &'static str)>
 where
     S: jykre_secrets::McpTokenStore + 'static,
 {
     if request.uri().query().is_some_and(leaks_token) {
         shared.warn_refused("query");
-        return Err(text_response(StatusCode::FORBIDDEN, ""));
+        return Err((StatusCode::FORBIDDEN, ""));
     }
     if let Some(origin) = request.headers().get(hyper::header::ORIGIN) {
         let allowed = origin.to_str().is_ok_and(loopback_origin);
         if !allowed {
             shared.warn_refused("origin");
-            return Err(text_response(StatusCode::FORBIDDEN, ""));
+            return Err((StatusCode::FORBIDDEN, ""));
         }
     }
     let wire = match bearer(request.headers()) {
         Bearer::Missing => {
             shared.warn_refused("missing");
-            return Err(text_response(StatusCode::UNAUTHORIZED, UNAUTHORIZED));
+            return Err((StatusCode::UNAUTHORIZED, UNAUTHORIZED));
         }
         Bearer::Malformed => {
             shared.warn_refused("malformed");
-            return Err(text_response(StatusCode::UNAUTHORIZED, UNAUTHORIZED));
+            return Err((StatusCode::UNAUTHORIZED, UNAUTHORIZED));
         }
         Bearer::Present(wire) => wire,
     };
     let Some((id_text, secret)) = split_wire(wire) else {
         shared.warn_refused("malformed");
-        return Err(text_response(StatusCode::UNAUTHORIZED, UNAUTHORIZED));
+        return Err((StatusCode::UNAUTHORIZED, UNAUTHORIZED));
     };
     let Some(id) = McpTokenId::parse(id_text) else {
         shared.warn_refused("unknown");
-        return Err(text_response(StatusCode::UNAUTHORIZED, UNAUTHORIZED));
+        return Err((StatusCode::UNAUTHORIZED, UNAUTHORIZED));
     };
     let refusal = {
         let mut registry = shared.registry.lock().await;
@@ -1363,9 +1367,9 @@ where
         }
         return Err(match refusal {
             TokenRefusal::VaultUnavailable | TokenRefusal::MissingFromVault => {
-                text_response(StatusCode::SERVICE_UNAVAILABLE, VAULT_BODY)
+                (StatusCode::SERVICE_UNAVAILABLE, VAULT_BODY)
             }
-            _ => text_response(StatusCode::UNAUTHORIZED, UNAUTHORIZED),
+            _ => (StatusCode::UNAUTHORIZED, UNAUTHORIZED),
         });
     }
     let record = {
@@ -1374,7 +1378,7 @@ where
     };
     let Some(record) = record else {
         shared.warn_refused("unknown");
-        return Err(text_response(StatusCode::UNAUTHORIZED, UNAUTHORIZED));
+        return Err((StatusCode::UNAUTHORIZED, UNAUTHORIZED));
     };
     let mut request = request;
     request.extensions_mut().insert(Accepted { record });
@@ -1862,10 +1866,11 @@ fn finished_error(name: &str, outcome: &'static str) -> Finished {
 }
 
 fn finished_client(mut result: ClientResult, failed: bool) -> Finished {
-    if failed && result.outcome == Outcome::Sent {
-        if let Some(response) = &mut result.response {
-            response.is_error = true;
-        }
+    if failed
+        && result.outcome == Outcome::Sent
+        && let Some(response) = &mut result.response
+    {
+        response.is_error = true;
     }
     let outcome = result.outcome.as_str();
     let Some(response) = result.response else {
@@ -1937,17 +1942,18 @@ fn input_schema(value: &serde_json::Value) -> Arc<JsonObject> {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        DirectorySettings, EnabledTools, MCP_WRITES, McpSettings, ReviewPolicy, TokenRecord,
-        TokenRegistry, save_settings,
+        DirectorySettings, EnabledTools, McpSettings, ReviewPolicy, SETTINGS_KEY, TokenRecord,
+        TokenRegistry,
     };
     use super::{ListenState, McpEndpoint, UNAUTHORIZED, lock};
     use crate::drivers::{ConnectionId, DriverResult, SecretString};
     use jykre_core::async_trait;
     use jykre_secrets::{McpTokenAccount, McpTokenStore};
+    use jykre_storage::ConfigRepository;
     use secrecy::ExposeSecret as _;
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
     use tokio::net::{TcpListener, TcpStream};
@@ -1990,6 +1996,17 @@ mod tests {
         std::env::temp_dir().join(format!("jykre-mcp-server-{}", ConnectionId::new()))
     }
 
+    async fn save_fixture_settings(dir: &Path, settings: &McpSettings) {
+        // Each fixture owns a folder. The application's global latest-write
+        // queue would let a parallel fixture supersede this setup.
+        let repository = ConfigRepository::open(dir).await.unwrap();
+        repository
+            .set_setting(SETTINGS_KEY, &settings.to_value())
+            .await
+            .unwrap();
+        repository.close().await;
+    }
+
     async fn listening() -> (McpEndpoint<MemoryVault>, SocketAddr, String) {
         let token = crate::mcp::McpToken::generate().unwrap();
         let wire = token.expose_wire();
@@ -2023,9 +2040,10 @@ mod tests {
         let registry = TokenRegistry::new(vault, DirectorySettings::new(&dir), settings);
         let endpoint = McpEndpoint::bind(dir, registry, 0).await;
         let addr = match endpoint.state() {
-            ListenState::Listening { addr } => addr,
-            _ => None::<SocketAddr>.expect("ephemeral loopback bind"),
-        };
+            ListenState::Listening { addr } => Some(addr),
+            _ => None,
+        }
+        .expect("ephemeral loopback bind");
         (endpoint, addr, wire)
     }
 
@@ -2073,9 +2091,7 @@ mod tests {
             port,
             tokens: Vec::new(),
         };
-        save_settings(&dir, &settings, MCP_WRITES.ask())
-            .await
-            .unwrap();
+        save_fixture_settings(&dir, &settings).await;
         let endpoint = McpEndpoint::listen(dir, false).await;
         assert!(matches!(endpoint.state(), ListenState::Off));
         let again = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).await;
@@ -2100,14 +2116,16 @@ mod tests {
             port,
             tokens: Vec::new(),
         };
-        save_settings(&dir, &settings, MCP_WRITES.ask())
-            .await
-            .unwrap();
+        save_fixture_settings(&dir, &settings).await;
         let endpoint = McpEndpoint::listen(dir, false).await;
-        assert!(matches!(
+        assert!(
+            matches!(
+                endpoint.state(),
+                ListenState::PortInUse { port: got } if got == port
+            ),
+            "state: {:?}",
             endpoint.state(),
-            ListenState::PortInUse { port: got } if got == port
-        ));
+        );
         drop(probe);
         endpoint.shutdown().await;
     }

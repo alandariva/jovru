@@ -46,10 +46,7 @@ impl McpTokenId {
     /// The ten characters. [`Self::parse`] and token generation only store
     /// the ASCII base32 alphabet, so the bytes are UTF-8.
     pub fn as_str(&self) -> &str {
-        match std::str::from_utf8(&self.0) {
-            Ok(text) => text,
-            Err(_) => "",
-        }
+        std::str::from_utf8(&self.0).unwrap_or_default()
     }
 }
 
@@ -201,11 +198,11 @@ fn encode_id(random: &[u8; ID_RANDOM_BYTES]) -> McpTokenId {
     // most significant group first.
     let bits = wide >> 6;
     let mut id = [0_u8; ID_LEN];
-    for index in 0..ID_LEN {
+    for (index, byte) in id.iter_mut().enumerate() {
         let shift = (ID_LEN - 1 - index) * 5;
         let group = ((bits >> shift) & 0b1_1111) as usize;
         // `group` is five bits, so it is an index into the 32-character alphabet.
-        id[index] = ID_ALPHABET[group];
+        *byte = ID_ALPHABET[group];
     }
     McpTokenId(id)
 }

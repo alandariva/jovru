@@ -484,7 +484,6 @@ impl Broker {
     /// [`ReviewPolicy::FirstSession`] waits only for the first cache answer
     /// submitted for `token` since this broker was created. A call refused
     /// because the broker is paused or quitting does not count as that answer.
-    #[must_use]
     pub fn submit_cache(
         &mut self,
         token: McpTokenId,
@@ -529,7 +528,6 @@ impl Broker {
     ///
     /// The open card may be waiting, in line, running, or showing a result.
     /// A second call is [`Outcome::Busy`] and adds no card.
-    #[must_use]
     pub fn submit_query(
         &mut self,
         token: McpTokenId,
@@ -1077,10 +1075,7 @@ impl Broker {
         let card = {
             let state = self.tokens.get_mut(&token)?;
             let position = state.cards.iter().position(|card| card.id == id)?;
-            let card = match state.cards.remove(position) {
-                Some(card) => card,
-                None => return None,
-            };
+            let card = state.cards.remove(position)?;
             if position == 0 {
                 start_front(&mut state.cards, now);
             }

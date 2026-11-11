@@ -45,6 +45,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 
 | Document | Content |
 | --- | --- |
+| [Development guide](standards/development-guide.md) | Designing new modules and refactoring existing ones in small, verifiable steps |
 | [Stack and dependencies](standards/stack-and-dependencies.md) | Approved stack and dependency policy |
 | [Rust guidelines](standards/rust-guidelines.md) | Errors, async, types, generated SQL, secrets and lints |
 | [UI guidelines](standards/ui-guidelines.md) | GPUI views, state, rendering, actions, text and accessibility |

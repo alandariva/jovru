@@ -24,5 +24,5 @@ pub use registry::{
     McpSettingsWrite, ReviewPolicy, SETTINGS_KEY, TokenDraft, TokenRecord, TokenRefusal,
     TokenRegistry, VaultCleanup, environment_label, load_settings, save_settings,
 };
-pub use server::{ListenState, McpEndpoint};
+pub use server::{CreateToken, ListenState, McpEndpoint};
 pub use token::{McpToken, McpTokenId, split_wire};
