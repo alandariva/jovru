@@ -730,6 +730,9 @@ async fn the_queue_refuses_beyond_its_size_and_after_its_wait() {
         late.finished().await,
         RunStatus::Refused(Refusal::QueueTimeout)
     ));
+    // The active run's row is written after its admission, not with it: wait
+    // for the run to execute so a slow disk cannot make the history empty.
+    eventually(Duration::from_secs(5), || executing(&active)).await;
     let history = engine
         .repository()
         .unwrap()
