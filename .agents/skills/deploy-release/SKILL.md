@@ -15,8 +15,9 @@ The flow has two phases with one hand-off in the middle:
 1. **Prepare**: bump, gate, commit, push, pull request. Then **stop** and ask the
    user to merge the pull request into `main`.
 2. **Ship** (after the user says it is merged): tag `main`, push the tag, check
-   that the release workflow started, give the user the link, and prepare the
-   notes of the draft.
+   that the release workflow started, give the user the link, prepare the
+   notes of the draft, and after the maintainer publishes, check the
+   published release's tag.
 
 ## How to behave
 
@@ -195,18 +196,38 @@ show them to the user in the hand-off message so they can read them.
 When the user says the draft exists:
 
 ```bash
-id=$(gh api repos/alandariva/jykre-studio/releases --jq '.[] | select(.draft and .tag_name=="vX.Y.Z") | .id')
-gh api -X PATCH repos/alandariva/jykre-studio/releases/$id -F body=@<notes file>
-gh api repos/alandariva/jykre-studio/releases/$id --jq '{draft, tag_name, body}' | head -c 600
+gh release edit vX.Y.Z --notes-file <notes file>
+gh release view vX.Y.Z --json isDraft,tagName --jq '{isDraft, tagName}'
 ```
 
-(`gh release edit vX.Y.Z --notes-file <file>` works too when it finds the draft.)
+`tagName` **must be exactly `vX.Y.Z`**. The application reads the version from
+the release's `tag_name`, and ignores a release whose tag is not a semantic
+version (0.4.0 was published as `untagged-…` and no installation was offered
+the update). If the draft is not found by `vX.Y.Z`, or `tagName` is anything
+else, **stop and tell the user**; do not edit it further. Do not fall back to
+`gh api -X PATCH` on the release without `tag_name`; if the API is the only
+way, send `-f tag_name=vX.Y.Z` too and check `tagName` again.
+
 Leave the draft a draft. Never publish it, delete it or change its assets: the
 maintainer publishes after signing and checking the Windows zip in Explorer and
 7-Zip. A `-rc.N` release is marked Pre-release by the maintainer when
 publishing.
 
 If the notes file is gone (a new session), write the notes again the same way.
+
+### 10. After the maintainer publishes
+
+When the user says the release is published, check what the update check will
+see (anonymous API, the same list the application reads):
+
+```bash
+curl -s "https://api.github.com/repos/alandariva/jykre-studio/releases?per_page=1" | grep -E '"(tag_name|draft)"'
+```
+
+`tag_name` must be `vX.Y.Z` and `draft` false. If the tag is `untagged-…`,
+tell the user and, with their approval, repair it:
+`gh release edit <the untagged tag> --tag vX.Y.Z`, then check again. Report the
+result; the release is not done until this check passes.
 
 ## Write the notes
 
