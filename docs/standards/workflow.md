@@ -37,7 +37,10 @@ Ask the maintainer first:
 - Adding or upgrading dependencies ([Stack and dependencies](stack-and-dependencies.md)).
 - Changing core contracts (`Driver`, `Session`, `RowSink`,
   `IntrospectionSink`, `SecretStore`), the SQLite schema or an ADR.
-- Committing, pushing, rewriting history or switching branches.
+- Committing, pushing, rewriting history or switching branches. The one
+  exception is a release run through the `deploy-release` skill
+  (`.claude/skills/deploy-release/SKILL.md`): the agent announces what it will
+  do and does it, without asking at each step (see [Git](#git)).
 
 Never:
 
@@ -99,8 +102,16 @@ What an agent hands back, kept short:
 ## Git
 
 - `main` is the default branch; `release/<version>` branches prepare a
-  release, and pushing a `v*` tag builds the binaries, signs them and drafts
-  a GitHub release for review. The `sign` job needs the
+  release. A release goes in two phases: the agent bumps the version, runs
+  the full gate, commits, pushes the release branch and opens the pull
+  request, then stops until the maintainer merges it into `main`. Only then
+  does it tag the merged `main` (`v<version>`, annotated) and push that one
+  tag. Pushing a `v*` tag builds the binaries, signs them and drafts a GitHub
+  release for review; the agent checks that the workflow started, gives the
+  maintainer its link, and does not monitor it. The maintainer approves the
+  signing stage and publishes the draft; the agent fills the draft's
+  description from the commits since the previous published release. The
+  `sign` job needs the
   `ZIPSIGN_PRIVATE_KEY` secret and verifies the archives with
   `assets/update/release-key.pub` before the draft
   ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)); a
@@ -111,8 +122,6 @@ What an agent hands back, kept short:
 - Commit messages: a short imperative summary, a blank line, then a body in
   plain English describing the user-visible changes, usually as a bullet list
   (see `git log`).
-- Commits are authored by the maintainer's identity, with no AI attribution
-  trailers (`Co-Authored-By` for an AI, session links).
 - History that has been pushed is not rewritten.
 
 ## Done

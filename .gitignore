@@ -17,8 +17,9 @@
 *.key
 .databrickscfg
 
-# Claude Code's local state and session worktrees
-/.claude/
+# Claude Code's local state and session worktrees (project skills are tracked)
+/.claude/*
+!/.claude/skills
 
 # Editors and OS
 .idea/
