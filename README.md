@@ -66,6 +66,10 @@ Backups, role administration and server monitoring belong to other tools.
   talk to Anthropic, OpenAI, an OpenAI-compatible server or Ollama. It sees
   SQL, errors, row counts and structure. Cell values come only from a query
   you approve and then send.
+- **MCP server (optional).** In **Preferences** you can switch on a server
+  that listens only on this computer (`127.0.0.1`) while the window is open.
+  An MCP client you choose, authenticated by a token you create, can search
+  the metadata cache, describe a table and run a query you approve.
 
 What you can do depends on the driver. The grid says when a result is
 read-only, and why.
@@ -174,12 +178,12 @@ Your own files there, and the data folder, are left as they are. The request
 carries your address and the version. A development build, or a folder the
 application cannot write, offers the release page instead.
 
-The signature's context is the archive's file name. For the 0.3.0 archives,
+The signature's context is the archive's file name. For the 0.4.0 archives,
 with [zipsign](https://crates.io/crates/zipsign) 0.2.2:
 
 ```bash
-zipsign verify zip --context jykre-studio-v0.3.0-windows-x86_64.zip jykre-studio-v0.3.0-windows-x86_64.zip assets/update/release-key.pub
-zipsign verify tar --context jykre-studio-v0.3.0-linux-x86_64.tar.gz jykre-studio-v0.3.0-linux-x86_64.tar.gz assets/update/release-key.pub
+zipsign verify zip --context jykre-studio-v0.4.0-windows-x86_64.zip jykre-studio-v0.4.0-windows-x86_64.zip assets/update/release-key.pub
+zipsign verify tar --context jykre-studio-v0.4.0-linux-x86_64.tar.gz jykre-studio-v0.4.0-linux-x86_64.tar.gz assets/update/release-key.pub
 ```
 
 ### Build from source
@@ -261,12 +265,14 @@ crates fit together is in
 ## Project status
 
 The project is in active development. The latest release is
-[v0.3.0](../../releases/tag/v0.3.0).
+[v0.4.0](../../releases/tag/v0.4.0).
 
 Version 0.2.0 made daily use reliable, including updates from signed
 releases. Version 0.3.0 adds automation while the application is open,
 editing in the result grid, CSV and Excel import, shortcuts you choose, and
-grid columns that can be hidden, moved, frozen and found.
+grid columns that can be hidden, moved, frozen and found. Version 0.4.0 adds
+an optional local MCP server, so an external assistant you choose can use the
+same read-only tools as the in-app assistant.
 
 Windows is the primary platform. Linux is validated on Ubuntu 24.04 with
 X11. Wayland and macOS are not validated. Behavior can change between
