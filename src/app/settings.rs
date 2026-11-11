@@ -234,11 +234,15 @@ impl AppView {
                             .child(self.settings_nav(cx))
                             .child(
                                 column()
-                                    .id("settings-page")
                                     .flex_1()
                                     .min_w_0()
                                     .bg(rgb(colors().bg))
-                                    .overflow_y_scroll()
+                                    // With a scrollbar: the bare wheel scroll gave no
+                                    // sign that the page continues below the fold.
+                                    .overflow_y_scrollbar()
+                                    // One scroll position per page: sharing one made a
+                                    // page open scrolled to where the last one was left.
+                                    .id(("settings-page", page as usize))
                                     .p_6()
                                     .gap_4()
                                     .child(
