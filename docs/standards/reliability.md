@@ -103,6 +103,14 @@
 | Automation: a `jjp/1` program saying `hello` | 30 s from its start; past it the run fails with `protocol` and the tree is killed |
 | Automation: the scheduler's sleep | At most 30 s between two readings of the wall clock, so a computer that slept is noticed on waking |
 | Automation: a scheduled due time | 60 s of grace: a due time the scheduler reaches later is missed and follows the schedule's missed-time policy |
+| MCP: one cache tool (`search_objects`, `describe_relation`) | 10 s (`TOOL_TIMEOUT`); past it the existing error text is the result |
+| MCP: waiting for the user's decision | 120 s per decision; the card closes and the client gets an error result, nothing sent |
+| MCP: an approved statement | 300 s, `ExecutionOptions`' default; **Stop** cancels; an error preview is sent only if the user sends it |
+| MCP: reading the token from the vault | 10 s, as passwords; past it the request is HTTP 503 |
+| MCP: writing or removing the token in the vault | 10 s; creation is refused and removal is retried |
+| MCP: reading a request's headers and body | 10 s; the connection is closed |
+| MCP: an idle HTTP connection | 60 s; the connection is closed |
+| MCP: shutdown | Within the application's shutdown deadline; the listener closes, pending cards are cancelled and sessions are closed |
 
 A new network operation gets an explicit timeout and a row in this table.
 

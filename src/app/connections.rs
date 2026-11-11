@@ -674,11 +674,23 @@ impl AppView {
                     Err(_) => connection_store::latest_backup(&dir).await,
                     Ok(_) => None,
                 };
-                let (font_size, copy, state, reports, theme, favorites, library) =
+                let themes_dir = dir.clone();
+                let theme_catalog = tokio::task::spawn_blocking(move || {
+                    let executable = std::env::current_exe().ok();
+                    jykre::theme::load_catalog(&jykre::theme::theme_directories(
+                        &themes_dir,
+                        executable.as_deref(),
+                    ))
+                })
+                .await
+                .unwrap_or_else(|_| jykre::theme::Catalog::bundled());
+                let (font_size, copy, state, reports, theme, theme_overrides, favorites, library) =
                     match ConfigRepository::open(&dir).await {
                         Ok(repository) => {
                             let font_size = repository.setting("editor.font_size").await;
                             let theme = repository.setting(jykre::theme::SETTINGS_KEY).await;
+                            let theme_overrides =
+                                repository.setting(jykre::theme::OVERRIDES_KEY).await;
                             let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
                             let state = super::state::read_state(&repository).await;
                             let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
@@ -688,9 +700,19 @@ impl AppView {
                                 .setting(jykre::query_files::library::SETTINGS_KEY)
                                 .await;
                             repository.close().await;
-                            (font_size, copy, state, reports, theme, favorites, library)
+                            (
+                                font_size,
+                                copy,
+                                state,
+                                reports,
+                                theme,
+                                theme_overrides,
+                                favorites,
+                                library,
+                            )
                         }
                         Err(error) => (
+                            Err(error.clone()),
                             Err(error.clone()),
                             Err(error.clone()),
                             Err(error.clone()),
@@ -730,6 +752,8 @@ impl AppView {
                     state,
                     reports,
                     theme,
+                    theme_overrides,
+                    theme_catalog,
                     favorites,
                     library,
                     filled,
@@ -745,6 +769,8 @@ impl AppView {
                     state,
                     reports,
                     theme,
+                    theme_overrides,
+                    theme_catalog,
                     favorites,
                     library,
                     filled,
@@ -759,12 +785,20 @@ impl AppView {
                         Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
+                        jykre::theme::Catalog::bundled(),
+                        Err(error.clone()),
                         Err(error),
                         Default::default(),
                         None,
                     ),
                 };
                 this.config_backup = backup;
+                super::theme::install_catalog(theme_catalog, cx);
+                if let Ok(value) = &theme_overrides {
+                    cx.set_global(super::theme::ThemeOverrides(
+                        jykre::theme::Overrides::from_value(value.as_ref()),
+                    ));
+                }
                 let mut problems = Vec::new();
                 match font_size {
                     Ok(font_size) => {
@@ -1084,7 +1118,6 @@ impl AppView {
     /// those it did not cover are read next ([`AppView::load_missing`]).
     fn apply_cache(connection: &mut Connection, snapshot: backend::MetadataSnapshot) {
         connection.tree.replace(snapshot.version, snapshot.pages);
-        connection.ages = jykre::explorer::namespace_ages(&snapshot.statuses);
         connection.no_access = snapshot
             .statuses
             .iter()
@@ -1132,7 +1165,6 @@ impl AppView {
             group,
             expanded: true,
             tree: Tree::default(),
-            ages: HashMap::new(),
             no_access: Default::default(),
             namespaces: Vec::new(),
             names: None,
@@ -1379,7 +1411,6 @@ impl AppView {
                                 Self::apply_cache(connection, cache);
                             } else {
                                 connection.tree.clear();
-                                connection.ages.clear();
                                 connection.metadata_statuses.clear();
                             }
                             connection.notice = loaded.warning.clone();
@@ -1423,7 +1454,7 @@ impl AppView {
                         if editing.is_none() {
                             this.new_query(this.connections[index].group, window, cx);
                         }
-                        if !this.search.read(cx).value().is_empty() {
+                        if this.cache_searching(cx) {
                             this.search_cache(false, cx);
                         }
                         if editing.is_some() {
@@ -1507,7 +1538,7 @@ impl AppView {
                     Err(error) => Some(error),
                 };
                 this.connection_outcome(index, node_status(&scope_name, result, reloaded));
-                if !this.search.read(cx).value().is_empty() {
+                if this.cache_searching(cx) {
                     this.search_cache(false, cx);
                 }
                 this.load_missing(index, cx);
@@ -1725,7 +1756,7 @@ impl AppView {
                     selection_status(result, reloaded)
                 };
                 this.connection_outcome(index, status);
-                if !this.search.read(cx).value().is_empty() {
+                if this.cache_searching(cx) {
                     this.search_cache(false, cx);
                 }
                 this.load_missing(index, cx);
@@ -1759,6 +1790,7 @@ impl AppView {
         // The list builds only rows on screen, so the node is scrolled in
         // before it takes the keyboard.
         self.reveal_explorer_node(index, path);
+        self.update_quick_position(cx);
         window.focus(&handle, cx);
         cx.notify();
     }
@@ -1783,8 +1815,24 @@ impl AppView {
         }
     }
 
-    /// An arrow key on an explorer node: move, expand or collapse
-    /// ([`jykre::explorer::step`]).
+    /// The line of the explorer at a list entry, when it takes the
+    /// selection: a connection (an empty path) or a node.
+    fn explorer_stop<'a>(&self, entry: &'a ExplorerEntry) -> Option<(usize, &'a ObjectPath)> {
+        const CONNECTION: &ObjectPath = &ObjectPath(Vec::new());
+        match entry {
+            ExplorerEntry::Connection(index) => self
+                .connections
+                .get(*index)
+                .filter(|connection| connection.input.is_some())
+                .map(|_| (*index, CONNECTION)),
+            ExplorerEntry::Row(index, row) => row.object().map(|object| (*index, &object.path)),
+        }
+    }
+
+    /// An arrow key on a connection or on one of its nodes. Up, Down, Home
+    /// and End move through every line of the explorer, the connections
+    /// included ([`jykre::explorer::move_in`]); Left and Right expand,
+    /// collapse or move inside the tree ([`jykre::explorer::step`]).
     fn tree_key(
         &mut self,
         index: usize,
@@ -1793,8 +1841,50 @@ impl AppView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use jykre::explorer::TreeMove;
-        let searching = !self.search.read(cx).value().is_empty();
+        use jykre::explorer::{TreeKey, TreeMove};
+        self.sync_explorer(cx);
+        if matches!(
+            key,
+            TreeKey::Up | TreeKey::Down | TreeKey::Home | TreeKey::End
+        ) {
+            // Every line that takes the selection, in the order shown.
+            let stops: Vec<_> = self
+                .explorer_entries
+                .iter()
+                .filter_map(|entry| self.explorer_stop(entry))
+                .collect();
+            let target = stops
+                .iter()
+                .position(|(at, stop)| *at == index && *stop == path)
+                .and_then(|current| jykre::explorer::move_in(stops.len(), current, key))
+                .map(|at| (stops[at].0, stops[at].1.clone()));
+            if let Some((index, path)) = target {
+                self.select_node(index, &path, window, cx);
+            }
+            return;
+        }
+        if path.0.is_empty() {
+            // The connection's own line.
+            let open = self.connections[index].expanded || self.cache_searching(cx);
+            match key {
+                TreeKey::Right if open => {
+                    let first = self.explorer_entries.iter().find_map(|entry| match entry {
+                        ExplorerEntry::Row(at, row) if *at == index => {
+                            row.object().map(|object| object.path.clone())
+                        }
+                        _ => None,
+                    });
+                    if let Some(first) = first {
+                        self.select_node(index, &first, window, cx);
+                    }
+                }
+                TreeKey::Right => self.connections[index].expanded = true,
+                _ => self.connections[index].expanded = false,
+            }
+            cx.notify();
+            return;
+        }
+        let searching = self.cache_searching(cx);
         let connection = &self.connections[index];
         // The nodes on the list, so a quick search's filter is followed.
         let nodes: Vec<_> = self
@@ -1816,6 +1906,10 @@ impl AppView {
                 self.select_node(index, &target, window, cx);
             }
             TreeMove::Expand | TreeMove::Collapse => self.toggle_node(index, path, cx),
+            // Left on a first-level node goes to its connection.
+            TreeMove::Stay if key == TreeKey::Left && path.0.len() == 1 => {
+                self.select_node(index, &ObjectPath::default(), window, cx)
+            }
             TreeMove::Stay => {}
         }
     }
@@ -1826,12 +1920,26 @@ impl AppView {
         if self.connections[index].tree.toggle(path) {
             self.load_children(index, path.clone(), None, cx);
         }
+        // A node expanded again goes on from where its read stopped.
+        self.load_rest(index, cx);
         self.save_expanded_soon(index, cx);
         cx.notify();
     }
 
-    /// Reads the next page of a node's children ("Load more").
+    /// Goes on reading, page after page and off the UI thread, the children
+    /// of every shown node that has more than the pages read so far, so a
+    /// search of the tree finds every child of what is expanded.
+    pub(super) fn load_rest(&mut self, index: usize, cx: &mut Context<Self>) {
+        for parent in self.connections[index].tree.unfinished() {
+            self.load_more(index, parent, cx);
+        }
+    }
+
+    /// Reads the next page of a node's children, unless it is being read.
     fn load_more(&mut self, index: usize, parent: ObjectPath, cx: &mut Context<Self>) {
+        if self.connections[index].tree.is_loading(&parent) {
+            return;
+        }
         let Some(after) = self.connections[index].tree.cursor(&parent).cloned() else {
             return;
         };
@@ -1873,7 +1981,9 @@ impl AppView {
                 }
                 match result {
                     Ok((version, page)) => {
-                        if !connection.tree.append(version, parent, page) {
+                        if connection.tree.append(version, parent, page) {
+                            this.load_rest(index, cx);
+                        } else {
                             this.reload_tree(index, cx);
                         }
                     }
@@ -2297,6 +2407,7 @@ impl AppView {
     pub(super) fn load_missing(&mut self, index: usize, cx: &mut Context<Self>) {
         // The tree was read again: the namespaces the tabs offer may differ.
         self.load_context_choices(index, cx);
+        self.load_rest(index, cx);
         let connection = &mut self.connections[index];
         let missing = connection.tree.missing();
         let Some(profile) = connection.profile.clone().filter(|_| !missing.is_empty()) else {
@@ -2336,7 +2447,9 @@ impl AppView {
                             .pages
                             .into_iter()
                             .all(|(parent, page)| connection.tree.append(version, parent, page));
-                        if !fresh {
+                        if fresh {
+                            this.load_rest(index, cx);
+                        } else {
                             this.reload_tree(index, cx);
                         }
                     }
@@ -2449,8 +2562,11 @@ impl AppView {
     pub(super) fn search_cache(&mut self, palette: bool, cx: &mut Context<Self>) {
         let typed = if palette {
             self.command.read(cx).value().to_string()
-        } else {
+        } else if self.explorer_everything {
             self.search.read(cx).value().to_string()
+        } else {
+            // The field searches the tree shown (`quick_search`).
+            String::new()
         };
         // `#tag` filters only saved queries; tables are found by the rest.
         let query = if palette {
@@ -2640,6 +2756,9 @@ impl AppView {
                     this.command_selected =
                         jykre::palette::keep(chosen.as_ref(), &this.command_matches);
                     this.command_scroll.scroll_to_item(this.command_selected);
+                } else {
+                    // The selection follows what was found.
+                    this.quick_retarget(cx);
                 }
                 cx.notify();
             });
@@ -2656,8 +2775,12 @@ impl AppView {
         connection: &Connection,
         cx: &mut Context<Self>,
     ) -> Div {
-        let query = self.search.read(cx).value().to_lowercase();
-        let expanded = connection.expanded || !query.is_empty();
+        let expanded = connection.expanded || self.cache_searching(cx);
+        let selected = self
+            .explorer_selected
+            .as_ref()
+            .is_some_and(|(at, path)| *at == index && path.0.is_empty());
+        let focus = self.node_handle(index, &ObjectPath::default(), cx);
         let weak = cx.weak_entity();
         let refreshing_all = connection
             .refreshing
@@ -2679,13 +2802,27 @@ impl AppView {
             .child(
                 row()
                     .id(("live-connection-row", index))
+                    // The chevron, the icon and the name sit close together.
+                    .gap_1()
                     .w_full()
                     .min_w_0()
+                    .relative()
                     .px_2()
                     .h(px(38.))
                     // The colour its tab group shows.
                     .border_l_3()
                     .border_color(rgb(connection_color(connection.color)))
+                    // The selection covers the whole line, as a node's.
+                    .when(selected, |s| {
+                        let cell = self.selected_bounds.clone();
+                        s.bg(rgb(colors().tree_selection)).child(
+                            canvas(move |bounds, _, _| cell.set(Some(bounds)), |_, _, _, _| {})
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full(),
+                        )
+                    })
                     // As every node: the chevron expands or collapses, and
                     // so do a double click, Enter and the arrows; a single
                     // click only takes the focus.
@@ -2708,6 +2845,8 @@ impl AppView {
                     )
                     .child(
                         button(("live-connection", index), I::Server, "")
+                            .px(px(4.))
+                            .gap_1()
                             .aria_label(match connection.appearance.environment {
                                 Some(environment) => SharedString::from(format!(
                                     "{}, {}",
@@ -2717,7 +2856,9 @@ impl AppView {
                                 None => connection.name.clone().into(),
                             })
                             .aria_expanded(expanded)
+                            .aria_selected(selected)
                             .aria_description(connection.detail.clone())
+                            .track_focus(&focus)
                             .flex_1()
                             .min_w_0()
                             .child(div().truncate().child(connection.name.clone()))
@@ -2742,20 +2883,12 @@ impl AppView {
                                     this.delete_connection(index, window, cx)
                                 },
                             ))
-                            // Right and Left expand and collapse the connection.
-                            .on_action(cx.listener(
-                                move |this, _: &super::shortcuts::ExplorerRight, _, cx| {
-                                    this.connections[index].expanded = true;
-                                    cx.notify();
-                                },
-                            ))
-                            .on_action(cx.listener(
-                                move |this, _: &super::shortcuts::ExplorerLeft, _, cx| {
-                                    this.connections[index].expanded = false;
-                                    cx.notify();
-                                },
-                            ))
-                            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            // The arrows: Up, Down, Home and End move as on
+                            // a node; Right expands the connection or goes
+                            // to its first node, Left collapses it.
+                            .map(|line| tree_keys(line, index, &ObjectPath::default(), cx))
+                            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                                this.select_node(index, &ObjectPath::default(), window, cx);
                                 if event.is_keyboard() || event.click_count() >= 2 {
                                     this.connections[index].expanded = !expanded;
                                     cx.notify();
@@ -2941,7 +3074,7 @@ impl AppView {
     /// search changed since the last frame, replacing only the entries that
     /// changed. Otherwise it costs one comparison per connection.
     pub(super) fn sync_explorer(&mut self, cx: &App) {
-        let searching = !self.search.read(cx).value().is_empty();
+        let searching = self.cache_searching(cx);
         let signature: Vec<_> = self
             .connections
             .iter()
@@ -3008,6 +3141,7 @@ impl AppView {
         if let Some(quick) = self.explorer_quick.as_mut() {
             quick.matches = matches;
         }
+        self.update_quick_position(cx);
         let old: Vec<_> = self
             .explorer_entries
             .iter()
@@ -3048,18 +3182,36 @@ impl AppView {
 
     /// Where the node is in the explorer list, if it shows.
     pub(super) fn explorer_position(&self, index: usize, path: &ObjectPath) -> Option<usize> {
-        self.explorer_entries.iter().position(|entry| match entry {
-            &ExplorerEntry::Row(at, ref row) => {
+        self.explorer_entries.iter().position(|entry| match *entry {
+            ExplorerEntry::Row(at, ref row) => {
                 at == index && row.object().is_some_and(|object| object.path == *path)
             }
-            ExplorerEntry::Connection(_) => false,
+            // An empty path is the connection's own line.
+            ExplorerEntry::Connection(at) => at == index && path.0.is_empty(),
         })
     }
 
     /// Scrolls the explorer so the node is on screen.
-    fn reveal_explorer_node(&self, index: usize, path: &ObjectPath) {
-        if let Some(found) = self.explorer_position(index, path) {
-            self.explorer_list.scroll_to_reveal_item(found);
+    pub(super) fn reveal_explorer_node(&self, index: usize, path: &ObjectPath) {
+        let Some(found) = self.explorer_position(index, path) else {
+            return;
+        };
+        let list = &self.explorer_list;
+        // The list knows the height of the lines it drew only, so it can
+        // scroll just far enough to a line above, on screen or right below
+        // it. A line further down (the last of a long node, a match far
+        // away) is put near the top instead, with a few lines before it.
+        let near = found <= list.logical_scroll_top().item_ix
+            || list.bounds_for_item(found).is_some_and(|bounds| {
+                bounds.top() <= list.viewport_bounds().bottom() + px(REVEAL_NEAR)
+            });
+        if near {
+            list.scroll_to_reveal_item(found);
+        } else {
+            list.scroll_to(ListOffset {
+                item_ix: found.saturating_sub(REVEAL_BEFORE),
+                offset_in_item: px(0.),
+            });
         }
     }
 
@@ -3077,6 +3229,26 @@ impl AppView {
             TreeRow::More { parent, id } => {
                 let parent = parent.clone();
                 // Its icon lines up with the icons of the children it loads.
+                // The rest is read by itself: while a page is on its way
+                // the line says so; after a failed read it reads again.
+                if self.connections[index].tree.is_loading(&parent) {
+                    return row()
+                        .id(("metadata-loading", *id))
+                        .role(Role::Status)
+                        .aria_label(tr!("Loading more objects…"))
+                        .pl(px(tree_indent(parent.0.len() + 1)
+                            + TREE_CHEVRON
+                            + TREE_GAP))
+                        .h(px(32.))
+                        .gap_2()
+                        .child(spinning_icon(
+                            ("metadata-loading-spinner", *id),
+                            I::LoaderCircle,
+                            colors().faint,
+                        ))
+                        .child(label(tr!("Loading more objects…")))
+                        .into_any_element();
+                }
                 return div()
                     .pl(px(tree_indent(parent.0.len() + 1)
                         + TREE_CHEVRON
@@ -3105,7 +3277,7 @@ impl AppView {
         let path = object.path.clone();
         // A preview reads the object where it is stored.
         let preview = object.stored_at.clone().unwrap_or_else(|| path.clone());
-        let searching = !self.search.read(cx).value().is_empty();
+        let searching = self.cache_searching(cx);
         // Keys and partitions refresh with their table.
         let refresh_path = jykre::explorer::refresh_scope(&path);
         let relation = object.kind.is_relation();
@@ -3128,23 +3300,25 @@ impl AppView {
             .map(|part| part.kind);
         let inspectable = jykre::explorer::inspectable(&object, last_level);
         let defined = relation;
-        let age = connection.ages.get(&path).map(|at| {
-            jykre::explorer::format_age(SystemTime::now().duration_since(*at).unwrap_or_default())
-        });
         let selected = self
             .explorer_selected
             .as_ref()
             .is_some_and(|(at, chosen)| *at == index && *chosen == path);
         let focus = self.node_handle(index, &path, cx);
-        // What the quick search, or else the explorer search, typed is
-        // marked in the name; only rows on screen do this.
+        // What the search typed is marked in the name; only rows on
+        // screen do this.
         let marks = match self.explorer_quick.as_ref() {
             Some(quick) => jykre::palette::highlights(&object.name, &[&quick.text]),
-            None => jykre::palette::highlights(&object.name, &[&self.search.read(cx).value()]),
+            None => Vec::new(),
         };
         row()
             .id(("node-row", id))
             .relative()
+            .w_full()
+            // The selection and the pointer mark the whole line, from one
+            // edge of the explorer to the other.
+            .when(selected, |s| s.bg(rgb(colors().tree_selection)))
+            .when(!selected, |s| s.hover(|s| s.bg(rgb(colors().tree_hover))))
             // Where the selected node is, for the menu Shift F10 opens.
             .when(selected, |s| {
                 let cell = self.selected_bounds.clone();
@@ -3210,15 +3384,16 @@ impl AppView {
                     .aria_selected(selected)
                     .track_focus(&focus)
                     .tab_index(0)
-                    .when(selected, |s| s.bg(rgb(colors().surface)))
-                    .focus_visible(|s| s.bg(rgb(colors().hover)))
+                    .when(!selected, |s| {
+                        s.focus_visible(|s| s.bg(rgb(colors().hover)))
+                    })
                     .flex()
                     .items_center()
                     .gap_2()
                     .flex_1()
                     .min_w_0()
+                    .h_full()
                     .cursor_pointer()
-                    .hover(|s| s.bg(rgb(colors().hover)))
                     .child(icon(
                         match object.kind {
                             ObjectKind::View => I::Eye,
@@ -3291,17 +3466,6 @@ impl AppView {
                             this.toggle_node(index, &click_path, cx);
                         }
                     }))
-            })
-            // How old the read of a chosen namespace is.
-            .when_some(age, |s, age| {
-                s.child(
-                    div()
-                        .flex_none()
-                        .px_1()
-                        .text_size(px(12.))
-                        .text_color(rgb(colors().faint))
-                        .child(age),
-                )
             })
             // Unreadable for lack of permission: its last good read stays.
             .when(no_access, |s| {
@@ -4225,15 +4389,18 @@ const TREE_CHEVRON: f32 = 20.;
 /// Space between the chevron and the node's icon (`gap_2`).
 const TREE_GAP: f32 = 8.;
 /// How far each level of the tree is indented.
-const TREE_STEP: f32 = 18.;
+const TREE_STEP: f32 = 12.;
+/// The left margin of the nodes right under a connection, which puts them
+/// inside the connection: past its chevron.
+const TREE_MARGIN: f32 = 24.;
 /// Where the text under a connection's name starts, lined up with the name.
-const CONNECTION_TEXT_INDENT: f32 = 75.;
+const CONNECTION_TEXT_INDENT: f32 = 62.;
 
 /// Left padding of a tree node at `depth` (1 for a database or catalog):
-/// a database starts under its connection's icon, and each level's chevron
-/// sits under its parent's icon.
+/// the first level starts past its connection's chevron, and each level
+/// below is indented one step more.
 fn tree_indent(depth: usize) -> f32 {
-    12. + depth as f32 * TREE_STEP
+    TREE_MARGIN + depth.saturating_sub(1) as f32 * TREE_STEP
 }
 
 fn queued_label() -> Div {
@@ -4485,6 +4652,12 @@ fn connection_shade(
 
 /// The explorer's keys on a node (`ExplorerUp`, ... in [`super::shortcuts`]):
 /// each is an action of the keymap, bound in the explorer's context.
+/// How far below the explorer's last line on screen a line still counts as
+/// drawn (the list's overdraw), and how many lines show before one that is
+/// scrolled to from far away.
+const REVEAL_NEAR: f32 = 200.;
+const REVEAL_BEFORE: usize = 3;
+
 fn tree_keys(
     node: Stateful<Div>,
     index: usize,

@@ -8,8 +8,8 @@ use jykre::automation::definition::{ChainProblem, Problem, RowRule};
 use jykre::automation::outputs::OutputProblem;
 use jykre::automation::queue::{Blocked, Limits, QueueFull};
 use jykre::automation::{
-    Cause, JobKind, Phase, PrepareError, Progress, PublishError, Refusal, RunOutcome, RunState,
-    SaveError,
+    Cause, ChainOutcome, JobKind, Phase, PrepareError, Progress, PublishError, Refusal, RunOutcome,
+    RunState, SaveError,
 };
 use jykre::cell_format::{duration, size};
 use jykre::parameters::ParameterProblem;
@@ -336,8 +336,9 @@ pub fn record_lines(record: &RunRecord, dialect: Option<SqlDialect>) -> Vec<Line
 }
 
 /// What a run that just ended says, with what only memory holds: the
-/// database's message, the transaction rolled back, how Stop ended a
-/// program.
+/// transaction rolled back, how Stop ended a program, why it could not
+/// start. The driver's error is shown apart, in the shape every error has
+/// ([`run_error`]).
 pub fn outcome_lines(outcome: &RunOutcome, dialect: Option<SqlDialect>) -> Vec<Line> {
     let mut lines = Vec::new();
     match outcome.state {
@@ -357,9 +358,6 @@ pub fn outcome_lines(outcome: &RunOutcome, dialect: Option<SqlDialect>) -> Vec<L
             tr!("Succeeded in {0}.", duration(millis(outcome.elapsed))),
         )),
     }
-    if let Some(error) = &outcome.error {
-        lines.push(Line::new(Level::Error, error.message.clone()));
-    }
     let code = outcome
         .sql
         .as_ref()
@@ -374,14 +372,19 @@ pub fn outcome_lines(outcome: &RunOutcome, dialect: Option<SqlDialect>) -> Vec<L
         if sql.transaction_rolled_back {
             lines.push(Line::new(Level::Warning, transaction_rolled_back()));
         }
+        // A statement that failed before it returned anything kept
+        // nothing worth saying; its code is with its error.
+        let kept = sql.data.row_count() as u64;
         lines.extend(counters(
             sql.reads_only,
-            Some(sql.data.row_count() as u64),
+            (outcome.state != RunState::Failed || kept > 0).then_some(kept),
             Some(sql.rows_discarded),
             sql.rows_affected,
             sql.truncated,
         ));
-        if let Some(code) = &sql.server_code {
+        if outcome.error.is_none()
+            && let Some(code) = &sql.server_code
+        {
             lines.push(Line::new(Level::Info, tr!("Server code {0}.", code)));
         }
     }
@@ -421,6 +424,119 @@ pub fn outcome_lines(outcome: &RunOutcome, dialect: Option<SqlDialect>) -> Vec<L
                 "Its end could not be written to the history; the next start marks it interrupted. It is never run again."
             ),
         ));
+    }
+    lines
+}
+
+/// A run's error as every error is shown (title, the database's own
+/// message, its codes and position, a suggested action, **Copy details**).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunError {
+    /// The chain's step that failed, for a chain run.
+    pub step: Option<String>,
+    pub title: String,
+    /// The database's own message, verbatim.
+    pub message: String,
+    /// The server's codes and where in the statement it stopped.
+    pub codes: Option<String>,
+    pub action: Option<String>,
+    /// The text **Copy details** puts on the clipboard.
+    pub details: String,
+}
+
+/// The driver's error of `outcome`, ready to show. `sql` is the statement
+/// as the job holds it, given only when it was sent as written (a
+/// statement with `:name` parameters is rewritten by some drivers, so the
+/// server's position would land elsewhere); `job` names the run in the
+/// copied details.
+pub fn run_error(
+    outcome: &RunOutcome,
+    sql: Option<&str>,
+    job: &str,
+    step: Option<&str>,
+) -> Option<RunError> {
+    let report = jykre::error_report::ErrorReport::new(outcome.error.as_ref()?);
+    let position = sql
+        .and_then(|sql| report.line_and_column(sql))
+        .map(|(line, column)| tr!("Line {0}, column {1} of the statement", line, column));
+    // A vendor's number alone ("1146") says what it is.
+    let server = report.codes().map(|codes| {
+        if report.sqlstate.is_none() {
+            tr!("Server code {0}", codes)
+        } else {
+            codes
+        }
+    });
+    let codes = match (server, position) {
+        (Some(codes), Some(position)) => Some(format!("{codes} · {position}")),
+        (codes, position) => codes.or(position),
+    };
+    let context = match step {
+        Some(step) => tr!("Chain {0} · step {1}", job, step),
+        None => tr!("Job {0}", job),
+    };
+    Some(RunError {
+        step: step.map(str::to_owned),
+        details: report.details(&context),
+        title: report.title,
+        message: report.message,
+        codes,
+        action: report.action,
+    })
+}
+
+/// What a finished chain says: its state and cause, `effect_unknown`, and
+/// each step with how it ended. A step that did not succeed gives its whole
+/// account under its line, as its own run would; steps after it did not
+/// run. `changed` names the connection whose settings changed, for
+/// `PlanChanged`.
+pub fn chain_outcome_lines(outcome: &ChainOutcome, changed: Option<String>) -> Vec<Line> {
+    let mut lines = Vec::new();
+    let level = match outcome.state {
+        RunState::Succeeded => Level::Success,
+        RunState::Cancelled => Level::Warning,
+        _ => Level::Error,
+    };
+    let mut first = state_label(outcome.state, outcome.cause, Some(outcome.elapsed));
+    if let Some(cause) = outcome.cause {
+        first.push_str(". ");
+        first.push_str(cause_sentence(cause, Some(JobKind::Chain)));
+    }
+    if let Some(step) = &outcome.failed_step {
+        first.push(' ');
+        first.push_str(&tr!("It stopped at {0}.", step));
+    }
+    lines.push(Line::new(level, first));
+    if let Some(changed) = changed {
+        lines.push(Line::new(Level::Error, changed));
+    }
+    if let Some(problem) = &outcome.input_problem {
+        lines.push(Line::new(
+            Level::Error,
+            input_problems(std::slice::from_ref(problem)),
+        ));
+    }
+    if outcome.effect_unknown {
+        lines.push(Line::new(Level::Warning, effect_unknown()));
+    }
+    for (index, id) in outcome.step_ids.iter().enumerate() {
+        match outcome.steps.get(index) {
+            Some(step) => {
+                let mut account = outcome_lines(step, None).into_iter();
+                if let Some(headline) = account.next() {
+                    lines.push(Line::new(
+                        headline.level,
+                        tr!("{0}: {1}", id, headline.text),
+                    ));
+                }
+                // What went wrong is said in full; a step that succeeded
+                // keeps to its line.
+                if step.state != RunState::Succeeded {
+                    lines.extend(account);
+                }
+            }
+            None => lines.push(Line::new(Level::Info, tr!("{0}: Not run.", id))),
+        }
     }
     lines
 }
@@ -848,6 +964,39 @@ pub fn production_outputs(connection: &str) -> String {
     )
 }
 
+/// Where a SQL run's rows are, said where a past run is read (section
+/// 6.4: the history keeps how a run ended, never what it returned).
+pub fn rows_note() -> &'static str {
+    tr!(
+        "The rows a run returns are never stored, only how many it kept: the result is shown in the job's tab right after the run, while that tab stays open."
+    )
+}
+
+/// What the result area says before a run has anything to show.
+pub fn no_result_yet(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Sql => tr!(
+            "The rows of the last run appear here, in a grid, while this tab stays open. They are never stored."
+        ),
+        JobKind::Process => {
+            tr!("What the program prints (stdout and stderr) appears here after each run.")
+        }
+        JobKind::Chain => tr!(
+            "The result of the chain's last step appears here: the rows of a SQL Job, or what a program printed."
+        ),
+    }
+}
+
+/// The result's size, above its grid.
+pub fn result_size(rows: usize, columns: usize) -> String {
+    match (rows == 1, columns == 1) {
+        (true, true) => tr!("1 row, 1 column").to_owned(),
+        (true, false) => tr!("1 row, {0} columns", columns),
+        (false, true) => tr!("{0} rows, 1 column", rows),
+        (false, false) => tr!("{0} rows, {1} columns", rows, columns),
+    }
+}
+
 pub fn logs_note() -> &'static str {
     tr!(
         "Program logs (stdout, stderr and jjp/1 messages) are kept on this computer for 7 days, at most 1 MiB per stream. Do not print passwords, tokens or personal data."
@@ -1007,6 +1156,123 @@ mod tests {
 
     fn texts(lines: &[Line]) -> Vec<&str> {
         lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    fn outcome(kind: JobKind, state: RunState, cause: Option<Cause>) -> RunOutcome {
+        RunOutcome {
+            id: RunId::new(),
+            kind,
+            state,
+            cause,
+            error: None,
+            effect_unknown: false,
+            sql: None,
+            program: None,
+            outputs: None,
+            outputs_stored: None,
+            history_failed: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            elapsed: Duration::from_millis(12),
+        }
+    }
+
+    fn missing_table() -> jykre_core::DriverError {
+        jykre_core::DriverError::from_server(
+            jykre_core::ErrorCode::Database,
+            "relation \"orderz\" does not exist",
+            jykre_core::ServerDiagnostic {
+                sqlstate: Some("42P01".into()),
+                vendor_code: None,
+                position: Some(15),
+            },
+        )
+    }
+
+    #[test]
+    fn a_run_s_error_keeps_the_database_s_words_codes_and_position() {
+        crate::app::source_text();
+        let mut failed = outcome(JobKind::Sql, RunState::Failed, Some(Cause::Database));
+        failed.error = Some(missing_table());
+        let sql = "SELECT *\nFROM orderz";
+        let shown = run_error(&failed, Some(sql), "Nightly", None).unwrap();
+        assert_eq!(shown.message, "relation \"orderz\" does not exist");
+        assert!(!shown.title.is_empty());
+        assert_eq!(
+            shown.codes.as_deref(),
+            Some("SQLSTATE 42P01 · Line 2, column 6 of the statement")
+        );
+        assert!(shown.details.contains("Job Nightly"), "{}", shown.details);
+        assert!(shown.details.contains("42P01"), "{}", shown.details);
+        // The account says how it ended; the message is the card's.
+        let lines = outcome_lines(&failed, None);
+        assert_eq!(lines[0].text, "Failed. The database reported an error.");
+        assert!(
+            !texts(&lines).iter().any(|line| line.contains("orderz")),
+            "the message is shown once, in the card"
+        );
+        // A statement with parameters may be rewritten: no position.
+        let unplaced = run_error(&failed, None, "Nightly", Some("step_2")).unwrap();
+        assert_eq!(unplaced.codes.as_deref(), Some("SQLSTATE 42P01"));
+        assert_eq!(unplaced.step.as_deref(), Some("step_2"));
+        assert!(unplaced.details.contains("Chain Nightly · step step_2"));
+        let fine = outcome(JobKind::Sql, RunState::Succeeded, None);
+        assert_eq!(run_error(&fine, Some(sql), "Nightly", None), None);
+    }
+
+    #[test]
+    fn a_chain_says_in_full_what_stopped_it() {
+        crate::app::source_text();
+        let mut failed = outcome(JobKind::Process, RunState::Failed, Some(Cause::Exit));
+        failed.effect_unknown = true;
+        failed.program = Some(jykre::automation::ProgramOutcome {
+            exit_code: Some(3),
+            named: "python3".into(),
+            ..Default::default()
+        });
+        let chain = ChainOutcome {
+            id: jykre_core::automation::ChainRunId::new(),
+            state: RunState::Failed,
+            cause: Some(Cause::Exit),
+            failed_step: Some("export".into()),
+            effect_unknown: true,
+            steps: vec![
+                std::sync::Arc::new(outcome(JobKind::Sql, RunState::Succeeded, None)),
+                std::sync::Arc::new(failed),
+            ],
+            step_ids: vec!["count".into(), "export".into(), "notify".into()],
+            input_problem: None,
+            history_failed: false,
+            started_at: std::time::SystemTime::UNIX_EPOCH,
+            elapsed: Duration::from_millis(40),
+        };
+        let lines = chain_outcome_lines(&chain, None);
+        let all = texts(&lines);
+        assert!(all[0].starts_with("Failed. "), "{}", all[0]);
+        assert!(all[0].ends_with("It stopped at export."), "{}", all[0]);
+        assert!(all.contains(&"count: Succeeded in 12 ms."));
+        assert!(
+            all.contains(&"export: Failed. The program exited with a nonzero code or a signal.")
+        );
+        // The failed step's own account follows its line.
+        assert!(all.contains(&"Exit code 3."));
+        assert!(all.contains(&"notify: Not run."));
+        let step = all.iter().position(|line| line.starts_with("export:"));
+        let code = all.iter().position(|line| *line == "Exit code 3.");
+        let after = all.iter().position(|line| line.starts_with("notify:"));
+        assert!(step < code && code < after, "{all:?}");
+        let changed = chain_outcome_lines(&chain, Some("Sales changed.".into()));
+        assert_eq!(changed[1].text, "Sales changed.");
+    }
+
+    #[test]
+    fn a_result_says_its_size_in_rows_and_columns() {
+        crate::app::source_text();
+        assert_eq!(result_size(4, 3), "4 rows, 3 columns");
+        assert_eq!(result_size(1, 1), "1 row, 1 column");
+        assert_eq!(result_size(0, 2), "0 rows, 2 columns");
+        assert_eq!(result_size(1, 5), "1 row, 5 columns");
+        assert!(no_result_yet(JobKind::Sql).contains("never stored"));
+        assert!(rows_note().contains("never stored"));
     }
 
     #[test]

@@ -1811,7 +1811,9 @@ impl AssistantPanel {
                 let dangerous = self.production && data.risk.is_some();
                 frame(colors().amber)
                     .child(title(tr!("The assistant asks to run a query").to_owned(), colors().amber))
-                    .when_some(data.purpose.clone(), |s, purpose| s.child(prose(&purpose)))
+                    .when_some(data.purpose.clone(), |s, purpose| {
+                        s.child(prose(&super::mcp_section::show_controls(&purpose)))
+                    })
                     .child(sql_text(data.sql.clone()))
                     .when(data.risk.is_some(), |s| {
                         s.child(badge(tr!("Changes or deletes data"), colors().amber))
@@ -2188,7 +2190,7 @@ fn sql_text(sql: String) -> Div {
         .text_size(px(12.))
         .text_color(rgb(colors().blue))
         .whitespace_normal()
-        .child(sql)
+        .child(super::mcp_section::show_controls(&sql))
 }
 
 fn mono(text: String) -> Div {

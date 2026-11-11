@@ -29,8 +29,9 @@ is visible, and the keyboard reaches everything.
 ```
 
 A connection's tab group appears with its first tab and goes away with its
-last: the tab strip never shows a group without tabs, at start or later. A
-report's tab has a group of its own (below).
+last: the tab strip never shows a group without tabs, at start or later. Tabs
+that belong to no connection share one grey group per kind: **Reports**,
+**Automation** and **MCP** (below).
 
 The rail holds, from the top: Explorer, Saved queries, Reports, Automation,
 History and, at the bottom, Preferences.
@@ -63,8 +64,10 @@ A failure says what failed and that nothing was installed.
 The **theme** is **System** until the user chooses: it follows the
 operating system's light or dark appearance, also when it changes while the
 application runs. **Light** or **Dark** stay chosen across restarts, and
-choosing **System** again follows the system once more. The choice applies
-at once to every part of the window.
+choosing **System** again follows the system once more. A theme file in a
+themes directory appears as another choice. The choice applies at once to
+every part of the window. How a file is written and where it is placed is
+in [Themes](themes.md).
 
 **Import from file…**, in the explorer's menu of a table or of the namespace
 that holds tables (a schema, or a MySQL database), on connections whose driver has transactions,
@@ -90,11 +93,10 @@ options, the sheet, the table or the mapping change: it was about another
 import. `Esc` (or the key chosen to close a dialog) closes it; Tab stays inside while it is open.
 
 A **report** ([ADR-0024](../adr/0024-reports.md),
-[ADR-0025](../adr/0025-report-panels.md)) opens in a tab of its own, in a tab
-group of its own named after the report and drawn without a colour (grey),
-since it belongs to no connection: the group offers no new tab, takes
-no other tab and goes away with the report's tab, since the report's panels
-may run on several connections. The tab has a toolbar (title, **Edit**,
+[ADR-0025](../adr/0025-report-panels.md)) opens in a tab of its own, in the **Reports** tab group, drawn without a colour
+(grey), since it belongs to no connection: every report tab shares the group,
+which offers no new tab, takes no other kind of tab and goes away with its
+last tab, since a report's panels may run on several connections. The tab has a toolbar (title, **Edit**,
 **Add a panel**, save, **Export for printing or PDF…**, **Run**), the
 definition while editing (description and one row per `:name` parameter the
 panels share, with its label, type, default, whether it is required and its
@@ -128,16 +130,27 @@ job its next run in the schedule's zone, **Suspended** in amber or
 **Schedule off**, virtualized), with a
 **+** menu (**New SQL Job**, **New program**, **New chain**) and a **Runs**
 entry, with the number of runs active, that opens the global runs list. A
-job opens in a tab of its own, in a grey tab group of its own named after
-the job, as a report's does; the tab's title ends with `●` while the job is
-not saved. Its toolbar holds the kind, save, **Publish** (not for a chain),
+job opens in a tab of its own, in the grey **Automation** tab group that the
+**Runs** tab shares, as reports share theirs; the tab's title ends with `●` while the job is
+not saved. Its toolbar holds the kind, **Save** (**Saved**, muted, when nothing changed), **Publish** (not for a chain),
 **Duplicate**, **Delete** and **Run**, which turns into **Stop** while the
 job's run is active; under it, three inner tabs, and a fourth,
 **Schedule**, once the job is saved:
 
-- **Editor**, a form. A SQL Job: name, description, the connection and where
-  unqualified names resolve (a menu of the connections, each with
-  **Session default** and its namespaces, as report panels offer), the SQL
+- **Editor**, a form that opens on what a job needs first. Its other
+  sections (**Limits**, **Declared outputs**, **Published versions** and,
+  for a program, **Entrypoint and working folder**, **Environment**,
+  **Protocol** and **Logs, stdin and Stop**) fold to their title and one
+  line saying what they hold (`logic::Section`, the summaries beside it):
+  a section opens unfolded when the job sets something in it, and its
+  header is a button that `Enter` or `Space` folds and unfolds. The rules
+  of section 8.1.1 stay inside the section they apply to. A SQL Job: name, description, a **Connection**
+  section of its own (a menu of the connections and, once one is chosen, a
+  **Database** menu with **Session default** and its namespaces, where
+  unqualified names resolve; a job without a connection, or whose connection
+  was deleted or cannot run, says so under the menu before **Run** refuses
+  it; a new job takes the only saved connection, and none when there are
+  several to choose from), the SQL
   editor with the same completion as a query tab (statements beyond the
   first are outlined in amber and named by their line before saving), one
   row per `:name` parameter (label, type, default, **Required**, **List of
@@ -145,8 +158,15 @@ job's run is active; under it, three inner tabs, and a fourth,
   timeout, the declared outputs (name, type, result column by position),
   which row the outputs take with what each rule does with zero, one and
   several rows, **Store outputs**, and the published versions (number and
-  date, each with a delete button). A program: the program, its arguments
-  one per row, the entrypoint, the working folder, the environment
+  date, each with a delete button). A program: its **Command**, the
+  program and its arguments typed as one line (`php -r "print('x');"`) and
+  read without a shell (`jykre::automation::command_line`): the first word
+  is the program, each other word one argument, quotes keep several words
+  as one, and a backslash outside quotes is an ordinary character, so
+  Windows paths need no escaping. Under the field, the program and each
+  argument are drawn as separate pieces, a quote left open is named, and a
+  word a shell would act on (`|`, `>`, `&&`, `$NAME`) says that it reaches
+  the program as an argument; then the entrypoint, the working folder, the environment
   (variables removed, those set, and which of Studio's variables are
   removed now), the protocol (**No protocol** or `jjp/1`; inputs and
   outputs only with `jjp/1`), the timeout, outputs, and the versions, each
@@ -158,11 +178,19 @@ job's run is active; under it, three inner tabs, and a fourth,
   NULL, a chain input, a declared output of an earlier step, or a constant
   typed beside it). What `chain_problems` finds is said under its step and
   input, read again after each change and once typing pauses.
-- **Inputs**: the run form, as a report's (a list input shows a menu),
-  **Run** or **Stop**, then the run's state and, for a SQL Job, the latest
-  result in a grid while the tab is open. A job that differs from what is
+- **Run and result**: one line saying what **Run** starts (the connection
+  and database a SQL Job runs on, a program's command, or a chain's number
+  of steps; a job with none says to choose it in the Editor), the run
+  form, as a report's (a list input shows a menu),
+  **Run** or **Stop**, then the run's state and, under it, what the run
+  left to look at while the tab is open: **Result**, a SQL Job's rows in a
+  grid with their count of rows and columns, or **Output**, what a program
+  printed (**stdout** and **stderr** with their sizes, read from its logs
+  when it ends; a run that did not succeed opens on stderr). A chain shows
+  what its last step left, naming the step. Before the first run the area
+  says what will appear in it; a queued or running run shows neither. A job that differs from what is
   saved runs as a draft, and the form says so.
-- **Runs**: the job's history (below).
+- **History**: the job's past runs (below).
 - **Schedule** ([specification](../plans/automation-engine-specification.md),
   section 9.5; [ADR-0041](../adr/0041-schedules-and-grants.md)): the
   schedule's state (off, on with its **next run** in its zone, abbreviation
@@ -190,6 +218,12 @@ job's run is active; under it, three inner tabs, and a fourth,
   confirmation), each program's file and hash, and the defaults; confirming
   again first says why it was suspended and which connections changed.
 
+Where this differs from the specification's section 8.1: the inner tabs it
+names **Inputs** and **Runs** are **Run and result** and **History** (the
+first holds what a run returns, the second is apart from the global **Runs**
+list), and a program's arguments are typed with its program, as one command
+line, rather than one per row (0.3.1).
+
 The rules the engine follows are stated where they apply (section 8.1.1):
 the limits and the queue beside the timeout, one statement per job, the
 4 KiB, 7-day and 90-day limits of stored outputs, the 7-day and 1 MiB
@@ -202,7 +236,7 @@ on Windows a program without `jjp/1` is killed after the 5 s), and that a
 chain runs published versions, never nests and stops at the first step
 that fails. Shortcuts that run SQL in a query tab never run a job.
 
-The history (a job's **Runs**, and the global **Runs** list) lists runs and
+The history (a job's **History**, and the global **Runs** list) lists runs and
 chain runs newest first, virtualized and read 50 at a time
 (**Load older runs**), each with its state icon, job, kind, how long ago and
 how long it took (a run without a job reads as a draft or a deleted job);
@@ -224,7 +258,9 @@ opens the step's job with its form filled from what earlier steps stored
 (constants, and outputs whose values were stored and have not expired)
 and says which inputs are left to fill in; it never runs by itself. The
 history says that refused runs are not recorded and how long runs, values
-and logs are kept. The global list has a **State** filter and, above the
+and logs are kept. A SQL run says that the rows it returned are
+never stored, only their count: they are in the job's tab right after the
+run. The global list has a **State** filter and, above the
 history, the runs and chain runs active or queued now, each with its state
 and **Stop**.
 
@@ -342,7 +378,7 @@ Each state has one consistent representation.
 | Nothing chosen to introspect | The connection in the explorer | **Choose what to introspect** under its name, which opens the connection settings |
 | A connection in the explorer | Its line | Its name, colour and environment, with **Configure connection** and **Refresh** at the right edge; where it connects (host, or profile and compute) is its tooltip. Under it only what needs attention or is running: a warning, the last failure (until a refresh succeeds), a read's progress, **Choose what to introspect**, or that nothing is saved yet. How an action ended (saved, refreshed, taken out of the queue) goes to the notice above the connections |
 | Metadata state per scope | Explorer node and its tooltip | Last success time, failure message, permission warnings |
-| Age of a chosen namespace | After the namespace's name in the explorer | How long ago it was last read in full ("3 days ago"), as of the moment it is drawn |
+| Age of a chosen namespace | The namespace's context menu in the explorer | The state and time of its last successful refresh; no age is drawn on the node's line |
 | A tab's context | The editor header, after the connection | Where unqualified names resolve: the schema (PostgreSQL), database (MySQL) or catalog and schema (Databricks), as the session reports it after each run ("Session default" before the first). Choosing another from the namespaces in the cache applies it from the next run; it comes back with the tab after a restart and is applied again to a session that reopened |
 | No access | After a node's name in the explorer | "no access" when the last refresh could not read it for lack of permission; its last good read stays and its menu says when it was taken |
 | Inspection | **Inspect** in a relation's or a schema's menu | A panel with indexes, constraints and triggers (relations) or functions, procedures with their parameters, sequences and types (schemas), read from the server when asked; `Esc` closes it |
@@ -351,9 +387,10 @@ Each state has one consistent representation.
 | Editor suggestions | The SQL editor | After `FROM` or `JOIN`, the relations of the tab's context (or of the namespace written before the dot), its CTEs and namespaces: a catalog or database first, and the schemas below it once the context gives it or the cache holds only one (without a catalog chosen, a Databricks connection offers its catalogs, and `catalog.` its schemas). A level the tab's context does not give yet (no run reported it) matches any name of the cache, so `sales.` still finds the `sales` schema; after `alias.`, the columns of that relation (inside a subquery, an alias of the enclosing query too); elsewhere, the columns of the relations of the query around the cursor: the statement, a subquery, a CTE body or one side of a `UNION`, never those of a subquery the cursor is not in. A CTE or a derived table offers the columns its `SELECT` names (renamed by a column list written after it; `*` brings the columns of what it reads), with the type of the column each one reads when that is a plain column. Without a qualifier, an expression also suggests the dialect's functions (with their signature and description; choosing one inserts `name(`) and keywords (`WHERE`, `CASE`), after the columns; after `::`, the dialect's types. Names that start exactly as typed come first. Keywords, functions and types come from the SQL catalogs, so they show even before the cache is read. Only the tab's own connection is suggested. Columns not read yet show "Loading columns…" and are read in the background; typing never waits. A name the dialect reserves (`order`, `user`) is inserted quoted. Hovering a column shows its type, nullability, key, default and comment (for a CTE's or a derived table's column, those of the column it reads), and hovering a function before its `(` its signatures, description and page; `Ctrl`-click on a relation or column shows it in the explorer |
 | Structure changed by SQL | The explorer | A `CREATE`, `ALTER`, `DROP`, `RENAME` or `COMMENT` that ran queues a refresh of the namespaces it touched, when they are chosen to be introspected, about 300 ms later |
 | Quick search in the explorer | A field over the tree, opened by typing while the tree has the keyboard | The text typed, how many shown nodes hold it (amber "No matches"), **Highlight** or **Filter**, and a button that closes it. It searches only the nodes shown, in their order, ignoring case and without reading the cache: the selection stays on a node that still matches, otherwise goes to the next match, scrolled into view. The part of each name that matches is marked (`MATCH_TEXT`, `MATCH_BG`), as the explorer search's text is. **Filter** hides the nodes that do not match, keeping their ancestors and what is expanded under a match. The keyboard stays on the tree, so the arrows move the selection without changing the text and typing goes on after `Enter` opens a table. Closing it shows the whole tree again with the node found selected; the mode is kept for the next search |
-| Explorer search | The field above the connections | Searches the whole local cache and shows the matches with their ancestors until cleared, also while other sections are shown. What is expanded does not change; clearing it gives back the selection from before when the node chosen meanwhile is not in the tree |
+| Explorer search | The field above the connections | One search, typed in the field or on the tree while the tree has the keyboard. It looks at the names of the nodes the tree shows (every child of what is expanded), selects the first match and says how many match, or which one the selection is on ("3/10"); **Highlight** marks the matches and **Filter** leaves only them, with their ancestors. **Everything** (the folder-search icon) searches the whole local cache instead, closed nodes included, and shows the matches with their ancestors until cleared or turned off. What is expanded does not change; ending an **Everything** search gives back the selection from before when the node chosen meanwhile is not in the tree |
+| Explorer selection | The explorer | The selected connection or node is marked over its whole line, from one edge of the explorer to the other, in the `selection` colour; the pointer marks the line under it more faintly |
 | Explorer favorites | **Favorites**, above the connections, shown while there is one | Connections, tables and views added with **Add to favorites** in their explorer menu (the context menu, also `Shift F10`), in the order added, at most six rows high before the list scrolls (virtualized). Each row shows the kind, the name and its connection and namespace; Enter, Space or a click opens a table or view as **View data** does and expands and scrolls to a connection; its `×` (or **Remove from favorites** in the explorer menu) removes it. A favorite whose connection was deleted, or whose object the connection's cache no longer holds, is greyed with an amber **Unavailable** whose tooltip says why; it is never pointed at another object. Nothing is read from a server to list them |
-| Explorer expansion | The explorer | The nodes left expanded come back after a restart, read from the local cache; "Load more" after a node reads its next page only |
+| Explorer expansion | The explorer | The nodes left expanded come back after a restart, read from the local cache. An expanded node shows its first 200 children at once and reads the rest by itself, off the UI thread, 2,000 at a time ("Loading more objects…" after the ones read so far), so the search of the tree finds all of them; a collapsed node stops and goes on when expanded again. "Load more objects" shows only after a read failed, to try again |
 | What a node is | Explorer node | Icon by kind (table, view, materialized view, column, key column, foreign key, partition), the column's type or what a key references after the name, and a tooltip with nullability, primary key position, default and comment |
 | Demo versus server data | Footer badge | `MOCK` or `SQL`; a tab without a connection outside the demo shows "No connection" and runs nothing |
 | Run of a query tab | Before the tab's title in the tab bar | A spinner while a run is active (stopping included), then how the last run ended: a check (succeeded), a red cross (failed) or a ban sign (cancelled). Nothing before the first run (`RunState::tab_status`) |
@@ -366,9 +403,9 @@ Each state has one consistent representation.
 | A connection's colour and environment | Explorer entry (a stripe on its left), its tab group and the editor header | The colour chosen in the connection dialog, or the driver's; a `DEV`, `STAGING` or `PROD` badge after the name |
 | What ran in the tab | Messages | A log of every statement that ended, independent of the result tabs |
 | Run duration | Footer, Messages, history | In the scale that reads best: `850 ms`, `12.4 s`, `3 min 3 s`, `1 h 2 min` |
-| Filtered rows | Footer | While the filter is open, the rows it shows of the page: "3 of 1,000 rows". The grid filters once typing pauses for 150 ms, not on every keystroke |
+| Result search | The bar under the result toolbar, opened by its button or `Ctrl F` while the query tab's grid has the keyboard | The text, **Highlight** or **Filter**, the current occurrence as `1/3` while highlighting, and a button that closes it. The match is the text drawn in the cell, ignoring case (a boolean shows "true" or "false", and that is what the search finds). Matching text is marked (`MATCH_TEXT`, `MATCH_BG`). **Highlight** keeps every row. **Filter** shows only the matching rows. Both count in the footer. The count and the row hiding wait until typing pauses for 150 ms; the marks follow each keystroke. `Enter`, `↓`, `Shift Enter` and `↑` move to the next or previous occurrence, and `Esc` closes the bar and returns the keyboard to the grid. It searches only the rows held for the page |
 | Format | Editor toolbar | While a Format runs, its button reads **Cancel format** (with the time it has run after 2 s) and stops it: the formatter ends before its next statement and the SQL is left as it was |
-| Explorer search | The search field over the connections | A spinner at the end of the field while the search reads the local caches, off the UI thread (one or two characters scan the whole name index) |
+| Explorer search | The search field over the connections | With **Everything** on, a spinner at the end of the field while the search reads the local caches, off the UI thread (one or two characters scan the whole name index). A tree of more than 5,000 lines is searched after a 150 ms pause in the typing |
 | Sorted column | Grid header | An arrow after the name; a click on a header sorts the page's rows by that column's values, ascending, then descending, then in the server's order. NULLs come last and numbers compare exactly |
 | Saved query (a `.sql` file, [ADR-0031](../adr/0031-saved-queries-as-sql-files.md)) | Editor toolbar, library, tab strip | **Save** (`Ctrl S`; a filled save icon while the tab holds what its file holds) writes the tab's file (the tab says **Saving to …** until it is written: syncing to disk can take seconds on a busy disk); a tab without one, and **Save as…** (`Ctrl Shift S`), ask where in the system dialog, starting in the library's folder with the tab's title as the name (`.sql` added when no extension is typed). The title is the file's name; a file tab with unsaved edits shows `●` after it. Before writing, a file changed on disk offers **Overwrite**, **Reload from disk** or **Save as…**, and a missing file **Locate…** or **Save as…**; a failed save keeps the tab's SQL, unsaved. The library lists the `.sql` files of its folder and subfolders (a file in a subfolder shows that folder before its connection; hidden folders skipped; at most 10,000 files, 8 deep), read again when it is shown, when the window comes back, after a save and with its refresh button; **Open…** (`Ctrl O`, or the library's folder button) opens any file. Its pencil renames the file (never over another; when the name has to be made safe, the dialog shows the file name it will get before the rename) and edits its tags, which stay on this computer; its folder button shows the file in the system's file manager; a file no longer found is marked and offers **Locate…** or **Forget**. Saved queries of an earlier version not moved to files yet are listed apart, with **Move to files** |
 | Tags of saved queries | Library, under the search | Each tag once, as `#tag`; choosing one lists only the queries with it, choosing it again lists them all. The search finds tags too, and `#word` asks for a tag that starts with `word` |
@@ -376,7 +413,7 @@ Each state has one consistent representation.
 | History | The history list | Every statement that ended (succeeded, failed or cancelled), newest first: the start of its SQL, its outcome, its connection, how long ago and how long it took; a search filters by SQL, title or connection |
 | Long lines of a large script | The SQL editor | Lines wrap at the editor's width, except in a tab whose text exceeds 256 KiB: there long lines scroll sideways, so a large file opens without freezing the window. Wrapping comes back once the text is 192 KiB or less ([Large `.sql` files in the editor](../plans/editor-large-files.md)) |
 | Query parameters | Above a query tab's editor, under its header | One field per `:name` of the SQL (none without markers): the name, its type (**Automatic**, which shows the type it reads from the value, or one chosen) and **NULL**, which disables the field. A missing or malformed value of a statement being run is outlined in red with what is expected, and nothing runs. **Run again** binds the current values; an export that runs a statement again binds those its result ran with. The fields come back with the tab after a restart. The values are bound by the driver ([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)) |
-| Saved report | Report toolbar, Reports list, tab group | The save icon is a filled bookmark while the tab holds the stored definition, and saving renames the report's tab group; the list shows each report's title, its connections (by name, or "N connections" past two), its number of panels and the start of its SQL, with its chart type as icon (a dashboard for several panels); a search filters by title, description, or a panel's title, connection or SQL |
+| Saved report | Report toolbar, Reports list, tab group | The save icon is a filled bookmark while the tab holds the stored definition, and saving renames the report's tab; the list shows each report's title, its connections (by name, or "N connections" past two), its number of panels and the start of its SQL, with its chart type as icon (a dashboard for several panels); a search filters by title, description, or a panel's title, connection or SQL |
 | Report parameters | The report's form | One field per `:name` of any panel, labelled as the definition says (`*` when required) with a placeholder for its type; a list parameter shows a menu of its choices (and **No value** when optional). A missing, malformed or unlisted value of a panel that runs is outlined in red with what is expected, and nothing runs. The values are bound by the driver, never written into the SQL ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)) |
 | Run of a report | Report toolbar, panel headers, footer, tab bar | **Run** turns into **Stop** while any panel runs; a connection without its password asks for it first, one after another; each panel shows **Waiting** (for its connection and database's session or a free place: at most four run at once), a spinner while it runs, **Failed** or **Stopped**, and its error in place of its result (a panel whose connection is gone says so and the others run); the tab shows the worst outcome; a panel's footer shows its rows, its time and "Stopped at the row limit" when more rows exist, and a panel whose session was lost says it was opened again |
 | Where a report panel runs | Panel header | A badge "connection · database" (just the connection for the session default), amber when the connection or database is no longer listed; while the report is edited, a menu of the connections with their namespaces, with a warning icon for one no longer listed |
@@ -386,7 +423,7 @@ Each state has one consistent representation.
 | Copy of a grid selection, a query page, the inspector's value or a report panel's result | Status over the grid after 100 ms; for a report panel, in its notice line | **Preparing copy…** while estimating; **Copying…** with rows completed and total while encoding, elapsed time after 2 s, and **Cancel copy** (also `Esc`). Above 50 MiB, a confirmation comes before encoding. The clipboard changes only after a successful, still-current copy |
 | Data of a table | A query tab opened for the table (a double click or `Enter` in the explorer, **View data** in its menu, `Enter` in the search) | The editor holds `SELECT * FROM` the table, without a `LIMIT`, and the tab reads it at once into a result tab called **Data**: the first page has the connection's row limit and the footer's arrows read the next ones from the session, never running the statement again. Opening the table again shows that tab, and reads the rows again only when none of its result tabs holds them: in place of a read that failed or was cancelled, otherwise in a new result tab, never over another result (a restored tab offers **View data**). Running something else in the tab closes the open result, as for any query; `↻` reads the table again |
 | Automation available | The Automation section | Nothing while it works. **Starting automation…** while the engine opens its file; **Read-only** when another Jykre Studio holds the data folder's automation lock (its jobs and history can be read, nothing runs or is saved), with **Try again**, also tried each time the section opens; **Automation is off** when `automation.db` comes from a newer version or the file or the lock cannot be opened, the rest of the application working. At start, what recovery found is said once: runs marked interrupted, and a damaged file set aside (job definitions lost, also in the explorer's notice) |
-| A job's run | The job's Inputs, toolbar and tab | **Queued, place N**: which limit it waits for (2 runs at once, 1 per connection), the runs that hold it and the time left before it leaves the queue (redrawn each second); then its phase (opening a session, running the statement, reading the rest of a write's result, the program running with its percent and stage), rows read, **Stopping…**, and how it ended: state and cause, `effect_unknown`, the database's message, a transaction rolled back, rows kept and discarded or left unread, whether the program ended on its own after Stop or was killed, outputs stored or why not. A run that did not start says why in place, with that refused runs are not recorded; a program refused because its file changed names it and offers **Publish**. A chain shows the step running ("step 2 of 3") with that step's state. The tab shows a spinner, then a check, a cross or a ban sign, as a query tab's |
+| A job's run | The job's **Run and result**, toolbar and tab | **Queued, place N**: which limit it waits for (2 runs at once, 1 per connection), the runs that hold it and the time left before it leaves the queue (redrawn each second); then its phase (opening a session, running the statement, reading the rest of a write's result, the program running with its percent and stage), rows read, **Stopping…**, and how it ended: state and cause, `effect_unknown`, a database error in the shape every error has ([Error messages](#error-messages): its title, the database's own message, its codes and position, a suggested action and **Copy details**; a chain shows the error of the step that stopped it, named, with that step's whole account under its line), a program that could not start naming what is missing (the program by the name the job gives it and whether it was looked up on `PATH`, or the entrypoint) and what the system said when it refused, a transaction rolled back, rows kept and discarded or left unread, whether the program ended on its own after Stop or was killed, outputs stored or why not. A run that did not start says why in place, with that refused runs are not recorded; a program refused because its file changed names it and offers **Publish**. A chain shows the step running ("step 2 of 3") with that step's state. The tab shows a spinner, then a check, a cross or a ban sign, as a query tab's |
 | Active runs | The Automation section's **Runs** entry | "N active" while runs or chains are active or queued |
 | A schedule | The job's **Schedule** tab, the sidebar's job entry | Off, on with its next run in the schedule's zone (abbreviation, offset, and this computer's time when it differs), or **Suspended** with the reason and **Confirm again**; the last outcome (started, a catch-up started, waiting for the run still going, skipped, missed, refused with the reason, suspended) and how many times were missed, with the last |
 | Scheduled runs that ended badly | The rail's Automation icon and the status bar | A red count of scheduled runs that failed or did not run since the Automation section or **Runs** was last opened; the status bar names the latest (the job, the outcome and the cause) and opens its job. A schedule that asked for it also shows an operating-system notification with the same words, never a value or a server message |
@@ -448,8 +485,8 @@ Rules:
   choosing a connection in the editor toolbar) asks first: its results and
   session belong to the previous connection, and an open transaction is
   rolled back. A tab without a connection moves without asking: it has no
-  session or results to lose. A report's tab never leaves its own group, and no other tab is
-  dropped into it.
+  session or results to lose. A report's, a job's or an MCP tab never leaves its kind's group
+  (it can be reordered inside it), and no other kind of tab is dropped into it.
 - Saving changed connection settings asks first when a tab of that
   connection runs a query or holds an open transaction: applying them cancels
   the query and closes the session. Otherwise tabs keep their results and
@@ -537,7 +574,7 @@ inside one focused control, marked *fixed*.
 | The same, in a new result tab | `Ctrl Shift Enter` |
 | Run every statement in the tab, one result tab each | `Ctrl Alt Enter` |
 | Stop the run of the tab on screen, as Stop does (a query tab's statements, a report's panels, or a job's or chain's run, which leaves the queue when it waits), without asking | `Ctrl F2` |
-| In a job's run form (**Inputs**): run the job with the values typed, as **Run** does. `Ctrl Enter` never runs a job | `Enter` (fixed) |
+| In a job's run form (**Run and result**): run the job with the values typed, as **Run** does. `Ctrl Enter` never runs a job | `Enter` (fixed) |
 | Run the panel whose SQL has the keyboard; elsewhere in a report tab, every panel | `Ctrl Enter` (or `Enter` in a parameter field, which runs every panel; fixed) |
 | Run every panel of the report on screen | `Ctrl Alt Enter` |
 | In a query tab's parameter field: run what `Ctrl Enter` runs (the selection or the statement at the cursor) | `Enter` (fixed) |
@@ -566,12 +603,12 @@ inside one focused control, marked *fixed*.
 | Close what is on top: the password prompt, a dialog, Preferences, the inspector, the search, the connection dialog. The key then goes on to what has the keyboard, so the grid and a report panel still close their own layers with `Esc` | `Esc` |
 | Refresh the focused explorer node | `F5` |
 | Delete the focused connection (asks first) | `Delete` |
-| Explorer: previous, next, first, last node | `↑`, `↓`, `Home`, `End` |
-| Explorer: expand or go to the first child, collapse or go to the parent | `→`, `←` |
+| Explorer: previous, next, first, last line, the connections included, so the arrows cross from one connection's tree to the next connection | `↑`, `↓`, `Home`, `End` |
+| Explorer: expand or go to the first child, collapse or go to the parent (from a first-level node, its connection); on a connection, expand it or go to its first node, collapse it | `→`, `←` |
 | Explorer: the selected node's context menu | `Shift F10` |
-| Explorer: quick search, typing a name while the tree has the keyboard: the next or previous match (wrapping; every node while nothing is typed; the explorer's next and previous node keys), open the selected match as `Enter` does, take back a character, close | Letters, `↓`, `↑`, `Enter`, `Backspace`, `Esc` (fixed, but the arrows) |
-| Explorer, while the tree has the keyboard: the quick search marks its matches or shows only them (opens it when closed) | `Ctrl F` |
-| Explorer search field: clear the text, then give the keyboard to the tree; go to the tree | `Esc`, `↓` (fixed) |
+| Explorer: typing a name while the tree has the keyboard fills the search field without leaving the tree: the next or previous match (wrapping; the explorer's next and previous node keys), open the selected match as `Enter` does, take back a character, clear the text | Letters, `↓`, `↑`, `Enter`, `Backspace`, `Esc` (fixed, but the arrows) |
+| Explorer, while the tree has the keyboard: the search marks its matches or shows only them | `Ctrl F` |
+| Explorer search field: clear the text, then give the keyboard to the tree; go to the tree; open the selected match | `Esc`, `↓`, `Enter` (fixed) |
 | Explorer: the table's Data view, which reads its rows at once (`SELECT * FROM` it, without a `LIMIT`, page by page); a Data view already open for the table is shown instead (**New query for table** in its menu opens another tab with `SELECT * … LIMIT` the row limit, not run). On any other node, expand or collapse. A click only selects; a double click does the same as `Enter`, and the chevron expands or collapses | `Enter` (fixed: it activates the node) |
 | Grid: move, extend the selection | Arrows, `Shift` + arrows |
 | Grid: first or last cell of the row, first or last cell of the page, a screen up or down (`Shift` extends) | `Home`, `End`, `Ctrl Home`, `Ctrl End`, `Page Up`, `Page Down` |
@@ -588,20 +625,23 @@ inside one focused control, marked *fixed*.
 | Grid: close the field of the cell being edited, then the side panel, then the records view, then clear the selection | `Esc` (fixed) |
 | Grid: select a column, extend to it | `Ctrl` + click, `Ctrl Shift` + click on its header |
 | Grid (a query tab's, a report panel's or a job's): the menu on the focused header's column, or the focused cell's, to hide, freeze at the left or move the column, show hidden columns or reset the layout. With the mouse, a header dragged onto another takes its place | `Shift F10` |
-| Find a column by name, ignoring case and accents, in the grid that has the keyboard, else in the query tab's result on screen (also the result toolbar's button); while its text is there, the records view lists only the columns it finds | `Ctrl Shift F` |
-| Column search field: choose a match, go to it (showing it when hidden), close the field | `↑`, `↓`, `Enter`, `Esc` (fixed) |
+| Find a column by name, ignoring case and accents, in the grid that has the keyboard, else in the query tab's result on screen (also the result toolbar's button); while the dialog is open with text, the records view lists only the columns it finds | `Ctrl Shift F` |
+| Query tab's result grid, while it has the keyboard: open the result search and focus its field (selects the text when the bar is already open). The toolbar's button opens it the same way, and a second click closes it | `Ctrl F` |
+| Result search field: the next or previous occurrence while highlighting, close the bar and give the keyboard back to the grid | `Enter`, `↓`, `Shift Enter`, `↑`, `Esc` (fixed) |
+| Column search dialog: choose a column, go to it (showing it when hidden) and close the dialog, or close it; a click outside the card closes it too | `↑`, `↓`, `Enter`, `Esc`, click outside (fixed) |
 | Result tabs: move the focused tab left or right | `Ctrl Shift ←`, `Ctrl Shift →` (or drag it) |
 | Tab bar: move between tabs | Arrows, `Home`, `End` (fixed) |
-| A job's tab: reach **Editor**, **Inputs** or **Runs**, open it (the keyboard goes to its first field, or the history) | `Tab`, then `Enter` or `Space` (fixed) |
+| A job's tab: reach **Editor**, **Run and result** or **History**, open it (the keyboard goes to its first field, or the history); reach a folded section of the Editor and fold or unfold it | `Tab`, then `Enter` or `Space` (fixed) |
 
 Shortcuts are GPUI actions in one keymap ([UI guidelines](../standards/ui-guidelines.md#actions-and-shortcuts)).
 A new shortcut updates this table, avoids keys the editor already uses, and
 works without the mouse.
 
 By default `Ctrl F` acts where the keyboard is: in a SQL editor it opens
-that editor's search, on the explorer's tree it marks or filters the quick
-search, and elsewhere (the result grid, a text field, a dialog) it does
-nothing. Search, replace and multiple cursors belong to the editor component
+that editor's search, on the explorer's tree it marks or filters the
+explorer's search, in a query tab's result grid it opens the result search, and
+elsewhere (a report or job grid, a text field, a dialog) it does nothing.
+Search, replace and multiple cursors belong to the editor component
 (`EditorState` of `gpui-base`), which binds their keys itself, in every SQL
 editor alike: a query tab, a report panel and a SQL Job's editor.
 
@@ -675,9 +715,9 @@ stack traces and modal dialogs for query errors.
 
 ## Theme and motion
 
-- A light and a dark theme with the same colour tokens of `ui.rs`
-  ([UI guidelines](../standards/ui-guidelines.md#colours-and-theme)); result values use the
-  colours in [Results](results.md#value-presentation).
+- Colour themes are JSON files with one set of tokens
+  ([Themes](themes.md), [UI guidelines](../standards/ui-guidelines.md#colours-and-theme));
+  result values use the colours in [Results](results.md#value-presentation).
 - The SQL font size is adjustable (12 to 24 px) and remembered.
 - Motion is reserved for work in progress (spinners). No decorative
   animation delays an action.

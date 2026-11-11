@@ -3472,6 +3472,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -4090,7 +4091,7 @@ dependencies = [
 
 [[package]]
 name = "jykre"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "calamine",
  "criterion",
@@ -4099,6 +4100,8 @@ dependencies = [
  "encoding_rs",
  "flate2",
  "gpui-kit",
+ "hyper",
+ "hyper-util",
  "jiff",
  "jykre-assistant",
  "jykre-core",
@@ -4118,6 +4121,7 @@ dependencies = [
  "opentelemetry_sdk",
  "process-wrap",
  "reqwest 0.13.5",
+ "rmcp",
  "rust_xlsxwriter",
  "rustls",
  "secrecy",
@@ -4127,6 +4131,7 @@ dependencies = [
  "sys-locale",
  "tar",
  "tokio",
+ "tower-service",
  "tracing",
  "tracing-appender",
  "tracing-opentelemetry",
@@ -4140,7 +4145,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-assistant"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures-util",
  "genai",
@@ -4156,7 +4161,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -4170,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-databricks"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "jykre-core",
  "reqwest 0.12.28",
@@ -4183,7 +4188,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-mysql"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4196,7 +4201,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-postgres"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4209,7 +4214,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-driver-sqlite"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "futures-util",
  "jykre-core",
@@ -4221,7 +4226,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-secrets"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "jykre-core",
  "keyring",
@@ -4231,14 +4236,14 @@ dependencies = [
 
 [[package]]
 name = "jykre-sql"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "jykre-core",
 ]
 
 [[package]]
 name = "jykre-sql-language"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "jykre-core",
  "jykre-sql",
@@ -4249,7 +4254,7 @@ dependencies = [
 
 [[package]]
 name = "jykre-storage"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "jykre-core",
  "serde_json",
@@ -6636,6 +6641,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmcp"
+version = "3.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d24a7e92f4bcaa36b97fa93c4fa7ca8f3e669eced949345b3462dba333c7f909"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "futures",
+ "http",
+ "http-body",
+ "http-body-util",
+ "indexmap 2.14.2",
+ "libc",
+ "pastey 0.2.3",
+ "pin-project-lite",
+ "rand 0.10.3",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "sse-stream",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower-service",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "ropey"
 version = "2.0.0-beta.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6944,6 +6982,7 @@ version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
 dependencies = [
+ "chrono",
  "dyn-clone",
  "indexmap 2.14.2",
  "ref-cast",
@@ -7792,6 +7831,19 @@ dependencies = [
  "serde_yaml",
  "sqruff-lib-core",
  "strum",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c25ac7aff0abd1dbc474536e40416e1102c7dd9bfba0b9861c6d357f835dcfb4"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -10232,7 +10284,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde_json",
 ]

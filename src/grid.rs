@@ -128,21 +128,25 @@ fn compare_values(
 
 impl GridView {
     pub fn new(result: &ResultData, key: GridKey) -> Self {
-        // The filter matches values, not how the grid draws them: a NULL has
-        // no text, so it never matches (not even a filter for "null"), while
-        // the text 'NULL' does.
-        let mut rows: Vec<_> = (0..result.row_count())
-            .filter(|row| {
-                key.filter.is_empty()
-                    || result.row(*row).any(|cell| {
-                        cell.is_some_and(|cell| cell.to_lowercase().contains(&key.filter))
-                    })
-            })
-            .collect();
         let families: Vec<_> = result
             .columns()
             .iter()
             .map(|column| cell_format::family(&column.data_type))
+            .collect();
+        // The filter matches the text the cell draws (a boolean `t` is
+        // "true"), not the stored characters.
+        let mut rows: Vec<_> = (0..result.row_count())
+            .filter(|row| {
+                key.filter.is_empty()
+                    || result.row(*row).enumerate().any(|(column, cell)| {
+                        shown_matches(
+                            cell,
+                            families.get(column).copied().unwrap_or(ValueFamily::Text),
+                            key.numbers_pt_br,
+                            &key.filter,
+                        )
+                    })
+            })
             .collect();
         // A stable sort: equal values keep the server's order.
         if let Some(sort) = key.sort
@@ -188,6 +192,270 @@ impl GridView {
             families,
         }
     }
+}
+
+/// Whether the result search marks matches or shows only the rows that match.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FindMode {
+    /// Every row stays. Matching text is marked, and the footer counts the
+    /// rows that contain the text.
+    #[default]
+    Highlight,
+    /// Only the rows that contain the text stay.
+    Filter,
+}
+
+/// How a cell draws a search hit on the text it shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CellMark {
+    None,
+    /// Byte ranges in the displayed text.
+    Ranges(Vec<std::ops::Range<usize>>),
+    /// The displayed text matches, and its characters do not line up with a
+    /// range (a case fold that splits one character into several).
+    Whole,
+}
+
+/// Whether the text a cell paints contains `needle`. `needle` is already
+/// lower case. An empty needle matches nothing. NULL is the word NULL, a
+/// boolean is `true` or `false`, and a pt-BR number is the grouped text.
+pub fn shown_matches(
+    value: Option<&str>,
+    family: ValueFamily,
+    numbers_pt_br: bool,
+    needle: &str,
+) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    if redraws(value, family, numbers_pt_br) {
+        return cell_format::shown(value, family, numbers_pt_br)
+            .to_lowercase()
+            .contains(needle);
+    }
+    value.is_some_and(|value| value.to_lowercase().contains(needle))
+}
+
+/// Values whose painted text is not their stored characters, ignoring case.
+fn redraws(value: Option<&str>, family: ValueFamily, numbers_pt_br: bool) -> bool {
+    let Some(value) = value else {
+        return true;
+    };
+    if value.is_empty() || value.contains(['\n', '\r']) || value.chars().all(char::is_whitespace) {
+        return true;
+    }
+    match family {
+        ValueFamily::Number if numbers_pt_br => true,
+        ValueFamily::Boolean => {
+            matches!(value.to_ascii_lowercase().as_str(), "t" | "1" | "f" | "0")
+        }
+        ValueFamily::Binary => value.starts_with("\\x"),
+        _ => false,
+    }
+}
+
+/// The mark for the text a cell paints. `needle` is already lower case.
+pub fn cell_mark(displayed: &str, needle: &str) -> CellMark {
+    if needle.is_empty() || !displayed.to_lowercase().contains(needle) {
+        return CellMark::None;
+    }
+    let ranges = crate::palette::highlights(displayed, &[needle]);
+    if ranges.is_empty() {
+        CellMark::Whole
+    } else {
+        CellMark::Ranges(ranges)
+    }
+}
+
+/// What a settled search found: matching rows, the visible cells that match
+/// in display order, and which of those cells is current.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FindScan {
+    /// Rows that contain the needle in any column, hidden ones included.
+    pub rows: usize,
+    /// Data rows containing a match, in display order.
+    pub matching: Vec<usize>,
+    /// False when cancelled or the scan exceeded its time limit.
+    pub complete: bool,
+    /// Visible matching cells, left to right and top to bottom:
+    /// `(data row, result column)`.
+    pub hits: Vec<(usize, usize)>,
+    /// The hit the focus is on, or the next one after it, wrapping.
+    /// `None` when nothing matches.
+    pub index: Option<usize>,
+}
+
+/// Scans `rows` (display order, data-row indices) for `needle`. `columns` are
+/// the visible result columns, in display order: only those are occurrences.
+/// A row still counts when the match is in a hidden column. The match is the
+/// text the cell paints. `needle` is already lower case.
+pub fn scan_find(
+    result: &ResultData,
+    rows: &[usize],
+    columns: &[usize],
+    families: &[ValueFamily],
+    numbers_pt_br: bool,
+    needle: &str,
+    focus: Option<(usize, usize)>,
+) -> FindScan {
+    scan_find_cells(
+        FindCells {
+            result,
+            session: None,
+            first_row: 0,
+            cancel: None,
+        },
+        rows,
+        columns,
+        families,
+        numbers_pt_br,
+        needle,
+        focus,
+    )
+}
+
+/// The same source used by the grid when painting edited and inserted cells.
+#[derive(Clone, Copy)]
+pub struct FindCells<'a> {
+    pub result: &'a ResultData,
+    pub session: Option<&'a crate::grid_edit::EditSession>,
+    pub first_row: usize,
+    pub cancel: Option<&'a crate::drivers::CancellationToken>,
+}
+
+impl FindCells<'_> {
+    fn matches(
+        self,
+        row: usize,
+        column: usize,
+        family: ValueFamily,
+        numbers_pt_br: bool,
+        needle: &str,
+    ) -> bool {
+        let overlay = self.session.and_then(|session| {
+            session.cell_overlay(self.first_row, self.result.row_count(), row, column)
+        });
+        if row >= self.result.row_count() && overlay.is_none() {
+            return crate::tr!("DEFAULT").to_lowercase().contains(needle);
+        }
+        let value = match overlay {
+            Some(overlay) => overlay.value().text(),
+            None => self.result.value(row, column),
+        };
+        shown_matches(value, family, numbers_pt_br, needle)
+    }
+}
+
+/// Scans the painted values, including pending and written edits.
+pub fn scan_find_cells(
+    cells: FindCells<'_>,
+    rows: &[usize],
+    columns: &[usize],
+    families: &[ValueFamily],
+    numbers_pt_br: bool,
+    needle: &str,
+    focus: Option<(usize, usize)>,
+) -> FindScan {
+    if needle.is_empty() {
+        return FindScan {
+            rows: 0,
+            matching: Vec::new(),
+            complete: true,
+            hits: Vec::new(),
+            index: None,
+        };
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut complete = true;
+    let mut matching = Vec::new();
+    let mut hits = Vec::new();
+    let mut exact = None;
+    let mut after = None;
+    let mut passed = false;
+    for &row in rows {
+        if cells.cancel.is_some_and(|cancel| cancel.is_cancelled())
+            || std::time::Instant::now() >= deadline
+        {
+            complete = false;
+            break;
+        }
+        if (0..cells.result.column_count()).any(|column| {
+            cells.matches(
+                row,
+                column,
+                families.get(column).copied().unwrap_or(ValueFamily::Text),
+                numbers_pt_br,
+                needle,
+            )
+        }) {
+            matching.push(row);
+        }
+        // A focus in a hidden column is already passed: the next visible hit
+        // of this row, or of a later row, is the current one.
+        if focus.is_some_and(|(focus_row, focus_column)| {
+            focus_row == row && !columns.contains(&focus_column)
+        }) {
+            passed = true;
+        }
+        for &column in columns {
+            let here = focus == Some((row, column));
+            if cells.matches(
+                row,
+                column,
+                families.get(column).copied().unwrap_or(ValueFamily::Text),
+                numbers_pt_br,
+                needle,
+            ) {
+                let at = hits.len();
+                if here {
+                    exact = Some(at);
+                } else if passed && after.is_none() {
+                    after = Some(at);
+                }
+                hits.push((row, column));
+            }
+            if here {
+                passed = true;
+            }
+        }
+    }
+    let index = if hits.is_empty() {
+        None
+    } else {
+        exact.or(after).or(Some(0))
+    };
+    FindScan {
+        complete,
+        rows: matching.len(),
+        matching,
+        hits,
+        index,
+    }
+}
+
+/// The occurrence after `index` (before it when `forward` is false), wrapping.
+/// With no current occurrence, the first or the last. `None` when there is
+/// nothing to land on.
+pub fn step_index(len: usize, index: Option<usize>, forward: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match index {
+        None => {
+            if forward {
+                0
+            } else {
+                len - 1
+            }
+        }
+        Some(index) => {
+            if forward {
+                (index + 1) % len
+            } else {
+                (index + len - 1) % len
+            }
+        }
+    })
 }
 
 /// The last [`GridView`], reused while its key is unchanged.
@@ -618,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_matches_values_and_never_a_null() {
+    fn the_filter_matches_the_text_on_screen() {
         let columns = vec![ResultColumn::new("note", "text")];
         let result = ResultData::from_rows(
             columns,
@@ -627,10 +895,267 @@ mod tests {
                 .map(std::iter::once),
         );
         let rows = |filter: &str| GridView::new(&result, key(0, filter, None)).rows;
-        // The text 'NULL' and 'nullable' match; the real NULL does not.
-        assert_eq!(rows("null"), [0, 2]);
-        assert_eq!(rows("ull"), [0, 2]);
+        // NULL is drawn as NULL, so it matches the same text as the word.
+        assert_eq!(rows("null"), [0, 1, 2]);
+        assert_eq!(rows("ull"), [0, 1, 2]);
         assert_eq!(rows(""), [0, 1, 2, 3]);
+
+        let flags = ResultData::from_rows(
+            vec![ResultColumn::new("on", "boolean")],
+            [
+                Some("t"),
+                Some("1"),
+                Some("TRUE"),
+                Some("f"),
+                Some("0"),
+                Some("no"),
+            ]
+            .into_iter()
+            .map(std::iter::once),
+        );
+        let flags = |filter: &str| GridView::new(&flags, key(0, filter, None)).rows;
+        // t and 1 are drawn as true; the stored "1" is not on screen.
+        assert_eq!(flags("true"), [0, 1, 2]);
+        assert_eq!(flags("false"), [3, 4]);
+        assert!(flags("1").is_empty());
+
+        let amounts = ResultData::from_rows(
+            vec![ResultColumn::new("amount", "numeric")],
+            [Some("1234.5")].into_iter().map(std::iter::once),
+        );
+        let formatted = |filter: &str| {
+            GridView::new(
+                &amounts,
+                GridKey {
+                    numbers_pt_br: true,
+                    ..key(0, filter, None)
+                },
+            )
+            .rows
+        };
+        assert_eq!(formatted("1.234"), [0]);
+        assert!(formatted("1234").is_empty());
+    }
+
+    #[test]
+    fn a_search_marks_the_text_on_screen_and_counts_visible_cells() {
+        let result = ResultData::from_rows(
+            vec![
+                ResultColumn::new("a", "text"),
+                ResultColumn::new("b", "text"),
+            ],
+            [
+                [Some("Alpha"), Some("beta")],
+                [Some("nope"), None],
+                [Some("alpha"), Some("ALPHA")],
+                [Some("zzz"), Some("zzz")],
+            ],
+        );
+        let rows: Vec<usize> = (0..result.row_count()).collect();
+        let columns = [0, 1];
+        let families = [ValueFamily::Text, ValueFamily::Text];
+        // "alp" hits Alpha, alpha and ALPHA: two rows, three visible cells.
+        // The NULL is drawn as NULL, which does not hold "alp".
+        let scan = scan_find(
+            &result,
+            &rows,
+            &columns,
+            &families,
+            false,
+            "alp",
+            Some((1, 0)),
+        );
+        assert_eq!(scan.rows, 2);
+        assert_eq!(scan.hits, [(0, 0), (2, 0), (2, 1)]);
+        // The focus is between the first and the later hits, so the current
+        // one is the next.
+        assert_eq!(scan.index, Some(1));
+        assert_eq!(
+            scan_find(
+                &result,
+                &rows,
+                &columns,
+                &families,
+                false,
+                "alp",
+                Some((2, 1))
+            )
+            .index,
+            Some(2)
+        );
+        // Past the last hit, the search wraps to the first.
+        assert_eq!(
+            scan_find(
+                &result,
+                &rows,
+                &columns,
+                &families,
+                false,
+                "alp",
+                Some((3, 0))
+            )
+            .index,
+            Some(0)
+        );
+        // A hidden column still makes its row count, and is not an occurrence.
+        let hidden = scan_find(&result, &rows, &[1], &families, false, "alp", None);
+        assert_eq!(hidden.rows, 2);
+        assert_eq!(hidden.hits, [(2, 1)]);
+        // A boolean stored as t is an occurrence of the word on screen.
+        let flags = ResultData::from_rows(
+            vec![
+                ResultColumn::new("on", "boolean"),
+                ResultColumn::new("note", "text"),
+            ],
+            [[Some("t"), Some("no")], [Some("f"), Some("true story")]],
+        );
+        let flag_rows: Vec<usize> = (0..flags.row_count()).collect();
+        let flag_scan = scan_find(
+            &flags,
+            &flag_rows,
+            &[0, 1],
+            &[ValueFamily::Boolean, ValueFamily::Text],
+            false,
+            "true",
+            None,
+        );
+        assert_eq!(flag_scan.rows, 2);
+        assert_eq!(flag_scan.hits, [(0, 0), (1, 1)]);
+        assert!(matches!(
+            cell_mark("Alpha", "alp"),
+            CellMark::Ranges(ranges) if !ranges.is_empty()
+        ));
+        assert!(matches!(cell_mark("NULL", "null"), CellMark::Ranges(_)));
+        assert!(matches!(cell_mark("true", "true"), CellMark::Ranges(_)));
+        assert_eq!(cell_mark("1.234,50", "1234"), CellMark::None);
+        assert_eq!(
+            scan_find(&result, &rows, &columns, &families, false, "", None).hits,
+            []
+        );
+        assert_eq!(step_index(3, Some(2), true), Some(0));
+        assert_eq!(step_index(3, Some(0), false), Some(2));
+        assert_eq!(step_index(0, None, true), None);
+    }
+
+    #[test]
+    fn search_follows_edits_inserts_written_values_and_number_format() {
+        use crate::drivers::write::{EditableColumn, EditableTable, KeyKind, WriteMode};
+        use crate::drivers::{ObjectKind, ObjectPath};
+        use crate::grid_edit::{EditSession, EditValue};
+        let result = ResultData::from_rows(
+            vec![
+                ResultColumn::new("id", "integer"),
+                ResultColumn::new("flag", "boolean"),
+                ResultColumn::new("amount", "numeric"),
+            ],
+            [[Some("1"), Some("f"), Some("1234")]],
+        );
+        let mut session = EditSession::new(
+            EditableTable {
+                table: ObjectPath::default().child(ObjectKind::Table, "items"),
+                writes: WriteMode::Direct,
+                columns: ["id", "flag", "amount"]
+                    .map(|name| {
+                        Some(EditableColumn {
+                            name: name.into(),
+                            declared_type: "text".into(),
+                            nullable: true,
+                            writable: true,
+                            has_default: true,
+                            binary: false,
+                            can_key: true,
+                        })
+                    })
+                    .to_vec(),
+                key: vec![0],
+                key_kind: KeyKind::PrimaryKey,
+                side_effects: vec![],
+            },
+            vec![Some(false); 3],
+        );
+        session
+            .set(
+                50,
+                &|col| result.value(0, col).map(str::to_owned),
+                1,
+                EditValue::Text("t".into()),
+            )
+            .unwrap();
+        let inserted = session.insert_row();
+        session
+            .set_inserted(inserted, 1, EditValue::Text("true".into()))
+            .unwrap();
+        let scan = |session: &EditSession, needle: &str, pt_br| {
+            scan_find_cells(
+                FindCells {
+                    result: &result,
+                    session: Some(session),
+                    first_row: 50,
+                    cancel: None,
+                },
+                &[0, 1],
+                &[0, 1, 2],
+                &[
+                    ValueFamily::Number,
+                    ValueFamily::Boolean,
+                    ValueFamily::Number,
+                ],
+                pt_br,
+                needle,
+                None,
+            )
+        };
+        let found = scan(&session, "true", false);
+        assert!(found.complete);
+        assert_eq!(found.matching, [0, 1]);
+        assert_eq!(found.hits, [(0, 1), (1, 1)]);
+        assert_eq!(scan(&session, "false", false).rows, 0);
+        assert_eq!(scan(&session, "default", false).matching, [1]);
+        assert_eq!(scan(&session, "1234", false).matching, [0]);
+        assert_eq!(scan(&session, "1234", true).rows, 0);
+        assert_eq!(scan(&session, "1.234", true).hits, [(0, 2)]);
+        session.written();
+        assert_eq!(scan(&session, "true", false).hits, found.hits);
+        let cancel = crate::drivers::CancellationToken::new();
+        cancel.cancel();
+        assert!(
+            !scan_find_cells(
+                FindCells {
+                    result: &result,
+                    session: None,
+                    first_row: 0,
+                    cancel: Some(&cancel)
+                },
+                &[0],
+                &[1],
+                &[ValueFamily::Number, ValueFamily::Boolean],
+                false,
+                "true",
+                None
+            )
+            .complete
+        );
+    }
+
+    #[test]
+    fn a_large_search_completes_within_budget() {
+        let result = event_log(100_000);
+        let view = GridView::new(&result, key(0, "", None));
+        let started = std::time::Instant::now();
+        let scan = scan_find(
+            &result,
+            &view.rows,
+            &[0, 1, 2, 3, 4],
+            &view.families,
+            false,
+            "event",
+            None,
+        );
+        let elapsed = started.elapsed();
+        assert!(scan.complete);
+        assert_eq!(scan.rows, 100_000);
+        assert_eq!(scan.hits.len(), 100_000);
+        assert!(elapsed < std::time::Duration::from_secs(10), "{elapsed:?}");
     }
 
     /// Shaped like the `sales.event_log` seed, without a database.

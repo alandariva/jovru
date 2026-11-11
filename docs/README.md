@@ -45,6 +45,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 
 | Document | Content |
 | --- | --- |
+| [Development guide](standards/development-guide.md) | Designing new modules and refactoring existing ones in small, verifiable steps |
 | [Stack and dependencies](standards/stack-and-dependencies.md) | Approved stack and dependency policy |
 | [Rust guidelines](standards/rust-guidelines.md) | Errors, async, types, generated SQL, secrets and lints |
 | [UI guidelines](standards/ui-guidelines.md) | GPUI views, state, rendering, actions, text and accessibility |
@@ -63,6 +64,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | [Persistence](reference/persistence.md) | SQLite files, schemas, refresh, migrations and recovery |
 | [Results](reference/results.md) | Result model, limits, grid, copying, export and reports |
 | [User experience](reference/ux.md) | Layout, visible states, feedback, shortcuts and text |
+| [Themes](reference/themes.md) | JSON colour themes, tokens, inheritance, overrides and fallback |
 | [SQL catalogs](reference/sql-catalogs.md) | Implemented catalog storage, loading, generation and validation |
 
 ### Plans
@@ -79,6 +81,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | [Schedule time-zone dependency](plans/schedule-time-zone-dependency.md) | `jiff` for schedules' time zones, with a structured rule instead of a cron grammar (A13); Approved 2026-11-08 |
 | [Automation SQL Job proof of concept](plans/automation-sql-job-poc.md) | Headless experiments that de-risk phase 1 without schema, contract or dependency changes; complete, with measurements on every relational driver; phase 1 was built on it |
 | [Large `.sql` files in the editor](plans/editor-large-files.md) | Proposal for ADR-0031's D7 file limit: the editor component's soft wrap on opening, measured options and a recommendation |
+| [MCP server for the assistant's tools](plans/assistant-mcp.md) | Approved, implementation in progress ([ADR-0042](adr/0042-mcp-server-for-the-assistant-tools.md)): a loopback MCP server inside the running app that exposes `search_objects`, `describe_relation` and `run_query` to external clients, controlled from its own rail section |
 | [SQL catalog proposal](plans/sql-catalog-proposal.md) | Original format proposal and future standalone catalog repository; see the reference for current behavior |
 
 ### Research and decisions
@@ -87,6 +90,7 @@ are tracked in [Technical debt](plans/technical-debt.md).
 | --- | --- |
 | [Behavioral audit](research/behavioral-audit.md) | Findings N001–N047, approvals, decisions and implementation evidence |
 | [SQL editor investigation](research/sql-editor-investigation.md) | Alternatives, proof of concept and editor findings |
+| [JSON theme review](research/json-theme-review.md) | Resolver and picker findings, corrections, verification and remaining gaps |
 | [Automation engine architecture review](research/automation-engine-architecture-review.md) | Technical findings, proposed changes, trade-offs and required maintainer decisions |
 | [Architecture decision records](adr/README.md) | Numbered records and their status |
 

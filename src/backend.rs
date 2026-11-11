@@ -33,6 +33,10 @@ const CACHE_READ_BUDGET: Duration = Duration::from_millis(50);
 /// Children read per page when a node is expanded or "Load more" is used.
 pub const CHILD_PAGE: u32 = 200;
 
+/// How many children each page after a node's first holds: the explorer
+/// reads the rest of an expanded node by itself, page after page.
+pub const REST_PAGE: u32 = 2_000;
+
 /// Pages of the explorer tree read from one snapshot of the cache.
 pub struct MetadataSnapshot {
     /// Each page read, with the node it belongs to, in the order asked.
@@ -223,7 +227,8 @@ pub async fn cached_metadata_pages(
 
 /// Reads the next page of `parent`'s children after `after` (its first
 /// page when `None`) and the cache version it was read from. Only that page
-/// is read, whatever the pages already loaded.
+/// is read, whatever the pages already loaded: [`CHILD_PAGE`] children
+/// first, [`REST_PAGE`] in each page after it.
 pub async fn cached_children(
     dir: &Path,
     id: ConnectionId,
@@ -238,8 +243,14 @@ pub async fn cached_children(
         let (version, mut pages) = repository
             .pages(&[PageRequest {
                 parent,
+                // The first page shows at once; the rest of a long node is
+                // read in the background, in fewer and larger pages.
+                limit: if after.is_some() {
+                    REST_PAGE
+                } else {
+                    CHILD_PAGE
+                },
                 after,
-                limit: CHILD_PAGE,
             }])
             .await?;
         let page = pages.pop().unwrap_or_default();

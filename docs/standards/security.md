@@ -15,6 +15,7 @@ document is the engineering standard.
 | PostgreSQL/MySQL password, without it | Memory only, for the session |
 | Assistant API key (Anthropic, OpenAI, OpenAI-compatible endpoint) | Only in the OS vault through `jykre-secrets` (`ApiKeyStore`): service `JykreStudio`, accounts `assistant:anthropic:api-key`, `assistant:openai:api-key` and `assistant:openai-compatible:api-key`. The accounts are fixed (`ApiKeyAccount`); the UI never names one. Never in `config.db`, settings or logs |
 | OpenTelemetry collector headers (usually its authentication) | Only in the OS vault through `jykre-secrets` (`ApiKeyStore`): service `JykreStudio`, account `telemetry:otlp:headers` (`ApiKeyAccount::telemetry_headers`). Never in `config.db`, settings or logs, never shown back ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)) |
+| MCP client token | OS vault through `jykre-secrets`: service `JykreStudio`, account `mcp:token:<id>`. `<id>` is 10 lowercase base32 characters and is not the secret. The secret is never in `config.db` or logs ([ADR-0042](../adr/0042-mcp-server-for-the-assistant-tools.md), [ADR-0004](../adr/0004-os-vault-for-credentials.md)) |
 | Databricks token | **Not stored by Jykre Studio.** Resolved by the Databricks CLI when needed and kept in memory ([ADR-0005](../adr/0005-databricks-through-cli-and-rest.md)) |
 
 ### Rules
@@ -163,6 +164,16 @@ sends requests to the provider the user chose. What a request may carry:
 - Logs record each round's provider, time, token counts and error code;
   never a prompt, an answer, schema text or a key. The provider library's
   own log is off (`genai=off`), as its warnings can quote answers.
+
+### MCP client
+
+An MCP client is a second destination for the same tools
+([ADR-0042](../adr/0042-mcp-server-for-the-assistant-tools.md)). The server
+binds the loopback address only and accepts the token only as a bearer.
+An answer leaves only through the MCP section's approval. `run_query`
+still needs both approvals. Cache text follows the token's review mode.
+Nothing here sends a prompt to a provider. The in-app assistant still
+sends its requests to the provider the user chose, under the rules above.
 
 ## Telemetry
 

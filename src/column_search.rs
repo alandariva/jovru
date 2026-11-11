@@ -1,9 +1,10 @@
 //! Finding a result's columns by name, ignoring case and accents, computed
 //! without a window ([Results](../docs/reference/results.md#grid)).
 //!
-//! [`find`] lists the columns whose name holds the text, the shown ones in
-//! display order first, then the hidden ones, each with the byte ranges of
-//! its name that matched, for the grid to mark them. It runs when the text
+//! [`find`] lists the columns whose name holds the text, shown and hidden
+//! ones in alphabetical order, each with the byte ranges of its name that
+//! matched, for the grid to mark them. An empty or whitespace
+//! text lists every column, with no ranges to mark. It runs when the text
 //! or the layout changes, never per frame.
 use crate::column_layout::ColumnLayout;
 use crate::result::ResultColumn;
@@ -117,27 +118,36 @@ pub fn ranges(name: &str, needle: &[char]) -> Vec<Range<usize>> {
 }
 
 /// The columns of `columns` whose name holds `text`, ignoring case and
-/// accents: the shown ones in display order, then the hidden ones in
-/// layout order. Nothing for an empty text.
+/// accents, shown and hidden ones together in alphabetical order of their
+/// names, compared the same way (columns with the same name keep their
+/// result order). Each match carries the byte ranges of its name that
+/// matched. An empty or whitespace `text` lists every column, with empty
+/// ranges.
 pub fn find(columns: &[ResultColumn], layout: &ColumnLayout, text: &str) -> Vec<ColumnMatch> {
     let needle = needle(text);
-    if needle.is_empty() {
-        return Vec::new();
-    }
     let shown = layout.visible().iter().map(|column| (*column, false));
     let hidden = layout.hidden_columns().map(|column| (column, true));
-    shown
+    let mut found: Vec<(Vec<char>, ColumnMatch)> = shown
         .chain(hidden)
         .filter_map(|(column, hidden)| {
             let name = &columns.get(column)?.name;
             let ranges = ranges(name, &needle);
-            (!ranges.is_empty()).then_some(ColumnMatch {
-                column,
-                ranges,
-                hidden,
+            // An empty search still names every column, with nothing to mark.
+            (needle.is_empty() || !ranges.is_empty()).then(|| {
+                let key = folded(name).into_iter().map(|(ch, _)| ch).collect();
+                (
+                    key,
+                    ColumnMatch {
+                        column,
+                        ranges,
+                        hidden,
+                    },
+                )
             })
         })
-        .collect()
+        .collect();
+    found.sort_unstable_by(|(a, left), (b, right)| a.cmp(b).then(left.column.cmp(&right.column)));
+    found.into_iter().map(|(_, found)| found).collect()
 }
 
 #[cfg(test)]
@@ -184,12 +194,13 @@ mod tests {
     }
 
     #[test]
-    fn shown_columns_come_first_in_display_order_then_hidden_ones() {
-        let columns = columns(&["id", "valid", "paid_at", "name", "Ídolo"]);
+    fn matches_are_alphabetical_with_hidden_columns_among_shown_ones() {
+        let columns = columns(&["valid", "paid_at", "id", "name", "Ídolo"]);
         let mut layout = ColumnLayout::new(5);
-        layout.move_onto(2, 0);
-        layout.hide(1);
-        // Shown as paid_at, id, name, Ídolo; valid hidden.
+        layout.move_onto(3, 0);
+        layout.hide(0);
+        // Shown as name, paid_at, id, Ídolo; valid hidden. The display order
+        // does not matter, and "Ídolo" sorts as "idolo", after "id".
         let found = find(&columns, &layout, "id");
         let summary: Vec<_> = found
             .iter()
@@ -201,14 +212,38 @@ mod tests {
         assert_eq!(
             summary,
             [
-                (2, false, 1, Some((2, 4))),
-                (0, false, 1, Some((0, 2))),
+                (2, false, 1, Some((0, 2))),
                 (4, false, 1, Some((0, 3))),
-                (1, true, 1, Some((3, 5))),
+                (1, false, 1, Some((2, 4))),
+                (0, true, 1, Some((3, 5))),
             ]
         );
-        assert!(find(&columns, &layout, "   ").is_empty());
         assert!(find(&columns, &layout, "zzz").is_empty());
+    }
+
+    #[test]
+    fn an_empty_text_lists_every_column_with_no_ranges() {
+        let columns = columns(&["id", "valid", "Paid_at", "name", "id"]);
+        let mut layout = ColumnLayout::new(5);
+        layout.move_onto(2, 0);
+        layout.hide(1);
+        // Shown as Paid_at, id, name, id; valid hidden. Upper case sorts as
+        // lower case, and the two "id" keep their result order.
+        let summary = |text: &str| {
+            find(&columns, &layout, text)
+                .into_iter()
+                .map(|found| (found.column, found.hidden, found.ranges))
+                .collect::<Vec<_>>()
+        };
+        let every = [
+            (0, false, vec![]),
+            (4, false, vec![]),
+            (3, false, vec![]),
+            (2, false, vec![]),
+            (1, true, vec![]),
+        ];
+        assert_eq!(summary("   "), every);
+        assert_eq!(summary(""), every);
     }
 
     #[test]

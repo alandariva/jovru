@@ -26,7 +26,7 @@ pub(in crate::app) struct BenchJob {
 /// Which history list a step drives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::app) enum List {
-    /// The first job's **Runs** tab.
+    /// The first job's **History** tab.
     Job,
     /// The global **Runs** list.
     Global,
@@ -186,10 +186,10 @@ impl Bench {
         self.big.read(cx).benchmark_running().1
     }
 
-    /// Shows the first job's **Runs** tab, or its **Inputs** with the run's
+    /// Shows the first job's **History** tab, or its **Run and result** with the run's
     /// outcome and result.
     pub(in crate::app) fn show_job_runs(&self, runs: bool, window: &mut Window, cx: &mut App) {
-        let inner = if runs { Inner::Runs } else { Inner::Inputs };
+        let inner = if runs { Inner::History } else { Inner::Run };
         for job in self.jobs.iter().chain(std::iter::once(&self.big)) {
             job.update(cx, |job, cx| job.benchmark_show(inner, window, cx));
         }

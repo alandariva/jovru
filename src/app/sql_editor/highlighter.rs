@@ -6,7 +6,7 @@
 //! An edit re-reads only the text around it ([`jykre::sql::relex_in_place`]), and a
 //! frame classifies only the tokens on screen, so the cost of typing and of
 //! painting does not grow with the script.
-use super::super::ui::colors;
+use super::super::ui::editor_colors;
 use gpui_kit::component::input::{
     EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter, Rope,
 };
@@ -64,16 +64,17 @@ impl SqlHighlighter {
 
 /// The colour of each kind of token; quoted names and operators keep the
 /// text colour.
-fn color(highlight: Highlight) -> Option<u32> {
+fn color(highlight: Highlight, colors: &jykre::theme::Palette) -> u32 {
     match highlight {
-        Highlight::Keyword => Some(colors().sql_keyword),
-        Highlight::Function => Some(colors().sql_function),
-        Highlight::Type => Some(colors().sql_type),
-        Highlight::String => Some(colors().sql_string),
-        Highlight::Number => Some(colors().sql_number),
-        Highlight::Comment | Highlight::Executable => Some(colors().sql_comment),
-        Highlight::Parameter => Some(colors().sql_parameter),
-        Highlight::QuotedIdentifier | Highlight::Operator => None,
+        Highlight::Keyword => colors.sql_keyword,
+        Highlight::Function => colors.sql_function,
+        Highlight::Type => colors.sql_type,
+        Highlight::String => colors.sql_string,
+        Highlight::Number => colors.sql_number,
+        Highlight::Comment | Highlight::Executable => colors.sql_comment,
+        Highlight::Parameter => colors.sql_parameter,
+        Highlight::Operator => colors.sql_operator,
+        Highlight::QuotedIdentifier => colors.sql_identifier,
     }
 }
 
@@ -105,6 +106,7 @@ impl InputHighlighter for SqlHighlighter {
         _: &dyn HighlightStyleResolver,
     ) -> Vec<(Range<usize>, HighlightStyle)> {
         let mut runs = Vec::new();
+        let colors = editor_colors();
         let mut cursor = range.start;
         let first = self
             .tokens
@@ -114,8 +116,8 @@ impl InputHighlighter for SqlHighlighter {
             if token.start >= range.end {
                 break;
             }
-            let Some(color) =
-                classify(&self.text, &self.tokens, index, &self.catalog).and_then(color)
+            let Some(color) = classify(&self.text, &self.tokens, index, &self.catalog)
+                .map(|kind| color(kind, &colors))
             else {
                 continue;
             };

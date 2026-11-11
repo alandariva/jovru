@@ -265,6 +265,29 @@ impl AppView {
         self.orphan_groups.push((name.to_owned(), group));
         group
     }
+
+    /// The grey tab group that holds every tab of one kind that belongs to
+    /// no connection (reports, automation, MCP). `open` is the group of a
+    /// tab of that kind already open: the group is shared, so it is reused;
+    /// when there is none (the last tab closed and took the group with it)
+    /// a new one named `name` is made. It offers no new tab.
+    pub(super) fn kind_group(
+        &mut self,
+        open: Option<TabGroupId>,
+        name: &str,
+        cx: &mut Context<Self>,
+    ) -> TabGroupId {
+        if let Some(group) = open
+            && self.tabs.read(cx).group_ids().any(|id| id == group)
+        {
+            return group;
+        }
+        self.tabs.update(cx, |tabs, cx| {
+            let group = tabs.add_group(name.to_owned(), rgb(colors().neutral).into(), cx);
+            let _ = tabs.set_group_new_tab(group, false, cx);
+            group
+        })
+    }
 }
 
 /// What a restored tab says about its file.

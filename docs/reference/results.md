@@ -207,22 +207,27 @@ alignment only; the value itself is never converted.
   finding a column by name reaches the rest), **Show all columns** and
   **Reset the column layout**. The last column shown cannot be hidden.
 - **Finding a column.** `Ctrl Shift F`, or the toolbar's **Find a column**
-  button, opens a field above the grid that finds columns by name,
+  button, opens a dialog over the grid that finds columns by name,
   ignoring case and accents (`jykre::column_search`: `cao` finds `Ação`,
   `strasse` finds `Straße`), with the matching part marked in the
-  `MATCH_TEXT` and `MATCH_BG` colours. It lists the shown columns in display
-  order, then the hidden ones, each saying it is hidden and that choosing it
-  shows it. `↑` and `↓` choose a match, `Enter` (or a click) goes to it:
-  the grid pans to the column and selects it over the displayed rows, after
-  showing it when it was hidden, and takes the keyboard; `Esc` closes the
-  field. The field says how many columns match. The matches are computed
-  when the text or the layout changes, never per frame, and only the lines
-  on screen are drawn, so thousands of columns cost a frame what eight do.
-  The shortcut works in the grid that has the keyboard (a query tab's, a
-  report panel's or a job's), the field included; elsewhere it opens the
-  field in the query tab's result on screen. While the field is open with
-  text, the records view lists only the shown columns it finds; closing
-  the field lists them all again.
+  `MATCH_TEXT` and `MATCH_BG` colours. With nothing typed it lists every
+  column; otherwise only the ones whose name holds the text. They are in
+  alphabetical order, ignoring case and accents, with the hidden ones among
+  the shown ones, each saying it is hidden and that choosing it shows it. `↑` and `↓` choose a column,
+  `Enter` (or a click) goes to it and closes the dialog: the grid pans to
+  the column and selects it over the displayed rows, after showing it when
+  it was hidden, and takes the keyboard. `Esc`, the close button or a click
+  on the dimmed area outside the card closes the dialog and gives the grid
+  the keyboard. Opening it again selects the text it already holds. The
+  dialog says how many columns match, or how many there are when the text
+  is empty. The matches are computed when the text, the layout or the
+  result changes, never per frame, and only the lines on screen are drawn,
+  so thousands of columns cost a frame what about ten do. The shortcut
+  works in the grid that has the keyboard (a query tab's, a report panel's
+  or a job's), the dialog included; elsewhere it opens the dialog in the
+  query tab's result on screen. While the dialog is open with text, the
+  records view lists only the shown columns it finds, still in display
+  order; closing it lists them all again.
   While any column is hidden, a line above the table (and the records)
   says how many, with **Show all columns**. The values, their types and
   NULLs are untouched; only where a column is drawn changes.
@@ -302,14 +307,33 @@ alignment only; the value itself is never converted.
   numbers, pins and what a run replaces do not change.
 - Right-clicking outside the selection selects the cell under the pointer
   first, so the context menu acts on what is under it.
-- The filter bar matches text in any column, ignoring case, and stops hiding
-  rows when it is closed. It applies once typing pauses for 150 ms, so a
-  burst of keystrokes rebuilds the grid's view once. It matches values, not how they are drawn: a NULL
-  never matches, even a filter for "null", while the text 'NULL' does.
-- The filter searches only the rows held for the page on screen. Below the
-  field it says so ("Filters this page only (1,000 rows)…") whenever the
-  result has other pages or stopped at a limit, and an empty match reads "No
-  rows on this page match the filter", never "no results".
+- The result search matches text in any column, ignoring case, and stops
+  hiding rows and marking text when it is closed. **Highlight** (the mode it
+  opens in) keeps every row and marks the matching text. **Filter** shows
+  only the matching rows. The footer counts the matching rows either way
+  ("3 of 1,000 rows", or "3 of rows 1–1,000" when the page is not the whole
+  result). While highlighting, the bar shows the current occurrence as
+  `1/3`: each visible cell that matches, left to right and top to bottom.
+  A row with two matching cells counts once in the footer and twice in
+  `1/3`. `Enter`, `↓`, `Shift Enter` and `↑` move that occurrence, wrapping. Hiding
+  rows and both counts wait until typing pauses for 150 ms, so a burst of
+  keystrokes rebuilds the grid's view once; the marks follow each keystroke.
+  It matches the text drawn in the cell, ignoring case. A boolean stored
+  as `t` or `1` matches "true", because that is what the cell shows; a
+  number in the pt-BR format matches the grouped text on screen. NULL is
+  drawn as NULL, empty text as "(empty)", and a line break as ↵, so a
+  search follows those. The mark is that text (`MATCH_TEXT`, `MATCH_BG`).
+  Searches run on the background executor with a ten-second scan limit;
+  typing, closing the bar or changing the page cancels the previous scan,
+  and superseded responses are discarded. Pending and written edits,
+  inserted rows (including DEFAULT), and number-format changes participate
+  in the search just as they do in the painted cells.
+- The search covers only the rows held for the page on screen. Below the
+  field it says so ("Filters this page only (1,000 rows)…", or "Highlights
+  this page only…" in the other mode) whenever the result has other pages or
+  stopped at a limit, and an empty filter reads "No rows on this page match
+  the filter", never "no results". With text and no highlight hit, the
+  footer reads "0 of 1,000 rows" and the bar shows no `0/0`.
 - Each result tab keeps its own selection and scroll: switching tabs and
   coming back to the same page restores them (`ResultGrid` keeps them by
   `ResultId`); another page starts at the top with nothing selected.

@@ -54,6 +54,7 @@ pub const ALLOWED: &[&str] = &[
     "jykre.config.operation",
     "jykre.assistant.tool",
     "jykre.assistant.tool_calls",
+    "jykre.mcp.outcome",
 ];
 
 /// Whether a span attribute is exported.

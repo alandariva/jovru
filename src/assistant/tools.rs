@@ -1,7 +1,8 @@
 //! The tools the model may call (ADR-0028). They read this computer's
 //! metadata cache and nothing else: no session, no server, no result. Every
 //! answer is plain text with a bounded size, and a failure is an answer
-//! too, so the model can adjust instead of the turn failing.
+//! too, so the model can adjust instead of the turn failing. Callers tell
+//! a tool error by [`ToolAnswer::failed`], not by the `Error:` prefix.
 use super::facts::SchemaScope;
 use crate::backend::{self, PatternSearch};
 use jykre_assistant::{ToolCall, ToolSpec};
@@ -24,6 +25,32 @@ pub const SEARCH_OBJECTS: &str = "search_objects";
 pub const DESCRIBE_RELATION: &str = "describe_relation";
 /// Answered by the user, not the cache ([`super::released`]).
 pub const RUN_QUERY: &str = "run_query";
+
+/// One tool answer: the text the model is given, and whether it is an error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolAnswer {
+    pub text: String,
+    /// True when the text is a tool error. The text itself is unchanged
+    /// (it still starts with `Error:` for the in-app path). Callers must
+    /// not detect failure by looking at that prefix.
+    pub failed: bool,
+}
+
+impl ToolAnswer {
+    fn success(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            failed: false,
+        }
+    }
+
+    fn failure(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            failed: true,
+        }
+    }
+}
 
 /// The tools of one conversation, over one connection's cache.
 pub struct CacheTools {
@@ -99,29 +126,39 @@ impl CacheTools {
                 description: "Describes one table or view: its columns in order with type, \
                     nullability, primary key, default and comment, and its foreign keys. \
                     `path` is the dotted name; a partial name (just the table) works when it \
-                    is unique."
+                    is unique. `include_comments` defaults to true; false omits column \
+                    comments and defaults."
                     .into(),
                 input_schema: json!({
                     "type": "object",
-                    "properties": {"path": {"type": "string"}},
+                    "properties": {
+                        "path": {"type": "string"},
+                        "include_comments": {
+                            "type": "boolean",
+                            "description": "When false, omit column comments and defaults. Optional; defaults to true.",
+                            "default": true
+                        }
+                    },
                     "required": ["path"]
                 }),
             },
         ]
     }
 
-    /// Answers one call; never fails.
-    pub async fn call(&self, call: &ToolCall) -> String {
+    /// Answers one call. A tool error has `failed` set and the same text
+    /// the model is given.
+    pub async fn call(&self, call: &ToolCall) -> ToolAnswer {
         let work = async {
             match call.name.as_str() {
                 SEARCH_OBJECTS => self.search_objects(&call.arguments).await,
                 DESCRIBE_RELATION => self.describe_relation(&call.arguments).await,
-                other => format!("Error: there is no tool named {other}."),
+                other => ToolAnswer::failure(format!("Error: there is no tool named {other}.")),
             }
         };
-        tokio::time::timeout(TOOL_TIMEOUT, work)
-            .await
-            .unwrap_or_else(|_| "Error: reading the metadata cache took too long.".into())
+        match tokio::time::timeout(TOOL_TIMEOUT, work).await {
+            Ok(answer) => answer,
+            Err(_) => ToolAnswer::failure("Error: reading the metadata cache took too long."),
+        }
     }
 
     async fn relations(&self) -> Result<Vec<(ObjectPath, ObjectKind)>, String> {
@@ -132,9 +169,9 @@ impl CacheTools {
             .map_err(|_| "Error: the metadata cache of this connection could not be read.".into())
     }
 
-    async fn search_objects(&self, arguments: &Value) -> String {
+    async fn search_objects(&self, arguments: &Value) -> ToolAnswer {
         let Some(pattern) = text(arguments, "pattern").filter(|p| !p.trim().is_empty()) else {
-            return "Error: `pattern` is required.".into();
+            return ToolAnswer::failure("Error: `pattern` is required.");
         };
         let kinds: Option<Vec<ObjectKind>> =
             arguments
@@ -157,11 +194,11 @@ impl CacheTools {
             Some(namespace) => {
                 let relations = match self.relations().await {
                     Ok(relations) => relations,
-                    Err(error) => return error,
+                    Err(error) => return ToolAnswer::failure(error),
                 };
                 match resolve_namespace(&relations, &parse_path(namespace)) {
                     Ok(namespace) => Some(namespace),
-                    Err(error) => return error,
+                    Err(error) => return ToolAnswer::failure(error),
                 }
             }
             None => None,
@@ -169,7 +206,11 @@ impl CacheTools {
         let after = match text(arguments, "after") {
             Some(token) => match self.cursor(token) {
                 Some(cursor) => Some(cursor),
-                None => return "Error: `after` is not a value this search returned.".into(),
+                None => {
+                    return ToolAnswer::failure(
+                        "Error: `after` is not a value this search returned.",
+                    );
+                }
             },
             None => None,
         };
@@ -190,8 +231,9 @@ impl CacheTools {
         let page = match page {
             Ok(page) => page,
             Err(_) => {
-                return "Error: the metadata cache of this connection could not be searched."
-                    .into();
+                return ToolAnswer::failure(
+                    "Error: the metadata cache of this connection could not be searched.",
+                );
             }
         };
         let mut answer = format!("Matches for {pattern}:\n");
@@ -214,22 +256,27 @@ impl CacheTools {
             let token = self.keep_cursor(next);
             let _ = writeln!(answer, "next: {token}");
         }
-        answer
+        ToolAnswer::success(answer)
     }
 
-    async fn describe_relation(&self, arguments: &Value) -> String {
+    async fn describe_relation(&self, arguments: &Value) -> ToolAnswer {
         let Some(path) = text(arguments, "path").filter(|p| !p.trim().is_empty()) else {
-            return "Error: `path` is required.".into();
+            return ToolAnswer::failure("Error: `path` is required.");
+        };
+        // Absent, null, or any non-boolean is the default: include them.
+        let include_comments = match arguments.get("include_comments") {
+            Some(Value::Bool(include)) => *include,
+            _ => true,
         };
         let relations = match self.relations().await {
             Ok(relations) => relations,
-            Err(error) => return error,
+            Err(error) => return ToolAnswer::failure(error),
         };
         let context = self.context_namespace(&relations);
         let (relation, kind) =
             match resolve_relation(&relations, &parse_path(path), context.as_ref()) {
                 Ok(found) => found,
-                Err(error) => return error,
+                Err(error) => return ToolAnswer::failure(error),
             };
         let scope = &self.scope;
         let children = match backend::relation_columns(
@@ -242,10 +289,12 @@ impl CacheTools {
         {
             Ok(children) => children,
             Err(_) => {
-                return "Error: the metadata cache of this connection could not be read.".into();
+                return ToolAnswer::failure(
+                    "Error: the metadata cache of this connection could not be read.",
+                );
             }
         };
-        describe(&relation, kind, &children)
+        ToolAnswer::success(describe(&relation, kind, &children, include_comments))
     }
 
     /// The namespace the tab's context names, when it is one the cache has.
@@ -448,8 +497,14 @@ fn clip(text: &str, max: usize) -> String {
     }
 }
 
-/// A relation as compact text: columns in order, keys, defaults, comments.
-pub fn describe(relation: &ObjectPath, kind: ObjectKind, children: &[MetadataObject]) -> String {
+/// A relation as compact text: columns in order, keys, and, when
+/// `include_comments` is true, defaults and comments.
+pub fn describe(
+    relation: &ObjectPath,
+    kind: ObjectKind,
+    children: &[MetadataObject],
+    include_comments: bool,
+) -> String {
     let mut answer = format!("{} ({})\n", path_text(relation), kind_name(kind));
     let columns: Vec<&MetadataObject> = children
         .iter()
@@ -473,11 +528,13 @@ pub fn describe(relation: &ObjectPath, kind: ObjectKind, children: &[MetadataObj
         if let Some(position) = column.primary_key {
             primary.push((position, column.name.as_str()));
         }
-        if let Some(default) = &column.default_value {
-            let _ = write!(answer, " DEFAULT {}", clip(default, MAX_DEFAULT));
-        }
-        if let Some(comment) = &column.comment {
-            let _ = write!(answer, " -- {}", clip(comment, MAX_COMMENT));
+        if include_comments {
+            if let Some(default) = &column.default_value {
+                let _ = write!(answer, " DEFAULT {}", clip(default, MAX_DEFAULT));
+            }
+            if let Some(comment) = &column.comment {
+                let _ = write!(answer, " -- {}", clip(comment, MAX_COMMENT));
+            }
         }
         answer.push('\n');
         if answer.len() > MAX_DESCRIPTION {
@@ -635,16 +692,22 @@ mod tests {
         status.default_value = Some("'pending'::text".into());
         status.comment = Some("synthetic\ncomment".into());
         let children = vec![column("id", 1), status];
-        let text = describe(&relation, ObjectKind::Table, &children);
+        let text = describe(&relation, ObjectKind::Table, &children, true);
         assert!(text.starts_with("sales.orders (table)\n"));
         assert!(text.contains("  id bigint NOT NULL\n"));
         assert!(text.contains("  status text NULL DEFAULT 'pending'::text -- synthetic comment\n"));
         assert!(text.contains("primary key: (id)"));
+        let bare = describe(&relation, ObjectKind::Table, &children, false);
+        assert!(bare.contains("  id bigint NOT NULL\n"));
+        assert!(bare.contains("  status text NULL\n"));
+        assert!(bare.contains("primary key: (id)"));
+        assert!(!bare.contains("DEFAULT"));
+        assert!(!bare.contains("synthetic"));
 
         let many: Vec<_> = (1..=400)
             .map(|i| column(&format!("c{i:03}_{}", "x".repeat(60)), i))
             .collect();
-        let text = describe(&relation, ObjectKind::Table, &many);
+        let text = describe(&relation, ObjectKind::Table, &many, true);
         assert!(text.len() <= MAX_DESCRIPTION + 64, "{}", text.len());
     }
 }

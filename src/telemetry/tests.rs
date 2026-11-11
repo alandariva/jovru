@@ -134,6 +134,11 @@ fn span_data(attributes: Vec<KeyValue>, status: Status) -> opentelemetry_sdk::tr
 }
 
 #[test]
+fn mcp_outcome_is_an_exported_attribute() {
+    assert!(attributes::allowed("jykre.mcp.outcome"));
+}
+
+#[test]
 fn spans_lose_every_attribute_outside_the_allowlist() {
     let mut span = span_data(
         vec![

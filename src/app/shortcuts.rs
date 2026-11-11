@@ -111,6 +111,8 @@ actions!(
         GridWriteEdits,
         /// Ctrl+Alt+Z: discards the pending edits, asking first.
         GridDiscardEdits,
+        /// Ctrl+F in a query tab's result grid: opens the result search.
+        FindInResults,
         /// Up in the explorer: the previous node, or the previous match of the quick search.
         ExplorerUp,
         /// Down in the explorer: the next node, or the next match of the quick search.
@@ -176,6 +178,12 @@ pub(super) fn default_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("delete", GridDeleteRows, grid),
         KeyBinding::new("ctrl-alt-s", GridWriteEdits, grid),
         KeyBinding::new("ctrl-alt-z", GridDiscardEdits, grid),
+        KeyBinding::new("ctrl-f", FindInResults, grid),
+        KeyBinding::new(
+            "ctrl-f",
+            FindInResults,
+            Some(result_grid::FIND_FIELD_CONTEXT),
+        ),
         KeyBinding::new("up", ExplorerUp, explorer),
         KeyBinding::new("down", ExplorerDown, explorer),
         KeyBinding::new("left", ExplorerLeft, explorer),
@@ -264,6 +272,7 @@ pub(super) fn catalog() -> Vec<Entry> {
         entry::<ToggleExplorer>(Window, tr!("Show or hide the explorer")),
         entry::<ToggleAssistant>(Window, tr!("Show or hide the assistant")),
         entry::<ShowPreferences>(Window, tr!("Open or close Preferences")),
+        entry::<ShowMcp>(Window, tr!("Open MCP")),
         entry::<LargerFont>(Window, tr!("Larger SQL font")),
         entry::<SmallerFont>(Window, tr!("Smaller SQL font")),
         entry::<ResetFont>(Window, tr!("SQL font at its default size")),
@@ -327,6 +336,7 @@ pub(super) fn catalog() -> Vec<Entry> {
         entry::<MoveResultTabRight>(Results, tr!("Move the result tab right")),
         entry::<FindColumn>(Results, tr!("Find a column by name")),
         entry::<ResultGridMenu>(Grid, tr!("The column's menu: hide, freeze or move it")),
+        entry::<FindInResults>(Grid, tr!("Find in the results")),
         entry::<GridCopy>(
             Grid,
             tr!("Copy the selection in the format of the copy menu"),

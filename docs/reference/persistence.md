@@ -102,6 +102,61 @@ conversation are not saved. The API key is
 never here: it is in the OS vault ([Security](../standards/security.md#where-they-live)).
 Conversations are not saved.
 
+`assistant.mcp` keeps the MCP server's switch, port and token records
+([ADR-0042](../adr/0042-mcp-server-for-the-assistant-tools.md)). The secret
+is not in this setting: it is in the OS vault. The setting is read once at
+start and written when the server switch, the port or a token record
+changes. A missing setting, or a value that is not this object, reads as
+the server off, port 47321 and no tokens. The object in `tokens` is the
+shape of one record. A missing or unknown field on a token takes the
+default below. `connection_id` is the connection's id as stored today (the
+text of `ConnectionId`). `connection_revision` is the integer
+`connections.revision`, which increments on every successful save of that
+profile. `environment_label` is that connection's environment key
+(`development`, `staging` or `production`), or `""` when it has none; the
+key lives in `connection.<id>.appearance`. A differing revision or
+environment key suspends the token until the user confirms it.
+`created_unix_ms` and `expires_unix_ms` are Unix milliseconds; null means
+the token does not expire. `review` is `every-call`, `first-session` or
+`never` (`first-session` is the first cache answer for that token since
+this process started). `suspended` null means not suspended; this version
+writes `connection-changed`, and any other string still suspends the token
+and is kept. An `id` that is not 10 lowercase base32 characters is left
+out. Last used time, activity, cursors and pending cards are not
+written.
+
+The MCP section's server switch saves `enabled` before replacing the
+listener. A failed write is shown in the section and leaves the current
+listener intact. **Off** closes the socket and pending requests; quitting
+closes them without changing `enabled`, so the next launch restores the
+saved choice. A replacement listener waits for the old socket to close
+before binding the same port.
+
+```json
+{
+  "enabled": false,
+  "port": 47321,
+  "tokens": [
+    {
+      "id": "<10 lowercase base32>",
+      "name": "<label, at most 60 characters>",
+      "connection_id": "<ConnectionId as stored today>",
+      "connection_revision": 0,
+      "environment_label": "",
+      "created_unix_ms": 0,
+      "expires_unix_ms": null,
+      "tools": {
+        "search_objects": true,
+        "describe_relation": true,
+        "run_query": false
+      },
+      "review": "every-call",
+      "suspended": null
+    }
+  ]
+}
+```
+
 `telemetry.preferences` keeps the telemetry choices
 (`jykre::telemetry::TelemetryPreferences`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)):
 `{"logs": false, "traces": false, "protocol": "http", "endpoint": ""}`.
@@ -245,6 +300,18 @@ of them and the profile keeps its revision, so a retry is not refused.
 `editor.font_size` is written once a burst of size changes settles, and a
 write superseded by a newer size is skipped, so the size saved is the last
 one shown.
+
+`appearance.theme` keeps the colour theme (`jykre::theme::ThemeChoice`):
+`"system"` (the default), `"light"`, `"dark"`, or the id of a theme file.
+A missing value, a non-string, or an id that could not be a file name reads
+as `"system"`. An id whose file is missing or invalid also draws the
+built-in theme for the system appearance. `appearance.theme_overrides`
+keeps only colour overrides (`{"tokens": {}, "editor": {}, "results": {}}`),
+not font size, density or layout. A value that is not that object is no
+override. Both are read at start with the other settings. Only the choice
+is written when it changes; Preferences does not edit overrides yet.
+Opening Preferences reads the theme files again. The
+files themselves are not in this database ([Themes](themes.md)).
 
 ## Schema: `metadata/<connection-id>.db`
 

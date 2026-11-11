@@ -12,6 +12,7 @@ mod fonts;
 mod import;
 mod layout;
 mod library_files;
+mod mcp_section;
 mod password;
 pub mod performance;
 mod probe;
@@ -189,6 +190,8 @@ actions!(
         NewTab,
         /// Ctrl+,: opens Preferences.
         ShowPreferences,
+        /// Ctrl+Shift+M: opens the MCP section and its Requests tab.
+        ShowMcp,
         /// Shift+F10 in a result grid: its menu on the focused header's
         /// column, or the focused cell's, to hide, freeze or move it.
         ResultGridMenu,
@@ -214,6 +217,7 @@ enum Section {
     Saved,
     Reports,
     Automation,
+    Mcp,
     History,
 }
 
@@ -227,8 +231,6 @@ struct Connection {
     metadata_statuses: Vec<RefreshStatus>,
     /// The explorer tree read from the cache, page by page.
     tree: Tree,
-    /// When each chosen namespace was last read in full.
-    ages: HashMap<ObjectPath, std::time::SystemTime>,
     /// Nodes the last refresh could not read for lack of permission; their
     /// last good read stays.
     no_access: std::collections::HashSet<ObjectPath>,
@@ -304,6 +306,8 @@ struct AppView {
     reports: jykre::reports::ReportLibrary,
     /// The automation engine, its jobs and tabs ([`automation`]).
     automation: automation::Host,
+    /// The MCP listener, its tokens and the Requests tab ([`mcp_section`]).
+    mcp: mcp_section::Host,
     /// The reports were read, so writing them loses nothing.
     persist_reports: bool,
     /// Bumped by every change, so only the last of a burst is written.
@@ -378,6 +382,7 @@ struct AppView {
     sidebar_open: bool,
     /// The Preferences dialog is open, on this category ([`settings`]).
     settings_open: bool,
+    theme_reload: Option<Task<()>>,
     settings_page: settings::SettingsPage,
     /// Keeps Tab inside Preferences.
     settings_focus: FocusHandle,
@@ -500,8 +505,15 @@ struct AppView {
     orphan_groups: Vec<(String, TabGroupId)>,
     /// The explorer node selected by a click or the arrow keys.
     explorer_selected: Option<(usize, ObjectPath)>,
-    /// The explorer's quick search, while open ([`quick_search`]).
+    /// What the explorer's search field holds, once applied to the tree
+    /// ([`quick_search`]); `None` while the field is empty.
     explorer_quick: Option<quick_search::QuickSearch>,
+    /// Whether the field searches the whole local cache, closed nodes
+    /// included, instead of the nodes the tree shows.
+    explorer_everything: bool,
+    /// Bumped by every change of the field's text, so a search of a long
+    /// tree waiting for a pause in the typing applies only the latest.
+    quick_revision: u64,
     /// Whether the quick search marks its matches or shows only them; kept
     /// from one search to the next.
     explorer_quick_mode: jykre::explorer::QuickMode,
@@ -568,10 +580,11 @@ impl AppView {
         .detach();
         let tab_subscription =
             cx.subscribe_in(&tabs, window, |this, _, event, window, cx| match event {
-                // A report's own group offers no new tab.
+                // The Reports, Automation and MCP groups offer no new tab.
                 GroupedTabsEvent::NewTabRequested(group)
                     if this.is_report_group(*group)
-                        || this.automation.tab_groups().any(|own| own == *group) => {}
+                        || this.automation.tab_groups().any(|own| own == *group)
+                        || this.mcp.tab_groups().any(|own| own == *group) => {}
                 GroupedTabsEvent::NewTabRequested(group) => this.new_query(*group, window, cx),
                 GroupedTabsEvent::TabClosed(tab) => {
                     // What the tab keeps (never its results or session) can
@@ -588,6 +601,8 @@ impl AppView {
                     }
                     this.unsaved_marked.remove(tab);
                     this.report_tabs.remove(tab);
+                    this.clear_mcp_secret(*tab, window, cx);
+                    this.mcp.forget(*tab);
                     this.automation.forget(*tab);
                     this.save_state_soon(cx);
                 }
@@ -646,12 +661,16 @@ impl AppView {
         let command = cx.new(|cx| {
             InputState::new(window, cx).placeholder(tr!("Search saved queries and tables…"))
         });
-        let search_subscription = cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) {
-                this.search_changed(cx);
-            }
-            cx.notify();
-        });
+        let search_subscription = cx.subscribe_in(
+            &search,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.search_text_changed(window, cx);
+                }
+                cx.notify();
+            },
+        );
         let command_subscription = cx.subscribe_in(
             &command,
             window,
@@ -683,6 +702,7 @@ impl AppView {
             report_tabs: HashMap::new(),
             reports: jykre::reports::ReportLibrary::default(),
             automation: automation::Host::default(),
+            mcp: mcp_section::Host::default(),
             persist_reports: false,
             reports_revision: 0,
             sql_catalogs: std::sync::Arc::default(),
@@ -735,6 +755,7 @@ impl AppView {
             next_query: 1,
             sidebar_open: true,
             settings_open: false,
+            theme_reload: None,
             settings_page: settings::SettingsPage::default(),
             settings_focus: cx.focus_handle(),
             assistant_settings: cx
@@ -832,6 +853,8 @@ impl AppView {
             orphan_groups: Vec::new(),
             explorer_selected: None,
             explorer_quick: None,
+            explorer_everything: false,
+            quick_revision: 0,
             explorer_quick_mode: jykre::explorer::QuickMode::default(),
             explorer_quick_key: None,
             explorer_focus: cx.focus_handle(),
@@ -1008,7 +1031,6 @@ impl AppView {
                     profile: None,
                     metadata_statuses: Vec::new(),
                     tree: Tree::default(),
-                    ages: HashMap::new(),
                     no_access: Default::default(),
                     namespaces: Vec::new(),
                     names: None,
@@ -1063,6 +1085,7 @@ impl AppView {
         app.load_connections(window, cx);
         app.load_shortcuts(cx);
         app.start_automation(window, cx);
+        app.start_mcp(window, cx);
         assistant_settings::load(cx);
         telemetry_settings::load(cx);
         jykre::telemetry::startup_finished();
@@ -1097,7 +1120,7 @@ impl AppView {
                     .collect();
                 return;
             }
-            Section::Explorer | Section::Automation => {
+            Section::Explorer | Section::Automation | Section::Mcp => {
                 self.library_shown.clear();
                 return;
             }
@@ -1306,8 +1329,8 @@ impl AppView {
             panel.update(cx, |panel, cx| panel.focus_editor(window, cx));
         } else if let Some(report) = self.report_tabs.get(&tab) {
             report.view.update(cx, |view, cx| view.focus(window, cx));
-        } else {
-            self.focus_automation_tab(tab, window, cx);
+        } else if !self.focus_automation_tab(tab, window, cx) {
+            self.focus_mcp_tab(tab, window, cx);
         }
     }
 
@@ -1725,7 +1748,10 @@ impl AppView {
             .count();
         // Last, runs still active are named and stopped (ADR-0034).
         if open == 0 || self.transactions_settled {
-            return self.automation_may_close(window, cx);
+            if !self.automation_may_close(window, cx) {
+                return false;
+            }
+            return self.mcp_may_close(window, cx);
         }
         let (title, description) = if open == 1 {
             (
@@ -1781,6 +1807,10 @@ impl AppView {
         }
         if self.automation.owns(tab) {
             self.request_automation_close(tab, window, cx);
+            return;
+        }
+        if self.mcp.owns(tab) {
+            self.request_mcp_close(tab, window, cx);
             return;
         }
         let (busy, unsaved, transaction, exporting) =
@@ -1902,12 +1932,14 @@ impl AppView {
         cx: &mut Context<Self>,
     ) {
         let same_group = self.tabs.read(cx).group_of(tab) == Some(group);
-        // A report's or a job's tab stays in its own group, and no other tab
-        // joins one.
+        // A report's, a job's or an MCP tab stays in its kind's group, and
+        // no other kind of tab joins one.
         if self.report_tabs.contains_key(&tab)
             || self.is_report_group(group)
             || self.automation.owns(tab)
             || self.automation.tab_groups().any(|own| own == group)
+            || self.mcp.owns(tab)
+            || self.mcp.tab_groups().any(|own| own == group)
         {
             if same_group {
                 let _ = self
@@ -2226,7 +2258,14 @@ impl AppView {
             .focusable()
             .tab_index(0)
             .focus_visible(|s| s.bg(rgb(colors().hover)))
-            .tooltip(move |window, cx| Tooltip::new(title).build(window, cx))
+            .tooltip(move |window, cx| {
+                if section == Section::Mcp {
+                    Tooltip::new(tr!("MCP · {0}", shortcuts::label::<ShowMcp>(cx)))
+                        .build(window, cx)
+                } else {
+                    Tooltip::new(title).build(window, cx)
+                }
+            })
             .size(px(34.))
             .flex_none()
             .rounded(px(7.))
@@ -2247,6 +2286,9 @@ impl AppView {
             // Scheduled runs that ended badly since the user last looked.
             .when(section == Section::Automation, |s| {
                 s.relative().children(self.automation_rail_badge())
+            })
+            .when(section == Section::Mcp, |s| {
+                s.relative().children(self.mcp_rail_badge())
             })
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.section == section {
@@ -2285,6 +2327,7 @@ impl AppView {
                     (Section::Saved, I::Bookmark, tr!("Saved queries")),
                     (Section::Reports, I::FileChartColumn, tr!("Reports")),
                     (Section::Automation, I::Zap, tr!("Automation")),
+                    (Section::Mcp, I::Cable, tr!("MCP")),
                     (Section::History, I::Clock, tr!("History")),
                 ]
                 .into_iter()
@@ -2339,6 +2382,7 @@ impl AppView {
             Section::Saved => tr!("Saved queries"),
             Section::Reports => tr!("Reports"),
             Section::Automation => tr!("Automation"),
+            Section::Mcp => tr!("MCP"),
             Section::History => tr!("History"),
         };
         column()
@@ -2383,6 +2427,13 @@ impl AppView {
                             .when(self.section == Section::Automation, |s| {
                                 s.child(self.automation_add_menu(cx))
                             })
+                            .when(self.section == Section::Mcp, |s| {
+                                s.child(self.mcp_new_token_button(
+                                    "mcp-add-token",
+                                    self.mcp.demo(),
+                                    cx,
+                                ))
+                            })
                             .child(
                                 icon_button(
                                     "collapse-sidebar",
@@ -2399,53 +2450,7 @@ impl AppView {
                     ),
             )
             .when(self.section == Section::Explorer, |s| {
-                s.child(
-                    div()
-                        .px_3()
-                        .pb_3()
-                        // Esc clears the text, then gives the keyboard to the
-                        // tree; Down goes to the tree's first node.
-                        .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                            if event.keystroke.modifiers.modified() {
-                                return;
-                            }
-                            match event.keystroke.key.as_str() {
-                                "escape" if !this.search.read(cx).value().is_empty() => {
-                                    this.search
-                                        .update(cx, |input, cx| input.set_value("", window, cx));
-                                    this.search_changed(cx);
-                                }
-                                "escape" | "down" => this.focus_explorer_tree(window, cx),
-                                _ => return,
-                            }
-                            window.prevent_default();
-                            cx.stop_propagation();
-                        }))
-                        .child({
-                            let input = Input::new(&self.search)
-                                .small()
-                                .prefix(I::Search)
-                                .w_full()
-                                .aria_label(tr!("Search objects in the explorer"));
-                            // A short search scans the whole cache, off the
-                            // UI thread; the field says it is running.
-                            if self.explorer_searching {
-                                input.suffix(
-                                    div()
-                                        .id("explorer-search-pending")
-                                        .role(Role::Status)
-                                        .aria_label(tr!("Searching…"))
-                                        .child(spinning_icon(
-                                            "explorer-search-spinner",
-                                            I::LoaderCircle,
-                                            colors().amber,
-                                        )),
-                                )
-                            } else {
-                                input
-                            }
-                        }),
-                )
+                s.child(self.explorer_search_bar(cx))
                 .when(!self.favorites.items.is_empty(), |s| {
                     s.child(self.favorites_section(cx))
                 })
@@ -2567,13 +2572,11 @@ impl AppView {
                                 )
                             },
                         )
-                        // Above the list, not over it, so the first rows
-                        // (often the matches) stay visible.
-                        .when_some(self.quick_search_bar(cx), |s, bar| s.child(bar))
                         .child({
                             let view = cx.entity();
-                            // Typing on the tree searches it (`quick_search`);
-                            // its keys are seen here before the focused node.
+                            // Typing on the tree fills the search field
+                            // (`quick_search`); its keys are seen here
+                            // before the focused node.
                             div()
                                 .id("explorer-keys")
                                 .role(Role::Tree)
@@ -3055,6 +3058,7 @@ impl AppView {
             .when(self.section == Section::Automation, |s| {
                 self.automation_list(s, cx)
             })
+            .when(self.section == Section::Mcp, |s| self.mcp_list(s, cx))
     }
 
     /// Hands the SQL catalogs to every tab, and to the ones opened later.
@@ -3195,7 +3199,11 @@ impl AppView {
     /// The tabs, or a welcome state with the next step when there is nothing
     /// to show yet.
     fn main_area(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.connections_loading || !self.connections.is_empty() || self.automation.has_tabs() {
+        if self.connections_loading
+            || !self.connections.is_empty()
+            || self.automation.has_tabs()
+            || self.mcp.has_tabs()
+        {
             return self.tabs.clone().into_any_element();
         }
         column()
@@ -3594,6 +3602,17 @@ impl Render for AppView {
                     this.open_settings(page, window, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &ShowMcp, window, cx| {
+                if this.connection_open
+                    || this.command_open
+                    || this.settings_open
+                    || this.password_prompt.is_some()
+                    || this.dialog_open()
+                {
+                    return;
+                }
+                this.show_mcp(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &FindColumn, window, cx| {
                 if this.connection_open
                     || this.command_open
@@ -3760,6 +3779,7 @@ impl Render for AppView {
                         )
                     })
                     .children(self.automation_news_line(cx))
+                    .children(self.mcp_status_line(cx))
                     .child(
                         row()
                             .gap_3()
@@ -3845,6 +3865,8 @@ pub(crate) fn application_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-t", NewTab, Some(editor)),
         KeyBinding::new("ctrl-,", ShowPreferences, None),
         KeyBinding::new("ctrl-,", ShowPreferences, Some(editor)),
+        KeyBinding::new("ctrl-shift-m", ShowMcp, None),
+        KeyBinding::new("ctrl-shift-m", ShowMcp, Some(editor)),
         KeyBinding::new(
             "shift-f10",
             ExplorerContextMenu,

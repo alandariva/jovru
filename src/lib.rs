@@ -4,6 +4,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod assistant;
+pub mod assistant_query;
 pub mod automation;
 pub mod backend;
 pub mod cell_format;
@@ -29,6 +30,7 @@ pub mod i18n;
 pub mod import;
 pub mod keymap;
 pub mod logging;
+pub mod mcp;
 pub mod metadata_scope;
 pub mod palette;
 pub mod parameters;

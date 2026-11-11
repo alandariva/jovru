@@ -49,7 +49,12 @@ pub(super) async fn run(
                 data::editable_target(data.columns()),
                 vec![Some(false); data.column_count()],
             );
-            grid.set_editing(id, Some(Editing::Session(Box::new(session))), window, cx);
+            grid.set_editing(
+                id,
+                Some(Editing::Session(std::sync::Arc::new(session))),
+                window,
+                cx,
+            );
         });
         view.stage = Stage::Grid(grid.clone());
         cx.notify();

@@ -622,10 +622,10 @@ pub async fn run_tools(tools: &CacheTools, calls: &[ToolCall]) -> Vec<ToolStep> 
             "assistant_tool",
             jykre.assistant.tool = if plain { call.name.as_str() } else { "other" }
         );
-        let output = tools.call(call).instrument(span).await;
+        let answer = tools.call(call).instrument(span).await;
         steps.push(ToolStep {
             call: call.clone(),
-            output,
+            output: answer.text,
             elapsed_ms: started.elapsed().as_millis() as u64,
             query: None,
         });

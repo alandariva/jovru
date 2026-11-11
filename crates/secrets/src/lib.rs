@@ -159,14 +159,145 @@ impl ApiKeyStore for SystemSecretStore {
     }
 }
 
+// Fixed sentence: the UI shows it, and the platform error may repeat the
+// token or the account id.
+fn token_unavailable() -> DriverError {
+    DriverError::new(
+        ErrorCode::Authentication,
+        "System vault unavailable. The token could not be read, saved or removed.",
+    )
+}
+
+/// Vault account `mcp:token:<id>`. `<id>` is exactly 10 lowercase base32
+/// characters. The id is not a secret; the value stored under the account is.
+///
+/// The id is stored inline so the account is [`Copy`] and can move into the
+/// vault's blocking task. [`Self::parse`] is the only constructor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct McpTokenAccount {
+    id: [u8; 10],
+}
+
+impl McpTokenAccount {
+    /// `None` when `id` is not exactly 10 characters from
+    /// `abcdefghijklmnopqrstuvwxyz234567`.
+    pub fn parse(id: &str) -> Option<Self> {
+        let bytes: [u8; 10] = id.as_bytes().try_into().ok()?;
+        if !bytes.iter().copied().all(Self::is_lowercase_base32) {
+            return None;
+        }
+        Some(Self { id: bytes })
+    }
+
+    /// `mcp:token:<id>`.
+    pub fn name(self) -> String {
+        let id = self.id();
+        format!("mcp:token:{id}")
+    }
+
+    /// The validated `<id>`. Borrows the stored bytes, so this does not allocate.
+    pub fn id(&self) -> &str {
+        // `parse` only stores the lowercase base32 alphabet, which is ASCII,
+        // so these bytes are UTF-8. The empty string keeps this path free of
+        // panics; a value this type can hold never takes it.
+        std::str::from_utf8(&self.id).unwrap_or("")
+    }
+
+    // RFC 4648 base32, lowercase and without padding. Excludes `0`, `1`, `8`,
+    // `9`, `=` and every other byte.
+    const fn is_lowercase_base32(byte: u8) -> bool {
+        matches!(byte, b'a'..=b'z' | b'2'..=b'7')
+    }
+}
+
+/// Token secrets kept only in the OS vault, under service `JykreStudio`.
+///
+/// `get` returns `Ok(None)` when the account has no entry. `delete` of a
+/// missing entry is `Ok(())`. A failure is a fixed message and does not
+/// include the token, the account id or the platform's detail. This trait
+/// does not apply a time limit; the caller does, as it does for [`ApiKeyStore`].
+#[async_trait]
+pub trait McpTokenStore: Send + Sync {
+    /// The stored token, or `None` when the account has no entry.
+    async fn get(&self, account: McpTokenAccount) -> DriverResult<Option<SecretString>>;
+    /// Saves the token under `account`.
+    async fn set(&self, account: McpTokenAccount, token: SecretString) -> DriverResult<()>;
+    /// Removes the token; an account without an entry is not an error.
+    async fn delete(&self, account: McpTokenAccount) -> DriverResult<()>;
+}
+
+fn mcp_token_entry(account: McpTokenAccount) -> DriverResult<keyring::Entry> {
+    keyring::Entry::new(SERVICE, &account.name()).map_err(|_| token_unavailable())
+}
+
+/// Maps a vault read: no entry is `None`; any other failure is reported
+/// without its detail, which may come from the platform.
+fn read_mcp_token(read: keyring::Result<String>) -> DriverResult<Option<SecretString>> {
+    match read {
+        Ok(token) => Ok(Some(SecretString::from(token))),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err(token_unavailable()),
+    }
+}
+
+/// Maps a vault removal: an entry already gone counts as removed.
+fn removed_mcp_token(removal: keyring::Result<()>) -> DriverResult<()> {
+    match removal {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(_) => Err(token_unavailable()),
+    }
+}
+
+#[async_trait]
+impl McpTokenStore for SystemSecretStore {
+    async fn get(&self, account: McpTokenAccount) -> DriverResult<Option<SecretString>> {
+        tokio::task::spawn_blocking(move || {
+            read_mcp_token(mcp_token_entry(account)?.get_password())
+        })
+        .await
+        .map_err(|_| token_unavailable())?
+    }
+    async fn set(&self, account: McpTokenAccount, token: SecretString) -> DriverResult<()> {
+        tokio::task::spawn_blocking(move || {
+            mcp_token_entry(account)?
+                .set_password(token.expose_secret())
+                .map_err(|_| token_unavailable())
+        })
+        .await
+        .map_err(|_| token_unavailable())?
+    }
+    async fn delete(&self, account: McpTokenAccount) -> DriverResult<()> {
+        tokio::task::spawn_blocking(move || {
+            removed_mcp_token(mcp_token_entry(account)?.delete_credential())
+        })
+        .await
+        .map_err(|_| token_unavailable())?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const SYNTHETIC_KEY: &str = "sk-jykre-synthetic-unit-fixture";
+    const SYNTHETIC_TOKEN: &str = "jykre-synthetic-mcp-unit-fixture";
+    // Lowercase RFC 4648 base32, without padding.
+    const BASE32: &str = "abcdefghijklmnopqrstuvwxyz234567";
+
+    // Both impls apply if `McpTokenAccount: From<String>`, so `_` cannot be
+    // inferred and the test stops compiling. `parse` stays the only constructor.
+    trait NoFromString<Marker> {
+        fn assert_not_implemented() {}
+    }
+    impl<T: ?Sized> NoFromString<()> for T {}
+    impl<T: From<String>> NoFromString<u8> for T {}
 
     fn platform_failure_mentioning_the_key() -> keyring::Error {
         keyring::Error::PlatformFailure(SYNTHETIC_KEY.into())
+    }
+
+    fn platform_failure_mentioning_the_token() -> keyring::Error {
+        keyring::Error::PlatformFailure(SYNTHETIC_TOKEN.into())
     }
 
     #[test]
@@ -197,6 +328,17 @@ mod tests {
         for (index, account) in accounts.iter().enumerate() {
             assert!(!account.name().starts_with("connection:"));
             assert!(accounts[index + 1..].iter().all(|other| other != account));
+        }
+        for id in ["abcdefghij", "klmnopqrst", "uvwxyz2345", "234567abcd"] {
+            let token_name = McpTokenAccount::parse(id).unwrap().name();
+            assert!(!token_name.starts_with("connection:"), "{token_name}");
+            assert!(!token_name.starts_with("assistant:"), "{token_name}");
+            assert!(
+                accounts
+                    .iter()
+                    .all(|account| account.name() != token_name.as_str()),
+                "{token_name}"
+            );
         }
     }
 
@@ -234,5 +376,95 @@ mod tests {
             let shown = format!("{error} {error:?}");
             assert!(!shown.contains(SYNTHETIC_KEY), "{shown}");
         }
+    }
+
+    #[test]
+    fn mcp_token_account_parse_accepts_only_ten_lowercase_base32_characters() {
+        assert_eq!(BASE32.len(), 32);
+        for start in 0..BASE32.len() {
+            let id: String = BASE32.chars().cycle().skip(start).take(10).collect();
+            let account = McpTokenAccount::parse(&id).unwrap();
+            assert_eq!(account.id(), id);
+            assert_eq!(McpTokenAccount::parse(account.id()), Some(account));
+        }
+
+        // `abcdefghé` is 10 bytes (é is two UTF-8 bytes) and 9 characters.
+        let rejected = [
+            "abcdefghi",
+            "abcdefghijk",
+            "",
+            "ABCDEFGHIJ",
+            "Abcdefghij",
+            "abcdefghi=",
+            "abcdefghi0",
+            "abcdefghi1",
+            "abcdefghi8",
+            "abcdefghi9",
+            "abcdefghiñ",
+            "éééééééééé",
+            "abcdefghé",
+            "abcdefghi/",
+            "abcdefghi:",
+        ];
+        for id in rejected {
+            assert!(McpTokenAccount::parse(id).is_none(), "{id:?}");
+        }
+    }
+
+    #[test]
+    fn mcp_token_account_name_is_the_vault_account() {
+        let account = McpTokenAccount::parse("abcdefgh23").unwrap();
+        let name = account.name();
+        assert_eq!(account.id(), "abcdefgh23");
+        assert_eq!(name, "mcp:token:abcdefgh23");
+        assert!(!name.starts_with("connection:"));
+        assert!(!name.starts_with("assistant:"));
+    }
+
+    #[test]
+    fn a_missing_mcp_token_reads_as_none() {
+        assert!(
+            read_mcp_token(Err(keyring::Error::NoEntry))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_stored_mcp_token_reads_back_as_a_secret() {
+        let token = read_mcp_token(Ok(SYNTHETIC_TOKEN.to_owned()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(token.expose_secret(), SYNTHETIC_TOKEN);
+        assert!(!format!("{token:?}").contains(SYNTHETIC_TOKEN));
+    }
+
+    #[test]
+    fn removing_a_missing_mcp_token_succeeds() {
+        removed_mcp_token(Ok(())).unwrap();
+        removed_mcp_token(Err(keyring::Error::NoEntry)).unwrap();
+    }
+
+    #[test]
+    fn mcp_token_vault_failures_omit_the_secret_and_the_account() {
+        let errors = [
+            read_mcp_token(Err(platform_failure_mentioning_the_token())).unwrap_err(),
+            removed_mcp_token(Err(platform_failure_mentioning_the_token())).unwrap_err(),
+        ];
+        for error in errors {
+            assert_eq!(error.code, ErrorCode::Authentication);
+            assert_eq!(
+                error.message,
+                "System vault unavailable. The token could not be read, saved or removed."
+            );
+            let shown = format!("{error} {error:?}");
+            assert!(!shown.contains(SYNTHETIC_TOKEN), "{shown}");
+            assert!(!shown.contains("abcdefghij"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn mcp_token_account_has_no_from_string_constructor() {
+        <McpTokenAccount as NoFromString<_>>::assert_not_implemented();
     }
 }

@@ -72,6 +72,53 @@ pub fn production_confirmation(
     Some((tr!("Run on {0}?", connection), parts.join("\n\n")))
 }
 
+/// What the SQL Job's connection control shows, and what is wrong with the
+/// choice, said under the control before a run refuses it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionChoice {
+    pub label: String,
+    pub problem: Option<String>,
+}
+
+/// The connection control of a SQL Job. `chosen` is the job's connection
+/// when it still exists (its name, and whether it can run now), `named`
+/// whether the job names one at all, `none_saved` whether there is no
+/// connection to choose.
+pub fn connection_choice(
+    chosen: Option<(&str, bool)>,
+    named: bool,
+    none_saved: bool,
+) -> ConnectionChoice {
+    match chosen {
+        Some((name, runs)) => ConnectionChoice {
+            label: name.to_owned(),
+            problem: (!runs).then(|| tr!("The connection {0} cannot run now.", name)),
+        },
+        None if named => ConnectionChoice {
+            label: tr!("A connection that no longer exists").to_owned(),
+            problem: Some(
+                tr!("The job's connection no longer exists. Choose another one here.").to_owned(),
+            ),
+        },
+        None => ConnectionChoice {
+            label: tr!("Choose a connection").to_owned(),
+            problem: Some(if none_saved {
+                tr!("There is no connection yet. Add one in the explorer, then choose it here.")
+                    .to_owned()
+            } else {
+                tr!("Choose the connection the job runs on.").to_owned()
+            }),
+        },
+    }
+}
+
+/// The item of `items` when it is the only one: a new SQL Job takes the
+/// only saved connection, and none when there are several to choose from.
+pub fn only<T>(items: &mut impl Iterator<Item = T>) -> Option<T> {
+    let first = items.next()?;
+    items.next().is_none().then_some(first)
+}
+
 /// One step of a chain's plan, as the one confirmation lists it
 /// (section 9.3.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -414,12 +461,117 @@ pub fn chain_snapshot(snapshot: &str) -> Option<(JobDefinition, Vec<SnapshotStep
     Some((chain, steps))
 }
 
-/// Whether a job's **Inputs** shows the result grid: only a finished run's
+/// Whether a job's **Run and result** shows the result grid: only a finished run's
 /// result. A run that is queued or running has none yet, and the previous
 /// run's would read as its own; the status above says **Queued** or what
 /// it is doing (section 8.1.1).
 pub fn shows_result(has_result: bool, running: bool) -> bool {
     has_result && !running
+}
+
+/// A section of a job's editor that folds to its title and one line saying
+/// what it holds, so the form opens on what a job needs first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Section {
+    Limits,
+    Outputs,
+    Versions,
+    /// A program's entrypoint and working folder.
+    Files,
+    Environment,
+    Protocol,
+    /// A program's logs, its stdin and how Stop ends it.
+    Running,
+}
+
+/// The sections a job's editor opens unfolded: those that hold something
+/// the job sets, so nothing chosen is out of sight.
+pub fn open_sections(definition: &JobDefinition) -> Vec<Section> {
+    let mut open = Vec::new();
+    if !definition.outputs().is_empty() || definition.persists_outputs() {
+        open.push(Section::Outputs);
+    }
+    if let JobBody::Process(process) = &definition.body {
+        if process.entrypoint.is_some() || process.working_directory.is_some() {
+            open.push(Section::Files);
+        }
+        if !process.environment.unset.is_empty() || !process.environment.set.is_empty() {
+            open.push(Section::Environment);
+        }
+        if process.protocol == Protocol::Jjp1 {
+            open.push(Section::Protocol);
+        }
+    }
+    open
+}
+
+/// What the folded **Limits** says: the timeout and, for a SQL Job, the
+/// rows a run keeps.
+pub fn limits_summary(timeout_ms: u64, rows: Option<u32>) -> String {
+    let timeout = jykre::cell_format::duration(timeout_ms);
+    match rows {
+        Some(1) => tr!("Timeout {0} · at most 1 row", timeout),
+        Some(rows) => tr!("Timeout {0} · at most {1} rows", timeout, rows),
+        None => tr!("Timeout {0}", timeout),
+    }
+}
+
+/// What the folded **Declared outputs** says.
+pub fn outputs_summary(count: usize, stored: bool) -> String {
+    match (count, stored) {
+        (0, _) => tr!("None").to_owned(),
+        (1, false) => tr!("1 output").to_owned(),
+        (1, true) => tr!("1 output, stored").to_owned(),
+        (count, false) => tr!("{0} outputs", count),
+        (count, true) => tr!("{0} outputs, stored", count),
+    }
+}
+
+/// What the folded **Published versions** says.
+pub fn versions_summary(latest: Option<i64>) -> String {
+    match latest {
+        Some(version) => tr!("Latest: version {0}", version),
+        None => tr!("Not published").to_owned(),
+    }
+}
+
+/// What the folded entrypoint and working folder say.
+pub fn files_summary(entrypoint: &str, folder: &str) -> String {
+    match (entrypoint.trim(), folder.trim()) {
+        ("", "") => tr!("The program itself, in its own folder").to_owned(),
+        (entrypoint, "") => entrypoint.to_owned(),
+        ("", folder) => tr!("In {0}", folder),
+        (entrypoint, folder) => tr!("{0}, in {1}", entrypoint, folder),
+    }
+}
+
+/// What the folded **Environment** says.
+pub fn environment_summary(unset: usize, set: usize) -> String {
+    if unset == 0 && set == 0 {
+        tr!("Jykre Studio's, minus its own variables").to_owned()
+    } else {
+        tr!("{0} removed, {1} set", unset, set)
+    }
+}
+
+/// What the folded **Protocol** says.
+pub fn protocol_summary(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::None => tr!("None: fixed arguments, no inputs or outputs"),
+        Protocol::Jjp1 => tr!("jjp/1: inputs and outputs"),
+    }
+}
+
+/// The stream of a program's output shown first: what it printed to
+/// stderr when the run did not succeed, or when stdout is empty; otherwise
+/// stdout.
+pub fn first_stream(failed: bool, stdout: bool, stderr: bool) -> super::program_bits::Stream {
+    use super::program_bits::Stream;
+    if stderr && (failed || !stdout) {
+        Stream::Stderr
+    } else {
+        Stream::Stdout
+    }
 }
 
 /// The notice **Try again** leaves while another window holds the lock.
@@ -476,6 +628,41 @@ mod tests {
             )
         );
         assert_eq!(statements_note(&[]), None);
+    }
+
+    #[test]
+    fn the_connection_control_says_what_is_chosen_and_what_is_missing() {
+        crate::app::source_text();
+        let chosen = connection_choice(Some(("Sales", true)), true, false);
+        assert_eq!(chosen.label, "Sales");
+        assert_eq!(chosen.problem, None);
+        let demo = connection_choice(Some(("Demo", false)), true, false);
+        assert_eq!(
+            demo.problem.as_deref(),
+            Some("The connection Demo cannot run now.")
+        );
+        let deleted = connection_choice(None, true, false);
+        assert_eq!(deleted.label, "A connection that no longer exists");
+        assert!(
+            deleted
+                .problem
+                .is_some_and(|text| text.contains("Choose another"))
+        );
+        let unset = connection_choice(None, false, false);
+        assert_eq!(unset.label, "Choose a connection");
+        assert_eq!(
+            unset.problem.as_deref(),
+            Some("Choose the connection the job runs on.")
+        );
+        let none = connection_choice(None, false, true);
+        assert!(none.problem.is_some_and(|text| text.contains("explorer")));
+    }
+
+    #[test]
+    fn a_new_job_takes_a_connection_only_when_there_is_one() {
+        assert_eq!(only(&mut [7].into_iter()), Some(7));
+        assert_eq!(only(&mut [7, 8].into_iter()), None);
+        assert_eq!(only(&mut std::iter::empty::<u8>()), None);
     }
 
     #[test]
@@ -812,6 +999,67 @@ mod tests {
         assert_eq!(steps[0].version, 2);
         assert_eq!(steps[0].definition, Some(job));
         assert!(snapshot_definition("not json").is_none());
+    }
+
+    #[test]
+    fn a_job_opens_unfolded_only_what_it_sets() {
+        crate::app::source_text();
+        let plain = program_version(Protocol::None);
+        assert!(open_sections(&plain).is_empty());
+        let mut set = program_version(Protocol::Jjp1);
+        if let JobBody::Process(process) = &mut set.body {
+            process.entrypoint = Some("/jobs/export.js".into());
+            process.environment.unset.push("AWS_PROFILE".into());
+        }
+        // The jjp/1 version declares an output, so its outputs open too.
+        assert_eq!(
+            open_sections(&set),
+            [
+                Section::Outputs,
+                Section::Files,
+                Section::Environment,
+                Section::Protocol
+            ]
+        );
+        assert_eq!(open_sections(&sql_version(&["rows"])), [Section::Outputs]);
+        assert!(open_sections(&sql_version(&[])).is_empty());
+    }
+
+    #[test]
+    fn a_folded_section_says_what_it_holds() {
+        crate::app::source_text();
+        assert_eq!(
+            limits_summary(300_000, Some(1000)),
+            "Timeout 5 min 0 s · at most 1000 rows"
+        );
+        assert_eq!(limits_summary(60_000, None), "Timeout 1 min 0 s");
+        assert_eq!(outputs_summary(0, false), "None");
+        assert_eq!(outputs_summary(1, true), "1 output, stored");
+        assert_eq!(outputs_summary(3, false), "3 outputs");
+        assert_eq!(versions_summary(None), "Not published");
+        assert_eq!(versions_summary(Some(4)), "Latest: version 4");
+        assert_eq!(
+            files_summary("", " "),
+            "The program itself, in its own folder"
+        );
+        assert_eq!(files_summary("/jobs/a.js", ""), "/jobs/a.js");
+        assert_eq!(files_summary("a.js", "/jobs"), "a.js, in /jobs");
+        assert_eq!(
+            environment_summary(0, 0),
+            "Jykre Studio's, minus its own variables"
+        );
+        assert_eq!(environment_summary(1, 2), "1 removed, 2 set");
+        assert!(protocol_summary(Protocol::None).starts_with("None"));
+    }
+
+    #[test]
+    fn a_failed_program_shows_what_it_wrote_to_stderr_first() {
+        use crate::app::automation::program_bits::Stream;
+        assert_eq!(first_stream(false, true, true), Stream::Stdout);
+        assert_eq!(first_stream(true, true, true), Stream::Stderr);
+        assert_eq!(first_stream(false, false, true), Stream::Stderr);
+        assert_eq!(first_stream(true, true, false), Stream::Stdout);
+        assert_eq!(first_stream(false, false, false), Stream::Stdout);
     }
 
     #[test]

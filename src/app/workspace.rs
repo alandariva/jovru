@@ -26,7 +26,7 @@ use jykre::{
         apply,
         facts::{ErrorFacts, RunFacts, SchemaScope},
         prompts,
-        released::{self, QueryPreview},
+        released::QueryPreview,
     },
     backend, cell_format, connection_store,
     drivers::*,
@@ -207,6 +207,10 @@ pub struct Workspace {
     opened_sql: Option<String>,
     notice: Option<Feedback>,
     filter_open: bool,
+    /// Highlight or filter, kept for the next time the bar opens.
+    find_mode: jykre::grid::FindMode,
+    /// The highlight search's `1/3`, while it has a current occurrence.
+    find_position: Option<String>,
     filter: Entity<InputState>,
     /// Tells the filter text typed last from earlier keystrokes still
     /// waiting to apply.
@@ -265,7 +269,7 @@ impl Workspace {
                 )
             });
         }
-        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Filter results…")));
+        let filter = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("Find in results…")));
         let assistant_subscription = cx.subscribe_in(
             &assistant_panel,
             window,
@@ -274,8 +278,24 @@ impl Workspace {
             },
         );
         let filter_subscription = cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
-            if matches!(event, InputEvent::Change) && this.filter_open {
-                this.filter_soon(cx);
+            if !this.filter_open {
+                return;
+            }
+            match event {
+                InputEvent::Change => {
+                    let text = this.filter.read(cx).value().to_string();
+                    this.grid
+                        .update(cx, |grid, cx| grid.set_find_needle(&text, cx));
+                    this.filter_soon(cx);
+                }
+                InputEvent::PressEnter {
+                    shift,
+                    secondary: false,
+                    ..
+                } => {
+                    this.grid.update(cx, |grid, cx| grid.step_find(!*shift, cx));
+                }
+                _ => {}
             }
         });
         let sales = demo::is_sales(sql);
@@ -313,6 +333,10 @@ impl Workspace {
                 }
                 ResultGridEvent::RowsShown { rows } => {
                     this.filtered_rows = *rows;
+                    cx.notify();
+                }
+                ResultGridEvent::FindPosition(position) => {
+                    this.find_position = position.clone();
                     cx.notify();
                 }
                 ResultGridEvent::Notice(notice) => {
@@ -442,6 +466,8 @@ impl Workspace {
             opened_sql: Some(sql.to_string()),
             notice: None,
             filter_open: false,
+            find_mode: jykre::grid::FindMode::Highlight,
+            find_position: None,
             filter_revision: 0,
             edit_job: None,
             edits_run: None,
@@ -2724,27 +2750,27 @@ impl Workspace {
                                 ),
                             )
                             .child(
-                                icon_button("filter-results", I::ListFilter, tr!("Filter results"))
-                                    .aria_selected(self.filter_open)
-                                    .when(self.filter_open, |s| s.bg(rgb(colors().hover)))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.filter_open = !this.filter_open;
+                                icon_button(
+                                    "filter-results",
+                                    I::ListFilter,
+                                    tr!(
+                                        "Find in results ({0})",
+                                        super::shortcuts::label::<super::shortcuts::FindInResults>(
+                                            cx
+                                        )
+                                    ),
+                                )
+                                .aria_selected(self.filter_open)
+                                .when(self.filter_open, |s| s.bg(rgb(colors().hover)))
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
                                         if this.filter_open {
-                                            this.filter
-                                                .update(cx, |input, cx| input.focus(window, cx));
-                                        }
-                                        // A closed filter bar must not keep hiding rows,
-                                        // nor apply text still waiting.
-                                        this.filter_revision += 1;
-                                        let filter = if this.filter_open {
-                                            this.filter.read(cx).value().to_string()
+                                            this.close_find(window, cx);
                                         } else {
-                                            String::new()
-                                        };
-                                        this.grid
-                                            .update(cx, |grid, cx| grid.set_filter(&filter, cx));
-                                        cx.notify();
-                                    })),
+                                            this.open_find(false, window, cx);
+                                        }
+                                    },
+                                )),
                             )
                             .child(self.copy_menu(cx))
                             .child(
@@ -2809,16 +2835,7 @@ impl Workspace {
                     .flatten(),
                 |s, bar| s.child(bar),
             )
-            .when(self.filter_open, |s| {
-                s.child(
-                    column()
-                        .px_3()
-                        .py_2()
-                        .gap_1()
-                        .child(Input::new(&self.filter).small().prefix(I::Search).w_full())
-                        .when_some(self.filter_scope(), |s, scope| s.child(label(scope))),
-                )
-            })
+            .when(self.filter_open, |s| s.child(self.find_bar(cx)))
             .when_some(self.export_bar(cx), |s, bar| s.child(bar))
             .child(
                 div()
@@ -3371,7 +3388,166 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// What the filter searches, when it is open: only the rows held for
+    /// Opens the result search and focuses its field. When it is already
+    /// open, `select_text` selects what was typed (a second Ctrl+F).
+    fn open_find(&mut self, select_text: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let already = self.filter_open;
+        self.filter_open = true;
+        self.result_view = ResultView::Table;
+        self.filter.update(cx, |input, cx| {
+            input.focus(window, cx);
+            if select_text && already {
+                input.select_all(window, cx);
+            }
+        });
+        if !already {
+            self.filter_revision += 1;
+            let text = self.filter.read(cx).value().to_string();
+            let mode = self.find_mode;
+            self.grid
+                .update(cx, |grid, cx| grid.settle_find(&text, mode, cx));
+        }
+        cx.notify();
+    }
+
+    /// Closes the search and gives the keyboard back to the grid.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.filter_open {
+            return;
+        }
+        self.filter_open = false;
+        self.filter_revision += 1;
+        self.grid.update(cx, |grid, cx| {
+            grid.close_find(cx);
+            grid.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn set_find_mode(
+        &mut self,
+        mode: jykre::grid::FindMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.find_mode == mode {
+            return;
+        }
+        self.find_mode = mode;
+        self.filter_revision += 1;
+        let text = self.filter.read(cx).value().to_string();
+        self.grid
+            .update(cx, |grid, cx| grid.settle_find(&text, mode, cx));
+        // The keyboard stays in the field, so typing goes on after the click.
+        self.filter.update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
+    }
+
+    /// The search bar: the text, the current occurrence, highlight or
+    /// filter, and a button that closes it.
+    fn find_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mode = self.find_mode;
+        let mode_button =
+            |id: &'static str, title: &'static str, this_mode: jykre::grid::FindMode| {
+                let chosen = mode == this_mode;
+                div()
+                    .id(id)
+                    .role(Role::Button)
+                    .aria_label(title)
+                    .aria_selected(chosen)
+                    .focusable()
+                    .tab_index(0)
+                    .border_1()
+                    .border_color(transparent_black())
+                    .focus_visible(|s| s.border_color(rgb(colors().mint)))
+                    .px(px(6.))
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(rgb(if chosen {
+                        colors().text
+                    } else {
+                        colors().faint
+                    }))
+                    .when(chosen, |s| s.bg(rgb(colors().hover)))
+                    .hover(|s| s.text_color(rgb(colors().text)))
+                    .child(title)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_find_mode(this_mode, window, cx)
+                    }))
+            };
+        column()
+            .id("result-find")
+            .key_context(super::result_grid::FIND_CONTEXT)
+            .role(Role::Search)
+            .aria_label(tr!("Find in results"))
+            .px_3()
+            .py_2()
+            .gap_1()
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.modifiers.modified() {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "escape" => this.close_find(window, cx),
+                    "down" | "up" => {
+                        let forward = event.keystroke.key == "down";
+                        if !this.grid.update(cx, |grid, cx| grid.step_find(forward, cx)) {
+                            return;
+                        }
+                    }
+                    _ => return,
+                }
+                window.prevent_default();
+                cx.stop_propagation();
+            }))
+            .child(
+                row()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.filter).small().prefix(I::Search).w_full()),
+                    )
+                    .when_some(self.find_position.clone(), |row, position| {
+                        row.child(
+                            div()
+                                .id("result-find-position")
+                                .role(Role::Status)
+                                .aria_label(position.clone())
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(rgb(colors().faint))
+                                .child(position),
+                        )
+                    })
+                    .child(mode_button(
+                        "result-find-highlight",
+                        tr!("Highlight"),
+                        jykre::grid::FindMode::Highlight,
+                    ))
+                    .child(mode_button(
+                        "result-find-filter",
+                        tr!("Filter"),
+                        jykre::grid::FindMode::Filter,
+                    ))
+                    .child(
+                        icon_button("close-result-find", I::X, tr!("Close the search"))
+                            .size(px(22.))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.close_find(window, cx)),
+                            ),
+                    ),
+            )
+            .when_some(self.filter_scope(), |s, scope| s.child(label(scope)))
+    }
+
+    /// What the search covers, when it is open: only the rows held for
     /// the page on screen, which may not be the whole result.
     fn filter_scope(&self) -> Option<String> {
         let tab = self.results.active()?;
@@ -3379,11 +3555,19 @@ impl Workspace {
         let rows = cell_format::count(page.data.row_count());
         let partial =
             tab.has_next() || tab.page_number() > 1 || tab.rest_closed() || tab.limit.is_some();
-        Some(if partial {
+        let highlight = self.find_mode == jykre::grid::FindMode::Highlight;
+        Some(if partial && highlight {
+            tr!(
+                "Highlights this page only ({0} rows). Other pages and rows past the limit are not searched.",
+                rows
+            )
+        } else if partial {
             tr!(
                 "Filters this page only ({0} rows). Other pages and rows past the limit are not searched.",
                 rows
             )
+        } else if highlight {
+            tr!("Highlights the {0} rows of this result.", rows)
         } else {
             tr!("Filters the {0} rows of this result.", rows)
         })
@@ -3487,9 +3671,10 @@ impl Workspace {
             cx.background_executor().timer(FILTER_DELAY).await;
             let _ = weak.update(cx, |this, cx| {
                 if this.filter_revision == revision && this.filter_open {
-                    let filter = this.filter.read(cx).value().to_string();
+                    let text = this.filter.read(cx).value().to_string();
+                    let mode = this.find_mode;
                     this.grid
-                        .update(cx, |grid, cx| grid.set_filter(&filter, cx));
+                        .update(cx, |grid, cx| grid.settle_find(&text, mode, cx));
                 }
             });
         })
@@ -3618,7 +3803,8 @@ impl Workspace {
     /// Runs a statement the user approved for the assistant, in the
     /// assistant's own session, and hands the panel its result cut to what
     /// may be sent ([`QueryPreview`]); the panel then asks the user whether
-    /// to send it. It is not a result tab and not in the history.
+    /// to send it. The run is `jykre::assistant_query::run_once`. It is not
+    /// a result tab and not in the history.
     fn run_assistant_query(&mut self, query: AssistantQuery, cx: &mut Context<Self>) {
         let Some(input) = self.input.clone() else {
             let error = DriverError::new(
@@ -3646,39 +3832,21 @@ impl Workspace {
         let lease = self.assistant_lease;
         let connection = self.cache_id;
         let context = self.context.clone();
-        let request = QueryRequest::new(
-            sql.clone(),
-            ExecutionOptions {
-                max_rows: released::READ_ROWS,
-                ..self.options()
-            },
-        );
         cx.spawn(async move |weak, cx| {
             // The result becomes a preview on the runtime; its rows are
             // dropped there.
             let outcome = backend::run(async move {
                 let stopped = cancel.clone();
-                let run = backend::query_in_context(
-                    connection,
-                    input,
-                    context,
-                    session,
-                    vec![request],
-                    ASSISTANT_MEMORY_CEILING,
-                    cancel,
+                let run = jykre::assistant_query::run_once(
+                    connection, input, context, session, sql, cancel,
                 )
                 .await;
-                let (preview, session) = match run {
-                    Ok(run) => {
-                        let preview = match &run.batch {
-                            Ok(batch) => QueryPreview::from_batch(batch, &sql),
-                            Err(error) => QueryPreview::from_error(error, &sql),
-                        };
-                        (preview, run.session)
-                    }
-                    Err(error) => (QueryPreview::from_error(&error, &sql), None),
-                };
-                Ok(((!stopped.is_cancelled()).then_some(preview), session))
+                // A stop still produced a preview; the panel treats it as
+                // not run, the same as when no password was given.
+                Ok((
+                    (!stopped.is_cancelled()).then_some(run.preview),
+                    run.session,
+                ))
             })
             .await;
             let (preview, session) = outcome.unwrap_or((None, None));
@@ -3762,10 +3930,6 @@ impl Workspace {
         cx.notify();
     }
 }
-
-/// The memory one query of the assistant may read: far more than the
-/// [`released::MAX_ROWS`] rows it may send, far less than a tab's result.
-const ASSISTANT_MEMORY_CEILING: usize = 4 << 20;
 
 /// A statement the user approved for the assistant, on its way.
 struct AssistantQuery {
@@ -4652,13 +4816,21 @@ fn run_button(
         StatementStatus::Ready => (I::Play, colors().mint, tr!("Run this query")),
         StatementStatus::Pending => (
             I::Clock,
-            colors().faint,
+            colors().state_disabled,
             tr!("Waiting for the statements before it · stop the run"),
         ),
-        StatementStatus::Running => (I::Square, colors().amber, tr!("Stop execution")),
-        StatementStatus::Success => (I::CircleCheck, colors().mint, tr!("Success · run again")),
-        StatementStatus::Error => (I::CircleX, colors().red, tr!("Error · run again")),
-        StatementStatus::Cancelled => (I::Play, colors().faint, tr!("Cancelled · run again")),
+        StatementStatus::Running => (I::Square, colors().state_execution, tr!("Stop execution")),
+        StatementStatus::Success => (
+            I::CircleCheck,
+            colors().state_success,
+            tr!("Success · run again"),
+        ),
+        StatementStatus::Error => (I::CircleX, colors().state_error, tr!("Error · run again")),
+        StatementStatus::Cancelled => (
+            I::Play,
+            colors().state_disabled,
+            tr!("Cancelled · run again"),
+        ),
     };
     div()
         .id(("query-run", index))
@@ -4727,6 +4899,11 @@ impl Render for Workspace {
             .id("query-workspace")
             .size_full()
             .bg(rgb(colors().bg))
+            .on_action(
+                cx.listener(|this, _: &super::shortcuts::FindInResults, window, cx| {
+                    this.open_find(true, window, cx);
+                }),
+            )
             .child(content)
     }
 }

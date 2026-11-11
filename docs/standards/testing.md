@@ -457,6 +457,23 @@ and the evidence.
   temporarily slowed by 100 ms, the new test failed 10 of 10 without the
   wake and passed 10 of 10 with it.
 
+### `taken_port_is_reported_without_panicking` (MCP)
+
+- **Seen:** 2026-11-10, twice in the parallel library suite on Windows;
+  the same test passed alone. The endpoint was `Off` while a second bind
+  correctly returned `AddrInUse`.
+- **Owner:** the maintainer.
+- **Status:** Fixed on 2026-11-10.
+- **Cause:** the listener tests prepared settings in separate temporary
+  folders through the application's global `MCP_WRITES` queue. A write
+  asked for by another test could supersede the fixture's setup, leaving
+  the default disabled setting. The listener never reached its bind.
+- **Fix:** listener fixtures write their synthetic settings directly through
+  `ConfigRepository`. The assertions on disabled and occupied ports stay
+  in place. The registry's test of ordered writes still uses `MCP_WRITES`.
+- **Evidence:** the parallel workspace suite passes after the fixture
+  change, including the occupied-port test and the ordered-write test.
+
 ## Lightweight hook
 
 The `.githooks/pre-commit` hook only checks formatting. Enable it per checkout:

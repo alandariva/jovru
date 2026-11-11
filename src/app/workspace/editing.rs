@@ -200,9 +200,9 @@ impl Workspace {
                     Err(error) => Err(error),
                 };
                 let editing = match target {
-                    Ok(write::EditTarget::Editable(table)) => {
-                        Some(Editing::Session(Box::new(EditSession::new(table, binary))))
-                    }
+                    Ok(write::EditTarget::Editable(table)) => Some(Editing::Session(
+                        std::sync::Arc::new(EditSession::new(table, binary)),
+                    )),
                     Ok(write::EditTarget::ReadOnly(reason)) => Some(Editing::ReadOnly(reason)),
                     Ok(_) => None,
                     Err(error) => {

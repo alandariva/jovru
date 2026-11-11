@@ -53,8 +53,12 @@ touches that path.
    than 30 s after the window opens
    ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)). High-frequency
    UI events (mouse, selection, frames) are never exported.
-2. **Load on demand.** The explorer reads children page by page; results are
-   bounded by the row limit while they are read.
+2. **Load on demand.** The explorer reads children page by page, and only
+   of the nodes that are expanded: the first page (200) shows at once and
+   the rest follows in the background, 2,000 at a time, off the UI thread,
+   so the search of the tree sees every child of what is open (maintainer
+   decision, 2026-11-09). Nothing is read under a collapsed node. Results
+   are bounded by the row limit while they are read.
 3. **Stream, do not buffer everything.** Drivers deliver rows to a `RowSink`
    and stop reading at the limit.
 4. **A frame costs what is on screen.** Long collections are virtualized and
@@ -77,7 +81,8 @@ A change that introduces one of these is rejected in review:
 - Converting, cloning or dropping a large result on the UI thread.
 - N+1 introspection (one query per table to read its columns); use set-based
   queries per database or schema.
-- Reading a whole metadata tree into the UI instead of paging it.
+- Reading a whole metadata tree into the UI instead of paging it: what is
+  read is what is expanded, page by page, never the levels below it.
 - Polling timers to discover state that an event or subscription can deliver.
 - Cloning large vectors to get past the borrow checker.
 - Recomputing a data-sized filter on every keystroke without a debounce.

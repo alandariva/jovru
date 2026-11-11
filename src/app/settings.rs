@@ -86,7 +86,70 @@ impl AppView {
         self.settings_page = page;
         self.settings_open = true;
         self.settings_focus.focus(window, cx);
+        self.reload_themes(cx);
         cx.notify();
+    }
+
+    /// Reads theme files again, off the UI thread, so a JSON dropped in
+    /// `themes/` can be chosen without restarting. The font size is kept.
+    fn reload_themes(&mut self, cx: &mut Context<Self>) {
+        let dir = jykre::connection_store::data_dir();
+        let chosen = theme::choice(cx);
+        let overrides = cx
+            .try_global::<theme::ThemeOverrides>()
+            .cloned()
+            .unwrap_or_default();
+        self.theme_reload = Some(cx.spawn(async move |weak, cx| {
+            let loaded = jykre::backend::run(async move {
+                let catalog = tokio::task::spawn_blocking(move || {
+                    let executable = std::env::current_exe().ok();
+                    let catalog = jykre::theme::load_catalog(&jykre::theme::theme_directories(
+                        &dir,
+                        executable.as_deref(),
+                    ));
+                    let mut choices = ThemeChoice::ALL.to_vec();
+                    choices.extend(
+                        catalog
+                            .extra_ids()
+                            .into_iter()
+                            .map(|id| ThemeChoice::Named(id.to_owned())),
+                    );
+                    if !choices.contains(&chosen) {
+                        choices.push(chosen);
+                    }
+                    let previews = theme::ThemePreviews([false, true].map(|dark| {
+                        choices
+                            .iter()
+                            .map(|choice| {
+                                (choice.clone(), catalog.resolve(choice, dark, &overrides.0))
+                            })
+                            .collect()
+                    }));
+                    (catalog, previews)
+                })
+                .await
+                .map_err(|error| {
+                    jykre_core::DriverError::new(
+                        jykre_core::ErrorCode::Internal,
+                        format!("Theme loading task failed: {error}"),
+                    )
+                })?;
+                Ok(catalog)
+            })
+            .await;
+            let Ok((catalog, previews)) = loaded else {
+                tracing::warn!("Could not reload themes");
+                return;
+            };
+            let _ = weak.update(cx, |this, cx| {
+                super::theme::install_catalog(catalog, cx);
+                cx.set_global(previews);
+                let choice = super::theme::choice(cx);
+                super::theme::apply(choice, None, cx);
+                this.recolor_groups(cx);
+                cx.notify();
+            });
+        }));
     }
 
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -171,11 +234,15 @@ impl AppView {
                             .child(self.settings_nav(cx))
                             .child(
                                 column()
-                                    .id("settings-page")
                                     .flex_1()
                                     .min_w_0()
                                     .bg(rgb(colors().bg))
-                                    .overflow_y_scroll()
+                                    // With a scrollbar: the bare wheel scroll gave no
+                                    // sign that the page continues below the fold.
+                                    .overflow_y_scrollbar()
+                                    // One scroll position per page: sharing one made a
+                                    // page open scrolled to where the last one was left.
+                                    .id(("settings-page", page as usize))
                                     .p_6()
                                     .gap_4()
                                     .child(
@@ -306,6 +373,10 @@ impl AppView {
             window.appearance(),
             WindowAppearance::Dark | WindowAppearance::VibrantDark
         );
+        let previews = cx
+            .try_global::<theme::ThemePreviews>()
+            .map(|previews| previews.0[usize::from(system_dark)].as_slice())
+            .unwrap_or_default();
         column()
             .gap_4()
             .child(
@@ -316,31 +387,49 @@ impl AppView {
                         .aria_label(tr!("Theme"))
                         .items_stretch()
                         .gap_3()
-                        .children(ThemeChoice::ALL.into_iter().enumerate().map(
-                            |(index, choice)| {
-                                let (title, detail, dark) = match choice {
-                                    ThemeChoice::System => (
-                                        tr!("System"),
-                                        if system_dark {
-                                            tr!("Follows the system, dark now")
-                                        } else {
-                                            tr!("Follows the system, light now")
-                                        },
-                                        system_dark,
-                                    ),
-                                    ThemeChoice::Light => (tr!("Light"), tr!("Always light"), false),
-                                    ThemeChoice::Dark => (tr!("Dark"), tr!("Always dark"), true),
-                                };
-                                theme_card(index, title, detail, dark, chosen == choice).on_click(
-                                    cx.listener(move |this, _, window, cx| {
-                                        if theme::choice(cx) != choice {
-                                            this.set_theme(choice, window, cx);
-                                            this.persist_theme(choice, cx);
-                                        }
-                                    }),
-                                )
-                            },
-                        )),
+                        .flex_wrap()
+                        .children(previews.iter().enumerate().map(|(index, (choice, resolved))| {
+                            let (title, detail) = match choice {
+                                ThemeChoice::System => (
+                                    tr!("System").to_owned(),
+                                    if system_dark {
+                                        tr!("Follows the system, dark now")
+                                    } else {
+                                        tr!("Follows the system, light now")
+                                    },
+                                ),
+                                ThemeChoice::Light => {
+                                    (tr!("Light").to_owned(), tr!("Always light"))
+                                }
+                                ThemeChoice::Dark => (tr!("Dark").to_owned(), tr!("Always dark")),
+                                ThemeChoice::Named(id) => (
+                                    if resolved.fell_back { id.clone() } else { resolved.name.clone() },
+                                    if resolved.fell_back && system_dark {
+                                        tr!("Follows the system, dark now")
+                                    } else if resolved.fell_back {
+                                        tr!("Follows the system, light now")
+                                    } else if resolved.appearance.is_dark() {
+                                        tr!("Always dark")
+                                    } else {
+                                        tr!("Always light")
+                                    },
+                                ),
+                            };
+                            let selected = choice.clone();
+                            theme_card(
+                                index,
+                                title,
+                                detail,
+                                resolved.application.as_ref(),
+                                &chosen == choice,
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if theme::choice(cx) != selected {
+                                    this.set_theme(selected.clone(), window, cx);
+                                    this.persist_theme(selected.clone(), cx);
+                                }
+                            }))
+                        })),
                 ),
             )
             .child(
@@ -544,21 +633,16 @@ fn setting_row(
 /// A choice of theme, with a small picture of the window in it.
 fn theme_card(
     index: usize,
-    title: &'static str,
+    title: String,
     detail: &'static str,
-    dark: bool,
+    shown: &super::ui::Palette,
     chosen: bool,
 ) -> Stateful<Div> {
-    let shown = if dark {
-        &super::ui::DARK
-    } else {
-        &super::ui::LIGHT
-    };
     let c = colors();
     column()
         .id(("theme-choice", index))
         .role(Role::RadioButton)
-        .aria_label(title)
+        .aria_label(title.clone())
         .aria_selected(chosen)
         .focusable()
         .tab_index(0)
@@ -690,7 +774,7 @@ fn theme_card(
 
 /// [`PREVIEW_SQL`] with the editor's colours.
 fn sql_preview() -> StyledText {
-    let c = colors();
+    let c = editor_colors();
     let style = |color: u32| HighlightStyle {
         color: Some(rgb(color).into()),
         ..HighlightStyle::default()
