@@ -1,6 +1,6 @@
 //! Batches, the bounded channel between reading and writing, and an import
 //! run all or nothing
-//! ([ADR-0040](../../docs/adr/0040-importing-files-into-a-table.md#1-where-it-lives)).
+//! ([D-0040](../../docs/decisions/drivers.md#d-0040)).
 //!
 //! Reading and decoding run on the runtime's blocking pool
 //! ([`read_batches`]); writing runs on the runtime through a
@@ -12,7 +12,7 @@
 //! [`run`] opens the writer's transaction, writes every batch into it and
 //! commits once the file is read to its end; a failure, a cancellation or
 //! the time limit rolls it back, so the table is as it was. Nothing is ever
-//! retried. The writer is the seam ADR-0039's write path fills
+//! retried. The writer is the seam D-0039's write path fills
 //! (`Session::begin_writes`, `write` with `WriteScope::Caller`,
 //! `end_writes`), which this part of A11 does not have yet.
 use super::mapping::Mapping;
@@ -109,7 +109,7 @@ pub struct Progress {
 }
 
 /// How long an import runs before its progress shows, and before its
-/// elapsed time and **Cancel** do ([User experience](../../docs/reference/ux.md#always-visible-states)).
+/// elapsed time and **Cancel** do ([User experience](../../docs/reference/ux/states.md#always-visible-states)).
 pub const PROGRESS_AFTER: Duration = Duration::from_millis(300);
 pub const CANCEL_AFTER: Duration = Duration::from_secs(2);
 
@@ -187,8 +187,8 @@ pub fn read_batches(
     Ok(rows)
 }
 
-/// Where an import's rows go: ADR-0039's write path in the import's own
-/// session (ADR-0040, section 4). Every call may be cancelled through its
+/// Where an import's rows go: D-0039's write path in the import's own
+/// session (D-0040, section 4). Every call may be cancelled through its
 /// token, which interrupts the statement as for a run.
 #[async_trait]
 pub trait BatchWriter: Send {

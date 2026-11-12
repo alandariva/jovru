@@ -9,7 +9,7 @@
 //! [`Limits::queue_per_connection`] per connection, for at most
 //! [`Limits::queue_wait`]. A run whose connection is busy does not hold back
 //! a later run on another connection. Queued runs live in memory only.
-use jykre_core::ConnectionId;
+use jovru_core::ConnectionId;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 

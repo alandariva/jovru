@@ -1,5 +1,5 @@
 //! Whole imports into SQLite files, through the driver's own session: the
-//! write path ADR-0040 adds, end to end, on dedicated synthetic files.
+//! write path D-0040 adds, end to end, on dedicated synthetic files.
 use super::mapping::{Mapping, MatchBy, TargetColumn};
 use super::pipeline::{ImportPlan, Outcome, Progress};
 use super::session::{ImportJob, run, target_columns};

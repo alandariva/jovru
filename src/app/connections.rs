@@ -1,12 +1,12 @@
 use super::*;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
-use jykre::explorer::QuickMode;
-use jykre::metadata_scope::{MetadataScope, RefreshPhase, RefreshProgress, format_eta};
-use jykre::refresh_queue::{Queued, RefreshJob};
-use jykre::result::{DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT};
-use jykre::{cell_format, tr};
-use jykre_storage::{PageCursor, RefreshState};
+use jovru::explorer::QuickMode;
+use jovru::metadata_scope::{MetadataScope, RefreshPhase, RefreshProgress, format_eta};
+use jovru::refresh_queue::{Queued, RefreshJob};
+use jovru::result::{DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT};
+use jovru::{cell_format, tr};
+use jovru_storage::{PageCursor, RefreshState};
 use std::time::SystemTime;
 
 /// A context-menu command run against the app view.
@@ -644,7 +644,7 @@ impl AppView {
                         Feedback::new(Tone::Success, tr!("Connection established successfully."))
                     }
                     Err(error) => {
-                        let report = jykre::error_report::ErrorReport::new(&error);
+                        let report = jovru::error_report::ErrorReport::new(&error);
                         let report = if this.driver == 2 {
                             report.with_databricks_auth()
                         } else {
@@ -677,27 +677,27 @@ impl AppView {
                 let themes_dir = dir.clone();
                 let theme_catalog = tokio::task::spawn_blocking(move || {
                     let executable = std::env::current_exe().ok();
-                    jykre::theme::load_catalog(&jykre::theme::theme_directories(
+                    jovru::theme::load_catalog(&jovru::theme::theme_directories(
                         &themes_dir,
                         executable.as_deref(),
                     ))
                 })
                 .await
-                .unwrap_or_else(|_| jykre::theme::Catalog::bundled());
+                .unwrap_or_else(|_| jovru::theme::Catalog::bundled());
                 let (font_size, copy, state, reports, theme, theme_overrides, favorites, library) =
                     match ConfigRepository::open(&dir).await {
                         Ok(repository) => {
                             let font_size = repository.setting("editor.font_size").await;
-                            let theme = repository.setting(jykre::theme::SETTINGS_KEY).await;
+                            let theme = repository.setting(jovru::theme::SETTINGS_KEY).await;
                             let theme_overrides =
-                                repository.setting(jykre::theme::OVERRIDES_KEY).await;
-                            let copy = repository.setting(jykre::copy_as::PREFERENCES_KEY).await;
+                                repository.setting(jovru::theme::OVERRIDES_KEY).await;
+                            let copy = repository.setting(jovru::copy_as::PREFERENCES_KEY).await;
                             let state = super::state::read_state(&repository).await;
-                            let reports = repository.setting(jykre::reports::SETTINGS_KEY).await;
+                            let reports = repository.setting(jovru::reports::SETTINGS_KEY).await;
                             let favorites =
-                                repository.setting(jykre::favorites::SETTINGS_KEY).await;
+                                repository.setting(jovru::favorites::SETTINGS_KEY).await;
                             let library = repository
-                                .setting(jykre::query_files::library::SETTINGS_KEY)
+                                .setting(jovru::query_files::library::SETTINGS_KEY)
                                 .await;
                             repository.close().await;
                             (
@@ -728,7 +728,7 @@ impl AppView {
                     Ok(mut state) => {
                         let data = dir.clone();
                         match tokio::task::spawn_blocking(move || {
-                            let filled = jykre::query_files::tabs::fill(&mut state, &data);
+                            let filled = jovru::query_files::tabs::fill(&mut state, &data);
                             (state, filled)
                         })
                         .await
@@ -785,7 +785,7 @@ impl AppView {
                         Err(error.clone()),
                         Err(error.clone()),
                         Err(error.clone()),
-                        jykre::theme::Catalog::bundled(),
+                        jovru::theme::Catalog::bundled(),
                         Err(error.clone()),
                         Err(error),
                         Default::default(),
@@ -796,7 +796,7 @@ impl AppView {
                 super::theme::install_catalog(theme_catalog, cx);
                 if let Ok(value) = &theme_overrides {
                     cx.set_global(super::theme::ThemeOverrides(
-                        jykre::theme::Overrides::from_value(value.as_ref()),
+                        jovru::theme::Overrides::from_value(value.as_ref()),
                     ));
                 }
                 let mut problems = Vec::new();
@@ -816,7 +816,7 @@ impl AppView {
                 }
                 match theme {
                     Ok(value) => {
-                        let choice = jykre::theme::ThemeChoice::from_value(value.as_ref());
+                        let choice = jovru::theme::ThemeChoice::from_value(value.as_ref());
                         this.set_theme(choice, window, cx);
                     }
                     Err(error) => problems.push(tr!(
@@ -826,7 +826,7 @@ impl AppView {
                 }
                 match copy {
                     Ok(value) => cx.set_global(super::copying::CopyPreferences(
-                        jykre::copy_as::CopyOptions::from_value(value.as_ref()),
+                        jovru::copy_as::CopyOptions::from_value(value.as_ref()),
                     )),
                     Err(error) => problems.push(tr!(
                         "Could not read the copy settings; the defaults are used: {0}",
@@ -968,7 +968,7 @@ impl AppView {
     /// **Open log folder**: shows the folder of the application's logs in
     /// the system's file manager, creating it first if nothing was logged.
     pub(super) fn open_log_folder(&mut self, cx: &mut Context<Self>) {
-        let folder = jykre::logging::log_dir(&connection_store::data_dir());
+        let folder = jovru::logging::log_dir(&connection_store::data_dir());
         cx.spawn(async move |weak, cx| {
             let created = folder.clone();
             let result = backend::run(async move {
@@ -997,7 +997,7 @@ impl AppView {
     /// their colours in it.
     pub(super) fn set_theme(
         &mut self,
-        choice: jykre::theme::ThemeChoice,
+        choice: jovru::theme::ThemeChoice,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1043,7 +1043,7 @@ impl AppView {
     /// a burst wins.
     pub(super) fn persist_theme(
         &mut self,
-        choice: jykre::theme::ThemeChoice,
+        choice: jovru::theme::ThemeChoice,
         cx: &mut Context<Self>,
     ) {
         let dir = connection_store::data_dir();
@@ -1054,7 +1054,7 @@ impl AppView {
                     .run(ticket, async {
                         let repository = ConfigRepository::open(&dir).await?;
                         let result = repository
-                            .set_setting(jykre::theme::SETTINGS_KEY, &choice.to_value())
+                            .set_setting(jovru::theme::SETTINGS_KEY, &choice.to_value())
                             .await;
                         repository.close().await;
                         result
@@ -1802,11 +1802,11 @@ impl AppView {
         &mut self,
         index: usize,
         path: &ObjectPath,
-        key: jykre::explorer::TreeKey,
+        key: jovru::explorer::TreeKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use jykre::explorer::TreeKey;
+        use jovru::explorer::TreeKey;
         match key {
             TreeKey::Up | TreeKey::Down if self.explorer_quick.is_some() => {
                 self.quick_step(key == TreeKey::Down, window, cx)
@@ -1831,17 +1831,17 @@ impl AppView {
 
     /// An arrow key on a connection or on one of its nodes. Up, Down, Home
     /// and End move through every line of the explorer, the connections
-    /// included ([`jykre::explorer::move_in`]); Left and Right expand,
-    /// collapse or move inside the tree ([`jykre::explorer::step`]).
+    /// included ([`jovru::explorer::move_in`]); Left and Right expand,
+    /// collapse or move inside the tree ([`jovru::explorer::step`]).
     fn tree_key(
         &mut self,
         index: usize,
         path: &ObjectPath,
-        key: jykre::explorer::TreeKey,
+        key: jovru::explorer::TreeKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use jykre::explorer::{TreeKey, TreeMove};
+        use jovru::explorer::{TreeKey, TreeMove};
         self.sync_explorer(cx);
         if matches!(
             key,
@@ -1856,7 +1856,7 @@ impl AppView {
             let target = stops
                 .iter()
                 .position(|(at, stop)| *at == index && *stop == path)
-                .and_then(|current| jykre::explorer::move_in(stops.len(), current, key))
+                .and_then(|current| jovru::explorer::move_in(stops.len(), current, key))
                 .map(|at| (stops[at].0, stops[at].1.clone()));
             if let Some((index, path)) = target {
                 self.select_node(index, &path, window, cx);
@@ -1900,7 +1900,7 @@ impl AppView {
         };
         // A search shows every match open.
         let open = |node: &MetadataObject| searching || connection.tree.is_expanded(&node.path);
-        match jykre::explorer::step(&nodes, open, current, key) {
+        match jovru::explorer::step(&nodes, open, current, key) {
             TreeMove::Focus(at) => {
                 let target = nodes[at].path.clone();
                 self.select_node(index, &target, window, cx);
@@ -2042,7 +2042,7 @@ impl AppView {
         if connection.revalidate_hours == 0 {
             return;
         }
-        let due = jykre::explorer::due_for_revalidation(
+        let due = jovru::explorer::due_for_revalidation(
             &connection.metadata_statuses,
             &connection.scope,
             std::time::Duration::from_secs(u64::from(connection.revalidate_hours) * 3_600),
@@ -2284,7 +2284,7 @@ impl AppView {
                                 .role(Role::ListItem)
                                 .aria_label(format!(
                                     "{} {}",
-                                    jykre::explorer::inspected_kind_name(item.kind),
+                                    jovru::explorer::inspected_kind_name(item.kind),
                                     item.name
                                 ))
                                 .h(px(30.))
@@ -2296,7 +2296,7 @@ impl AppView {
                                         .flex_none()
                                         .text_size(px(12.))
                                         .text_color(rgb(colors().faint))
-                                        .child(jykre::explorer::inspected_kind_name(item.kind)),
+                                        .child(jovru::explorer::inspected_kind_name(item.kind)),
                                 )
                                 .child(
                                     div()
@@ -2388,7 +2388,7 @@ impl AppView {
         let choices: Vec<_> = connection
             .namespaces
             .iter()
-            .map(jykre::ddl::namespace_context)
+            .map(jovru::ddl::namespace_context)
             .collect();
         for panel in self.panels.values() {
             panel.update(cx, |panel, cx| {
@@ -2543,7 +2543,7 @@ impl AppView {
             OpenTable::Data => data.clone(),
             OpenTable::Query => backend::preview_sql(&*driver, stored_at, connection.row_limit),
         };
-        let title = jykre::explorer::qualified_title(path);
+        let title = jovru::explorer::qualified_title(path);
         let group = connection.group;
         if let Some(tab) = self.add_query(group, &title, &sql, window, cx)
             && let Some(panel) = self.panels.get(&tab).cloned()
@@ -2571,7 +2571,7 @@ impl AppView {
         // `#tag` filters only saved queries; tables are found by the rest.
         let query = if palette {
             self.match_saved_in_palette(cx);
-            jykre::workspace_state::without_tag_filters(&typed)
+            jovru::workspace_state::without_tag_filters(&typed)
         } else {
             typed.clone()
         };
@@ -2598,7 +2598,7 @@ impl AppView {
             self.command_searching = false;
             self.command_matches
                 .retain(|item| matches!(item, super::PaletteItem::Saved(_)));
-            let more = jykre::palette::truncate(&mut self.command_matches, &typed);
+            let more = jovru::palette::truncate(&mut self.command_matches, &typed);
             self.command_more |= more;
             self.command_selected = self
                 .command_selected
@@ -2735,7 +2735,7 @@ impl AppView {
                                 // The search is limited, so its rows are built
                                 // once here, not while drawing.
                                 this.connections[index].set_search_rows(
-                                    jykre::explorer::search_rows(&objects, &lowered),
+                                    jovru::explorer::search_rows(&objects, &lowered),
                                 );
                             }
                         }
@@ -2751,10 +2751,10 @@ impl AppView {
                 if palette {
                     // The saved queries were already cut to the limit as the
                     // text changed, so what that left out still counts.
-                    let more = jykre::palette::truncate(&mut this.command_matches, &typed);
+                    let more = jovru::palette::truncate(&mut this.command_matches, &typed);
                     this.command_more |= more;
                     this.command_selected =
-                        jykre::palette::keep(chosen.as_ref(), &this.command_matches);
+                        jovru::palette::keep(chosen.as_ref(), &this.command_matches);
                     this.command_scroll.scroll_to_item(this.command_selected);
                 } else {
                     // The selection follows what was found.
@@ -3122,12 +3122,12 @@ impl AppView {
                 matches += rows
                     .iter()
                     .filter_map(TreeRow::object)
-                    .filter(|object| jykre::explorer::quick_matches(&object.name, text))
+                    .filter(|object| jovru::explorer::quick_matches(&object.name, text))
                     .count();
             }
             match filter.as_deref() {
                 Some(filter) => entries.extend(
-                    jykre::explorer::filter_rows(rows, filter)
+                    jovru::explorer::filter_rows(rows, filter)
                         .into_iter()
                         .map(|row| ExplorerEntry::Row(index, row)),
                 ),
@@ -3148,7 +3148,7 @@ impl AppView {
             .map(ExplorerEntry::key)
             .collect();
         let new: Vec<_> = entries.iter().map(ExplorerEntry::key).collect();
-        let (range, count) = jykre::explorer::changed_range(&old, &new);
+        let (range, count) = jovru::explorer::changed_range(&old, &new);
         self.explorer_list.splice(range, count);
         self.explorer_entries = entries;
         // A node go to definition asked for is selected once it shows.
@@ -3279,11 +3279,11 @@ impl AppView {
         let preview = object.stored_at.clone().unwrap_or_else(|| path.clone());
         let searching = self.cache_searching(cx);
         // Keys and partitions refresh with their table.
-        let refresh_path = jykre::explorer::refresh_scope(&path);
+        let refresh_path = jovru::explorer::refresh_scope(&path);
         let relation = object.kind.is_relation();
-        let opens = jykre::explorer::opens(&object);
-        let expandable = jykre::explorer::expandable(&object);
-        let detail = jykre::explorer::detail(&object);
+        let opens = jovru::explorer::opens(&object);
+        let expandable = jovru::explorer::expandable(&object);
+        let detail = jovru::explorer::detail(&object);
         let described = matches!(object.kind, ObjectKind::Column | ObjectKind::ForeignKey)
             || object.comment.is_some();
         let collapsed = !searching && !connection.tree.is_expanded(&path);
@@ -3298,7 +3298,7 @@ impl AppView {
             .first()
             .and_then(|namespace| namespace.0.last())
             .map(|part| part.kind);
-        let inspectable = jykre::explorer::inspectable(&object, last_level);
+        let inspectable = jovru::explorer::inspectable(&object, last_level);
         let defined = relation;
         let selected = self
             .explorer_selected
@@ -3308,7 +3308,7 @@ impl AppView {
         // What the search typed is marked in the name; only rows on
         // screen do this.
         let marks = match self.explorer_quick.as_ref() {
-            Some(quick) => jykre::palette::highlights(&object.name, &[&quick.text]),
+            Some(quick) => jovru::palette::highlights(&object.name, &[&quick.text]),
             None => Vec::new(),
         };
         row()
@@ -3432,7 +3432,7 @@ impl AppView {
                     // Built only when shown, not for every node.
                     .when(described, |s| {
                         s.tooltip(move |window, cx| {
-                            Tooltip::new(jykre::explorer::description(&described_object))
+                            Tooltip::new(jovru::explorer::description(&described_object))
                                 .build(window, cx)
                         })
                     })
@@ -3524,7 +3524,7 @@ impl AppView {
                 let favorite_path = path.clone();
                 let favorite_stored = preview.clone();
                 // A table imports into itself; a last-level namespace
-                // offers its tables, or a new one (ADR-0040).
+                // offers its tables, or a new one (D-0040).
                 let import_target = match object.kind {
                     // As the cache lists it, which the dialog's list does.
                     ObjectKind::Table => Some((Some(path.clone()), path.parent())),
@@ -3934,7 +3934,7 @@ impl AppView {
 
     /// The connection's colour and environment, in **Options**.
     fn appearance_fields(&self, cx: &mut Context<Self>) -> Div {
-        use jykre::connection_appearance::{ConnectionColor, Environment};
+        use jovru::connection_appearance::{ConnectionColor, Environment};
         let chosen = self.connection_appearance;
         let toggled = |on: bool| if on { Toggled::True } else { Toggled::False };
         let chip = |id: (&'static str, usize), text: &'static str, on: bool, color: u32| {
@@ -4639,9 +4639,9 @@ fn connection_detail(config: &ConnectionConfig) -> String {
 /// It names a hue, drawn in the theme on screen.
 fn connection_shade(
     driver: DriverKind,
-    appearance: jykre::connection_appearance::Appearance,
-) -> jykre::connection_appearance::ConnectionColor {
-    use jykre::connection_appearance::ConnectionColor as C;
+    appearance: jovru::connection_appearance::Appearance,
+) -> jovru::connection_appearance::ConnectionColor {
+    use jovru::connection_appearance::ConnectionColor as C;
     appearance.color.unwrap_or(match driver {
         DriverKind::MySql => C::Blue,
         DriverKind::Databricks => C::Purple,
@@ -4665,7 +4665,7 @@ fn tree_keys(
     cx: &mut Context<AppView>,
 ) -> Stateful<Div> {
     use super::shortcuts::*;
-    use jykre::explorer::TreeKey;
+    use jovru::explorer::TreeKey;
     fn on<A: Action>(
         node: Stateful<Div>,
         index: usize,

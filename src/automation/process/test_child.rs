@@ -1,7 +1,7 @@
 //! A program every test platform can run: this test binary, started again
 //! on [`automation_test_child`] alone, told what to do by
 //! [`MODE`] in its environment. The variable travels through the job's
-//! `environment.set`, as a user's constant would; a `JYKRE_*` name would
+//! `environment.set`, as a user's constant would; a `JOVRU_*` name would
 //! read as if it escaped the denylist.
 //!
 //! Modes (`name` or `name:argument`):
@@ -259,7 +259,7 @@ impl Client {
         let mut line = String::new();
         let _ = std::io::stdin().lock().read_line(&mut line);
         let token: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
-        let address = std::env::var("JYKRE_JJP_ADDRESS").unwrap_or_default();
+        let address = std::env::var("JOVRU_JJP_ADDRESS").unwrap_or_default();
         let stream = TcpStream::connect(address).expect("the host listens");
         let reader = BufReader::new(stream.try_clone().expect("a socket clones"));
         let mut client = Self {

@@ -4,7 +4,7 @@
 //! NULLs are bits in a bitmap, so a result costs a handful of allocations
 //! instead of one per cell, and its size in memory is known exactly. Values
 //! keep the database's text: exact numbers, temporal values and the text
-//! `NULL` are never reinterpreted ([Results](../docs/reference/results.md)).
+//! `NULL` are never reinterpreted ([Results](../docs/reference/results/README.md)).
 use crate::drivers::{Cell, ColumnInfo, ColumnOrigin, Row, RowSink, SinkControl};
 use std::fmt::Write as _;
 
@@ -23,7 +23,7 @@ pub const DEFAULT_MEMORY_CEILING: usize = 256 * 1024 * 1024;
 pub struct ResultColumn {
     pub name: String,
     pub data_type: String,
-    /// The column's source, as the driver described it (ADR-0039).
+    /// The column's source, as the driver described it (D-0039).
     pub origin: ColumnOrigin,
     /// How this page's cells of the column arrived: `Some(true)` as bytes
     /// (shown as `0x…`), `Some(false)` as text or all NULL, `None` mixed

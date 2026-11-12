@@ -2,7 +2,7 @@
 //! where in the text it puts the cursor. Nothing here reads the text: the
 //! editor gives the number of lines, which its rope knows without a scan,
 //! and clamps the column to the line itself
-//! ([User experience](../docs/reference/ux.md#keyboard-shortcuts)).
+//! ([User experience](../docs/reference/ux/shortcuts.md#keyboard-shortcuts)).
 use crate::tr;
 
 /// A line, and optionally a column, as the user numbers them (from 1).

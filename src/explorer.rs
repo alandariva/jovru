@@ -3,7 +3,7 @@
 //! in other desktop trees.
 use crate::drivers::{MetadataObject, ObjectKind, ObjectPath};
 use crate::tr;
-use jykre_storage::{ChildPage, PageCursor, RefreshStatus};
+use jovru_storage::{ChildPage, PageCursor, RefreshStatus};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -990,14 +990,14 @@ mod tests {
     #[tokio::test]
     async fn a_node_with_more_children_ends_with_load_more() {
         let dir = std::env::temp_dir().join(format!(
-            "jykre-explorer-{}",
+            "jovru-explorer-{}",
             crate::drivers::ConnectionId::new()
         ));
         let config = crate::drivers::ConnectionConfig {
             driver: crate::drivers::DriverKind::MySql,
             options: serde_json::json!({"host":"localhost","user":"fixture","sslMode":"disabled"}),
         };
-        let repository = jykre_storage::MetadataRepository::open(
+        let repository = jovru_storage::MetadataRepository::open(
             &dir,
             crate::drivers::ConnectionId::new(),
             &config,

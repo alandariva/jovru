@@ -1,10 +1,10 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-use jykre_core::*;
-use jykre_storage::ConfigRepository;
+use jovru_core::*;
+use jovru_storage::ConfigRepository;
 
 #[tokio::test]
 async fn configuration_settings_and_identity_survive_restart_and_reject_stale_writes() {
-    let dir = std::env::temp_dir().join(format!("jykre-config-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-config-{}", ConnectionId::new()));
     let repository = ConfigRepository::open(&dir).await.unwrap();
     let profile = ConnectionProfile {
         id: ConnectionId::new(),
@@ -47,7 +47,7 @@ async fn configuration_settings_and_identity_survive_restart_and_reject_stale_wr
 
 #[tokio::test]
 async fn a_profile_and_its_settings_are_saved_together_or_not_at_all() {
-    let dir = std::env::temp_dir().join(format!("jykre-config-atomic-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-config-atomic-{}", ConnectionId::new()));
     let repository = ConfigRepository::open(&dir).await.unwrap();
     let profile = ConnectionProfile {
         id: ConnectionId::new(),
@@ -59,8 +59,8 @@ async fn a_profile_and_its_settings_are_saved_together_or_not_at_all() {
         remember_password: false,
         revision: 0,
     };
-    let limit = jykre_storage::row_limit_key(profile.id);
-    let scope = jykre_storage::metadata_scope_key(profile.id);
+    let limit = jovru_storage::row_limit_key(profile.id);
+    let scope = jovru_storage::metadata_scope_key(profile.id);
     let saved = repository
         .save_with_settings(
             &profile,
@@ -95,7 +95,7 @@ async fn a_profile_and_its_settings_are_saved_together_or_not_at_all() {
         name: "Synthetic atomic".into(),
         ..profile.clone()
     };
-    let other_limit = jykre_storage::row_limit_key(other.id);
+    let other_limit = jovru_storage::row_limit_key(other.id);
     assert!(
         repository
             .save_with_settings(&other, &[(other_limit, serde_json::json!(9))])
@@ -118,7 +118,7 @@ async fn a_profile_and_its_settings_are_saved_together_or_not_at_all() {
 
 #[tokio::test]
 async fn row_limits_are_kept_per_connection_and_survive_restart() {
-    let dir = std::env::temp_dir().join(format!("jykre-row-limit-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-row-limit-{}", ConnectionId::new()));
     let (first, second) = (ConnectionId::new(), ConnectionId::new());
     let repository = ConfigRepository::open(&dir).await.unwrap();
     assert_eq!(repository.row_limit(first).await.unwrap(), None);
@@ -143,7 +143,7 @@ async fn row_limits_are_kept_per_connection_and_survive_restart() {
 
 #[tokio::test]
 async fn an_unreadable_profile_does_not_hide_the_others() {
-    let dir = std::env::temp_dir().join(format!("jykre-config-each-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-config-each-{}", ConnectionId::new()));
     let repository = ConfigRepository::open(&dir).await.unwrap();
     let profile = |name: &str| ConnectionProfile {
         id: ConnectionId::new(),
@@ -195,21 +195,21 @@ fn synthetic_profile(name: &str) -> ConnectionProfile {
 
 #[tokio::test]
 async fn deleting_a_connection_removes_its_settings_and_only_its_own() {
-    let dir = std::env::temp_dir().join(format!("jykre-config-delete-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-config-delete-{}", ConnectionId::new()));
     let repository = ConfigRepository::open(&dir).await.unwrap();
     let gone = synthetic_profile("Deleted fixture");
     let kept = synthetic_profile("Kept fixture");
     let gone = repository
         .save_with_settings(
             &gone,
-            &[(jykre_storage::row_limit_key(gone.id), serde_json::json!(10))],
+            &[(jovru_storage::row_limit_key(gone.id), serde_json::json!(10))],
         )
         .await
         .unwrap();
     let kept = repository
         .save_with_settings(
             &kept,
-            &[(jykre_storage::row_limit_key(kept.id), serde_json::json!(20))],
+            &[(jovru_storage::row_limit_key(kept.id), serde_json::json!(20))],
         )
         .await
         .unwrap();
@@ -243,15 +243,15 @@ async fn deleting_a_connection_removes_its_settings_and_only_its_own() {
 
 #[tokio::test]
 async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
-    let dir = std::env::temp_dir().join(format!("jykre-config-backup-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-config-backup-{}", ConnectionId::new()));
     let repository = ConfigRepository::open(&dir).await.unwrap();
-    assert!(jykre_storage::config_backups(&dir).await.is_empty());
+    assert!(jovru_storage::config_backups(&dir).await.is_empty());
 
     let first = repository.back_up(&dir).await.unwrap();
     // Nothing changed: the newest copy already holds it.
     assert_eq!(repository.back_up(&dir).await.unwrap(), first);
     assert_eq!(
-        jykre_storage::config_backups(&dir).await,
+        jovru_storage::config_backups(&dir).await,
         vec![first.clone()]
     );
 
@@ -260,25 +260,25 @@ async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
         .await
         .unwrap();
     let mut newest = first.clone();
-    for limit in 0..jykre_storage::CONFIG_BACKUPS_KEPT + 2 {
+    for limit in 0..jovru_storage::CONFIG_BACKUPS_KEPT + 2 {
         repository
             .set_row_limit(saved.id, 100 + limit as u32)
             .await
             .unwrap();
         newest = repository.back_up(&dir).await.unwrap();
     }
-    let backups = jykre_storage::config_backups(&dir).await;
-    assert_eq!(backups.len(), jykre_storage::CONFIG_BACKUPS_KEPT);
+    let backups = jovru_storage::config_backups(&dir).await;
+    assert_eq!(backups.len(), jovru_storage::CONFIG_BACKUPS_KEPT);
     assert_eq!(backups[0], newest);
     assert!(!backups.contains(&first));
-    assert!(jykre_storage::config_backup_time(&newest) > std::time::UNIX_EPOCH);
+    assert!(jovru_storage::config_backup_time(&newest) > std::time::UNIX_EPOCH);
     repository.close().await;
 
     // A broken configuration is set aside, never deleted, and the copy
     // takes its place.
     std::fs::write(dir.join("config.db"), b"synthetic corrupt configuration").unwrap();
     assert!(ConfigRepository::open(&dir).await.is_err());
-    let aside = jykre_storage::restore_config_backup(&dir, &newest)
+    let aside = jovru_storage::restore_config_backup(&dir, &newest)
         .await
         .unwrap();
     assert_eq!(
@@ -289,7 +289,7 @@ async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
     assert_eq!(restored.list().await.unwrap(), vec![saved.clone()]);
     assert_eq!(
         restored.row_limit(saved.id).await.unwrap(),
-        Some(100 + jykre_storage::CONFIG_BACKUPS_KEPT as u32 + 1)
+        Some(100 + jovru_storage::CONFIG_BACKUPS_KEPT as u32 + 1)
     );
     restored.close().await;
 
@@ -302,7 +302,7 @@ async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
     std::fs::write(dir.join("config.db").join("inside"), b"x").unwrap();
     let before = names(&dir);
     assert!(
-        jykre_storage::restore_config_backup(&dir, &newest)
+        jovru_storage::restore_config_backup(&dir, &newest)
             .await
             .is_err()
     );
@@ -315,7 +315,7 @@ async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
     let elsewhere = dir.join("config-v1-1.db");
     std::fs::copy(&newest, &elsewhere).unwrap();
     assert!(
-        jykre_storage::restore_config_backup(&dir, &elsewhere)
+        jovru_storage::restore_config_backup(&dir, &elsewhere)
             .await
             .is_err()
     );
@@ -328,7 +328,7 @@ async fn backups_keep_the_latest_distinct_copies_and_restore_a_broken_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opening_a_new_file_from_several_places_at_once_works_for_all() {
     for _ in 0..10 {
-        let dir = std::env::temp_dir().join(format!("jykre-config-{}", ConnectionId::new()));
+        let dir = std::env::temp_dir().join(format!("jovru-config-{}", ConnectionId::new()));
         let opens: Vec<_> = (0..6)
             .map(|_| {
                 let dir = dir.clone();

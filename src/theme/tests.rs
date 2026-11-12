@@ -136,7 +136,7 @@ fn a_child_theme_inherits_and_a_missing_token_keeps_the_default() {
 #[test]
 fn inherited_aliases_follow_child_and_user_overrides_on_each_surface() {
     let mut catalog = Catalog::bundled();
-    catalog.insert_source("ocean.json", r##"{"schema":1,"id":"ocean","name":"Ocean","extends":"jykre-dark","tokens":{"color.accent":"#2266aa"},"editor":{"color.accent":"#123456"}}"##);
+    catalog.insert_source("ocean.json", r##"{"schema":1,"id":"ocean","name":"Ocean","extends":"jovru-dark","tokens":{"color.accent":"#2266aa"},"editor":{"color.accent":"#123456"}}"##);
     let choice = ThemeChoice::Named("ocean".to_owned());
     let resolved = catalog.resolve(&choice, false, &Overrides::default());
     assert_eq!(resolved.application.button_primary_bg, 0x2266aa);
@@ -160,7 +160,7 @@ fn inherited_aliases_follow_child_and_user_overrides_on_each_surface() {
 #[test]
 fn a_literal_replaces_an_inherited_alias_and_invalid_values_keep_it() {
     let mut catalog = Catalog::bundled();
-    catalog.insert_source("child.json", r##"{"schema":1,"id":"child","name":"Child","extends":"jykre-dark","tokens":{"color.accent":"#123456","button.primary.background":"#654321","state.success":"invalid"}}"##);
+    catalog.insert_source("child.json", r##"{"schema":1,"id":"child","name":"Child","extends":"jovru-dark","tokens":{"color.accent":"#123456","button.primary.background":"#654321","state.success":"invalid"}}"##);
     let overrides = Overrides::from_value(Some(&json!({"tokens":{"color.accent":"#abcdef"}})));
     let resolved = catalog.resolve(&ThemeChoice::Named("child".to_owned()), true, &overrides);
     assert_eq!(resolved.application.button_primary_bg, 0x654321);
@@ -396,12 +396,12 @@ fn switching_themes_replaces_the_one_in_memory() {
 #[test]
 fn a_dropped_file_is_loaded_from_a_directory_without_recompiling() {
     let root =
-        std::env::temp_dir().join(format!("jykre-themes-{}", jykre_core::ConnectionId::new()));
+        std::env::temp_dir().join(format!("jovru-themes-{}", jovru_core::ConnectionId::new()));
     let themes = root.join("themes");
     std::fs::create_dir_all(&themes).unwrap();
     std::fs::write(
         themes.join("ocean.json"),
-        r##"{"schema":1,"id":"ocean","name":"Ocean","appearance":"dark","extends":"jykre-dark","tokens":{"color.accent":"#2266aa"}}"##,
+        r##"{"schema":1,"id":"ocean","name":"Ocean","appearance":"dark","extends":"jovru-dark","tokens":{"color.accent":"#2266aa"}}"##,
     )
     .unwrap();
     let catalog = load_catalog(&theme_directories(&root, None));
@@ -420,8 +420,8 @@ fn a_dropped_file_is_loaded_from_a_directory_without_recompiling() {
 #[test]
 fn theme_directories_have_stable_precedence_and_oversized_files_are_skipped() {
     let root = std::env::temp_dir().join(format!(
-        "jykre-theme-order-{}",
-        jykre_core::ConnectionId::new()
+        "jovru-theme-order-{}",
+        jovru_core::ConnectionId::new()
     ));
     let first = root.join("first");
     let second = root.join("second");
@@ -472,10 +472,10 @@ fn theme_directories_have_stable_precedence_and_oversized_files_are_skipped() {
 #[tokio::test]
 async fn the_choice_and_the_overrides_survive_in_the_settings_store() {
     let dir = std::env::temp_dir().join(format!(
-        "jykre-theme-pref-{}",
-        jykre_core::ConnectionId::new()
+        "jovru-theme-pref-{}",
+        jovru_core::ConnectionId::new()
     ));
-    let repository = jykre_storage::ConfigRepository::open(&dir).await.unwrap();
+    let repository = jovru_storage::ConfigRepository::open(&dir).await.unwrap();
     let choice = ThemeChoice::Named("ocean".to_owned());
     repository
         .set_setting(SETTINGS_KEY, &choice.to_value())
@@ -491,7 +491,7 @@ async fn the_choice_and_the_overrides_survive_in_the_settings_store() {
         .unwrap();
     repository.close().await;
 
-    let reopened = jykre_storage::ConfigRepository::open(&dir).await.unwrap();
+    let reopened = jovru_storage::ConfigRepository::open(&dir).await.unwrap();
     let stored = reopened.setting(SETTINGS_KEY).await.unwrap();
     let stored_overrides = reopened.setting(OVERRIDES_KEY).await.unwrap();
     reopened.close().await;

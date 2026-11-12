@@ -1,4 +1,4 @@
-use jykre_core::{DriverError, DriverResult};
+use jovru_core::{DriverError, DriverResult};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

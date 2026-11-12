@@ -11,7 +11,7 @@
 //! Which table, column or alias a name refers to needs the statement's
 //! structure and the metadata cache, which this does not use.
 use crate::catalog::{DialectCatalog, is_builtin_keyword};
-use jykre_sql::TokenKind;
+use jovru_sql::TokenKind;
 use std::ops::Range;
 
 /// How a token is shown.
@@ -102,7 +102,7 @@ pub fn classify(
 mod tests {
     use super::{Highlight, classify};
     use crate::catalog::{DialectCatalog, DialectFiles, parse};
-    use jykre_sql::{SqlDialect, tokens};
+    use jovru_sql::{SqlDialect, tokens};
 
     fn postgres() -> DialectCatalog {
         parse(

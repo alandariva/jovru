@@ -169,7 +169,7 @@ pub fn parse_limit(text: &str) -> Option<i64> {
     text.trim()
         .parse::<i64>()
         .ok()
-        .filter(|limit| jykre_core::automation::MISSED_LIMIT_RANGE.contains(limit))
+        .filter(|limit| jovru_core::automation::MISSED_LIMIT_RANGE.contains(limit))
 }
 
 #[cfg(test)]

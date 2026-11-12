@@ -1,10 +1,10 @@
 //! The dialog that adds a query tab's SQL to a saved report
-//! ([ADR-0025](../../docs/adr/0025-report-panels.md)): it lists the saved
+//! ([D-0025](../../docs/decisions/results.md#d-0025)): it lists the saved
 //! reports, with a search, and the one chosen gets a new panel with the SQL
 //! on the tab's connection and in its database. Nothing is stored until the
 //! report is saved.
 use super::*;
-use jykre::reports::ConnectionRef;
+use jovru::reports::ConnectionRef;
 
 /// The open dialog and what it adds.
 pub(super) struct ReportPicker {

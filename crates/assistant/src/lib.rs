@@ -1,4 +1,4 @@
-//! The model side of the AI assistant ([ADR-0028](../../../docs/adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)):
+//! The model side of the AI assistant ([D-0028](../../../docs/decisions/assistant.md#d-0028)):
 //! which provider and model answer, the canonical request a round sends,
 //! one streamed round at a time, what it cost and where the SQL is in an
 //! answer.

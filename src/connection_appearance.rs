@@ -5,7 +5,7 @@
 //! (`{"color": "red", "environment": "production"}`), like the row limit.
 //! A missing or unreadable value is the default: the driver's colour and no
 //! environment.
-use jykre_core::ConnectionId;
+use jovru_core::ConnectionId;
 use serde_json::Value;
 
 /// The colours a connection can take. Their shades live with the other

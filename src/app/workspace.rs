@@ -19,9 +19,9 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::script_outline::{Outline, Revisions, apply_edit};
-use jykre::tr;
-use jykre::{
+use jovru::script_outline::{Outline, Revisions, apply_edit};
+use jovru::tr;
+use jovru::{
     assistant::{
         apply,
         facts::{ErrorFacts, RunFacts, SchemaScope},
@@ -89,7 +89,7 @@ pub struct Workspace {
     risk_confirmed: bool,
     /// The environment of the tab's connection; production asks before
     /// risky statements.
-    environment: Option<jykre::connection_appearance::Environment>,
+    environment: Option<jovru::connection_appearance::Environment>,
     /// The tab's session, kept between runs so `USE`, `SET`, temporary
     /// tables and transactions carry over. Out with the run while one is
     /// running; `None` until the first run or after it was lost.
@@ -104,7 +104,7 @@ pub struct Workspace {
     next_lease: u64,
     /// The next page of a result is being read; runs wait for it.
     fetching: bool,
-    /// The export bar and the export it runs ([Results](../../docs/reference/results.md#export)).
+    /// The export bar and the export it runs ([Results](../../docs/reference/results/transfer.md#export)).
     export: ExportBar,
     /// The fields of the SQL's `:name` parameters, above the editor.
     parameters: ParameterForm,
@@ -113,7 +113,7 @@ pub struct Workspace {
     editor: Entity<EditorState>,
     assistant_split: Entity<ResizableState>,
     query_split: Entity<ResizableState>,
-    /// The assistant, its own cached entity (ADR-0028).
+    /// The assistant, its own cached entity (D-0028).
     assistant_panel: Entity<AssistantPanel>,
     /// The assistant's own session, for the queries the user lets it run:
     /// apart from the tab's, so they never touch its transaction, temporary
@@ -128,7 +128,7 @@ pub struct Workspace {
     dialect: SharedString,
     database: String,
     /// The hue of the tab's connection; `None` without one.
-    connection_color: Option<jykre::connection_appearance::ConnectionColor>,
+    connection_color: Option<jovru::connection_appearance::ConnectionColor>,
     title: SharedString,
     /// One result tab per statement run, each read page by page.
     results: ResultTabs,
@@ -150,7 +150,7 @@ pub struct Workspace {
     sql_editor: Entity<SqlEditor>,
     /// The editor's **Go to line** prompt (`Ctrl G`), closed until asked.
     go_to_line: Entity<GoToLine>,
-    /// The result grid, its own entity ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
+    /// The result grid, its own entity ([D-0012](../../docs/decisions/results.md#d-0012)).
     grid: Entity<ResultGrid>,
     /// Visible cells selected in the grid, as it last reported.
     selected_cells: usize,
@@ -163,7 +163,7 @@ pub struct Workspace {
     /// The run state and the status of each statement in the editor.
     run: QueryRun,
     /// The editor's text, kept in step with its edits so a keystroke costs
-    /// what it changes ([`jykre::script_outline`]).
+    /// what it changes ([`jovru::script_outline`]).
     editor_sql: String,
     /// The version of `editor_sql` and the dialect, and the one the
     /// statement lines, statuses and parameters were read from.
@@ -175,7 +175,7 @@ pub struct Workspace {
     /// worked out for; forgotten when the saved text changes.
     unsaved: Cell<Option<(u64, bool)>>,
     /// Whether the editor soft-wraps: not for a long script
-    /// ([`jykre::script_outline::soft_wrap`]).
+    /// ([`jovru::script_outline::soft_wrap`]).
     soft_wrap: bool,
     /// The line where each statement of `editor_sql` starts and its line
     /// count, kept when the SQL changes so a frame never splits the script.
@@ -184,8 +184,8 @@ pub struct Workspace {
     /// SQL as last saved to the library, if this tab is saved.
     saved_sql: Option<String>,
     /// The `.sql` file the tab edits; `saved_sql` is then the text it was
-    /// loaded or last saved with (ADR-0031).
-    file: Option<jykre::workspace_state::TabFile>,
+    /// loaded or last saved with (D-0031).
+    file: Option<jovru::workspace_state::TabFile>,
     /// The tab's recovery file, while its text is kept apart.
     recovery: Option<String>,
     /// The saved query this tab edits, by its identity in the library.
@@ -208,14 +208,14 @@ pub struct Workspace {
     notice: Option<Feedback>,
     filter_open: bool,
     /// Highlight or filter, kept for the next time the bar opens.
-    find_mode: jykre::grid::FindMode,
+    find_mode: jovru::grid::FindMode,
     /// The highlight search's `1/3`, while it has a current occurrence.
     find_position: Option<String>,
     filter: Entity<InputState>,
     /// Tells the filter text typed last from earlier keystrokes still
     /// waiting to apply.
     filter_revision: u64,
-    /// Editing has the session out: reading a table, or writing (ADR-0039).
+    /// Editing has the session out: reading a table, or writing (D-0039).
     edit_job: Option<EditJob>,
     /// A run that waits for the user to accept losing pending edits.
     edits_run: Option<(Scope, Placement)>,
@@ -420,11 +420,11 @@ impl Workspace {
             connection_color: if !demo {
                 None
             } else if connection.contains("Databricks") {
-                Some(jykre::connection_appearance::ConnectionColor::Blue)
+                Some(jovru::connection_appearance::ConnectionColor::Blue)
             } else if connection.contains("MySQL") {
-                Some(jykre::connection_appearance::ConnectionColor::Pink)
+                Some(jovru::connection_appearance::ConnectionColor::Pink)
             } else {
-                Some(jykre::connection_appearance::ConnectionColor::Mint)
+                Some(jovru::connection_appearance::ConnectionColor::Mint)
             },
             title: title.to_string().into(),
             results,
@@ -466,7 +466,7 @@ impl Workspace {
             opened_sql: Some(sql.to_string()),
             notice: None,
             filter_open: false,
-            find_mode: jykre::grid::FindMode::Highlight,
+            find_mode: jovru::grid::FindMode::Highlight,
             find_position: None,
             filter_revision: 0,
             edit_job: None,
@@ -639,7 +639,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if history {
-            use jykre::workspace_state::RunStatus;
+            use jovru::workspace_state::RunStatus;
             let (status, detail) = match &outcome {
                 LogOutcome::Rows { rows, more: true } => (
                     RunStatus::Succeeded,
@@ -658,7 +658,7 @@ impl Workspace {
                 LogOutcome::Cancelled => (RunStatus::Cancelled, tr!("Execution cancelled").into()),
             };
             cx.emit(WorkspaceEvent::Executed(
-                jykre::workspace_state::QueryEntry::ran(
+                jovru::workspace_state::QueryEntry::ran(
                     &self.title,
                     &self.connection,
                     sql,
@@ -722,13 +722,13 @@ impl Workspace {
                 selected
             }
         };
-        match jykre::sql::explain(&self.editor_sql, selection, self.run.dialect()) {
+        match jovru::sql::explain(&self.editor_sql, selection, self.run.dialect()) {
             Ok(sql) => {
                 let scope = Scope::Again { sql, origin: None };
                 self.execute_queries(scope, Placement::New, cx);
             }
             Err(refused) => {
-                use jykre::sql::ExplainRefused;
+                use jovru::sql::ExplainRefused;
                 let text = match refused {
                     ExplainRefused::NoDialect => {
                         tr!("This connection's dialect does not say how to read a plan.")
@@ -814,7 +814,7 @@ impl Workspace {
     }
 
     /// The file the tab edits, if any.
-    pub fn file(&self) -> Option<&jykre::workspace_state::TabFile> {
+    pub fn file(&self) -> Option<&jovru::workspace_state::TabFile> {
         self.file.as_ref()
     }
 
@@ -826,7 +826,7 @@ impl Workspace {
     /// The editor applied `event`'s edits: the text is brought in step with
     /// them, and its outline is read again off the UI thread.
     fn text_edited(&mut self, event: &InputEditsEvent, cx: &mut Context<Self>) {
-        let _timer = jykre::logging::UiTimer::start("editor edit");
+        let _timer = jovru::logging::UiTimer::start("editor edit");
         let Some((_, after)) = event.edits().last() else {
             self.editor_sql = self.editor.read(cx).text().to_string();
             self.text_replaced(cx);
@@ -857,7 +857,7 @@ impl Workspace {
     /// Soft-wraps the editor or not by the length of its text, changing it
     /// only when the answer changes.
     fn follow_soft_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let wrap = jykre::script_outline::soft_wrap(self.editor_sql.len(), self.soft_wrap);
+        let wrap = jovru::script_outline::soft_wrap(self.editor_sql.len(), self.soft_wrap);
         if wrap != self.soft_wrap {
             self.soft_wrap = wrap;
             self.editor
@@ -890,7 +890,7 @@ impl Workspace {
                     let started = std::time::Instant::now();
                     let sql = text.to_string();
                     let outline = Outline::read(revision, &sql, dialect);
-                    jykre::logging::timing("editor outline", started, OUTLINE_PAUSE);
+                    jovru::logging::timing("editor outline", started, OUTLINE_PAUSE);
                     (sql, outline)
                 })
                 .await;
@@ -903,7 +903,7 @@ impl Workspace {
         if !self.revisions.accept(outline.revision) {
             return;
         }
-        let _timer = jykre::logging::UiTimer::start("apply editor outline");
+        let _timer = jovru::logging::UiTimer::start("apply editor outline");
         self.run.apply_outline(sql, outline.statements);
         self.statement_lines = outline.statement_lines.into();
         self.line_count = outline.line_count;
@@ -918,7 +918,7 @@ impl Workspace {
         if !self.revisions.is_stale() {
             return;
         }
-        let _timer = jykre::logging::UiTimer::start("editor outline before a run");
+        let _timer = jovru::logging::UiTimer::start("editor outline before a run");
         self.outline_task = None;
         let outline = Outline::read(
             self.revisions.current(),
@@ -935,7 +935,7 @@ impl Workspace {
     /// The tab's recovery file, and gives it one when it has none.
     pub fn recovery_name(&mut self) -> String {
         self.recovery
-            .get_or_insert_with(jykre::query_files::recovery::new_name)
+            .get_or_insert_with(jovru::query_files::recovery::new_name)
             .clone()
     }
 
@@ -951,11 +951,11 @@ impl Workspace {
     pub fn link_file(
         &mut self,
         id: u64,
-        file: jykre::workspace_state::TabFile,
+        file: jovru::workspace_state::TabFile,
         text: String,
         cx: &mut Context<Self>,
     ) {
-        self.title = jykre::query_files::names::title_of(&file.path).into();
+        self.title = jovru::query_files::names::title_of(&file.path).into();
         self.saved_id = Some(id);
         self.saved_sql = Some(text);
         self.file = Some(file);
@@ -969,7 +969,7 @@ impl Workspace {
     pub fn file_moved(
         &mut self,
         path: std::path::PathBuf,
-        base: Option<jykre::query_files::Fingerprint>,
+        base: Option<jovru::query_files::Fingerprint>,
         cx: &mut Context<Self>,
     ) {
         if let Some(file) = self.file.as_mut() {
@@ -977,7 +977,7 @@ impl Workspace {
             if let Some(base) = base {
                 file.base = base;
             }
-            self.title = jykre::query_files::names::title_of(&file.path).into();
+            self.title = jovru::query_files::names::title_of(&file.path).into();
             cx.emit(WorkspaceEvent::Changed);
             cx.notify();
         }
@@ -987,7 +987,7 @@ impl Workspace {
     /// one undo step.
     pub fn reload_file(
         &mut self,
-        file: jykre::workspace_state::TabFile,
+        file: jovru::workspace_state::TabFile,
         text: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1121,7 +1121,7 @@ impl Workspace {
 
     /// **Copy this page as CSV**. A copy estimated above 50 MiB asks first
     /// before generation, since building and holding it takes time and
-    /// memory ([Results](../../docs/reference/results.md#copying)).
+    /// memory ([Results](../../docs/reference/results/transfer.md#copying)).
     fn copy_page_csv(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.current_page().filter(|_| self.has_results()).is_none() {
             self.notice = Some(Feedback::new(
@@ -1180,7 +1180,7 @@ impl Workspace {
             }
             DataView::Read(placement) => placement,
         };
-        let origin = jykre::sql::statements(&self.editor_sql, self.run.dialect())
+        let origin = jovru::sql::statements(&self.editor_sql, self.run.dialect())
             .into_iter()
             .find(|range| self.editor_sql.get(range.clone()) == Some(sql.as_str()))
             .map(|range| range.start);
@@ -1229,7 +1229,7 @@ impl Workspace {
     }
 
     /// The page on screen, if any.
-    fn current_page(&self) -> Option<&jykre::result_tabs::Page> {
+    fn current_page(&self) -> Option<&jovru::result_tabs::Page> {
         self.results.active().and_then(ResultTab::current)
     }
 
@@ -1254,7 +1254,7 @@ impl Workspace {
             grid.retain_places(&open);
         });
         // Whoever holds a page last frees it; here, that is the runtime
-        // ([ADR-0022](../../docs/adr/0022-result-pages-shared-across-threads.md)).
+        // ([D-0022](../../docs/decisions/results.md#d-0022)).
         for page in self.results.take_dropped() {
             backend::release(page);
         }
@@ -1499,16 +1499,16 @@ impl Workspace {
         let sql = self.editor.read(cx).text().to_string();
         let confirmed = std::mem::take(&mut self.risk_confirmed);
         // The values of the statements' `:name` markers, bound by the driver
-        // (ADR-0026). A missing or malformed one runs nothing.
+        // (D-0026). A missing or malformed one runs nothing.
         let options = self.options();
         let statements = self.run.statements_for(&sql, &scope);
         let Some(requests) = self.parameter_requests(&statements, &options, cx) else {
             return;
         };
-        if self.environment == Some(jykre::connection_appearance::Environment::Production)
+        if self.environment == Some(jovru::connection_appearance::Environment::Production)
             && !confirmed
         {
-            let risks = jykre::guard::risks(&statements, self.run.dialect());
+            let risks = jovru::guard::risks(&statements, self.run.dialect());
             if !risks.is_empty() {
                 self.risky_run = Some((scope, placement));
                 cx.emit(WorkspaceEvent::ConfirmRisk {
@@ -1604,7 +1604,7 @@ impl Workspace {
                 .await;
                 let mut pending = Some(result);
                 let _ = weak.update(cx, |this, cx| {
-                    let _timer = jykre::logging::UiTimer::start("publish result");
+                    let _timer = jovru::logging::UiTimer::start("publish result");
                     let Some(result) = pending.take() else {
                         return;
                     };
@@ -1854,7 +1854,7 @@ impl Workspace {
     }
 
     /// Puts the cursor where the server stopped, when the editor still holds
-    /// the statement ([UX](../../docs/reference/ux.md#error-messages)). Nothing is
+    /// the statement ([UX](../../docs/reference/ux/feedback.md#error-messages)). Nothing is
     /// selected, so the next key never replaces text.
     fn mark_error(&mut self, id: ResultId, cx: &mut Context<Self>) {
         if let Some(at) = self.error_offset(id) {
@@ -1943,7 +1943,7 @@ impl Workspace {
         };
         let descriptor = driver.descriptor();
         let texts: Vec<String> = statements.iter().map(|(_, sql)| sql.clone()).collect();
-        let namespaces = jykre::ddl::stale_namespaces(
+        let namespaces = jovru::ddl::stale_namespaces(
             &texts,
             &descriptor.capabilities.namespace_levels(),
             descriptor.dialect,
@@ -1959,7 +1959,7 @@ impl Workspace {
 
     /// Where unqualified names resolve, as the header shows it.
     fn context_label(&self) -> String {
-        jykre::ddl::context_label(&self.context)
+        jovru::ddl::context_label(&self.context)
     }
 
     /// The header's context selector: the schema (PostgreSQL), database
@@ -1986,7 +1986,7 @@ impl Workspace {
                     let workspace = workspace.clone();
                     let chosen = choice.clone();
                     menu = menu.item(
-                        PopupMenuItem::new(jykre::ddl::context_label(choice))
+                        PopupMenuItem::new(jovru::ddl::context_label(choice))
                             .checked(*choice == current)
                             .on_click(move |_, _, cx| {
                                 let _ = workspace.update(cx, |this, cx| {
@@ -3031,7 +3031,7 @@ impl Workspace {
         let state = self.run.state();
         // After two seconds a run shows how long it has taken, and a
         // cancellation that takes long says the server has not stopped yet
-        // ([UX](../../docs/reference/ux.md#always-visible-states)).
+        // ([UX](../../docs/reference/ux/states.md#always-visible-states)).
         let elapsed = |duration: Duration| {
             (duration >= Duration::from_secs(2))
                 .then(|| cell_format::duration(duration.as_millis() as u64))
@@ -3426,7 +3426,7 @@ impl Workspace {
 
     fn set_find_mode(
         &mut self,
-        mode: jykre::grid::FindMode,
+        mode: jovru::grid::FindMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3448,7 +3448,7 @@ impl Workspace {
     fn find_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mode = self.find_mode;
         let mode_button =
-            |id: &'static str, title: &'static str, this_mode: jykre::grid::FindMode| {
+            |id: &'static str, title: &'static str, this_mode: jovru::grid::FindMode| {
                 let chosen = mode == this_mode;
                 div()
                     .id(id)
@@ -3529,12 +3529,12 @@ impl Workspace {
                     .child(mode_button(
                         "result-find-highlight",
                         tr!("Highlight"),
-                        jykre::grid::FindMode::Highlight,
+                        jovru::grid::FindMode::Highlight,
                     ))
                     .child(mode_button(
                         "result-find-filter",
                         tr!("Filter"),
-                        jykre::grid::FindMode::Filter,
+                        jovru::grid::FindMode::Filter,
                     ))
                     .child(
                         icon_button("close-result-find", I::X, tr!("Close the search"))
@@ -3555,7 +3555,7 @@ impl Workspace {
         let rows = cell_format::count(page.data.row_count());
         let partial =
             tab.has_next() || tab.page_number() > 1 || tab.rest_closed() || tab.limit.is_some();
-        let highlight = self.find_mode == jykre::grid::FindMode::Highlight;
+        let highlight = self.find_mode == jovru::grid::FindMode::Highlight;
         Some(if partial && highlight {
             tr!(
                 "Highlights this page only ({0} rows). Other pages and rows past the limit are not searched.",
@@ -3723,7 +3723,7 @@ impl Workspace {
         match event {
             AssistantPanelEvent::Submit { text, mode } => {
                 // The request's first message holds only what the facts
-                // allow-list lets the tab tell (ADR-0028).
+                // allow-list lets the tab tell (D-0028).
                 let prompt = match mode {
                     AssistantMode::Ask => prompts::chat_message(
                         text,
@@ -3803,7 +3803,7 @@ impl Workspace {
     /// Runs a statement the user approved for the assistant, in the
     /// assistant's own session, and hands the panel its result cut to what
     /// may be sent ([`QueryPreview`]); the panel then asks the user whether
-    /// to send it. The run is `jykre::assistant_query::run_once`. It is not
+    /// to send it. The run is `jovru::assistant_query::run_once`. It is not
     /// a result tab and not in the history.
     fn run_assistant_query(&mut self, query: AssistantQuery, cx: &mut Context<Self>) {
         let Some(input) = self.input.clone() else {
@@ -3837,7 +3837,7 @@ impl Workspace {
             // dropped there.
             let outcome = backend::run(async move {
                 let stopped = cancel.clone();
-                let run = jykre::assistant_query::run_once(
+                let run = jovru::assistant_query::run_once(
                     connection, input, context, session, sql, cancel,
                 )
                 .await;
@@ -3992,13 +3992,13 @@ pub enum WorkspaceEvent {
     /// asks and, on a yes, calls [`Workspace::confirm_pending_edits`].
     ConfirmPendingEdits { pending: usize },
     /// Statements generated from a result's edits, for a database not
-    /// written directly (ADR-0039, section 9): the host opens them in a new
+    /// written directly (D-0039, section 9): the host opens them in a new
     /// tab on `connection` and calls [`Workspace::open_generated`].
     OpenGenerated {
         title: String,
         connection: String,
         sql: String,
-        parameters: Vec<jykre::parameters::TabParameter>,
+        parameters: Vec<jovru::parameters::TabParameter>,
         context: SessionContext,
     },
     /// The user chose another connection for this tab in the toolbar.
@@ -4009,7 +4009,7 @@ pub enum WorkspaceEvent {
     Save { save_as: bool },
     /// A statement ended, in success, failure or cancellation: an entry for
     /// the history.
-    Executed(jykre::workspace_state::QueryEntry),
+    Executed(jovru::workspace_state::QueryEntry),
     /// Start a report from this SQL (the selection, the statement at the
     /// cursor or the whole script); the host opens it as a draft.
     SaveAsReport {
@@ -4079,14 +4079,14 @@ impl Workspace {
     }
 
     /// What this tab keeps between sessions.
-    pub fn state(&self) -> jykre::workspace_state::TabState {
-        jykre::workspace_state::TabState {
+    pub fn state(&self) -> jovru::workspace_state::TabState {
+        jovru::workspace_state::TabState {
             title: self.title.to_string(),
             connection: self.connection.to_string(),
             sql: self.editor_sql.clone(),
             saved_sql: self.saved_sql.clone(),
             saved_id: self.saved_id,
-            timeout_seconds: jykre::workspace_state::TabState::store_timeout(self.timeout),
+            timeout_seconds: jovru::workspace_state::TabState::store_timeout(self.timeout),
             opened_sql: self.opened_sql.clone(),
             catalog: self.context.catalog.clone(),
             schema: self.context.schema.clone(),
@@ -4100,7 +4100,7 @@ impl Workspace {
 
     /// Closing the tab would lose SQL that is not in the library.
     pub fn has_unsaved_sql(&self) -> bool {
-        jykre::workspace_state::has_unsaved_sql(
+        jovru::workspace_state::has_unsaved_sql(
             &self.editor_sql,
             self.saved_sql.as_deref(),
             self.opened_sql.as_deref(),
@@ -4108,7 +4108,7 @@ impl Workspace {
     }
 
     /// Restores what [`Workspace::state`] kept.
-    pub fn restore(&mut self, state: &jykre::workspace_state::TabState, cx: &mut Context<Self>) {
+    pub fn restore(&mut self, state: &jovru::workspace_state::TabState, cx: &mut Context<Self>) {
         self.saved_sql = state.saved_sql.clone();
         self.saved_id = state.saved_id;
         self.file = state.file.clone();
@@ -4133,7 +4133,7 @@ impl Workspace {
 
     /// What the query tab shows before its title: the run in progress, or
     /// how the last one ended.
-    pub fn tab_status(&self) -> jykre::grouped_tabs::TabStatus {
+    pub fn tab_status(&self) -> jovru::grouped_tabs::TabStatus {
         self.run.state().tab_status()
     }
 
@@ -4228,13 +4228,13 @@ impl Workspace {
     /// explorer shows them.
     pub fn set_appearance(
         &mut self,
-        color: Option<jykre::connection_appearance::ConnectionColor>,
-        environment: Option<jykre::connection_appearance::Environment>,
+        color: Option<jovru::connection_appearance::ConnectionColor>,
+        environment: Option<jovru::connection_appearance::Environment>,
         cx: &mut Context<Self>,
     ) {
         self.connection_color = color;
         self.environment = environment;
-        let production = environment == Some(jykre::connection_appearance::Environment::Production);
+        let production = environment == Some(jovru::connection_appearance::Environment::Production);
         self.assistant_panel
             .update(cx, |panel, cx| panel.set_production(production, cx));
         cx.notify();
@@ -4608,7 +4608,7 @@ fn log_entry(index: usize, entry: &LogEntry, now: SystemTime) -> Stateful<Div> {
         LogOutcome::Failed(error) => (I::CircleX, colors().red, error.clone()),
         LogOutcome::Cancelled => (I::Ban, colors().amber, tr!("Execution cancelled").into()),
     };
-    let age = jykre::explorer::format_age(now.duration_since(entry.at).unwrap_or_default());
+    let age = jovru::explorer::format_age(now.duration_since(entry.at).unwrap_or_default());
     let timing = match entry.elapsed_ms {
         Some(elapsed) => format!(
             "{} · {age}",
@@ -4739,7 +4739,7 @@ fn page_summary(tab: &ResultTab, filtered: Option<usize>) -> (I, u32, String, Op
     };
     let paged = tab.page_number() > 1 || tab.has_next();
     let rows =
-        jykre::result_tabs::rows_label(page.data.row_count(), page.first_row, paged, filtered);
+        jovru::result_tabs::rows_label(page.data.row_count(), page.first_row, paged, filtered);
     match tab.limit {
         Some(ResultLimit::Memory(bytes)) => (
             I::TriangleAlert,
@@ -4949,8 +4949,8 @@ impl Render for ResultTabPreview {
 
 /// What the confirmation before a risky run on production says: each
 /// risky statement's kind, numbered as the run orders them.
-pub(super) fn risk_description(risks: &[(usize, jykre::guard::Risk)], total: usize) -> String {
-    use jykre::guard::Risk;
+pub(super) fn risk_description(risks: &[(usize, jovru::guard::Risk)], total: usize) -> String {
+    use jovru::guard::Risk;
     let lines: Vec<String> = risks
         .iter()
         .map(|(index, risk)| {

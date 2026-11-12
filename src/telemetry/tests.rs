@@ -135,7 +135,7 @@ fn span_data(attributes: Vec<KeyValue>, status: Status) -> opentelemetry_sdk::tr
 
 #[test]
 fn mcp_outcome_is_an_exported_attribute() {
-    assert!(attributes::allowed("jykre.mcp.outcome"));
+    assert!(attributes::allowed("jovru.mcp.outcome"));
 }
 
 #[test]
@@ -249,9 +249,9 @@ fn only_exportable_events_become_logs_and_only_spans_become_traces() {
         tracing::warn!(file = "C:/Users/someone/x.sql", "event with a file");
         tracing::warn!(error = "synthetic free text", "event with an error text");
         tracing::trace!("trace event");
-        tracing::info!(target: "jykre::probe", "frame probe");
-        tracing::debug!(target: "jykre::ui_thread", "ui-thread timing");
-        tracing::warn!(target: "jykre::ui_thread", "slow ui-thread work");
+        tracing::info!(target: "jovru::probe", "frame probe");
+        tracing::debug!(target: "jovru::ui_thread", "ui-thread timing");
+        tracing::warn!(target: "jovru::ui_thread", "slow ui-thread work");
         tracing::warn!(target: "opentelemetry_sdk", "exporter warning");
     });
     let text = capture.exported_text();

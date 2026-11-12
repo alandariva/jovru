@@ -1,4 +1,4 @@
-//! `jykmcp_<id>_<secret>`: a 50-bit id and a 256-bit secret.
+//! `jovmcp_<id>_<secret>`: a 50-bit id and a 256-bit secret.
 //!
 //! The id is the record key (lowercase RFC 4648 base32, ten characters).
 //! The secret is 64 lowercase hex digits held in a [`SecretString`].
@@ -7,7 +7,7 @@
 //! leaves this type only through [`McpToken::expose_wire`] and
 //! [`McpToken::expose_secret`], which callers must not log.
 
-use jykre_core::SecretString;
+use jovru_core::SecretString;
 use secrecy::ExposeSecret as _;
 use std::fmt;
 use std::io;
@@ -19,7 +19,7 @@ const ID_LEN: usize = 10;
 const ID_RANDOM_BYTES: usize = 7;
 const SECRET_BYTES: usize = 32;
 const SECRET_HEX_LEN: usize = SECRET_BYTES * 2;
-const PREFIX: &str = "jykmcp_";
+const PREFIX: &str = "jovmcp_";
 const HEX: [u8; 16] = *b"0123456789abcdef";
 
 /// The record key of an MCP token: ten characters from
@@ -65,7 +65,7 @@ impl fmt::Debug for McpTokenId {
     }
 }
 
-/// An MCP client token, `jykmcp_<id>_<secret>`.
+/// An MCP client token, `jovmcp_<id>_<secret>`.
 ///
 /// The secret is a [`SecretString`]: it is wiped on drop, and [`Clone`]
 /// copies it into another value that wipes itself too. This type does not
@@ -103,7 +103,7 @@ impl McpToken {
         })
     }
 
-    /// The full wire `jykmcp_<id>_<secret>`. Lowercase hex only. A query
+    /// The full wire `jovmcp_<id>_<secret>`. Lowercase hex only. A query
     /// string, whitespace, a bad alphabet or the wrong lengths is `None`.
     /// The secret is copied into a [`SecretString`].
     pub fn parse(wire: &str) -> Option<Self> {
@@ -119,7 +119,7 @@ impl McpToken {
         &self.id
     }
 
-    /// `jykmcp_<id>_<secret>` for the one-time display and the vault write.
+    /// `jovmcp_<id>_<secret>` for the one-time display and the vault write.
     ///
     /// The caller must not log this string.
     pub fn expose_wire(&self) -> String {
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn secret_matches_accepts_the_secret_and_rejects_one_bit_wrong_length_and_uppercase() {
         let secret = "ab".repeat(32);
-        let token = McpToken::parse(&format!("jykmcp_abcdefghij_{secret}")).unwrap();
+        let token = McpToken::parse(&format!("jovmcp_abcdefghij_{secret}")).unwrap();
         assert!(token.secret_matches(&secret));
 
         let mut flipped = secret.clone().into_bytes();
@@ -287,7 +287,7 @@ mod tests {
     fn debug_of_mcp_token_omits_the_id_and_the_secret() {
         let id = "234567abcd";
         let secret = "0123456789abcdef".repeat(4);
-        let token = McpToken::parse(&format!("jykmcp_{id}_{secret}")).unwrap();
+        let token = McpToken::parse(&format!("jovmcp_{id}_{secret}")).unwrap();
         let rendered = format!("{token:?}");
         assert_eq!(rendered, "McpToken(<redacted>)");
         assert!(!rendered.contains(secret.as_str()));
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn split_wire_and_parse_reject_a_bad_shape() {
         let secret = "ab".repeat(32);
-        let good = format!("jykmcp_abcdefghij_{secret}");
+        let good = format!("jovmcp_abcdefghij_{secret}");
         assert_eq!(split_wire(&good), Some(("abcdefghij", secret.as_str())));
         assert!(McpToken::parse(&good).is_some());
         assert_eq!(
@@ -314,21 +314,21 @@ mod tests {
             format!("abcdefghij_{secret}"),
             format!("mcp_abcdefghij_{secret}"),
             format!("JYKMCP_abcdefghij_{secret}"),
-            format!("jykmcp_abcdefghi_{secret}"),
-            format!("jykmcp_abcdefghijk_{secret}"),
-            format!("jykmcp_abcdefghi0_{secret}"),
-            format!("jykmcp_abcdefgh18_{secret}"),
-            format!("jykmcp_ABCDEFGHIJ_{secret}"),
-            format!("jykmcp_abcdefghij_{}", &secret[..63]),
-            format!("jykmcp_abcdefghij_{}", secret.replacen('a', "g", 1)),
-            format!("jykmcp_abcdefghij_{}", secret.to_ascii_uppercase()),
+            format!("jovmcp_abcdefghi_{secret}"),
+            format!("jovmcp_abcdefghijk_{secret}"),
+            format!("jovmcp_abcdefghi0_{secret}"),
+            format!("jovmcp_abcdefgh18_{secret}"),
+            format!("jovmcp_ABCDEFGHIJ_{secret}"),
+            format!("jovmcp_abcdefghij_{}", &secret[..63]),
+            format!("jovmcp_abcdefghij_{}", secret.replacen('a', "g", 1)),
+            format!("jovmcp_abcdefghij_{}", secret.to_ascii_uppercase()),
             format!("{good}0"),
             format!("{good}?x=1"),
             format!(" {good}"),
             format!("{good} "),
-            format!("jykmcp_abcd efghij_{secret}"),
+            format!("jovmcp_abcd efghij_{secret}"),
             format!("{good}\n"),
-            format!("jykmcp_abcdefghij_{secret}_"),
+            format!("jovmcp_abcdefghij_{secret}_"),
         ];
         for wire in rejected {
             assert!(split_wire(&wire).is_none(), "{wire}");

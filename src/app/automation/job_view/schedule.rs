@@ -10,11 +10,11 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use jykre::automation::schedule::form::{DaysChoice, RuleForm, parse_limit};
-use jykre::automation::schedule::rule::{self, Rule};
-use jykre::automation::schedule::{Consent, DEFAULT_MISSED_LIMIT, missing_defaults};
-use jykre::automation::{MissedPolicy, OverlapPolicy, ScheduleId};
-use jykre_storage::{ScheduleDraft, StoredSchedule};
+use jovru::automation::schedule::form::{DaysChoice, RuleForm, parse_limit};
+use jovru::automation::schedule::rule::{self, Rule};
+use jovru::automation::schedule::{Consent, DEFAULT_MISSED_LIMIT, missing_defaults};
+use jovru::automation::{MissedPolicy, OverlapPolicy, ScheduleId};
+use jovru_storage::{ScheduleDraft, StoredSchedule};
 
 /// The Schedule tab's fields and what was read.
 pub(super) struct ScheduleFields {
@@ -248,7 +248,7 @@ impl JobView {
         let zone = rule::time_zone(&zone_name);
         if zone.is_none() {
             preview.problems.push(says::schedule_error(
-                &jykre::automation::schedule::ScheduleError::UnknownZone,
+                &jovru::automation::schedule::ScheduleError::UnknownZone,
             ));
         }
         match fields.form.rule() {
@@ -277,7 +277,7 @@ impl JobView {
             && parse_limit(&fields.limit.read(cx).value()).is_none()
         {
             preview.problems.push(says::schedule_error(
-                &jykre::automation::schedule::ScheduleError::MissedLimit,
+                &jovru::automation::schedule::ScheduleError::MissedLimit,
             ));
         }
         // A notice about the state goes once the state is another (the
@@ -323,13 +323,13 @@ impl JobView {
         let version = match self.kind {
             JobKind::Chain => None,
             _ => Some(self.schedule_version().ok_or_else(|| {
-                says::schedule_error(&jykre::automation::schedule::ScheduleError::Missing)
+                says::schedule_error(&jovru::automation::schedule::ScheduleError::Missing)
             })?),
         };
         let missed_limit = match fields.missed {
             MissedPolicy::Queue => {
                 Some(parse_limit(&fields.limit.read(cx).value()).ok_or_else(|| {
-                    says::schedule_error(&jykre::automation::schedule::ScheduleError::MissedLimit)
+                    says::schedule_error(&jovru::automation::schedule::ScheduleError::MissedLimit)
                 })?)
             }
             _ => None,
@@ -363,7 +363,7 @@ impl JobView {
         if !self.writable() {
             self.schedule_notice(
                 Tone::Error,
-                says::schedule_error(&jykre::automation::schedule::ScheduleError::Unavailable),
+                says::schedule_error(&jovru::automation::schedule::ScheduleError::Unavailable),
                 cx,
             );
             return;
@@ -446,7 +446,7 @@ impl JobView {
             .iter()
             .filter(|connection| {
                 connection.environment
-                    == Some(jykre::connection_appearance::Environment::Production)
+                    == Some(jovru::connection_appearance::Environment::Production)
             })
             .map(|connection| connection.id)
             .collect();
@@ -460,7 +460,7 @@ impl JobView {
                 let connection = sql.connection.filter(|id| production.contains(id))?;
                 let dialect =
                     source_of(&self.sources.sources, connection).and_then(|source| source.dialect);
-                let risk = jykre::guard::risk(&sql.sql, dialect)?;
+                let risk = jovru::guard::risk(&sql.sql, dialect)?;
                 let description = crate::app::workspace::risk_description(&[(0, risk)], 1);
                 Some((step.job_name.clone(), description))
             })
@@ -578,14 +578,14 @@ impl JobView {
                 s.child(
                     div().id("schedule-inputs").role(Role::Alert).child(warning_line(
                         says::schedule_error(
-                            &jykre::automation::schedule::ScheduleError::Inputs(missing),
+                            &jovru::automation::schedule::ScheduleError::Inputs(missing),
                         ),
                     )),
                 )
             })
             .when(unpublished, |s| {
                 s.child(warning_line(says::schedule_error(
-                    &jykre::automation::schedule::ScheduleError::Missing,
+                    &jovru::automation::schedule::ScheduleError::Missing,
                 )))
             })
             .child(self.schedule_rule(fields, cx))
@@ -609,11 +609,11 @@ impl JobView {
         let on = stored.is_some_and(|stored| stored.enabled);
         section_box(tr!("Schedule"))
             .child(note_line(tr!(
-                "A schedule runs only while Jykre Studio is open, and only in the window that holds automation; nothing runs while it is closed. Its runs share the queue, the limits and the history of runs started by hand."
+                "A schedule runs only while Jovru is open, and only in the window that holds automation; nothing runs while it is closed. Its runs share the queue, the limits and the history of runs started by hand."
             )))
             .when(self.availability == Availability::ReadOnly, |s| {
                 s.child(warning_line(tr!(
-                    "Another Jykre Studio window holds automation: this schedule runs there, not here."
+                    "Another Jovru window holds automation: this schedule runs there, not here."
                 )))
             })
             .when(stored.is_none() && fields.loaded, |s| {
@@ -900,7 +900,7 @@ impl JobView {
         };
         let limit = parse_limit(&fields.limit.read(cx).value());
         section_box(tr!("Missed times and overlap"))
-            .child(label(tr!("Times missed while Jykre Studio was closed, asleep or without automation")))
+            .child(label(tr!("Times missed while Jovru was closed, asleep or without automation")))
             .child(missed_rows)
             .when(fields.missed == MissedPolicy::Queue, |s| {
                 s.child(labelled(
@@ -910,7 +910,7 @@ impl JobView {
             })
             .child(note_line(says::missed_policy(fields.missed, limit)))
             .child(note_line(tr!(
-                "A catch-up is a new run, marked catch-up in the history; a run that started is never run again. Catch-ups go one at a time, and ones not started yet are dropped when Jykre Studio closes."
+                "A catch-up is a new run, marked catch-up in the history; a run that started is never run again. Catch-ups go one at a time, and ones not started yet are dropped when Jovru closes."
             )))
             .child(label(tr!("A time that comes while the previous run is still going")))
             .child(

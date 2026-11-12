@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "id": "jykre-dark",
-  "name": "Jykre Dark",
+  "id": "jovru-dark",
+  "name": "Jovru Dark",
   "appearance": "dark",
   "tokens": {
     "color.background": "#15181d",

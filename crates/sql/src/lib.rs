@@ -10,13 +10,13 @@
 //! Everything here is pure and synchronous: the same input gives the same
 //! output, and SQL is never sent anywhere or rewritten for execution. This
 //! crate knows nothing about the editor's language features (completion,
-//! highlighting, formatting), which live in `jykre-sql-language` and can be
+//! highlighting, formatting), which live in `jovru-sql-language` and can be
 //! removed without touching what runs queries.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod names;
 
-pub use jykre_core::SqlDialect;
+pub use jovru_core::SqlDialect;
 use std::ops::Range;
 
 /// What a token is, lexically. Whether a word is a keyword, a function or a
@@ -857,7 +857,7 @@ pub fn string_literal(value: &str, dialect: Option<SqlDialect>) -> String {
     literal
 }
 
-/// A `:name` parameter marker of a report (ADR-0023).
+/// A `:name` parameter marker of a report (D-0023).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NamedMarker {
     pub name: String,
@@ -871,7 +871,7 @@ pub struct NamedMarker {
 /// starting with a digit) and not right after something it could continue:
 /// `x::int`, `a := 1`, `raw:owner`, `arr[1:2]`, `arr[lo:hi]` and `arr[:hi]`
 /// hold no marker. Finding markers changes nothing: the driver binds the
-/// values ([`jykre_core::QueryParameter`]).
+/// values ([`jovru_core::QueryParameter`]).
 pub fn named_markers(sql: &str, dialect: Option<SqlDialect>) -> Vec<NamedMarker> {
     let tokens = tokens(sql, dialect);
     let mut markers = Vec::new();
@@ -901,7 +901,7 @@ pub fn named_markers(sql: &str, dialect: Option<SqlDialect>) -> Vec<NamedMarker>
         let Some(name) = sql.get(marker.start + 1..marker.end) else {
             continue;
         };
-        if jykre_core::is_parameter_name(name) {
+        if jovru_core::is_parameter_name(name) {
             markers.push(NamedMarker {
                 name: name.to_owned(),
                 range: marker,

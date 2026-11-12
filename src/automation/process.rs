@@ -1,5 +1,5 @@
 //! One run of an external program (specification, section 9.1;
-//! [ADR-0038](../../docs/adr/0038-external-program-runs.md)).
+//! [D-0038](../../docs/decisions/automation.md#d-0038)).
 //!
 //! The engine drives a run in two steps:
 //!
@@ -39,8 +39,8 @@ pub use run::run;
 
 use super::definition::Protocol;
 use super::jjp::{JjpHost, NamedValues, ProtocolProblem, Terminal};
-use jykre_core::CancellationToken;
-use jykre_core::automation::{Cause, RunId, RunState};
+use jovru_core::CancellationToken;
+use jovru_core::automation::{Cause, RunId, RunState};
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -265,7 +265,7 @@ impl ProgramReport {
 }
 
 /// A run's outcome: its terminal state, its cause when it failed, and
-/// whether the program may have done something Studio cannot know.
+/// whether the program may have done something Jovru cannot know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Verdict {
     pub state: RunState,
@@ -291,7 +291,7 @@ pub struct Verdict {
 /// | protocol | `jjp/1` | any | any | `Failed`, `Protocol` |
 ///
 /// Every run that started and did not succeed has `effect_unknown`:
-/// Studio cannot know what a program did.
+/// Jovru cannot know what a program did.
 pub fn verdict(
     protocol: Protocol,
     decided_by: Decider,

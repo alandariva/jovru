@@ -72,7 +72,7 @@ impl Default for ExecutionOptions {
     }
 }
 
-/// The type a parameter's value is read as (ADR-0023).
+/// The type a parameter's value is read as (D-0023).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParameterKind {
     Text,
@@ -87,7 +87,7 @@ pub enum ParameterKind {
 }
 
 /// A named value the driver binds: it travels apart from the SQL text and is
-/// never written into it (ADR-0023). The caller finds the markers; `markers`
+/// never written into it (D-0023). The caller finds the markers; `markers`
 /// holds the byte ranges of this parameter's `:name` markers in
 /// [`QueryRequest::sql`]. A driver replaces each marker with a fixed
 /// reference to the bound value, or sends the SQL unchanged when the server
@@ -343,7 +343,7 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub nullable: Option<bool>,
     /// Where the column's values come from, as the protocol described it
-    /// when the statement was prepared, with no extra I/O (ADR-0039).
+    /// when the statement was prepared, with no extra I/O (D-0039).
     pub origin: ColumnOrigin,
 }
 
@@ -359,7 +359,7 @@ impl ColumnInfo {
     }
 }
 
-/// Where a result column's values come from (ADR-0039).
+/// Where a result column's values come from (D-0039).
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum ColumnOrigin {

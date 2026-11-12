@@ -3,9 +3,9 @@
 //! at a time (each change finds the matches again), then matches chosen,
 //! one of them hidden by A14, so the grid shows it and pans to it.
 use super::*;
-use jykre::performance::budget::{OTHER_FRAME_P95, WITHIN_FRAME};
-use jykre::performance::data;
-use jykre::probe::Samples;
+use jovru::performance::budget::{OTHER_FRAME_P95, WITHIN_FRAME};
+use jovru::performance::data;
+use jovru::probe::Samples;
 
 const COLUMNS: usize = 10_000;
 const ROWS: usize = 50;

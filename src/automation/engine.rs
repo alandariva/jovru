@@ -1,5 +1,5 @@
 //! The application-root service (specification, sections 5.2–5.6 and 6.6;
-//! ADR-0034): the data folder's lock, recovery, admission and the queue,
+//! D-0034): the data folder's lock, recovery, admission and the queue,
 //! one owner task per run, Stop, and the coordinated shutdown.
 use super::chain::{InputProblem, form_values};
 use super::definition::{self, ChainProblem, JobBody, JobDefinition, PinnedFile, Problem};
@@ -11,9 +11,9 @@ use super::{
     SqlJob, UtcMillis, chain_run, jjp, logs, process, program_run, sql_run,
 };
 use crate::result::DEFAULT_MEMORY_CEILING;
-use jykre_core::automation::RunSchedule;
-use jykre_core::{CancellationToken, ConnectionId, Driver, DriverResult, ResolvedConnection};
-use jykre_storage::{
+use jovru_core::automation::RunSchedule;
+use jovru_core::{CancellationToken, ConnectionId, Driver, DriverResult, ResolvedConnection};
+use jovru_storage::{
     AutomationLock, AutomationRepository, ChainRef, InUse, Opened, Orphan, StoredJob, StoredVersion,
 };
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ use tokio::task::JoinHandle;
 pub(super) const SETTLE: Duration = Duration::from_secs(11);
 /// How often history and logs are pruned while the application runs.
 const PRUNE_EVERY: Duration = Duration::from_secs(60 * 60);
-/// Program logs are deleted this long after their run finished (ADR-0037).
+/// Program logs are deleted this long after their run finished (D-0037).
 pub const LOG_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// Whether automation can run in this process.
@@ -41,7 +41,7 @@ pub enum Availability {
     Starting,
     /// Runs can be admitted and jobs saved.
     Ready,
-    /// Another Jykre Studio holds the data folder's automation lock:
+    /// Another Jovru holds the data folder's automation lock:
     /// history can be read, nothing can run or be saved (section 6.6).
     ReadOnly,
     /// Automation is off; the rest of the application works.
@@ -166,7 +166,7 @@ pub enum SaveError {
     Chain(Vec<ChainProblem>),
     /// The job or version is named by these chains.
     InUse(Vec<ChainRef>),
-    /// The version is the one the job's schedule runs (ADR-0041).
+    /// The version is the one the job's schedule runs (D-0041).
     Scheduled,
     /// Someone else saved the job meanwhile, or it is gone.
     Conflict,
@@ -262,7 +262,7 @@ pub(super) struct Inner {
     registry: Mutex<Registry>,
     revisions: Mutex<HashMap<ConnectionId, i64>>,
     /// Schedules: the clock, the connections they may use, and what the
-    /// scheduler tells the views (ADR-0041).
+    /// scheduler tells the views (D-0041).
     pub schedules: schedule::Shared,
     /// One `open` at a time: a second **Try again** waits for the first.
     opening: tokio::sync::Mutex<()>,
@@ -375,7 +375,7 @@ pub(super) struct RunSpec {
     /// The published version a chain step runs.
     pub version: Option<i64>,
     pub chain: Option<(ChainRunId, usize)>,
-    /// The schedule that started it, or its chain (ADR-0041).
+    /// The schedule that started it, or its chain (D-0041).
     pub scheduled: Option<RunSchedule>,
     pub work: Work,
 }
@@ -563,7 +563,7 @@ impl Engine {
         };
         if !lock_taken {
             // The file belongs to the lock holder: read it as it is, never
-            // create, migrate or set it aside (ADR-0034, decision 4).
+            // create, migrate or set it aside (D-0034, decision 4).
             match AutomationRepository::open_read_only(&dir).await {
                 Ok(Some(Opened::Newer)) => {
                     self.set_availability(Availability::Off(OffReason::Newer));
@@ -684,8 +684,8 @@ impl Engine {
         }
     }
 
-    /// Prunes history (ADR-0034, ADR-0035) and program logs older than 7
-    /// days, or whose run is gone (ADR-0037). Never blocks admission.
+    /// Prunes history (D-0034, D-0035) and program logs older than 7
+    /// days, or whose run is gone (D-0037). Never blocks admission.
     pub async fn prune(&self, now: UtcMillis) {
         let Some(repository) = self.repository() else {
             return;
@@ -718,7 +718,7 @@ impl Engine {
         }
     }
 
-    /// **Delete logs**: removes a run's log folder now (ADR-0037).
+    /// **Delete logs**: removes a run's log folder now (D-0037).
     pub async fn delete_logs(&self, run: RunId) {
         if logs::delete_logs(&self.inner.data_dir, run).await.is_err() {
             tracing::warn!(run = %run, "could not delete a run's logs");
@@ -775,7 +775,7 @@ impl Engine {
             }
         };
         let saved = saved.map_err(|error| match error.code {
-            jykre_core::ErrorCode::Validation => SaveError::Conflict,
+            jovru_core::ErrorCode::Validation => SaveError::Conflict,
             _ => SaveError::Storage(error.message),
         })?;
         self.inner.changed();
@@ -1143,9 +1143,9 @@ impl Engine {
     ) -> DriverResult<Plan> {
         let repository = self
             .repository()
-            .ok_or_else(|| jykre_core::DriverError::validation("Automation is not available."))?;
+            .ok_or_else(|| jovru_core::DriverError::validation("Automation is not available."))?;
         let JobBody::Chain(body) = &chain.body else {
-            return Err(jykre_core::DriverError::validation("Not a chain."));
+            return Err(jovru_core::DriverError::validation("Not a chain."));
         };
         let mut steps = Vec::new();
         let mut versions = HashMap::new();

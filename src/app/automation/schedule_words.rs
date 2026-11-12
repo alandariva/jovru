@@ -4,13 +4,13 @@
 //! is tested without a window.
 use crate::app::ui::environment_name;
 use jiff::tz::TimeZone;
-use jykre::automation::schedule::rule::{
+use jovru::automation::schedule::rule::{
     Days, Local, MonthDay, Occurrence, Rule, RuleProblem, Shift, local,
 };
-use jykre::automation::schedule::{BadEnd, Consent, ScheduleError};
-use jykre::automation::{JobKind, MissedPolicy, OverlapPolicy, ScheduleOutcome, UtcMillis};
-use jykre::tr;
-use jykre_storage::StoredSchedule;
+use jovru::automation::schedule::{BadEnd, Consent, ScheduleError};
+use jovru::automation::{JobKind, MissedPolicy, OverlapPolicy, ScheduleOutcome, UtcMillis};
+use jovru::tr;
+use jovru_storage::StoredSchedule;
 
 fn weekday_name(day: i8) -> &'static str {
     match day {
@@ -209,19 +209,19 @@ pub fn rule_problem(problem: RuleProblem) -> &'static str {
 pub fn missed_policy(policy: MissedPolicy, limit: Option<i64>) -> String {
     match policy {
         MissedPolicy::Ignore => tr!(
-            "Times missed while Jykre Studio was closed, the computer slept or another window held automation are not run; they are counted and shown."
+            "Times missed while Jovru was closed, the computer slept or another window held automation are not run; they are counted and shown."
         )
         .to_owned(),
         MissedPolicy::RunOnce => tr!(
-            "Times missed while Jykre Studio was closed, the computer slept or another window held automation run once, as one catch-up run, when it can run again."
+            "Times missed while Jovru was closed, the computer slept or another window held automation run once, as one catch-up run, when it can run again."
         )
         .to_owned(),
         MissedPolicy::Queue if limit == Some(1) => tr!(
-            "The most recent time missed while Jykre Studio was closed, the computer slept or another window held automation runs as a catch-up run; older ones are only counted."
+            "The most recent time missed while Jovru was closed, the computer slept or another window held automation runs as a catch-up run; older ones are only counted."
         )
         .to_owned(),
         MissedPolicy::Queue => tr!(
-            "The {0} most recent times missed while Jykre Studio was closed, the computer slept or another window held automation run as catch-up runs, one after another; older ones are only counted.",
+            "The {0} most recent times missed while Jovru was closed, the computer slept or another window held automation run as catch-up runs, one after another; older ones are only counted.",
             limit.unwrap_or(0)
         ),
     }
@@ -309,12 +309,12 @@ pub fn status_lines(schedule: &StoredSchedule, zone: Option<&TimeZone>) -> Vec<S
         let last = schedule.missed_last_at.map_or_else(String::new, when_due);
         lines.push(if schedule.missed_count == 1 {
             tr!(
-                "Missed once while Jykre Studio was closed, asleep or without automation ({0}).",
+                "Missed once while Jovru was closed, asleep or without automation ({0}).",
                 last
             )
         } else {
             tr!(
-                "Missed {0} times while Jykre Studio was closed, asleep or without automation (last: {1}).",
+                "Missed {0} times while Jovru was closed, asleep or without automation (last: {1}).",
                 schedule.missed_count,
                 last
             )
@@ -395,7 +395,7 @@ pub fn consent(consent: &Consent, here: &TimeZone, risks: &[(String, String)]) -
         ),
     });
     parts.push(rule_sentence(&consent.rule, &consent.zone));
-    if let Some(zone) = jykre::automation::schedule::rule::time_zone(&consent.zone) {
+    if let Some(zone) = jovru::automation::schedule::rule::time_zone(&consent.zone) {
         let next: Vec<String> = consent
             .next
             .iter()
@@ -409,10 +409,8 @@ pub fn consent(consent: &Consent, here: &TimeZone, risks: &[(String, String)]) -
         }
     }
     parts.push(
-        tr!(
-            "It runs only while Jykre Studio is open, in this window; nothing runs while it is closed."
-        )
-        .to_owned(),
+        tr!("It runs only while Jovru is open, in this window; nothing runs while it is closed.")
+            .to_owned(),
     );
     parts.push(missed_policy(
         consent.schedule.draft.missed_policy,
@@ -447,7 +445,7 @@ pub fn consent(consent: &Consent, here: &TimeZone, risks: &[(String, String)]) -
         );
     }
     for step in &consent.steps {
-        if let jykre::automation::definition::JobBody::Process(process) = &step.definition.body
+        if let jovru::automation::definition::JobBody::Process(process) = &step.definition.body
             && let Some(pinned) = &process.pinned
         {
             parts.push(tr!(
@@ -486,7 +484,7 @@ pub fn consent(consent: &Consent, here: &TimeZone, risks: &[(String, String)]) -
 /// server message (Q-40).
 /// Said once the user consented: the schedule is on.
 pub fn scheduled() -> &'static str {
-    tr!("Scheduled. It runs only while Jykre Studio is open.")
+    tr!("Scheduled. It runs only while Jovru is open.")
 }
 
 /// Said once the user turned the schedule off.
@@ -524,8 +522,8 @@ pub fn bad_end(end: &BadEnd, kind: Option<JobKind>) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jykre::automation::Cause;
-    use jykre::automation::schedule::rule::{LocalTime, time_zone};
+    use jovru::automation::Cause;
+    use jovru::automation::schedule::rule::{LocalTime, time_zone};
 
     fn at(text: &str) -> UtcMillis {
         UtcMillis(text.parse::<jiff::Timestamp>().unwrap().as_millisecond())
@@ -628,8 +626,8 @@ mod tests {
     fn a_bad_end_names_its_cause_never_failed_twice() {
         crate::app::source_text();
         let mut end = BadEnd {
-            schedule: jykre::automation::ScheduleId::new(),
-            job: jykre::automation::JobId::new(),
+            schedule: jovru::automation::ScheduleId::new(),
+            job: jovru::automation::JobId::new(),
             name: "SchedJob".into(),
             due_at: at("2026-11-09T08:00:00Z"),
             cause: Some(Cause::Database),

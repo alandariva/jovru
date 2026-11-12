@@ -5,20 +5,20 @@
 //! its history. Tested here; the views only call these.
 use super::words;
 use crate::app::ui::{Feedback, Tone};
-use jykre::automation::JobId;
-use jykre::automation::definition::{
+use jovru::automation::JobId;
+use jovru::automation::definition::{
     ChainBody, ChainStep, JobBody, JobDefinition, Protocol, Source,
 };
-use jykre::automation::{Availability, Cause, JobKind, RunState};
-use jykre::sql::SqlDialect;
-use jykre::tr;
-use jykre_core::automation::{ChainRunRecord, RunOutput, RunRecord};
+use jovru::automation::{Availability, Cause, JobKind, RunState};
+use jovru::sql::SqlDialect;
+use jovru::tr;
+use jovru_core::automation::{ChainRunRecord, RunOutput, RunRecord};
 use std::collections::HashMap;
 
 /// The line (from 1) where each statement after the first starts: a job
 /// runs exactly one, so these are marked before saving (section 4.3).
 pub fn extra_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<usize> {
-    jykre::sql::statements(sql, dialect)
+    jovru::sql::statements(sql, dialect)
         .into_iter()
         .filter_map(|range| {
             let text = sql.get(range.clone())?;
@@ -52,7 +52,7 @@ pub fn statements_note(lines: &[usize]) -> Option<String> {
 /// The confirmation a SQL run on a production connection needs before it
 /// starts: its risky statement (`guard::risk`, described as a tab does)
 /// and, when the job stores its outputs, that they will be stored
-/// (ADR-0035). `None` when nothing needs confirming.
+/// (D-0035). `None` when nothing needs confirming.
 pub fn production_confirmation(
     connection: &str,
     production: bool,
@@ -299,7 +299,7 @@ pub fn new_step_id(chain: &ChainBody) -> String {
 }
 
 /// What a step run again on its own is prefilled with (specification,
-/// section 9.3.5; ADR-0035): a constant of the chain, or an output an
+/// section 9.3.5; D-0035): a constant of the chain, or an output an
 /// earlier step stored whose value has not expired. Chain inputs are never
 /// stored, so those fields stay empty, as do outputs not stored. Returns
 /// the values and the inputs left to fill in.
@@ -370,7 +370,7 @@ pub fn chain_steps(
         ),
         (RunState::Cancelled, _) => tr!("Not run: the chain was stopped at {0}.", step),
         (RunState::Interrupted, _) => {
-            tr!("Not run: Jykre Studio closed while {0} ran.", step)
+            tr!("Not run: Jovru closed while {0} ran.", step)
         }
         _ => tr!("Not run: the chain stopped at {0}.", step),
     };
@@ -508,7 +508,7 @@ pub fn open_sections(definition: &JobDefinition) -> Vec<Section> {
 /// What the folded **Limits** says: the timeout and, for a SQL Job, the
 /// rows a run keeps.
 pub fn limits_summary(timeout_ms: u64, rows: Option<u32>) -> String {
-    let timeout = jykre::cell_format::duration(timeout_ms);
+    let timeout = jovru::cell_format::duration(timeout_ms);
     match rows {
         Some(1) => tr!("Timeout {0} · at most 1 row", timeout),
         Some(rows) => tr!("Timeout {0} · at most {1} rows", timeout, rows),
@@ -548,7 +548,7 @@ pub fn files_summary(entrypoint: &str, folder: &str) -> String {
 /// What the folded **Environment** says.
 pub fn environment_summary(unset: usize, set: usize) -> String {
     if unset == 0 && set == 0 {
-        tr!("Jykre Studio's, minus its own variables").to_owned()
+        tr!("Jovru's, minus its own variables").to_owned()
     } else {
         tr!("{0} removed, {1} set", unset, set)
     }
@@ -598,12 +598,12 @@ pub fn notice_after(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jykre::automation::OffReason;
-    use jykre::automation::definition::{OutputSpec, SqlOutput};
-    use jykre::automation::{ChainRunId, RunId, UtcMillis};
-    use jykre::reports::ParameterSpec;
-    use jykre_core::automation::RunOrigin;
-    use jykre_core::{ConnectionId, ParameterKind};
+    use jovru::automation::OffReason;
+    use jovru::automation::definition::{OutputSpec, SqlOutput};
+    use jovru::automation::{ChainRunId, RunId, UtcMillis};
+    use jovru::reports::ParameterSpec;
+    use jovru_core::automation::RunOrigin;
+    use jovru_core::{ConnectionId, ParameterKind};
 
     #[test]
     fn the_extra_statements_are_found_by_their_first_line() {
@@ -935,7 +935,7 @@ mod tests {
         stopped.state = RunState::Interrupted;
         assert_eq!(
             chain_steps(&stopped, &steps, &runs)[1].text,
-            "Not run: Jykre Studio closed while step_1 ran."
+            "Not run: Jovru closed while step_1 ran."
         );
     }
 
@@ -1046,7 +1046,7 @@ mod tests {
         assert_eq!(files_summary("a.js", "/jobs"), "a.js, in /jobs");
         assert_eq!(
             environment_summary(0, 0),
-            "Jykre Studio's, minus its own variables"
+            "Jovru's, minus its own variables"
         );
         assert_eq!(environment_summary(1, 2), "1 removed, 2 set");
         assert!(protocol_summary(Protocol::None).starts_with("None"));

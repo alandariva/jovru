@@ -2,8 +2,8 @@
 //! its own under the system's temporary folder with synthetic data. Nothing
 //! needs Docker, so these run in the basic gate.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-use jykre_core::*;
-use jykre_driver_sqlite::SqliteDriver;
+use jovru_core::*;
+use jovru_driver_sqlite::SqliteDriver;
 use serde_json::json;
 use sqlx::{ConnectOptions, Connection};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ impl Folder {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "jykre-sqlite-{}-{}",
+            "jovru-sqlite-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::SeqCst)
         ));
@@ -138,14 +138,14 @@ const ENDLESS: &str =
 async fn assert_kept(session: &mut Box<dyn Session>) {
     assert!(session.is_open());
     let (_, sink) = run(session, "SELECT value FROM temp.kept").await.unwrap();
-    assert_eq!(sink.rows, vec![vec![Cell::Text("jykre-kept".into())]]);
+    assert_eq!(sink.rows, vec![vec![Cell::Text("jovru-kept".into())]]);
 }
 
 async fn keep_state(session: &mut Box<dyn Session>) {
     run(session, "CREATE TEMP TABLE kept (value TEXT)")
         .await
         .unwrap();
-    run(session, "INSERT INTO kept VALUES ('jykre-kept')")
+    run(session, "INSERT INTO kept VALUES ('jovru-kept')")
         .await
         .unwrap();
 }
@@ -830,7 +830,7 @@ async fn inspection_and_definitions_come_from_the_schema() {
     assert_eq!(error.code, ErrorCode::NotFound);
 }
 
-/// What a result read with `sql` can be written back to (ADR-0039).
+/// What a result read with `sql` can be written back to (D-0039).
 async fn target_of(session: &mut Box<dyn Session>, sql: &str) -> write::EditTarget {
     let (_, sink) = run(session, sql).await.unwrap();
     session

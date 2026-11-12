@@ -23,13 +23,13 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo xtask check
-      - run: cargo build --release --locked --bin jykre
+      - run: cargo build --release --locked --bin jovru
       - name: Package
         shell: pwsh
         run: |
-          $name = "jykre-studio-${env:GITHUB_REF_NAME}-windows-x86_64"
+          $name = "jovru-${env:GITHUB_REF_NAME}-windows-x86_64"
           New-Item -ItemType Directory -Force dist/$name | Out-Null
-          Copy-Item target/release/jykre.exe, LICENSE, README.md dist/$name
+          Copy-Item target/release/jovru.exe, LICENSE, README.md dist/$name
           # The SQL catalogs the editor reads at run time, next to the executable.
           Copy-Item -Recurse catalog dist/$name/catalog
           Compress-Archive -Path dist/$name -DestinationPath dist/$name.zip
@@ -64,17 +64,17 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo xtask check
-      - run: cargo build --release --locked --bin jykre
+      - run: cargo build --release --locked --bin jovru
       - name: Package
         run: |
-          name="jykre-studio-${GITHUB_REF_NAME}-linux-x86_64"
+          name="jovru-${GITHUB_REF_NAME}-linux-x86_64"
           mkdir -p "dist/$name"
-          cp target/release/jykre LICENSE README.md "dist/$name"
+          cp target/release/jovru LICENSE README.md "dist/$name"
           # The SQL catalogs the editor reads at run time, next to the executable.
           cp -R catalog "dist/$name/catalog"
           # The desktop entry, its icon and the script that installs them.
-          cp assets/linux/io.github.alandariva.JykreStudio.desktop "dist/$name"
-          cp assets/icon/jykre.svg "dist/$name/io.github.alandariva.JykreStudio.svg"
+          cp assets/linux/io.github.alandariva.Jovru.desktop "dist/$name"
+          cp assets/icon/jovru.svg "dist/$name/io.github.alandariva.Jovru.svg"
           install -m 755 assets/linux/install.sh "dist/$name"
           tar -czf "dist/$name.tar.gz" -C dist "$name"
           (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
@@ -84,7 +84,7 @@ jobs:
           path: dist/*.tar.gz*
           if-no-files-found: error
 
-  # Signs each archive with the release key (ADR-0033): the application
+  # Signs each archive with the release key (D-0033): the application
   # installs an update only when it verifies against
   # assets/update/release-key.pub. The signature's context is the archive's
   # file name, so an archive cannot be renamed to pass for another version.
@@ -160,7 +160,7 @@ jobs:
           foreach ($zip in Get-ChildItem dist/*.zip) {
             $out = Join-Path $env:RUNNER_TEMP $zip.BaseName
             Expand-Archive -Path $zip.FullName -DestinationPath $out
-            foreach ($entry in 'jykre.exe', 'catalog') {
+            foreach ($entry in 'jovru.exe', 'catalog') {
               if (-not (Test-Path (Join-Path $out (Join-Path $zip.BaseName $entry)))) {
                 throw "$entry is missing from $($zip.Name)"
               }

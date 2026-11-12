@@ -11,13 +11,11 @@ pub fn from_update_error(error: &self_update::Error) -> DriverError {
     match error {
         Error::RateLimited { .. } => DriverError::new(
             ErrorCode::Connection,
-            tr!(
-                "GitHub is limiting requests from this network; Jykre Studio will try again later."
-            ),
+            tr!("GitHub is limiting requests from this network; Jovru will try again later."),
         ),
         Error::NotFound { .. } => DriverError::new(
             ErrorCode::NotFound,
-            tr!("GitHub did not find Jykre Studio's releases."),
+            tr!("GitHub did not find Jovru's releases."),
         ),
         Error::Unauthorized { status, .. } | Error::HttpStatus { status, .. } => {
             from_status(*status)
@@ -87,7 +85,7 @@ pub fn from_io(error: &std::io::Error) -> DriverError {
         std::io::ErrorKind::PermissionDenied => DriverError::new(
             ErrorCode::PermissionDenied,
             tr!(
-                "Jykre Studio cannot write to its own folder; download the release and replace it by hand."
+                "Jovru cannot write to its own folder; download the release and replace it by hand."
             ),
         ),
         std::io::ErrorKind::StorageFull => DriverError::new(
@@ -112,7 +110,7 @@ pub fn timeout() -> DriverError {
 pub fn unsigned() -> DriverError {
     DriverError::new(
         ErrorCode::Protocol,
-        tr!("The archive is not signed with Jykre Studio's release key; nothing was installed."),
+        tr!("The archive is not signed with Jovru's release key; nothing was installed."),
     )
 }
 
@@ -133,7 +131,7 @@ pub fn too_large() -> DriverError {
 pub fn unexpected_layout() -> DriverError {
     DriverError::new(
         ErrorCode::Protocol,
-        tr!("The release archive does not hold Jykre Studio as expected; nothing was installed."),
+        tr!("The release archive does not hold Jovru as expected; nothing was installed."),
     )
 }
 
@@ -141,7 +139,7 @@ pub fn not_restored() -> DriverError {
     DriverError::new(
         ErrorCode::Internal,
         tr!(
-            "The update failed and Jykre Studio's folder could not be put back as it was; download the release and replace the folder by hand."
+            "The update failed and Jovru's folder could not be put back as it was; download the release and replace the folder by hand."
         ),
     )
 }

@@ -1,7 +1,7 @@
-//! Replaces the entries of Jykre Studio's folder with a release's, all or
+//! Replaces the entries of Jovru's folder with a release's, all or
 //! nothing.
 //!
-//! The release is unpacked into `<folder>/.jykre-update/staging-<id>/`,
+//! The release is unpacked into `<folder>/.jovru-update/staging-<id>/`,
 //! on the same file system, so every step is a rename. Each top-level entry
 //! of the archive's folder replaces the entry of the same name, the
 //! executable last; what it replaces is moved into `trash-<id>/`. A failed
@@ -22,7 +22,7 @@ use super::error;
 use super::release::Platform;
 
 /// The folder, next to the executable, that holds an update's files.
-pub const WORK_DIR: &str = ".jykre-update";
+pub const WORK_DIR: &str = ".jovru-update";
 
 /// A release unpacked and checked, ready to be swapped in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,14 +258,14 @@ mod tests {
     fn fixture(temp: &TempDir) -> (PathBuf, StagedRelease, PathBuf) {
         let dir = temp.path().join("app");
         std::fs::create_dir_all(dir.join("catalog/postgresql")).unwrap();
-        std::fs::write(dir.join("jykre"), b"old binary").unwrap();
+        std::fs::write(dir.join("jovru"), b"old binary").unwrap();
         std::fs::write(dir.join("README.md"), b"old readme").unwrap();
         std::fs::write(dir.join("catalog/postgresql/manifest.json"), b"old").unwrap();
         std::fs::write(dir.join("notes.txt"), b"the user's").unwrap();
         let unpacked = dir.join(WORK_DIR).join("staging-1").join("files");
-        let root = unpacked.join("jykre-studio-v0.2.1-linux-x86_64");
+        let root = unpacked.join("jovru-v0.2.1-linux-x86_64");
         std::fs::create_dir_all(root.join("catalog/postgresql")).unwrap();
-        std::fs::write(root.join("jykre"), b"new binary").unwrap();
+        std::fs::write(root.join("jovru"), b"new binary").unwrap();
         std::fs::write(root.join("README.md"), b"new readme").unwrap();
         std::fs::write(root.join("LICENSE"), b"new license").unwrap();
         std::fs::write(root.join("catalog/postgresql/manifest.json"), b"new").unwrap();
@@ -290,7 +290,7 @@ mod tests {
             .iter()
             .map(|name| name.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["LICENSE", "README.md", "catalog", "jykre"]);
+        assert_eq!(names, ["LICENSE", "README.md", "catalog", "jovru"]);
     }
 
     #[test]
@@ -305,7 +305,7 @@ mod tests {
                 .find(|(path, _)| path == name)
                 .map(|(_, bytes)| bytes.clone())
         };
-        assert_eq!(content("jykre").as_deref(), Some(&b"new binary"[..]));
+        assert_eq!(content("jovru").as_deref(), Some(&b"new binary"[..]));
         assert_eq!(content("LICENSE").as_deref(), Some(&b"new license"[..]));
         assert_eq!(
             content("catalog/postgresql/manifest.json").as_deref(),
@@ -313,7 +313,7 @@ mod tests {
         );
         assert_eq!(content("notes.txt").as_deref(), Some(&b"the user's"[..]));
         assert_eq!(
-            std::fs::read(trash.join("jykre")).unwrap(),
+            std::fs::read(trash.join("jovru")).unwrap(),
             b"old binary",
             "the replaced executable waits in the trash"
         );
@@ -379,13 +379,13 @@ mod tests {
 
         let unpacked = temp.path().join("no-catalog");
         std::fs::create_dir_all(unpacked.join("root")).unwrap();
-        std::fs::write(unpacked.join("root/jykre"), b"x").unwrap();
+        std::fs::write(unpacked.join("root/jovru"), b"x").unwrap();
         assert!(validate_staged(&unpacked, PLATFORM).is_err());
 
         let unpacked = temp.path().join("work-dir");
         std::fs::create_dir_all(unpacked.join("root/catalog")).unwrap();
         std::fs::create_dir_all(unpacked.join("root").join(WORK_DIR)).unwrap();
-        std::fs::write(unpacked.join("root/jykre"), b"x").unwrap();
+        std::fs::write(unpacked.join("root/jovru"), b"x").unwrap();
         assert!(validate_staged(&unpacked, PLATFORM).is_err());
     }
 
@@ -396,9 +396,9 @@ mod tests {
         let temp = TempDir::new();
         let unpacked = temp.path().join("ok");
         std::fs::create_dir_all(unpacked.join("root/catalog")).unwrap();
-        std::fs::write(unpacked.join("root/jykre"), b"x").unwrap();
+        std::fs::write(unpacked.join("root/jovru"), b"x").unwrap();
         let staged = validate_staged(&unpacked, PLATFORM).unwrap();
-        let mode = std::fs::metadata(staged.root.join("jykre"))
+        let mode = std::fs::metadata(staged.root.join("jovru"))
             .unwrap()
             .permissions()
             .mode();

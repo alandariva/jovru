@@ -1,8 +1,8 @@
-//! The MCP section of the rail (plan 5.2 and 5.5, [ADR-0042](../../docs/adr/0042-mcp-server-for-the-assistant-tools.md)).
+//! The MCP section of the rail (plan 5.2 and 5.5, [D-0042](../../docs/decisions/assistant.md#d-0042)).
 //!
 //! The sidebar, the token tabs and the Requests tab present
-//! [`jykre::mcp::McpEndpoint`] and send it intents. Token records, review,
-//! deadlines and whether an answer may leave stay in `jykre::mcp`. A new
+//! [`jovru::mcp::McpEndpoint`] and send it intents. Token records, review,
+//! deadlines and whether an answer may leave stay in `jovru::mcp`. A new
 //! card updates the rail and the status bar and does not take the keyboard.
 
 use super::*;
@@ -10,14 +10,14 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::connection_appearance::Environment;
-use jykre::drivers::{ConnectionId, DriverKind};
-use jykre::mcp::{
+use jovru::connection_appearance::Environment;
+use jovru::drivers::{ConnectionId, DriverKind};
+use jovru::mcp::{
     ActivityEntry, CONNECTION_CHANGED, CardContent, CardId, CardPlace, CardSnapshot, DEFAULT_PORT,
     EnabledTools, ListenState, McpEndpoint, McpTokenId, Outcome, ReviewPolicy, TokenRecord,
     environment_label, split_wire,
 };
-use jykre::tr;
+use jovru::tr;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -155,7 +155,7 @@ fn utc_date(unix_ms: u64) -> String {
 }
 
 fn prefix(id: &McpTokenId) -> String {
-    format!("jykmcp_{}…", id.as_str())
+    format!("jovmcp_{}…", id.as_str())
 }
 
 fn review_label(policy: ReviewPolicy) -> &'static str {
@@ -277,7 +277,7 @@ struct SavedConnection {
     revision: i64,
     environment: Option<Environment>,
     environment_key: String,
-    color: jykre::connection_appearance::ConnectionColor,
+    color: jovru::connection_appearance::ConnectionColor,
     driver: DriverKind,
 }
 
@@ -375,10 +375,10 @@ impl AppView {
                     }),
                 );
         }
-        let dir = jykre::connection_store::data_dir();
+        let dir = jovru::connection_store::data_dir();
         cx.spawn_in(window, async move |weak, cx| {
             let listened =
-                jykre::backend::run(async move { Ok(McpEndpoint::listen(dir, demo).await) }).await;
+                jovru::backend::run(async move { Ok(McpEndpoint::listen(dir, demo).await) }).await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.mcp.switching = false;
                 match listened {
@@ -578,7 +578,7 @@ impl AppView {
         self.mcp.switching = true;
         cx.notify();
         cx.spawn(async move |weak, cx| {
-            let result = jykre::backend::run(async move {
+            let result = jovru::backend::run(async move {
                 if let Some(endpoint) = endpoint {
                     match change {
                         ServerChange::Enabled(on) => endpoint.set_enabled(on).await,
@@ -1362,7 +1362,7 @@ impl AppView {
         }
         self.mcp.shutdown_started = true;
         cx.spawn_in(window, async move |weak, cx| {
-            let _ = jykre::backend::run(async move {
+            let _ = jovru::backend::run(async move {
                 endpoint.shutdown().await;
                 Ok(())
             })
@@ -2164,9 +2164,9 @@ impl TokenView {
         self.error = None;
         cx.notify();
         cx.spawn_in(window, async move |weak, cx| {
-            let created = jykre::backend::run(async move {
+            let created = jovru::backend::run(async move {
                 endpoint
-                    .create_token(jykre::mcp::CreateToken {
+                    .create_token(jovru::mcp::CreateToken {
                         name,
                         connection_id: connection.id,
                         connection_revision: connection.revision,
@@ -2213,7 +2213,7 @@ impl TokenView {
         self.busy = true;
         self.clear_secret(window, cx);
         cx.spawn_in(window, async move |weak, cx| {
-            let rotated = jykre::backend::run(async move { endpoint.rotate(id).await }).await;
+            let rotated = jovru::backend::run(async move { endpoint.rotate(id).await }).await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 this.busy = false;
                 match rotated {
@@ -2252,7 +2252,7 @@ impl TokenView {
             return;
         };
         cx.spawn(async move |weak, cx| {
-            let result = jykre::backend::run(async move { endpoint.revoke(id).await }).await;
+            let result = jovru::backend::run(async move { endpoint.revoke(id).await }).await;
             let _ = weak.update(cx, |this, cx| {
                 match result {
                     Ok(()) => {
@@ -2272,7 +2272,7 @@ impl TokenView {
             return;
         };
         cx.spawn(async move |weak, cx| {
-            let result = jykre::backend::run(async move { endpoint.delete_token(id).await }).await;
+            let result = jovru::backend::run(async move { endpoint.delete_token(id).await }).await;
             let _ = weak.update(cx, |this, cx| {
                 match result {
                     Ok(()) => this.revoked = true,
@@ -2297,7 +2297,7 @@ impl TokenView {
         };
         cx.spawn(async move |weak, cx| {
             let result =
-                jykre::backend::run(async move { endpoint.set_name(id, name).await }).await;
+                jovru::backend::run(async move { endpoint.set_name(id, name).await }).await;
             let _ = weak.update(cx, |this, cx| {
                 match result {
                     Ok(()) => {
@@ -2320,7 +2320,7 @@ impl TokenView {
         };
         cx.spawn(async move |weak, cx| {
             let result =
-                jykre::backend::run(async move { endpoint.set_tools(id, tools).await }).await;
+                jovru::backend::run(async move { endpoint.set_tools(id, tools).await }).await;
             let _ = weak.update(cx, |this, cx| {
                 if let Err(error) = result {
                     this.error = Some(error.to_string());
@@ -2339,7 +2339,7 @@ impl TokenView {
         };
         cx.spawn(async move |weak, cx| {
             let result =
-                jykre::backend::run(async move { endpoint.set_review(id, review).await }).await;
+                jovru::backend::run(async move { endpoint.set_review(id, review).await }).await;
             let _ = weak.update(cx, |this, cx| {
                 if let Err(error) = result {
                     this.error = Some(error.to_string());
@@ -2359,7 +2359,7 @@ impl TokenView {
         };
         cx.spawn(async move |weak, cx| {
             let result =
-                jykre::backend::run(async move { endpoint.set_expiry(id, expires).await }).await;
+                jovru::backend::run(async move { endpoint.set_expiry(id, expires).await }).await;
             let _ = weak.update(cx, |this, cx| {
                 if let Err(error) = result {
                     this.error = Some(error.to_string());
@@ -2375,7 +2375,7 @@ impl TokenView {
             return;
         };
         cx.spawn(async move |weak, cx| {
-            let result = jykre::backend::run(async move { endpoint.confirm_token(id).await }).await;
+            let result = jovru::backend::run(async move { endpoint.confirm_token(id).await }).await;
             let _ = weak.update(cx, |this, cx| {
                 if let Err(error) = result {
                     this.error = Some(error.to_string());
@@ -2672,7 +2672,7 @@ impl TokenView {
                 )),
             )
             .child(label(tr!(
-                "This is the only time Jykre Studio shows this token. Store it in your MCP client's configuration."
+                "This is the only time Jovru shows this token. Store it in your MCP client's configuration."
             )))
             .child(
                 div()
@@ -2797,7 +2797,7 @@ impl Render for TokenView {
 #[cfg(test)]
 mod tests {
     use super::{ExpiryChoice, expires_at, prefix, show_controls, utc_date};
-    use jykre::mcp::McpTokenId;
+    use jovru::mcp::McpTokenId;
 
     #[test]
     fn controls_and_bidi_marks_are_visible_escapes() {
@@ -2816,7 +2816,7 @@ mod tests {
         crate::app::source_text();
         let id = McpTokenId::parse("abcdefghij");
         let shown = id.as_ref().map(prefix);
-        assert_eq!(shown.as_deref(), Some("jykmcp_abcdefghij…"));
+        assert_eq!(shown.as_deref(), Some("jovmcp_abcdefghij…"));
         assert_eq!(expires_at(ExpiryChoice::Never, 1_000), None);
         assert_eq!(
             expires_at(ExpiryChoice::Days30, 1_000),

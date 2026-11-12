@@ -1,14 +1,14 @@
-//! The agentic loop, one round at a time (ADR-0028). The application drives
+//! The agentic loop, one round at a time (D-0028). The application drives
 //! it so each request can be shown before it leaves: a turn starts with the
 //! user's message, each round is prepared, reviewed when the mode asks for
 //! it, sent, and answered with tool results until the model gives a final
 //! answer or the round limit stops it. Everything is kept in the trace.
 use super::tools::CacheTools;
-use jykre_assistant::{
+use jovru_assistant::{
     Assistant, Message, ModelRequest, Price, RoundEvent, RoundResult, ToolCall, ToolSpec, Usage,
     estimate_tokens,
 };
-use jykre_core::{CancellationToken, DriverError, DriverResult, ErrorCode};
+use jovru_core::{CancellationToken, DriverError, DriverResult, ErrorCode};
 use serde::Serialize;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -107,7 +107,7 @@ pub fn split_calls(calls: Vec<ToolCall>) -> (Vec<ToolCall>, Vec<ToolCall>) {
 /// model gets instead.
 pub fn query_sql(
     call: &ToolCall,
-    dialect: Option<jykre_core::SqlDialect>,
+    dialect: Option<jovru_core::SqlDialect>,
 ) -> Result<String, String> {
     let sql = call
         .arguments
@@ -620,7 +620,7 @@ pub async fn run_tools(tools: &CacheTools, calls: &[ToolCall]) -> Vec<ToolStep> 
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
         let span = tracing::info_span!(
             "assistant_tool",
-            jykre.assistant.tool = if plain { call.name.as_str() } else { "other" }
+            jovru.assistant.tool = if plain { call.name.as_str() } else { "other" }
         );
         let answer = tools.call(call).instrument(span).await;
         steps.push(ToolStep {
@@ -650,7 +650,7 @@ pub async fn send(
         gen_ai.request.model = config.model.as_str(),
         gen_ai.usage.input_tokens = tracing::field::Empty,
         gen_ai.usage.output_tokens = tracing::field::Empty,
-        jykre.assistant.tool_calls = tracing::field::Empty
+        jovru.assistant.tool_calls = tracing::field::Empty
     );
     let started = Instant::now();
     let result = assistant
@@ -672,7 +672,7 @@ pub async fn send(
                 );
             }
             span.record(
-                "jykre.assistant.tool_calls",
+                "jovru.assistant.tool_calls",
                 crate::telemetry::attributes::count(round.tool_calls.len()),
             );
         }

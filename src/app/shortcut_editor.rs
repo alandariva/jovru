@@ -12,8 +12,8 @@ use super::shortcuts::{self, Group};
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::keymap::{self, Assigned, Key};
-use jykre::tr;
+use jovru::keymap::{self, Assigned, Key};
+use jovru::tr;
 use std::collections::HashMap;
 
 /// A key that collides with other actions, waiting for the user's answer.

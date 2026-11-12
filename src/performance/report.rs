@@ -1,6 +1,6 @@
 //! The performance run's report: a JSON file with every phase and metric,
 //! and a short Markdown summary next to it with the budgets and this run's
-//! numbers (`jykre-performance-<timestamp>-<pid>.json` and `.md`).
+//! numbers (`jovru-performance-<timestamp>-<pid>.json` and `.md`).
 use super::budget::{Metric, Status};
 use super::selection::PathId;
 use serde_json::{Value, json};
@@ -46,7 +46,7 @@ pub struct Environment {
     pub logical_cpus: Option<usize>,
     /// The window's content in logical pixels, and its scale factor.
     pub window: Option<(f32, f32, f32)>,
-    /// `JYKRE_PROBE` was on, so frames and stalls were timed.
+    /// `JOVRU_PROBE` was on, so frames and stalls were timed.
     pub probe: bool,
 }
 
@@ -114,7 +114,7 @@ impl Report {
             "frame_probe": environment.probe,
             "started_unix_seconds": self.started,
             "elapsed_seconds": self.elapsed_seconds,
-            "measurement": "frames and UI-thread stalls from the frame probe (JYKRE_PROBE=1) per phase; UI-thread work from the application's own UiTimer timings; process CPU (100% = one logical CPU) and resident memory at phase ends, and sampled during imports",
+            "measurement": "frames and UI-thread stalls from the frame probe (JOVRU_PROBE=1) per phase; UI-thread work from the application's own UiTimer timings; process CPU (100% = one logical CPU) and resident memory at phase ends, and sampled during imports",
             "input": "in-process production handlers (keys, toolbar actions, typing into the fields), on timers; not OS input injection",
             "paths": paths,
             "results": results,
@@ -126,7 +126,7 @@ impl Report {
     /// platform and the window.
     pub fn markdown(&self) -> String {
         let environment = &self.environment;
-        let mut text = String::from("# Jykre Studio performance run\n\n");
+        let mut text = String::from("# Jovru performance run\n\n");
         text.push_str(&format!(
             "- Version {}, {} build\n- Platform: {} {}, {} logical CPUs\n",
             environment.version,
@@ -146,7 +146,7 @@ impl Report {
         text.push_str(&format!(
             "- Frame probe: {}\n- Paths: {}\n- Elapsed: {:.0} s\n\n",
             if environment.probe {
-                "on (JYKRE_PROBE=1)"
+                "on (JOVRU_PROBE=1)"
             } else {
                 "off; frames and stalls not measured"
             },
@@ -219,7 +219,7 @@ fn cell(text: &str) -> String {
 
 /// The report's file name without its extension.
 pub fn file_stem(stamp_nanos: u128, pid: u32) -> String {
-    format!("jykre-performance-{stamp_nanos}-{pid}")
+    format!("jovru-performance-{stamp_nanos}-{pid}")
 }
 
 /// Writes `<stem>.json` and `<stem>.md` into `dir`.
@@ -293,7 +293,7 @@ mod tests {
         assert!(text.contains("## Not measured"), "{text}");
         assert!(text.contains("probe off"), "{text}");
         assert!(text.contains("temporary folder left"), "{text}");
-        assert!(file_stem(5, 7) == "jykre-performance-5-7");
+        assert!(file_stem(5, 7) == "jovru-performance-5-7");
     }
 
     #[test]
@@ -304,7 +304,7 @@ mod tests {
         assert!(
             std::fs::read_to_string(markdown)
                 .unwrap()
-                .starts_with("# Jykre")
+                .starts_with("# Jovru")
         );
         folder.remove().unwrap();
     }

@@ -1,5 +1,5 @@
 //! Export of a result to a file, on the database runtime
-//! ([Results](../../docs/reference/results.md#export)).
+//! ([Results](../../docs/reference/results/transfer.md#export)).
 //!
 //! The rows go to the file in parts: first the pages the tab already holds,
 //! then the rest of the result, read from the session in parts of about
@@ -139,10 +139,10 @@ pub async fn export_with(
     let span = crate::client_span!(
         "export",
         format = ?request.options.format,
-        jykre.export.format = format!("{:?}", request.options.format).to_lowercase(),
-        jykre.export.rows = tracing::field::Empty,
-        jykre.export.truncated = tracing::field::Empty,
-        jykre.bytes = tracing::field::Empty
+        jovru.export.format = format!("{:?}", request.options.format).to_lowercase(),
+        jovru.export.rows = tracing::field::Empty,
+        jovru.export.truncated = tracing::field::Empty,
+        jovru.bytes = tracing::field::Empty
     );
     let started = Instant::now();
     let mut run = ExportRun {
@@ -168,14 +168,14 @@ pub async fn export_with(
     match &outcome {
         Ok(exported) => {
             span.record(
-                "jykre.export.rows",
+                "jovru.export.rows",
                 crate::telemetry::attributes::count(exported.rows),
             );
             span.record(
-                "jykre.bytes",
+                "jovru.bytes",
                 crate::telemetry::attributes::count(exported.bytes),
             );
-            span.record("jykre.export.truncated", exported.truncated);
+            span.record("jovru.export.truncated", exported.truncated);
         }
         Err(error) => crate::telemetry::attributes::record_error(&span, error),
     }

@@ -1,6 +1,6 @@
 //! The dialog that renames a saved query and gives it tags, from the
 //! library's pencil. A query that is a file is renamed by renaming its
-//! file, never over another one, and its tags stay local (ADR-0031); a
+//! file, never over another one, and its tags stay local (D-0031); a
 //! saved query of an earlier version, not moved to a file yet, is renamed
 //! in place.
 use super::*;
@@ -73,7 +73,7 @@ impl AppView {
             cx.notify();
             return;
         }
-        let tags = jykre::workspace_state::parse_tags(&self.details_tags.read(cx).value());
+        let tags = jovru::workspace_state::parse_tags(&self.details_tags.read(cx).value());
         let Some(QueryDetails::Edit { id }) = self
             .query_details
             .as_ref()
@@ -86,8 +86,8 @@ impl AppView {
             return;
         }
         self.query_details = None;
-        jykre::workspace_state::edit_saved(&mut self.unmigrated, id, &name, &tags);
-        jykre::workspace_state::edit_saved(&mut self.saved_queries, id, &name, &tags);
+        jovru::workspace_state::edit_saved(&mut self.unmigrated, id, &name, &tags);
+        jovru::workspace_state::edit_saved(&mut self.saved_queries, id, &name, &tags);
         // The tab that edits the query shows its name.
         let open: Vec<(TabId, Entity<Workspace>)> = self
             .panels
@@ -124,9 +124,9 @@ impl AppView {
         let from = entry.path.clone();
         let to = from
             .parent()
-            .map(|folder| folder.join(jykre::query_files::names::file_name(name)))
+            .map(|folder| folder.join(jovru::query_files::names::file_name(name)))
             .unwrap_or_else(|| from.clone());
-        let renames = !jykre::query_files::names::same_path(&from, &to) || from != to;
+        let renames = !jovru::query_files::names::same_path(&from, &to) || from != to;
         if let Some(entry) = self.query_library.entry_mut(id) {
             entry.tags = tags;
         }
@@ -142,17 +142,17 @@ impl AppView {
         cx.spawn_in(window, async move |weak, cx| {
             let renamed = backend::run(async move {
                 Ok(tokio::task::spawn_blocking(move || {
-                    jykre::query_files::rename(&source, &target)
+                    jovru::query_files::rename(&source, &target)
                 })
                 .await
                 .unwrap_or_else(|_| {
-                    Err(jykre::query_files::FileError::Io(
+                    Err(jovru::query_files::FileError::Io(
                         "the file task stopped".into(),
                     ))
                 }))
             })
             .await
-            .unwrap_or_else(|error| Err(jykre::query_files::FileError::Io(error.message.clone())));
+            .unwrap_or_else(|error| Err(jovru::query_files::FileError::Io(error.message.clone())));
             let _ = weak.update_in(cx, |this, window, cx| {
                 if let Err(error) = renamed {
                     this.details_error = Some(tr!("Not renamed: {0}", error.message()));
@@ -161,13 +161,13 @@ impl AppView {
                 }
                 this.query_details = None;
                 this.query_library.moved(id, &to);
-                let title = jykre::query_files::names::title_of(&to);
+                let title = jovru::query_files::names::title_of(&to);
                 let open: Vec<(TabId, Entity<Workspace>)> = this
                     .panels
                     .iter()
                     .filter(|(_, panel)| {
                         panel.read(cx).file().is_some_and(|file| {
-                            jykre::query_files::names::same_path(&file.path, &from)
+                            jovru::query_files::names::same_path(&file.path, &from)
                         })
                     })
                     .map(|(tab, panel)| (*tab, panel.clone()))
@@ -218,15 +218,15 @@ impl AppView {
             QueryDetails::Edit { .. } => (tr!("Rename the saved query"), tr!("Save changes")),
         };
         // A file's name cannot hold every title: the name it will get is
-        // shown before the rename (ADR-0031).
+        // shown before the rename (D-0031).
         let QueryDetails::Edit { id } = details;
         let file_name = self
             .is_file_entry(*id)
             .then(|| self.details_name.read(cx).value().trim().to_owned())
             .filter(|name| {
-                !name.is_empty() && jykre::query_files::names::safe_stem(name, "Query") != *name
+                !name.is_empty() && jovru::query_files::names::safe_stem(name, "Query") != *name
             })
-            .map(|name| jykre::query_files::names::file_name(&name));
+            .map(|name| jovru::query_files::names::file_name(&name));
         self.overlay("details-backdrop", cx)
             .child(
                 column()

@@ -1,5 +1,5 @@
 //! CSV: `csv`'s reader over a decoder of the chosen encoding
-//! ([proposal](../../docs/plans/csv-and-xlsx-reading-dependencies.md#encodings)).
+//! ([proposal](../../docs/reference/drivers/editing-and-import.md#import-encodings)).
 //!
 //! The decoder sits between the file and the CSV reader with fixed buffers
 //! and hands it UTF-8. A byte-order mark overrides the chosen encoding. Bytes

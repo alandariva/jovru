@@ -1,4 +1,4 @@
-// xtask is a command-line tool: printing its progress is its job (ADR-0011).
+// xtask is a command-line tool: printing its progress is its job (D-0011).
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 mod catalogs;
@@ -68,7 +68,7 @@ fn run(root: &Path, full: bool) -> Result<(), String> {
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
     let id = run_id(std::process::id(), nanos);
-    // Handed to the tests as JYKRE_CONFIG_DIR: a test that reaches the
+    // Handed to the tests as JOVRU_CONFIG_DIR: a test that reaches the
     // application data folder by mistake writes here, and the gate fails.
     let data = env::temp_dir().join(format!("{id}-data"));
     fs::create_dir_all(&data).map_err(|e| format!("{}: {e}", data.display()))?;
@@ -78,7 +78,7 @@ fn run(root: &Path, full: bool) -> Result<(), String> {
 }
 
 fn gate(root: &Path, full: bool, id: &str, data: &Path) -> Result<(), String> {
-    let isolated = [("JYKRE_CONFIG_DIR", data.as_os_str())];
+    let isolated = [("JOVRU_CONFIG_DIR", data.as_os_str())];
     println!(
         "{} gate. Live tests are skipped in basic mode; authenticated Databricks tests and visual checks are separate.",
         if full { "Full" } else { "Basic" }
@@ -131,7 +131,7 @@ fn gate(root: &Path, full: bool, id: &str, data: &Path) -> Result<(), String> {
         &[
             "clippy",
             "-p",
-            "jykre-sql-language",
+            "jovru-sql-language",
             "--no-default-features",
             "--all-targets",
             "--locked",
@@ -146,7 +146,7 @@ fn gate(root: &Path, full: bool, id: &str, data: &Path) -> Result<(), String> {
         &[
             "test",
             "-p",
-            "jykre-sql-language",
+            "jovru-sql-language",
             "--no-default-features",
             "--locked",
         ],
@@ -292,30 +292,30 @@ fn architecture(metadata: &Value) -> Result<(), String> {
             let target = dependency["name"]
                 .as_str()
                 .ok_or("Dependency name missing")?;
-            // The assistant crate talks to AI providers (ADR-0028) the way a
+            // The assistant crate talks to AI providers (D-0028) the way a
             // driver talks to a database: it knows the core contracts only,
             // never the UI, the cache or the vault.
-            let adapter = name.starts_with("jykre-driver-")
-                || name == "jykre-storage"
-                || name == "jykre-secrets"
-                || name == "jykre-assistant";
-            let backend = name == "jykre-core" || adapter;
-            let internal = target == "jykre" || target == "xtask" || target.starts_with("jykre-");
+            let adapter = name.starts_with("jovru-driver-")
+                || name == "jovru-storage"
+                || name == "jovru-secrets"
+                || name == "jovru-assistant";
+            let backend = name == "jovru-core" || adapter;
+            let internal = target == "jovru" || target == "xtask" || target.starts_with("jovru-");
             let ui = target.starts_with("gpui") || target == "tauri";
-            // The SQL crates are pure text handling (ADR-0020): `jykre-sql`
+            // The SQL crates are pure text handling (D-0020): `jovru-sql`
             // serves query execution and must stay free of the editor's
-            // engines; `jykre-sql-language` holds the editor's features and
+            // engines; `jovru-sql-language` holds the editor's features and
             // knows neither the UI nor the editor's LSP types.
-            let sql = name == "jykre-sql";
-            let language = name == "jykre-sql-language";
+            let sql = name == "jovru-sql";
+            let language = name == "jovru-sql-language";
             let editor_engine = target == "sqruff-lib" || target.starts_with("tree-sitter");
             let forbidden = (backend && ui)
-                || (name == "jykre-core"
+                || (name == "jovru-core"
                     && (internal || matches!(target, "sqlx" | "reqwest" | "genai")))
-                || (adapter && internal && target != "jykre-core")
+                || (adapter && internal && target != "jovru-core")
                 || ((sql || language) && (ui || target == "lsp-types"))
-                || (sql && ((internal && target != "jykre-core") || editor_engine))
-                || (language && internal && !matches!(target, "jykre-core" | "jykre-sql"));
+                || (sql && ((internal && target != "jovru-core") || editor_engine))
+                || (language && internal && !matches!(target, "jovru-core" | "jovru-sql"));
             if forbidden {
                 return Err(format!(
                     "Dependency forbidden by the architecture: {name} -> {target}"
@@ -326,10 +326,10 @@ fn architecture(metadata: &Value) -> Result<(), String> {
     Ok(())
 }
 
-/// The `jykre` library (everything in `src/` but the application in
+/// The `jovru` library (everything in `src/` but the application in
 /// `src/main.rs` and `src/app/`) runs queries and reads metadata; it never
 /// uses the editor's language features, so they can be removed without
-/// touching it (ADR-0020).
+/// touching it (D-0020).
 fn library_without_language_features(root: &Path) -> Result<(), String> {
     let src = root.join("src");
     let mut pending = vec![src.clone()];
@@ -344,9 +344,9 @@ fn library_without_language_features(root: &Path) -> Result<(), String> {
             } else if path.extension().is_some_and(|ext| ext == "rs") {
                 let source =
                     fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-                if source.contains("jykre_sql_language") {
+                if source.contains("jovru_sql_language") {
                     return Err(format!(
-                        "{} uses the editor's language features (jykre_sql_language); only src/app may",
+                        "{} uses the editor's language features (jovru_sql_language); only src/app may",
                         path.display()
                     ));
                 }
@@ -356,7 +356,7 @@ fn library_without_language_features(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// What `src/assistant` and `src/mcp` may not name (ADR-0028, ADR-0042):
+/// What `src/assistant` and `src/mcp` may not name (D-0028, D-0042):
 /// result values, bound parameter values, sessions, credentials and server
 /// reads. The assistant's requests are built from the allow-list in
 /// `src/assistant/facts.rs` and the metadata cache only, and from a query's
@@ -382,7 +382,7 @@ const ASSISTANT_FORBIDDEN: [&str; 11] = [
 const RELEASED_MAY_NAME: [&str; 3] = ["ResultData", "QueryBatch", "QueryResult"];
 
 fn assistant_privacy(root: &Path) -> Result<(), String> {
-    // `src/mcp` is held to the same list as `src/assistant` (ADR-0042).
+    // `src/mcp` is held to the same list as `src/assistant` (D-0042).
     // A missing directory is skipped, as a checkout without that tree is.
     let mut pending = vec![
         root.join("src").join("assistant"),
@@ -429,7 +429,7 @@ fn assistant_privacy(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// What the saved-query files' code may not name (ADR-0031): sessions,
+/// What the saved-query files' code may not name (D-0031): sessions,
 /// drivers and running queries, so opening, discovering, migrating or
 /// recovering files can never run SQL.
 const QUERY_FILES_FORBIDDEN: [&str; 9] = [
@@ -533,7 +533,7 @@ fn compose_output(root: &Path, project: &str, args: &[&str]) -> Result<String, S
 /// The time suffix keeps it unique where PIDs can repeat, such as Windows and
 /// WSL sharing one Docker daemon, or a PID reused after an interrupted run.
 fn run_id(pid: u32, nanos: u128) -> String {
-    format!("jykre-gate-{pid}-{nanos:x}")
+    format!("jovru-gate-{pid}-{nanos:x}")
 }
 
 /// The host port in the output of `docker compose port`, such as
@@ -599,7 +599,7 @@ fn live(root: &Path, project: &str, data: &Path) -> Result<(), String> {
         for (service, driver, container_port) in FIXTURES {
             let output = compose_output(root, project, &["port", service, container_port])?;
             let port = published_port(&output)?.to_string();
-            let package = format!("jykre-driver-{driver}");
+            let package = format!("jovru-driver-{driver}");
             println!("> Integration {package} ({service}) on 127.0.0.1:{port}");
             command_env(
                 root,
@@ -615,21 +615,21 @@ fn live(root: &Path, project: &str, data: &Path) -> Result<(), String> {
                     "--ignored",
                 ],
                 &[
-                    ("JYKRE_TEST_PORT", OsStr::new(&port)),
-                    ("JYKRE_CONFIG_DIR", data.as_os_str()),
+                    ("JOVRU_TEST_PORT", OsStr::new(&port)),
+                    ("JOVRU_CONFIG_DIR", data.as_os_str()),
                 ],
             )
             .map_err(|_| format!("Integration {service} failed"))?;
             // The export reads real sessions through the application's
             // backend, which no driver crate may depend on.
-            println!("> Integration jykre export ({service}) on 127.0.0.1:{port}");
+            println!("> Integration jovru export ({service}) on 127.0.0.1:{port}");
             command_env(
                 root,
                 "cargo",
                 &[
                     "test",
                     "-p",
-                    "jykre",
+                    "jovru",
                     "--locked",
                     "--test",
                     "live",
@@ -637,12 +637,12 @@ fn live(root: &Path, project: &str, data: &Path) -> Result<(), String> {
                     "--ignored",
                 ],
                 &[
-                    ("JYKRE_TEST_PORT", OsStr::new(&port)),
-                    ("JYKRE_TEST_DRIVER", OsStr::new(driver)),
-                    ("JYKRE_CONFIG_DIR", data.as_os_str()),
+                    ("JOVRU_TEST_PORT", OsStr::new(&port)),
+                    ("JOVRU_TEST_DRIVER", OsStr::new(driver)),
+                    ("JOVRU_CONFIG_DIR", data.as_os_str()),
                 ],
             )
-            .map_err(|_| format!("Integration jykre export ({service}) failed"))?;
+            .map_err(|_| format!("Integration jovru export ({service}) failed"))?;
             println!("[OK] Integration {service}");
         }
         Ok(())
@@ -660,35 +660,35 @@ mod tests {
     #[test]
     fn rejects_invalid_dependency_edges_in_every_dependency_kind() {
         for (name, target) in [
-            ("jykre-core", "gpui-kit"),
-            ("jykre-core", "sqlx"),
-            ("jykre-core", "xtask"),
-            ("jykre-core", "jykre-driver-mysql"),
-            ("jykre-driver-postgres", "jykre"),
-            ("jykre-driver-postgres", "jykre-driver-mysql"),
-            ("jykre-storage", "jykre"),
-            ("jykre-storage", "gpui-kit"),
-            ("jykre-storage", "jykre-driver-postgres"),
-            ("jykre-secrets", "jykre-storage"),
-            ("jykre-core", "jykre-storage"),
-            ("jykre-sql", "jykre"),
-            ("jykre-sql", "jykre-sql-language"),
-            ("jykre-sql", "jykre-storage"),
-            ("jykre-sql", "sqruff-lib"),
-            ("jykre-sql", "tree-sitter"),
-            ("jykre-sql", "gpui-kit"),
-            ("jykre-sql-language", "jykre"),
-            ("jykre-sql-language", "jykre-storage"),
-            ("jykre-sql-language", "jykre-driver-postgres"),
-            ("jykre-sql-language", "gpui-kit"),
-            ("jykre-sql-language", "lsp-types"),
-            ("jykre-core", "genai"),
-            ("jykre-assistant", "gpui-kit"),
-            ("jykre-assistant", "jykre"),
-            ("jykre-assistant", "jykre-storage"),
-            ("jykre-assistant", "jykre-secrets"),
-            ("jykre-assistant", "jykre-sql-language"),
-            ("jykre-assistant", "jykre-driver-postgres"),
+            ("jovru-core", "gpui-kit"),
+            ("jovru-core", "sqlx"),
+            ("jovru-core", "xtask"),
+            ("jovru-core", "jovru-driver-mysql"),
+            ("jovru-driver-postgres", "jovru"),
+            ("jovru-driver-postgres", "jovru-driver-mysql"),
+            ("jovru-storage", "jovru"),
+            ("jovru-storage", "gpui-kit"),
+            ("jovru-storage", "jovru-driver-postgres"),
+            ("jovru-secrets", "jovru-storage"),
+            ("jovru-core", "jovru-storage"),
+            ("jovru-sql", "jovru"),
+            ("jovru-sql", "jovru-sql-language"),
+            ("jovru-sql", "jovru-storage"),
+            ("jovru-sql", "sqruff-lib"),
+            ("jovru-sql", "tree-sitter"),
+            ("jovru-sql", "gpui-kit"),
+            ("jovru-sql-language", "jovru"),
+            ("jovru-sql-language", "jovru-storage"),
+            ("jovru-sql-language", "jovru-driver-postgres"),
+            ("jovru-sql-language", "gpui-kit"),
+            ("jovru-sql-language", "lsp-types"),
+            ("jovru-core", "genai"),
+            ("jovru-assistant", "gpui-kit"),
+            ("jovru-assistant", "jovru"),
+            ("jovru-assistant", "jovru-storage"),
+            ("jovru-assistant", "jovru-secrets"),
+            ("jovru-assistant", "jovru-sql-language"),
+            ("jovru-assistant", "jovru-driver-postgres"),
         ] {
             for kind in [Value::Null, json!("dev"), json!("build")] {
                 assert!(architecture(&json!({"packages":[{"name":name,"dependencies":[{"name":target,"kind":kind}]}]})).is_err());
@@ -699,14 +699,14 @@ mod tests {
     #[test]
     fn allows_driver_contracts_and_app_composition() {
         assert!(architecture(&json!({"packages":[
-            {"name":"jykre-driver-postgres","dependencies":[{"name":"jykre-core"},{"name":"sqlx"}]},
-            {"name":"jykre","dependencies":[{"name":"gpui-kit"},{"name":"jykre-driver-postgres"},{"name":"jykre-storage"},{"name":"jykre-secrets"}]},
-            {"name":"jykre-storage","dependencies":[{"name":"jykre-core"},{"name":"sqlx"}]},
-            {"name":"jykre-secrets","dependencies":[{"name":"jykre-core"},{"name":"keyring"}]},
-            {"name":"jykre-sql","dependencies":[{"name":"jykre-core"}]},
-            {"name":"jykre-sql-language","dependencies":[{"name":"jykre-core"},{"name":"jykre-sql"},{"name":"sqruff-lib"}]},
-            {"name":"jykre-assistant","dependencies":[{"name":"jykre-core"},{"name":"genai"},{"name":"reqwest"}]},
-            {"name":"jykre","dependencies":[{"name":"jykre-assistant"}]}
+            {"name":"jovru-driver-postgres","dependencies":[{"name":"jovru-core"},{"name":"sqlx"}]},
+            {"name":"jovru","dependencies":[{"name":"gpui-kit"},{"name":"jovru-driver-postgres"},{"name":"jovru-storage"},{"name":"jovru-secrets"}]},
+            {"name":"jovru-storage","dependencies":[{"name":"jovru-core"},{"name":"sqlx"}]},
+            {"name":"jovru-secrets","dependencies":[{"name":"jovru-core"},{"name":"keyring"}]},
+            {"name":"jovru-sql","dependencies":[{"name":"jovru-core"}]},
+            {"name":"jovru-sql-language","dependencies":[{"name":"jovru-core"},{"name":"jovru-sql"},{"name":"sqruff-lib"}]},
+            {"name":"jovru-assistant","dependencies":[{"name":"jovru-core"},{"name":"genai"},{"name":"reqwest"}]},
+            {"name":"jovru","dependencies":[{"name":"jovru-assistant"}]}
         ]})).is_ok());
     }
 
@@ -723,13 +723,13 @@ mod tests {
         // The application may use them.
         write(
             "src/app/sql_editor/mod.rs",
-            "use jykre_sql_language::format;",
+            "use jovru_sql_language::format;",
         );
-        write("src/main.rs", "use jykre_sql_language as _;");
+        write("src/main.rs", "use jovru_sql_language as _;");
         assert!(library_without_language_features(&root).is_ok());
         write(
             "src/backend/names.rs",
-            "use jykre_sql_language::completion;",
+            "use jovru_sql_language::completion;",
         );
         let refused = library_without_language_features(&root);
         fs::remove_dir_all(&root).unwrap();
@@ -866,7 +866,7 @@ mod tests {
     #[test]
     fn run_ids_are_valid_compose_projects_and_differ_between_runs() {
         let id = run_id(4242, 0x1a2b);
-        assert_eq!(id, "jykre-gate-4242-1a2b");
+        assert_eq!(id, "jovru-gate-4242-1a2b");
         assert!(
             id.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')

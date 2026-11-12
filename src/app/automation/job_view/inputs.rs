@@ -91,7 +91,7 @@ impl JobView {
                     button(
                         id,
                         I::ScrollText,
-                        format!("{} · {}", stream.name(), jykre::cell_format::size(size)),
+                        format!("{} · {}", stream.name(), jovru::cell_format::size(size)),
                     )
                     .role(Role::Tab)
                     .aria_selected(output.stream == stream)
@@ -144,8 +144,8 @@ impl JobView {
                 .when_some(dropped, |s, bytes| {
                     s.child(div().px_3().pb_2().child(label(tr!(
                         "The file holds {0}; only its first {1} are shown.",
-                        jykre::cell_format::size(bytes),
-                        jykre::cell_format::size(super::super::program_bits::LOG_LIMIT)
+                        jovru::cell_format::size(bytes),
+                        jovru::cell_format::size(super::super::program_bits::LOG_LIMIT)
                     ))))
                 })
             }
@@ -232,7 +232,7 @@ impl JobView {
                         line.child(icon(I::Database, colors().muted))
                             .child(label(tr!(
                                 "Runs on {0}",
-                                jykre::reports::source_label(
+                                jovru::reports::source_label(
                                     &source.connection.name,
                                     &body.context
                                 )

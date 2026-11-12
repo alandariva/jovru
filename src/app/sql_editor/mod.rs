@@ -2,11 +2,11 @@
 //! completion, hover, go to definition and Format.
 //!
 //! This adapter is the only place that knows both the editor (gpui-kit) and
-//! the language features (`jykre-sql-language`). The workspace sees
+//! the language features (`jovru-sql-language`). The workspace sees
 //! [`SqlEditor`] alone and tells it what it needs (the dialect, the
 //! connection, the names of its cache and the tab's context), so the
 //! features can be removed or replaced here without touching what runs
-//! queries ([ADR-0020](../../../docs/adr/0020-editor-language-features-in-their-own-crates.md)).
+//! queries ([D-0020](../../../docs/decisions/architecture.md#d-0020)).
 mod go_to_line;
 mod highlighter;
 mod providers;
@@ -16,11 +16,11 @@ pub use go_to_line::GoToLine;
 use super::ui::{Feedback, Tone};
 use gpui_kit::component::input::EditorState;
 use gpui_kit::*;
-use jykre::drivers::*;
-use jykre::{backend, tr};
-use jykre_sql_language::catalog::{self, DialectCatalog, DialectFiles};
-use jykre_sql_language::completion::{CandidateKind, Relation, Request, Source, Symbol, Wanted};
-use jykre_sql_language::format::{FormatError, Formatted};
+use jovru::drivers::*;
+use jovru::{backend, tr};
+use jovru_sql_language::catalog::{self, DialectCatalog, DialectFiles};
+use jovru_sql_language::completion::{CandidateKind, Relation, Request, Source, Symbol, Wanted};
+use jovru_sql_language::format::{FormatError, Formatted};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -28,8 +28,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-pub use jykre_sql_language::catalog::SqlCatalogs;
-pub use jykre_sql_language::completion::NameIndex;
+pub use jovru_sql_language::catalog::SqlCatalogs;
+pub use jovru_sql_language::completion::NameIndex;
 
 /// What the workspace hears from the editor's features.
 pub enum SqlEditorEvent {
@@ -149,7 +149,7 @@ impl SqlEditor {
         let quote = self.connection.as_ref().map_or('"', |(_, quote)| *quote);
         let catalog = self.catalogs.get(Some(dialect));
         Some(std::rc::Rc::new(move |name: &str| {
-            jykre_sql_language::completion::quote_name(name, dialect, quote, &catalog)
+            jovru_sql_language::completion::quote_name(name, dialect, quote, &catalog)
         }))
     }
 
@@ -209,12 +209,12 @@ impl Snapshot {
         use gpui_kit::component::RopeExt as _;
         let sql = text.to_string();
         let Some(request) =
-            jykre_sql_language::completion::request(&sql, offset, &self.names, &self.context)
+            jovru_sql_language::completion::request(&sql, offset, &self.names, &self.context)
         else {
             return (Vec::new(), Vec::new());
         };
         let columns = &self.columns;
-        let (found, missing) = jykre_sql_language::completion::candidates(
+        let (found, missing) = jovru_sql_language::completion::candidates(
             &request,
             &self.names,
             &self.context,
@@ -295,7 +295,7 @@ impl SqlEditor {
                 continue;
             }
             let config = config.clone();
-            let dir = jykre::connection_store::data_dir();
+            let dir = jovru::connection_store::data_dir();
             cx.spawn(async move |weak, cx| {
                 let read = relation.clone();
                 let result = backend::run(async move {
@@ -331,7 +331,7 @@ impl SqlEditor {
     ) -> Option<(Symbol, Range<usize>)> {
         self.cache_target()?;
         let columns = &self.columns;
-        let found = jykre_sql_language::completion::symbol_at(
+        let found = jovru_sql_language::completion::symbol_at(
             sql,
             offset,
             &self.names,
@@ -341,7 +341,7 @@ impl SqlEditor {
         if found.is_none() {
             // The name may be a column of a relation not read yet.
             let request =
-                jykre_sql_language::completion::request(sql, offset, &self.names, &self.context);
+                jovru_sql_language::completion::request(sql, offset, &self.names, &self.context);
             if let Some(Request {
                 wanted: Wanted::Columns { sources, .. },
                 ..
@@ -364,9 +364,9 @@ impl SqlEditor {
     fn function_at(&self, sql: &str, offset: usize) -> Option<(String, Range<usize>)> {
         let catalog = self.catalogs.get(self.dialect);
         let (name, range) =
-            jykre_sql_language::completion::function_at(sql, offset, self.dialect, &catalog)?;
+            jovru_sql_language::completion::function_at(sql, offset, self.dialect, &catalog)?;
         let text =
-            jykre_sql_language::completion::function_documentation(catalog.functions(&name))?;
+            jovru_sql_language::completion::function_documentation(catalog.functions(&name))?;
         Some((format!("**{name}**\n\n{text}"), range))
     }
 
@@ -380,7 +380,7 @@ impl SqlEditor {
                     .get(relation)?
                     .iter()
                     .find(|object| object.kind == ObjectKind::Column && object.name == *name)?;
-                let details = jykre::explorer::description(column);
+                let details = jovru::explorer::description(column);
                 Some(format!(
                     "**{}**\n\n{}",
                     column.name,
@@ -393,7 +393,7 @@ impl SqlEditor {
                 Some(format!(
                     "**{}**\n\n{}",
                     name.join("."),
-                    jykre::explorer::kind_name(kind)
+                    jovru::explorer::kind_name(kind)
                 ))
             }
         }
@@ -445,9 +445,9 @@ impl SqlEditor {
         let task = cx.background_spawn(async move {
             let stop = || stop.load(Ordering::Relaxed);
             if selection.is_empty() {
-                jykre_sql_language::format::format_until(&source, dialect, &stop)
+                jovru_sql_language::format::format_until(&source, dialect, &stop)
             } else {
-                jykre_sql_language::format::format_range_until(&source, selection, dialect, &stop)
+                jovru_sql_language::format::format_range_until(&source, selection, dialect, &stop)
                     .map(|(formatted, _)| formatted)
             }
         });
@@ -544,7 +544,7 @@ impl SqlEditor {
     /// cost does not grow with the text.
     pub fn go_to(
         &mut self,
-        target: jykre::go_to_line::Target,
+        target: jovru::go_to_line::Target,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -552,7 +552,7 @@ impl SqlEditor {
             return;
         };
         let lines = self.line_count(cx);
-        let place = jykre::go_to_line::place(target, lines);
+        let place = jovru::go_to_line::place(target, lines);
         editor.update(cx, |editor, cx| {
             editor.set_cursor_position(
                 gpui_kit::component::input::Position::new(
@@ -566,7 +566,7 @@ impl SqlEditor {
         if place.past_end {
             cx.emit(SqlEditorEvent::Notice(Feedback::new(
                 Tone::Info,
-                jykre::go_to_line::past_end_notice(target, lines),
+                jovru::go_to_line::past_end_notice(target, lines),
             )));
         }
     }
@@ -583,7 +583,7 @@ impl SqlEditor {
             let sql = editor.text().to_string();
             let reversed = editor.is_selection_reversed();
             let toggled =
-                jykre_sql_language::comment::toggle_line_comments(&sql, editor.selected_range());
+                jovru_sql_language::comment::toggle_line_comments(&sql, editor.selected_range());
             // Replacing the selection, made the lines first, is one undo step
             // and leaves every other cursor out.
             editor.set_selected_range(toggled.range, cx);
@@ -646,7 +646,7 @@ impl SqlEditor {
                 editor.scroll_offset(),
             )
         };
-        let map = |offset| jykre::sql::map_offset(sql, &formatted, offset);
+        let map = |offset| jovru::sql::map_offset(sql, &formatted, offset);
         let range = map(selection.start)..map(selection.end);
         let caret = |text: &str, range: &Range<usize>| {
             let at = if reversed { range.start } else { range.end };
@@ -684,13 +684,13 @@ impl SqlEditor {
 }
 
 /// Reads the SQL catalogs (keywords, functions and types by dialect) from the
-/// first catalog directory found: `JYKRE_SQL_CATALOG_DIR`, then `catalog`
+/// first catalog directory found: `JOVRU_SQL_CATALOG_DIR`, then `catalog`
 /// next to the executable and, in a development build, the repository's
 /// `catalog`. The files are read on the runtime and parsed there; a dialect
 /// whose files are missing or invalid keeps the built-in words, and so does
 /// every dialect when no directory is found.
 pub async fn load_catalogs() -> Arc<SqlCatalogs> {
-    let variable = std::env::var_os("JYKRE_SQL_CATALOG_DIR").map(PathBuf::from);
+    let variable = std::env::var_os("JOVRU_SQL_CATALOG_DIR").map(PathBuf::from);
     let executable = std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf));

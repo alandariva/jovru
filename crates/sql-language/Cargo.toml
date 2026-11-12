@@ -1,5 +1,5 @@
 [package]
-name = "jykre-sql-language"
+name = "jovru-sql-language"
 description = "The SQL editor's language features (completion, hover, formatting), apart from what runs queries"
 version.workspace = true
 edition.workspace = true
@@ -19,8 +19,8 @@ default = ["sqruff"]
 sqruff = ["dep:sqruff-lib"]
 
 [dependencies]
-jykre-core = { path = "../core" }
-jykre-sql = { path = "../sql" }
+jovru-core = { path = "../core" }
+jovru-sql = { path = "../sql" }
 serde.workspace = true
 serde_json.workspace = true
 sqruff-lib = { workspace = true, optional = true }

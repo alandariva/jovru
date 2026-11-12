@@ -1,5 +1,5 @@
 use crate::DatabricksConfig;
-use jykre_core::{DriverError, DriverResult, ErrorCode, SecretString};
+use jovru_core::{DriverError, DriverResult, ErrorCode, SecretString};
 use serde_json::Value;
 use std::{
     collections::HashMap,
@@ -87,7 +87,7 @@ async fn cli_output(
             .and_then(|name| name.to_str())
             .unwrap_or("databricks"),
         process.exit.code = tracing::field::Empty,
-        jykre.cli.command = subcommand,
+        jovru.cli.command = subcommand,
         error.type = tracing::field::Empty,
         otel.status_code = tracing::field::Empty,
     );
@@ -155,7 +155,7 @@ async fn cli_output_in(
 /// profile. Authentication is checked later for the selected one.
 pub async fn list_profiles(
     cli_path: Option<&Path>,
-    cancel: jykre_core::CancellationToken,
+    cancel: jovru_core::CancellationToken,
 ) -> DriverResult<Vec<CliProfile>> {
     let executable = cli_path.unwrap_or_else(|| Path::new("databricks"));
     validate_executable(executable)?;
@@ -659,7 +659,7 @@ mod tests {
 
     #[tokio::test]
     async fn profile_discovery_honors_prior_cancellation_and_rejects_shell_scripts() {
-        let cancel = jykre_core::CancellationToken::new();
+        let cancel = jovru_core::CancellationToken::new();
         cancel.cancel();
         assert_eq!(
             list_profiles(Some(Path::new("missing-fixture.exe")), cancel)
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(
             list_profiles(
                 Some(Path::new("fixture.cmd")),
-                jykre_core::CancellationToken::new()
+                jovru_core::CancellationToken::new()
             )
             .await
             .unwrap_err()

@@ -1,5 +1,5 @@
 [package]
-name = "jykre-driver-databricks"
+name = "jovru-driver-databricks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +12,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-jykre-core = { path = "../core" }
+jovru-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
 
@@ -20,7 +20,7 @@ reqwest.workspace = true
 secrecy.workspace = true
 tokio.workspace = true
 # Spans around each HTTP request and CLI run, exported by the application
-# when telemetry is on (ADR-0029); never a host, token, body or argument.
+# when telemetry is on (D-0029); never a host, token, body or argument.
 tracing.workspace = true
 
 [dev-dependencies]

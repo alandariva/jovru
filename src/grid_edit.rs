@@ -1,5 +1,5 @@
 //! Editing a result in the grid, outside the views
-//! ([ADR-0039](../docs/adr/0039-editing-result-data-through-the-driver.md)).
+//! ([D-0039](../docs/decisions/results.md#d-0039)).
 //!
 //! An [`EditSession`] holds a result tab's pending edits over the rows it
 //! read: changed cells, rows marked for deletion and inserted rows. Nothing
@@ -75,7 +75,7 @@ pub enum Refused {
     AlreadyWritten,
 }
 
-/// Why a result is read-only, in words (ADR-0039, section 1).
+/// Why a result is read-only, in words (D-0039, section 1).
 pub fn read_only_text(reason: &ReadOnlyReason) -> String {
     match reason {
         ReadOnlyReason::DriverCannotTell => tr!(

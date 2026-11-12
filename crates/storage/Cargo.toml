@@ -1,5 +1,5 @@
 [package]
-name = "jykre-storage"
+name = "jovru-storage"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,10 +12,10 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-jykre-core = { path = "../core" }
+jovru-core = { path = "../core" }
 sqlx = { workspace = true, features = ["sqlite"] }
 serde_json.workspace = true
 tokio.workspace = true
-# Fingerprints of automation snapshots (ADR-0034).
+# Fingerprints of automation snapshots (D-0034).
 sha2.workspace = true
 

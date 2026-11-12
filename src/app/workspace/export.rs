@@ -1,17 +1,17 @@
 //! The export bar of a query tab: the options, the system's save dialog, the
-//! export's progress and how it ended ([Results](../../../docs/reference/results.md#export)).
+//! export's progress and how it ended ([Results](../../../docs/reference/results/transfer.md#export)).
 //!
 //! The bar exports the result tab on screen. What it writes and how runs in
-//! `jykre::export` and `backend::export`; this view only chooses, starts,
+//! `jovru::export` and `backend::export`; this view only chooses, starts,
 //! shows and cancels.
 use super::*;
-use jykre::backend::{ExportProgress, ExportRead, ExportRequest, ExportRun};
-use jykre::export::{
+use jovru::backend::{ExportProgress, ExportRead, ExportRequest, ExportRun};
+use jovru::export::{
     ExportFormat, ExportOptions, ExportPreferences, Quoting, Separator, SqlTarget,
     suggested_file_name,
 };
-use jykre::result::ResultColumn;
-use jykre::result_tabs::{ExportSource, Missing};
+use jovru::result::ResultColumn;
+use jovru::result_tabs::{ExportSource, Missing};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -137,7 +137,7 @@ impl Workspace {
         let dir = connection_store::data_dir();
         cx.spawn(async move |weak, cx| {
             let loaded =
-                backend::run(async move { jykre::export::load_preferences(&dir).await }).await;
+                backend::run(async move { jovru::export::load_preferences(&dir).await }).await;
             let _ = weak.update(cx, |this, cx| match loaded {
                 Ok(preferences) if !this.export.touched => {
                     this.export.preferences = preferences;
@@ -184,7 +184,7 @@ impl Workspace {
     /// result for an export: a single query that only reads, on a
     /// connection.
     fn can_run_again(&self, tab: &ResultTab) -> bool {
-        self.input.is_some() && jykre::sql::reads_only(&tab.sql, self.run.dialect())
+        self.input.is_some() && jovru::sql::reads_only(&tab.sql, self.run.dialect())
     }
 
     /// Starts exporting the result on screen. `held_only` writes only the
@@ -271,7 +271,7 @@ impl Workspace {
             .preferences
             .directory
             .clone()
-            .unwrap_or_else(jykre::export::default_directory);
+            .unwrap_or_else(jovru::export::default_directory);
         self.export.state = ExportState::Picking;
         cx.notify();
         let chosen = cx.prompt_for_new_path(&directory, Some(name.as_str()));
@@ -368,10 +368,10 @@ impl Workspace {
         self.export.preferences.directory = path.parent().map(PathBuf::from);
         let preferences = self.export.preferences.clone();
         let dir = connection_store::data_dir();
-        let ticket = jykre::export::PREFERENCE_WRITES.ask();
+        let ticket = jovru::export::PREFERENCE_WRITES.ask();
         cx.background_spawn(async move {
             let saved = backend::run(async move {
-                jykre::export::save_preferences(&dir, preferences, ticket).await
+                jovru::export::save_preferences(&dir, preferences, ticket).await
             })
             .await;
             if let Err(error) = saved {

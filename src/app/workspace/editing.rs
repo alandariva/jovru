@@ -1,17 +1,17 @@
-//! Editing a result's rows (ADR-0039): reading what the result can be
+//! Editing a result's rows (D-0039): reading what the result can be
 //! written back to, the one confirmation before a write, the write itself
 //! in the tab's session, and the statements generated for a database that
 //! is not written directly (Databricks).
 //!
 //! The pending edits and the request they become live in
-//! `jykre::grid_edit`; the grid draws them and takes the editing keys. This
+//! `jovru::grid_edit`; the grid draws them and takes the editing keys. This
 //! view asks the session, confirms, writes and says how it went.
 use super::super::result_grid::Editing;
 use super::*;
 use gpui_kit::component::WindowExt as _;
-use jykre::grid_edit::{self, ChangeKind, EditSession, EditValue, Origin};
-use jykre::parameters::{KindChoice, TabParameter};
-use jykre_core::write::{self, ReferenceAction, SideEffect, WriteMode};
+use jovru::grid_edit::{self, ChangeKind, EditSession, EditValue, Origin};
+use jovru::parameters::{KindChoice, TabParameter};
+use jovru_core::write::{self, ReferenceAction, SideEffect, WriteMode};
 use std::time::Instant;
 
 /// Changes the confirmation lists one by one, and statements it shows.
@@ -159,7 +159,7 @@ impl Workspace {
         let columns: Vec<ColumnInfo> = tab
             .columns()
             .iter()
-            .map(jykre::result::ResultColumn::info)
+            .map(jovru::result::ResultColumn::info)
             .collect();
         let binary = combined_binary(tab);
         let (session, lease) = self.lease_session(false);
@@ -382,7 +382,7 @@ impl Workspace {
             commit,
             side_effects,
             production: self.environment
-                == Some(jykre::connection_appearance::Environment::Production),
+                == Some(jovru::connection_appearance::Environment::Production),
             connection: self.connection.to_string(),
         };
         let workspace = cx.entity().downgrade();
@@ -568,7 +568,7 @@ impl Workspace {
     }
 
     /// The statements that write the edits, for a database that is not
-    /// written directly (ADR-0039, section 9): a new query tab on the same
+    /// written directly (D-0039, section 9): a new query tab on the same
     /// connection and context, with the values in its parameter fields.
     fn generate_edits(
         &mut self,

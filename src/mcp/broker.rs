@@ -48,10 +48,10 @@ pub const QUERY_BUSY: &str = concat!(
 );
 
 /// Error result while the section is paused. No card is added.
-pub const NOT_ACCEPTING: &str = "Jykre Studio is not accepting requests now.";
+pub const NOT_ACCEPTING: &str = "Jovru is not accepting requests now.";
 
 /// Error result when a card is closed because the application is quitting.
-pub const QUITTING: &str = "Jykre Studio is quitting; nothing was sent.";
+pub const QUITTING: &str = "Jovru is quitting; nothing was sent.";
 
 /// Error result when a card is closed because its token was revoked, expired,
 /// suspended or rotated while the card was open.

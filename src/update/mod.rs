@@ -1,4 +1,4 @@
-//! Updates from GitHub releases ([ADR-0033](../../docs/adr/0033-update-check-and-signed-self-install.md)).
+//! Updates from GitHub releases ([D-0033](../../docs/decisions/security.md#d-0033)).
 //!
 //! Once a day (on by default, off in Preferences) the release list is read
 //! anonymously; a newer version, pre-releases included, is offered in the
@@ -136,7 +136,7 @@ pub fn now_ms() -> u64 {
 /// The `User-Agent` of every request: the application and its version,
 /// nothing else.
 pub fn user_agent() -> String {
-    format!("JykreStudio/{}", env!("CARGO_PKG_VERSION"))
+    format!("Jovru/{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Writes of [`PREFERENCES_KEY`]; the last one asked for wins.
@@ -146,7 +146,7 @@ pub static RECORD_WRITES: LatestWrite = LatestWrite::new();
 
 /// Reads the preferences and the record kept in the data folder `dir`.
 pub async fn load(dir: &Path) -> DriverResult<(UpdatePreferences, UpdateRecord)> {
-    let repository = jykre_storage::ConfigRepository::open(dir).await?;
+    let repository = jovru_storage::ConfigRepository::open(dir).await?;
     let preferences = repository.setting(PREFERENCES_KEY).await;
     let record = repository.setting(RECORD_KEY).await;
     repository.close().await;
@@ -177,7 +177,7 @@ pub async fn save_record(dir: &Path, record: UpdateRecord, ticket: u64) -> Drive
 }
 
 async fn write(dir: &Path, key: &str, value: Value) -> DriverResult<()> {
-    let repository = jykre_storage::ConfigRepository::open(dir).await?;
+    let repository = jovru_storage::ConfigRepository::open(dir).await?;
     let result = repository.set_setting(key, &value).await;
     repository.close().await;
     result

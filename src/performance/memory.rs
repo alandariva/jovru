@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn samples_are_read_from_each_platform_s_text() {
-        let status = "Name:\tjykre\nVmHWM:\t  2048 kB\nVmRSS:\t  1024 kB\n";
+        let status = "Name:\tjovru\nVmHWM:\t  2048 kB\nVmRSS:\t  1024 kB\n";
         assert_eq!(linux_sample(status), Some((1024 * 1024, Some(2048 * 1024))));
         assert_eq!(linux_sample("Name: x\n"), None);
         assert_eq!(

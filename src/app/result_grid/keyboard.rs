@@ -4,7 +4,7 @@ use super::editing::EditAction;
 use super::inspector::Inspector;
 use super::{ResultGrid, ResultGridEvent};
 use gpui_kit::*;
-use jykre::grid::Jump;
+use jovru::grid::Jump;
 
 /// What a key of the grid does ([`ResultGrid::grid_key`]).
 #[derive(Clone, Copy, Debug)]

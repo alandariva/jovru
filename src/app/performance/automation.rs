@@ -7,14 +7,14 @@
 use super::*;
 use crate::app::automation::benchmark::{Bench, BenchJob, List};
 use crate::app::report_panel::ReportSource;
-use jykre::automation::{Availability, Engine, RunState, UtcMillis};
-use jykre::drivers::{ConnectionId, DriverError, DriverKind, ErrorCode, builtin_registry};
-use jykre::performance::budget::{
+use jovru::automation::{Availability, Engine, RunState, UtcMillis};
+use jovru::drivers::{ConnectionId, DriverError, DriverKind, ErrorCode, builtin_registry};
+use jovru::performance::budget::{
     AUTOMATION_FRAME_P95, AUTOMATION_STALL, FIRST_FRAME_AFTER_RESULT, PUBLISH_RESULT,
     STATE_PUBLICATION,
 };
-use jykre::performance::data;
-use jykre::reports::ConnectionRef;
+use jovru::performance::data;
+use jovru::reports::ConnectionRef;
 
 /// Rows of the table the jobs read, and of the large result.
 const ROWS: usize = 100_000;
@@ -56,7 +56,7 @@ pub(super) async fn run(
                 cx.notify();
             })?;
             drop(bench);
-            let _ = jykre::backend::run(async move {
+            let _ = jovru::backend::run(async move {
                 engine.shutdown().await;
                 Ok(())
             })
@@ -100,7 +100,7 @@ async fn prepare(
     let database = run.folder.join("jobs.sqlite");
     let filled = {
         let database = database.clone();
-        jykre::backend::run(async move {
+        jovru::backend::run(async move {
             data::sqlite_run(
                 &database,
                 &[data::JOBS_TABLE_SQL, &data::jobs_rows_sql(ROWS)],
@@ -112,14 +112,14 @@ async fn prepare(
     if let Err(error) = filled {
         return Ok(Err(failed(error)));
     }
-    let runtime = match jykre::backend::runtime_handle() {
+    let runtime = match jovru::backend::runtime_handle() {
         Ok(runtime) => runtime,
         Err(error) => return Ok(Err(failed(error))),
     };
     let engine = Engine::start(runtime, folder);
     let started = {
         let engine = engine.clone();
-        jykre::backend::run(async move { Ok(engine.started().await) }).await
+        jovru::backend::run(async move { Ok(engine.started().await) }).await
     };
     if !matches!(started, Ok(Availability::Ready)) {
         return Ok(Err(format!("the engine did not start: {started:?}")));
@@ -147,7 +147,7 @@ async fn prepare(
     ));
     let saved = {
         let engine = engine.clone();
-        jykre::backend::run(async move {
+        jovru::backend::run(async move {
             let mut saved = Vec::new();
             for definition in definitions {
                 let stored = engine.save_job(&definition, None).await.map_err(|_| {
@@ -185,7 +185,7 @@ async fn prepare(
         let job = first.definition.clone();
         let revision = first.revision;
         let connection = connections[0];
-        jykre::backend::run(async move {
+        jovru::backend::run(async move {
             data::seed_history(
                 &repository,
                 &job,
@@ -218,7 +218,7 @@ async fn prepare(
                 name: format!("Synthetic SQLite {}", index + 1),
             },
             input: Some(data::sqlite(&database)),
-            row_limit: jykre::result::DEFAULT_ROW_LIMIT,
+            row_limit: jovru::result::DEFAULT_ROW_LIMIT,
             environment: None,
             dialect,
             choices: Vec::new(),

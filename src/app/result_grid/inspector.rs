@@ -8,11 +8,11 @@ use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::cell_format::{self, ValueFamily};
-use jykre::grid::{self, selection_block};
-use jykre::grid_edit::EditSession;
-use jykre::stats::{self, BlockSummary, ColumnSummary, Sample, SelectionSummary};
-use jykre::tr;
+use jovru::cell_format::{self, ValueFamily};
+use jovru::grid::{self, selection_block};
+use jovru::grid_edit::EditSession;
+use jovru::stats::{self, BlockSummary, ColumnSummary, Sample, SelectionSummary};
+use jovru::tr;
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -1,20 +1,20 @@
-//! **Import from file…** ([ADR-0040](../../../docs/adr/0040-importing-files-into-a-table.md)):
+//! **Import from file…** ([D-0040](../../../docs/decisions/drivers.md#d-0040)):
 //! the dialog that chooses a CSV or `.xlsx` file, its sheet, header row,
 //! delimiter and encoding, the table (from the connection's metadata
 //! cache), how the file's columns fill the table's, and what an empty CSV
 //! field means, with a preview of the values that would be bound.
 //!
-//! Everything it decides is `jykre::import`'s; the dialog only holds the
+//! Everything it decides is `jovru::import`'s; the dialog only holds the
 //! choices and shows what the library read, off the UI thread. **Import**
-//! runs `jykre::import::session::run` on the runtime, in a session of its
+//! runs `jovru::import::session::run` on the runtime, in a session of its
 //! own, all or nothing, and says how it ended ([`ImportDialog::run`]).
 use super::*;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
-use jykre::import::mapping::{Mapping, MatchBy, TargetColumn};
-use jykre::import::pipeline::{ImportPlan, Outcome, PROGRESS_AFTER, Progress, Shown, TimeLimit};
-use jykre::import::session::ImportJob;
-use jykre::import::{
+use jovru::import::mapping::{Mapping, MatchBy, TargetColumn};
+use jovru::import::pipeline::{ImportPlan, Outcome, PROGRESS_AFTER, Progress, Shown, TimeLimit};
+use jovru::import::session::ImportJob;
+use jovru::import::{
     CsvOptions, Delimiter, EmptyFields, FileKind, ImportValue, Preview, ReadOptions, XlsxOptions,
     delimited::ENCODINGS,
 };
@@ -302,7 +302,7 @@ impl ImportDialog {
         cx: &mut Context<Self>,
     ) {
         let (dir, id, config) = (
-            jykre::connection_store::data_dir(),
+            jovru::connection_store::data_dir(),
             self.id,
             self.config.clone(),
         );
@@ -328,13 +328,13 @@ impl ImportDialog {
                         Vec::new()
                     }
                 };
-                tables.sort_by_key(|path| jykre::explorer::qualified_title(path).to_lowercase());
+                tables.sort_by_key(|path| jovru::explorer::qualified_title(path).to_lowercase());
                 let items: Vec<Choice> = tables
                     .iter()
                     .enumerate()
                     .map(|(index, path)| Choice {
                         index,
-                        title: jykre::explorer::qualified_title(path).into(),
+                        title: jovru::explorer::qualified_title(path).into(),
                     })
                     .collect();
                 this.table = chosen
@@ -366,7 +366,7 @@ impl ImportDialog {
             started: Instant::now(),
         };
         let (dir, id, config) = (
-            jykre::connection_store::data_dir(),
+            jovru::connection_store::data_dir(),
             self.id,
             self.config.clone(),
         );
@@ -437,7 +437,7 @@ impl ImportDialog {
         self.tick(revision, cx);
         cx.notify();
         cx.spawn_in(window, async move |weak, cx| {
-            let result = jykre::import::off_thread(move || jykre::import::inspect(&path)).await;
+            let result = jovru::import::off_thread(move || jovru::import::inspect(&path)).await;
             let _ = weak.update_in(cx, |this, window, cx| {
                 if this.revision != revision {
                     return;
@@ -557,8 +557,8 @@ impl ImportDialog {
         self.tick(revision, cx);
         cx.notify();
         cx.spawn(async move |weak, cx| {
-            let result = jykre::import::off_thread(move || {
-                jykre::import::preview(&path, &options, jykre::import::PREVIEW_ROWS, &cancel)
+            let result = jovru::import::off_thread(move || {
+                jovru::import::preview(&path, &options, jovru::import::PREVIEW_ROWS, &cancel)
             })
             .await;
             let _ = weak.update(cx, |this, cx| {
@@ -732,10 +732,10 @@ impl ImportDialog {
             .filter(|path| path.parent().as_ref() == Some(&namespace))
             .filter_map(ObjectPath::relation)
             .collect();
-        let wanted = jykre::import::draft::wanted_name(&stem);
-        let table = jykre::import::draft::table_name(&stem, &taken);
+        let wanted = jovru::import::draft::wanted_name(&stem);
+        let table = jovru::import::draft::table_name(&stem, &taken);
         let instead_of = (table != wanted).then_some(wanted.as_str());
-        let sql = jykre::import::draft::create_table(
+        let sql = jovru::import::draft::create_table(
             &*self.driver,
             &namespace,
             &table,
@@ -779,7 +779,7 @@ impl ImportDialog {
             .unwrap_or_default();
         let table = self
             .selected_table()
-            .map(jykre::explorer::qualified_title)
+            .map(jovru::explorer::qualified_title)
             .unwrap_or_default();
         (file, table)
     }
@@ -807,7 +807,7 @@ impl ImportDialog {
             cx.notify();
             return;
         };
-        let title = jykre::explorer::qualified_title(&table);
+        let title = jovru::explorer::qualified_title(&table);
         let job = ImportJob {
             connection,
             table,
@@ -830,7 +830,7 @@ impl ImportDialog {
         cx.spawn(async move |weak, cx| {
             let outcome =
                 backend::run(
-                    async move { Ok(jykre::import::session::run(job, cancel, sender).await) },
+                    async move { Ok(jovru::import::session::run(job, cancel, sender).await) },
                 )
                 .await;
             let _ = weak.update(cx, |this, cx| {
@@ -1472,7 +1472,7 @@ pub(super) fn running_status<V: 'static>(
     if shown == Shown::Nothing {
         return div().into_any_element();
     }
-    let rows = jykre::cell_format::count(progress.rows_written as usize);
+    let rows = jovru::cell_format::count(progress.rows_written as usize);
     let text = match progress.read {
         Some(share) => tr!(
             "Importing… rows written: {0}, {1} % of the file read",
@@ -1492,7 +1492,7 @@ pub(super) fn running_status<V: 'static>(
         ))
         .child(div().text_size(px(13.)).child(text))
         .when(shown == Shown::ProgressAndCancel, |s| {
-            s.child(label(jykre::cell_format::duration(
+            s.child(label(jovru::cell_format::duration(
                 elapsed.as_millis() as u64
             )))
             .child(
@@ -1528,7 +1528,7 @@ pub(super) fn redraw_while<V: 'static>(cx: &mut Context<V>, running: fn(&V) -> b
     .detach();
 }
 
-/// How an import ended, in words (ADR-0040, section 4).
+/// How an import ended, in words (D-0040, section 4).
 fn finished(outcome: &DriverResult<Outcome>, table: &str) -> ImportRun {
     match outcome {
         Ok(outcome @ Outcome::Imported { .. }) => ImportRun::Finished {
@@ -1782,7 +1782,7 @@ impl AppView {
             return;
         };
         let production = connection.appearance.environment
-            == Some(jykre::connection_appearance::Environment::Production);
+            == Some(jovru::connection_appearance::Environment::Production);
         if !production {
             dialog.update(cx, |dialog, cx| dialog.run(input, cx));
             return;

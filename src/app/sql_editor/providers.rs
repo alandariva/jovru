@@ -1,6 +1,6 @@
 //! The SQL editor's completion, hover and go to definition, as the editor's
 //! providers. They ask the tab's [`SqlEditor`], which holds the connection's
-//! name index and the columns read so far; `jykre_sql_language::completion`
+//! name index and the columns read so far; `jovru_sql_language::completion`
 //! decides what the SQL around the cursor means.
 use super::SqlEditor;
 use gpui_kit::component::input::{
@@ -19,7 +19,7 @@ use std::str::FromStr as _;
 type ShowDocument = Rc<dyn Fn(&lsp_types::ShowDocumentParams, &mut Window, &mut App) -> bool>;
 
 /// The URI scheme a definition uses for an object of the explorer.
-const OBJECT_SCHEME: &str = "jykre-object";
+const OBJECT_SCHEME: &str = "jovru-object";
 
 struct SqlProviders {
     editor: WeakEntity<SqlEditor>,
@@ -40,14 +40,14 @@ pub(super) fn install(editor: &Entity<EditorState>, features: WeakEntity<SqlEdit
 }
 
 /// The URI that names an object path, hex-encoded so any name survives.
-fn object_uri(path: &jykre::drivers::ObjectPath) -> Option<Uri> {
+fn object_uri(path: &jovru::drivers::ObjectPath) -> Option<Uri> {
     let json = serde_json::to_vec(path).ok()?;
     let hex: String = json.iter().map(|byte| format!("{byte:02x}")).collect();
     Uri::from_str(&format!("{OBJECT_SCHEME}:{hex}")).ok()
 }
 
 /// The object path an [`object_uri`] names.
-fn object_path(uri: &Uri) -> Option<jykre::drivers::ObjectPath> {
+fn object_path(uri: &Uri) -> Option<jovru::drivers::ObjectPath> {
     let text = uri.as_str().strip_prefix(&format!("{OBJECT_SCHEME}:"))?;
     let bytes = (0..text.len())
         .step_by(2)
@@ -170,7 +170,7 @@ fn show_object(features: WeakEntity<SqlEditor>) -> ShowDocument {
 #[cfg(test)]
 mod tests {
     use super::{object_path, object_uri};
-    use jykre::drivers::{ObjectKind, ObjectPath};
+    use jovru::drivers::{ObjectKind, ObjectPath};
 
     #[test]
     fn an_object_uri_reads_back_the_same_path() {
@@ -179,7 +179,7 @@ mod tests {
             .child(ObjectKind::Schema, "a/b:c")
             .child(ObjectKind::Table, "ção \"x\"");
         let uri = object_uri(&path).unwrap();
-        assert!(uri.as_str().starts_with("jykre-object:"));
+        assert!(uri.as_str().starts_with("jovru-object:"));
         assert_eq!(object_path(&uri), Some(path));
     }
 }

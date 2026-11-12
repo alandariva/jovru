@@ -5,9 +5,9 @@ use super::table::{painted, value_color};
 use super::{HEADER_HEIGHT, ROW_HEIGHT, ResultGrid, ResultGridEvent};
 use crate::app::ui::*;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::cell_format::{self, ValueFamily};
-use jykre::grid::{self, CellMark};
-use jykre::tr;
+use jovru::cell_format::{self, ValueFamily};
+use jovru::grid::{self, CellMark};
+use jovru::tr;
 use std::ops::Range;
 use std::rc::Rc;
 

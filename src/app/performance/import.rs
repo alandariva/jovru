@@ -1,19 +1,19 @@
 //! Importing a file (A11): a large synthetic CSV and an `.xlsx` with a large
 //! shared strings table, imported into a temporary SQLite database through
-//! the production pipeline (`jykre::import::session::run`, the driver's own
+//! the production pipeline (`jovru::import::session::run`, the driver's own
 //! session, all or nothing), with the dialog's progress line in the window.
 //! Resident memory is sampled during each import; a last import is
 //! cancelled midway and the table checked.
 use super::*;
-use jykre::drivers::{CancellationToken, DriverResult};
-use jykre::import::pipeline::{ImportPlan, Outcome, Progress, Shown as Showing, TimeLimit};
-use jykre::import::session::ImportJob;
-use jykre::import::{CsvOptions, ReadOptions, XlsxOptions};
-use jykre::performance::budget::{
+use jovru::drivers::{CancellationToken, DriverResult};
+use jovru::import::pipeline::{ImportPlan, Outcome, Progress, Shown as Showing, TimeLimit};
+use jovru::import::session::ImportJob;
+use jovru::import::{CsvOptions, ReadOptions, XlsxOptions};
+use jovru::performance::budget::{
     CANCEL_SHOWN, OTHER_FRAME_P95, PROGRESS_SHOWN, ROWS_LEFT_BY_CANCEL, STALL,
 };
-use jykre::performance::data;
-use jykre::performance::memory::{Peak, Sampler};
+use jovru::performance::data;
+use jovru::performance::memory::{Peak, Sampler};
 use std::path::Path;
 use tokio::sync::watch;
 
@@ -29,7 +29,7 @@ const MIB: f64 = 1024.0 * 1024.0;
 const ROWS_MISSING: Budget = Budget {
     limit: 0.0,
     text: "0 rows",
-    source: "ADR-0040: an import that ends well writes every row",
+    source: "D-0040: an import that ends well writes every row",
 };
 
 /// The import the window shows, as the dialog's footer does.
@@ -158,7 +158,7 @@ pub(super) async fn run(
     };
     let database = files.database.clone();
     let created: DriverResult<Option<String>> =
-        jykre::backend::run(
+        jovru::backend::run(
             async move { data::sqlite_run(&database, &[data::IMPORT_TABLE_SQL]).await },
         )
         .await;
@@ -207,7 +207,7 @@ fn missing_all(section: &mut Section, reason: &str) {
 
 async fn count(database: &Path) -> Option<u64> {
     let database = database.to_path_buf();
-    jykre::backend::run(async move { data::sqlite_count(&database, data::IMPORT_TABLE).await })
+    jovru::backend::run(async move { data::sqlite_count(&database, data::IMPORT_TABLE).await })
         .await
         .ok()
 }
@@ -280,8 +280,8 @@ async fn import(
     let token = cancel.clone();
     let task = cx
         .background_executor()
-        .spawn(jykre::backend::run(async move {
-            Ok(jykre::import::session::run(job, token, sender).await)
+        .spawn(jovru::backend::run(async move {
+            Ok(jovru::import::session::run(job, token, sender).await)
         }));
     let mut cancelled_at = None;
     if kind == Kind::Cancelled {

@@ -1,7 +1,7 @@
 //! The copy formats of a result's selection: tab-separated text, CSV, JSON,
 //! JSON Lines, a Markdown or HTML table, `INSERT` statements, an `IN` list,
 //! values separated by commas and the column names
-//! ([Results](../docs/reference/results.md#copying)).
+//! ([Results](../docs/reference/results/transfer.md#copying)).
 //!
 //! Values are written from the database's text, never reinterpreted: a
 //! number of a number column is written as the database wrote it, a
@@ -12,7 +12,7 @@
 //!
 //! [`CopyOptions`] are the choices of the copy menu: the format `Ctrl C`
 //! copies in and how the delimited formats write their fields. They are kept
-//! in the settings as `copy.preferences` ([Persistence](../docs/reference/persistence.md)).
+//! in the settings as `copy.preferences` ([Persistence](../docs/reference/persistence/README.md)).
 use crate::cell_format::{self, ValueFamily};
 use crate::column_layout::ColumnLayout;
 use crate::decimal;
@@ -21,7 +21,7 @@ use crate::export::{Quoting, Separator, push_csv_field};
 use crate::grid::{CellSelection, block_columns, selection_block};
 use crate::result::ResultData;
 use crate::sql::string_literal;
-use jykre_core::SqlDialect;
+use jovru_core::SqlDialect;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -217,7 +217,7 @@ pub static PREFERENCE_WRITES: crate::connection_store::LatestWrite =
 
 /// Reads the copy preferences kept in the data folder `dir`.
 pub async fn load_preferences(dir: &Path) -> DriverResult<CopyOptions> {
-    let repository = jykre_storage::ConfigRepository::open(dir).await?;
+    let repository = jovru_storage::ConfigRepository::open(dir).await?;
     let value = repository.setting(PREFERENCES_KEY).await;
     repository.close().await;
     Ok(CopyOptions::from_value(value?.as_ref()))
@@ -229,7 +229,7 @@ pub async fn load_preferences(dir: &Path) -> DriverResult<CopyOptions> {
 pub async fn save_preferences(dir: &Path, options: CopyOptions, ticket: u64) -> DriverResult<()> {
     PREFERENCE_WRITES
         .run(ticket, async {
-            let repository = jykre_storage::ConfigRepository::open(dir).await?;
+            let repository = jovru_storage::ConfigRepository::open(dir).await?;
             let result = repository
                 .set_setting(PREFERENCES_KEY, &options.to_value())
                 .await;

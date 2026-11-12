@@ -9,12 +9,12 @@ use gpui_kit::component::Sizable;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, Input};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use jykre::automation::definition::{
+use jovru::automation::definition::{
     ChainProblem, DEFAULT_CHAIN_TIMEOUT_MS, DEFAULT_TIMEOUT_MS, MAX_OUTPUTS, MAX_STEPS, MIN_STEPS,
     RowRule,
 };
-use jykre::parameters::KINDS;
-use jykre::reports::ConnectionRef;
+use jovru::parameters::KINDS;
+use jovru::reports::ConnectionRef;
 
 const VERSION_ROW: f32 = 44.;
 
@@ -407,7 +407,7 @@ impl JobView {
             let shown = if current == SessionContext::default() {
                 tr!("Session default").to_owned()
             } else {
-                jykre::ddl::context_label(&current)
+                jovru::ddl::context_label(&current)
             };
             Button::new("job-database")
                 .outline()
@@ -435,13 +435,13 @@ impl JobView {
                         menu = menu.label(tr!("Refresh the metadata to list namespaces"));
                     }
                     for choice in &choices {
-                        menu = menu.item(item(jykre::ddl::context_label(choice), choice.clone()));
+                        menu = menu.item(item(jovru::ddl::context_label(choice), choice.clone()));
                     }
                     menu
                 })
         });
         let production = source.is_some_and(|source| {
-            source.environment == Some(jykre::connection_appearance::Environment::Production)
+            source.environment == Some(jovru::connection_appearance::Environment::Production)
         });
         section(tr!("Connection"))
             .child(
@@ -460,7 +460,7 @@ impl JobView {
                     )
                     .when(production, |s| {
                         s.child(environment_badge(
-                            jykre::connection_appearance::Environment::Production,
+                            jovru::connection_appearance::Environment::Production,
                         ))
                     })
                     .when_some(database, |s, database| {
@@ -931,14 +931,14 @@ impl JobView {
                             return;
                         }
                         // On a production connection, storing values asks
-                        // first (ADR-0035).
+                        // first (D-0035).
                         let production = match &this.definition.body {
                             JobBody::Sql(body) => body
                                 .connection
                                 .and_then(|id| source_of(&this.sources.sources, id))
                                 .filter(|source| {
                                     source.environment
-                                        == Some(jykre::connection_appearance::Environment::Production)
+                                        == Some(jovru::connection_appearance::Environment::Production)
                                 })
                                 .map(|source| source.connection.name.clone()),
                             _ => None,
@@ -1407,10 +1407,10 @@ impl JobView {
                 super::super::program_bits::denylist(),
             )))
             .child(note(if fields.removed.is_empty() {
-                tr!("None of these is set in Jykre Studio's environment now.").to_owned()
+                tr!("None of these is set in Jovru's environment now.").to_owned()
             } else {
                 tr!(
-                    "Removed from Jykre Studio's environment now: {0}.",
+                    "Removed from Jovru's environment now: {0}.",
                     fields.removed.join(", ")
                 )
             }))
@@ -1586,7 +1586,7 @@ impl JobView {
             })
             .when(body.steps.len() < MIN_STEPS, |s| {
                 s.child(warning(words::problem(
-                    &jykre::automation::definition::Problem::StepCount(body.steps.len()),
+                    &jovru::automation::definition::Problem::StepCount(body.steps.len()),
                 )))
             })
     }

@@ -4,9 +4,9 @@ use super::{ResultGrid, ResultGridEvent};
 use crate::app::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::*;
-use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
-use jykre::tr;
-use jykre_core::SqlDialect;
+use jovru::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
+use jovru::tr;
+use jovru_core::SqlDialect;
 use std::rc::Rc;
 
 /// How copies as SQL write names and strings for the tab's connection.

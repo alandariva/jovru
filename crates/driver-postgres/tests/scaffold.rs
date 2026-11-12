@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-use jykre_core::*;
-use jykre_driver_postgres::{PostgresConfig, PostgresDriver};
+use jovru_core::*;
+use jovru_driver_postgres::{PostgresConfig, PostgresDriver};
 use serde_json::{Value, json};
 
 fn options() -> Value {

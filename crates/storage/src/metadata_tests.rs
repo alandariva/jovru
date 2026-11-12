@@ -1,7 +1,7 @@
 use super::*;
 
 fn dir() -> PathBuf {
-    std::env::temp_dir().join(format!("jykre-metadata-{}", ConnectionId::new()))
+    std::env::temp_dir().join(format!("jovru-metadata-{}", ConnectionId::new()))
 }
 fn config() -> ConnectionConfig {
     ConnectionConfig {

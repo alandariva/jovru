@@ -19,7 +19,7 @@ pub use metadata::{
     RefreshStatus, SearchCursor, SearchPage,
 };
 
-use jykre_core::*;
+use jovru_core::*;
 use sqlx::{ConnectOptions, SqlitePool, sqlite::*};
 use std::{path::Path, time::Duration};
 
@@ -38,7 +38,7 @@ pub(crate) async fn open_pool(path: &Path, durable: bool) -> DriverResult<Sqlite
 }
 
 /// [`open_pool`], and with `secure_delete` SQLite overwrites deleted content
-/// with zeros, so a value removed on time (ADR-0035) does not stay in the
+/// with zeros, so a value removed on time (D-0035) does not stay in the
 /// file's free pages.
 pub(crate) async fn open_pool_with(
     path: &Path,

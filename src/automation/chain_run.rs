@@ -1,4 +1,4 @@
-//! The owner of one chain run (specification, section 9.3.5; ADR-0036): it
+//! The owner of one chain run (specification, section 9.3.5; D-0036): it
 //! admits each step as an ordinary run, waits for its end, maps its outputs
 //! to the next step's inputs, and stops at the first step that does not
 //! succeed. The chain holds no admission slot of its own; a step releases
@@ -17,9 +17,9 @@ use super::{
     Cause, ChainOutcome, ChainRunId, ChainStatus, Phase, Progress, Refusal, RunId, RunOutcome,
     RunState, RunStatus, SqlJob, UtcMillis,
 };
-use jykre_core::CancellationToken;
-use jykre_core::automation::{RunOrigin, RunSchedule};
-use jykre_storage::{ChainFinish, NewChainRun};
+use jovru_core::CancellationToken;
+use jovru_core::automation::{RunOrigin, RunSchedule};
+use jovru_storage::{ChainFinish, NewChainRun};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -65,7 +65,7 @@ pub(super) struct Started {
     pub request: ChainRequest,
     /// The chain's form, checked.
     pub values: Vec<(String, Option<String>)>,
-    /// The schedule that started it (ADR-0041); its steps carry it too.
+    /// The schedule that started it (D-0041); its steps carry it too.
     pub scheduled: Option<RunSchedule>,
 }
 
@@ -263,7 +263,7 @@ struct Context<'a> {
     chain: ChainRunId,
     scheduled: Option<RunSchedule>,
     chain_values: &'a [(String, Option<String>)],
-    connections: &'a HashMap<jykre_core::ConnectionId, ConnectionInput>,
+    connections: &'a HashMap<jovru_core::ConnectionId, ConnectionInput>,
     stop: &'a CancellationToken,
     deadline: Instant,
     status: &'a watch::Sender<ChainStatus>,

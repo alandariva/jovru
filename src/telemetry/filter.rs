@@ -23,12 +23,12 @@ const LOCAL_ONLY_TARGETS: &[&str] = &[
     "tower",
     "reqwest",
     "rustls",
-    "jykre::probe",
+    "jovru::probe",
 ];
 
 /// The target of UI-thread timings (`logging::UiTimer`): one per publish,
 /// grid rebuild or copy. Only its warnings (slow work) are exported.
-pub const UI_THREAD_TARGET: &str = "jykre::ui_thread";
+pub const UI_THREAD_TARGET: &str = "jovru::ui_thread";
 
 /// The signal a filter feeds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +50,7 @@ impl ExportGate {
     }
 
     /// The static part of the decision: never `trace` (it carries SQL and
-    /// payloads), spans only from Jykre's crates, and events without the
+    /// payloads), spans only from Jovru's crates, and events without the
     /// fields and targets that stay local.
     pub fn admits(&self, metadata: &Metadata<'_>) -> bool {
         if *metadata.level() == Level::TRACE {
@@ -58,7 +58,7 @@ impl ExportGate {
         }
         let target = metadata.target();
         match self.signal {
-            Signal::Traces => metadata.is_span() && target.starts_with("jykre"),
+            Signal::Traces => metadata.is_span() && target.starts_with("jovru"),
             Signal::Logs => {
                 metadata.is_event()
                     && !LOCAL_ONLY_TARGETS

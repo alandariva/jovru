@@ -769,7 +769,7 @@ pub fn selected_rows(
 }
 
 /// Copies above this size ask for confirmation first
-/// ([Results](../docs/reference/results.md#copying)).
+/// ([Results](../docs/reference/results/transfer.md#copying)).
 pub const COPY_CONFIRM_BYTES: usize = 50 * 1024 * 1024;
 
 /// Number of cells in the visible part of a selection.

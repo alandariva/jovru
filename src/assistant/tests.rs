@@ -9,13 +9,13 @@ use crate::backend::cache_config;
 use crate::error_report::ErrorReport;
 use crate::result::{ResultColumn, ResultData};
 use crate::result_tabs::{Completed, Placement, ResultTabs};
-use jykre_assistant::{Assistant, Message, Timeouts, ToolCall};
-use jykre_core::{
+use jovru_assistant::{Assistant, Message, Timeouts, ToolCall};
+use jovru_core::{
     CancellationToken, ConnectionConfig, ConnectionId, DriverKind, IntrospectionReport,
     MetadataObject, ObjectKind, ObjectPath, ParameterKind, QueryParameter, SessionContext,
     SqlDialect,
 };
-use jykre_storage::MetadataRepository;
+use jovru_storage::MetadataRepository;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -123,7 +123,7 @@ async fn cache() -> SchemaScope {
 /// `shop.orders` in a synthetic metadata cache, with the comment and default
 /// of its `status` column.
 async fn orders_cache(comment: &str, default_value: &str) -> SchemaScope {
-    let dir = std::env::temp_dir().join(format!("jykre-assistant-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-assistant-{}", ConnectionId::new()));
     let id = ConnectionId::new();
     let config = ConnectionConfig {
         driver: DriverKind::MySql,
@@ -165,7 +165,7 @@ async fn orders_cache(comment: &str, default_value: &str) -> SchemaScope {
 }
 
 /// Every text a request carries, as it appears inside a JSON body.
-fn shown_texts(request: &jykre_assistant::ModelRequest) -> Vec<String> {
+fn shown_texts(request: &jovru_assistant::ModelRequest) -> Vec<String> {
     let mut texts = vec![request.system.clone()];
     for message in &request.messages {
         match message {
@@ -251,8 +251,8 @@ async fn no_result_value_or_bound_parameter_reaches_the_provider() {
     ])
     .await;
     let assistant = Assistant::new(
-        jykre_assistant::ProviderConfig {
-            kind: jykre_assistant::ProviderKind::OpenAiCompatible,
+        jovru_assistant::ProviderConfig {
+            kind: jovru_assistant::ProviderKind::OpenAiCompatible,
             model: "fake".into(),
             endpoint: Some(url),
         },
@@ -338,14 +338,14 @@ enum Choice {
 /// A user answering `run_query` as the panel and the workspace would: the
 /// statement runs in a session of its own on a synthetic SQLite file.
 struct User {
-    input: jykre_core::ResolvedConnection,
-    session: Option<Box<dyn jykre_core::Session>>,
+    input: jovru_core::ResolvedConnection,
+    session: Option<Box<dyn jovru_core::Session>>,
     choice: Choice,
     runs: usize,
 }
 
 impl QueryGate for User {
-    async fn answer(&mut self, call: jykre_assistant::ToolCall) -> run::ToolStep {
+    async fn answer(&mut self, call: jovru_assistant::ToolCall) -> run::ToolStep {
         let sql = match run::query_sql(&call, Some(SqlDialect::Sqlite)) {
             Ok(sql) => sql,
             Err(reason) => return released::rejected(call, String::new(), reason),
@@ -359,11 +359,11 @@ impl QueryGate for User {
             self.input.clone(),
             SessionContext::default(),
             self.session.take(),
-            vec![jykre_core::QueryRequest::new(
+            vec![jovru_core::QueryRequest::new(
                 sql.clone(),
-                jykre_core::ExecutionOptions {
+                jovru_core::ExecutionOptions {
                     max_rows: released::READ_ROWS,
-                    ..jykre_core::ExecutionOptions::default()
+                    ..jovru_core::ExecutionOptions::default()
                 },
             )],
             4 << 20,
@@ -387,15 +387,15 @@ impl QueryGate for User {
 }
 
 /// A synthetic SQLite file with 60 rows holding a visible and a secret value.
-async fn people() -> jykre_core::ResolvedConnection {
-    let path = std::env::temp_dir().join(format!("jykre-assistant-{}.sqlite", ConnectionId::new()));
+async fn people() -> jovru_core::ResolvedConnection {
+    let path = std::env::temp_dir().join(format!("jovru-assistant-{}.sqlite", ConnectionId::new()));
     std::fs::write(&path, b"").unwrap();
-    let input = jykre_core::ResolvedConnection {
+    let input = jovru_core::ResolvedConnection {
         config: ConnectionConfig {
             driver: DriverKind::Sqlite,
             options: serde_json::json!({"path": path.to_string_lossy()}),
         },
-        credentials: jykre_core::Credentials::default(),
+        credentials: jovru_core::Credentials::default(),
     };
     let setup = [
         "CREATE TABLE people (id INTEGER, visible TEXT, secret TEXT)".to_owned(),
@@ -411,7 +411,7 @@ async fn people() -> jykre_core::ResolvedConnection {
         None,
         setup
             .into_iter()
-            .map(|sql| jykre_core::QueryRequest::new(sql, jykre_core::ExecutionOptions::default()))
+            .map(|sql| jovru_core::QueryRequest::new(sql, jovru_core::ExecutionOptions::default()))
             .collect(),
         4 << 20,
         CancellationToken::new(),
@@ -457,8 +457,8 @@ async fn query_values_leave_only_when_sent_and_never_from_a_hidden_column() {
     for choice in [Choice::SendHidingSecret, Choice::Withhold, Choice::Decline] {
         let (url, recorded) = fake(vec![asks_for_queries(), answers("Done.")]).await;
         let assistant = Assistant::new(
-            jykre_assistant::ProviderConfig {
-                kind: jykre_assistant::ProviderKind::OpenAiCompatible,
+            jovru_assistant::ProviderConfig {
+                kind: jovru_assistant::ProviderKind::OpenAiCompatible,
                 model: "fake".into(),
                 endpoint: Some(url),
             },
@@ -547,7 +547,7 @@ async fn query_values_leave_only_when_sent_and_never_from_a_hidden_column() {
 #[test]
 fn preferences_round_trip_and_ignore_what_they_do_not_know() {
     let mut preferences = AssistantPreferences {
-        provider: Some(jykre_assistant::ProviderKind::Ollama),
+        provider: Some(jovru_assistant::ProviderKind::Ollama),
         model: "llama".into(),
         endpoint: Some("http://localhost:11434/".into()),
         review: run::ReviewMode::FirstOnly,
@@ -571,7 +571,7 @@ fn preferences_round_trip_and_ignore_what_they_do_not_know() {
     let read = AssistantPreferences::from_value(Some(&odd));
     assert_eq!(read, AssistantPreferences::default());
     assert!(read.config().is_none());
-    assert_eq!(key_account(jykre_assistant::ProviderKind::Ollama), None);
+    assert_eq!(key_account(jovru_assistant::ProviderKind::Ollama), None);
 }
 
 use crate::result_tabs::ResultState;
@@ -583,8 +583,8 @@ async fn assistant_turns_never_log_prompts_answers_schema_or_keys_above_trace() 
     let scope = cache().await;
     let (url, _recorded) = fake(vec![calls_every_tool(), answers("synthetic-answer-marker")]).await;
     let assistant = Assistant::new(
-        jykre_assistant::ProviderConfig {
-            kind: jykre_assistant::ProviderKind::OpenAiCompatible,
+        jovru_assistant::ProviderConfig {
+            kind: jovru_assistant::ProviderKind::OpenAiCompatible,
             model: "fake".into(),
             endpoint: Some(url),
         },

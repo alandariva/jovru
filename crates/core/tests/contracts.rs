@@ -1,5 +1,5 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-use jykre_core::*;
+use jovru_core::*;
 use serde_json::json;
 use std::sync::{
     Arc, Mutex,
@@ -580,10 +580,10 @@ async fn a_session_that_knows_no_context_reports_an_empty_one() {
 }
 
 /// A driver that cannot tell where a column comes from keeps every result
-/// read-only (ADR-0039, section 7).
+/// read-only (D-0039, section 7).
 #[tokio::test]
 async fn a_session_that_cannot_tell_keeps_results_read_only() {
-    use jykre_core::write::*;
+    use jovru_core::write::*;
     let mut session: Box<dyn Session> = Box::new(TestSession {
         requests: Arc::new(Mutex::new(Vec::new())),
         closed: Arc::new(AtomicBool::new(false)),
@@ -608,14 +608,14 @@ async fn a_session_that_cannot_tell_keeps_results_read_only() {
         },
         changes: vec![],
         timeout: None,
-        scope: jykre_core::write::WriteScope::Atomic,
+        scope: jovru_core::write::WriteScope::Atomic,
     };
     let written = session
         .write(&request, CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(written.code, ErrorCode::NotImplemented);
-    // Nor can it import (ADR-0040).
+    // Nor can it import (D-0040).
     assert_eq!(
         session
             .table_target(&request.target.table, CancellationToken::new())

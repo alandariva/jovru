@@ -1,4 +1,4 @@
-//! Writing a result to a file the user chose ([Results](../docs/reference/results.md#export)).
+//! Writing a result to a file the user chose ([Results](../docs/reference/results/transfer.md#export)).
 //!
 //! Every format is written row by row, so an export never holds more than
 //! the page it is writing. [`ExportFile`] writes into a temporary file next
@@ -1020,7 +1020,7 @@ pub static PREFERENCE_WRITES: crate::connection_store::LatestWrite =
 
 /// Reads the export preferences kept in the data folder `dir`.
 pub async fn load_preferences(dir: &Path) -> DriverResult<ExportPreferences> {
-    let repository = jykre_storage::ConfigRepository::open(dir).await?;
+    let repository = jovru_storage::ConfigRepository::open(dir).await?;
     let value = repository.setting(PREFERENCES_KEY).await;
     repository.close().await;
     Ok(ExportPreferences::from_value(value?.as_ref()))
@@ -1036,7 +1036,7 @@ pub async fn save_preferences(
 ) -> DriverResult<()> {
     PREFERENCE_WRITES
         .run(ticket, async {
-            let repository = jykre_storage::ConfigRepository::open(dir).await?;
+            let repository = jovru_storage::ConfigRepository::open(dir).await?;
             let result = repository
                 .set_setting(PREFERENCES_KEY, &preferences.to_value())
                 .await;

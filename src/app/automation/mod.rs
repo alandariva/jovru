@@ -1,6 +1,6 @@
 //! The Automation section of the rail and its tabs (specification, section
 //! 8.1; Q-20…Q-22): the engine as an application-root service
-//! ([ADR-0034](../../../docs/adr/0034-automation-database-service-and-lock.md)),
+//! ([D-0034](../../../docs/decisions/automation.md#d-0034)),
 //! the list of jobs and chains in the sidebar, a tab per job with its
 //! **Editor**, **Run and result** and **History**, and the global **Runs**
 //! list.
@@ -27,9 +27,9 @@ use super::*;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use history::HistoryEvent;
 use job_view::{JobEvent, JobView};
-use jykre::automation::definition::JobDefinition;
-use jykre::automation::schedule::{ScheduleConnection, ScheduleNews};
-use jykre::automation::{
+use jovru::automation::definition::JobDefinition;
+use jovru::automation::schedule::{ScheduleConnection, ScheduleNews};
+use jovru::automation::{
     Availability, ConnectionInput, Engine, JobId, JobKind, OffReason, Recovery,
 };
 use runs_view::RunsView;
@@ -275,7 +275,7 @@ impl AppView {
                     tr!("{0} programs from the last session are still running", count)
                 },
                 description: tr!(
-                    "Jykre Studio closed while they ran, and their process groups are still alive. Ending them kills each group; leaving them lets them finish on their own. Their runs are marked interrupted either way."
+                    "Jovru closed while they ran, and their process groups are still alive. Ending them kills each group; leaving them lets them finish on their own. Their runs are marked interrupted either way."
                 )
                 .to_owned(),
                 ok: tr!("End them"),
@@ -300,7 +300,7 @@ impl AppView {
     /// Something changed in the engine: the list of jobs, the open views'
     /// histories and the global list read it again.
     fn automation_changed(&mut self, cx: &mut Context<Self>) {
-        let _timer = jykre::logging::UiTimer::start("automation changes");
+        let _timer = jovru::logging::UiTimer::start("automation changes");
         self.reload_jobs(cx);
         for tab in self.automation.tabs.values() {
             match &tab.view {
@@ -458,7 +458,7 @@ impl AppView {
         if new && let Some(end) = news.latest.as_ref().filter(|end| end.notify) {
             let (title, body) = schedule_words::bad_end(end, self.job_kind(end.job));
             cx.show_system_notification(SystemNotification {
-                tag: format!("jykre-schedule-{}", end.schedule).into(),
+                tag: format!("jovru-schedule-{}", end.schedule).into(),
                 title: title.into(),
                 body: body.into(),
                 actions: Vec::new(),
@@ -1111,7 +1111,7 @@ impl AppView {
             Availability::ReadOnly => (
                 Tone::Warning,
                 tr!(
-                    "Read-only: another Jykre Studio window is running automation on this data folder. Its jobs and history can be read here; nothing can run or be saved until it closes."
+                    "Read-only: another Jovru window is running automation on this data folder. Its jobs and history can be read here; nothing can run or be saved until it closes."
                 )
                 .to_owned(),
                 true,
@@ -1119,7 +1119,7 @@ impl AppView {
             Availability::Off(OffReason::Newer) => (
                 Tone::Warning,
                 tr!(
-                    "Automation is off: automation.db was written by a newer version of Jykre Studio. It is left as it is; the rest of the application works."
+                    "Automation is off: automation.db was written by a newer version of Jovru. It is left as it is; the rest of the application works."
                 )
                 .to_owned(),
                 false,
@@ -1188,7 +1188,7 @@ impl AppView {
     }
 
     /// Opening the section tries the lock again when another window held
-    /// it (ADR-0034).
+    /// it (D-0034).
     pub(super) fn automation_shown(&mut self, cx: &mut Context<Self>) {
         self.automation_seen();
         if self.automation.availability == Some(Availability::ReadOnly) {
@@ -1297,8 +1297,8 @@ impl AppView {
 }
 
 /// What the sidebar says of a schedule, computed when the jobs are read.
-fn schedule_line(schedule: &jykre_storage::StoredSchedule) -> ScheduleLine {
-    use jykre::automation::schedule::rule::{self, Rule};
+fn schedule_line(schedule: &jovru_storage::StoredSchedule) -> ScheduleLine {
+    use jovru::automation::schedule::rule::{self, Rule};
     let zone = rule::time_zone(&schedule.draft.time_zone);
     let (short, full) = if !schedule.enabled {
         (
@@ -1314,7 +1314,7 @@ fn schedule_line(schedule: &jykre_storage::StoredSchedule) -> ScheduleLine {
             ),
         )
     } else {
-        let now = jykre::automation::UtcMillis::now();
+        let now = jovru::automation::UtcMillis::now();
         let next = zone
             .as_ref()
             .zip(Rule::from_json(&schedule.draft.rule_json).ok())

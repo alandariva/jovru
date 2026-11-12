@@ -1,8 +1,8 @@
 //! The connection dialog's choice of what to introspect. Namespace lists
 //! are read on the backend runtime, one level at a time, as the user opens
-//! them; the tree and the choice live in [`jykre::metadata_scope`].
+//! them; the tree and the choice live in [`jovru::metadata_scope`].
 use super::*;
-use jykre::metadata_scope::{Check, Listing, MetadataScope, ScopeRow, ScopeTree};
+use jovru::metadata_scope::{Check, Listing, MetadataScope, ScopeRow, ScopeTree};
 
 /// Height of one line of the list, so it can be virtualized.
 const ROW_HEIGHT: f32 = 30.;
@@ -145,7 +145,7 @@ impl ScopePicker {
                     }
                     Err(error) => this.tree.listing_failed(
                         &parent,
-                        jykre::error_report::ErrorReport::new(&error).summary(),
+                        jovru::error_report::ErrorReport::new(&error).summary(),
                     ),
                 }
                 this.rebuild(cx);

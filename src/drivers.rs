@@ -1,15 +1,15 @@
 //! Built-in driver composition. Backend contracts and adapters also work
 //! independently of this GPUI application through their individual crates.
 
-pub use jykre_core::*;
-pub use jykre_driver_databricks as databricks;
-pub use jykre_driver_databricks::DatabricksDriver;
-pub use jykre_driver_mysql as mysql;
-pub use jykre_driver_mysql::MySqlDriver;
-pub use jykre_driver_postgres as postgres;
-pub use jykre_driver_postgres::PostgresDriver;
-pub use jykre_driver_sqlite as sqlite;
-pub use jykre_driver_sqlite::SqliteDriver;
+pub use jovru_core::*;
+pub use jovru_driver_databricks as databricks;
+pub use jovru_driver_databricks::DatabricksDriver;
+pub use jovru_driver_mysql as mysql;
+pub use jovru_driver_mysql::MySqlDriver;
+pub use jovru_driver_postgres as postgres;
+pub use jovru_driver_postgres::PostgresDriver;
+pub use jovru_driver_sqlite as sqlite;
+pub use jovru_driver_sqlite::SqliteDriver;
 
 use std::sync::Arc;
 

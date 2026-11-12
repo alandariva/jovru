@@ -3,20 +3,20 @@
 //! its counters, why it was refused or waits. GPUI-free, so each sentence
 //! is tested without a window; the views only lay them out.
 use super::program_bits;
-use jykre::automation::chain::InputProblem;
-use jykre::automation::definition::{ChainProblem, Problem, RowRule};
-use jykre::automation::outputs::OutputProblem;
-use jykre::automation::queue::{Blocked, Limits, QueueFull};
-use jykre::automation::{
+use jovru::automation::chain::InputProblem;
+use jovru::automation::definition::{ChainProblem, Problem, RowRule};
+use jovru::automation::outputs::OutputProblem;
+use jovru::automation::queue::{Blocked, Limits, QueueFull};
+use jovru::automation::{
     Cause, ChainOutcome, JobKind, Phase, PrepareError, Progress, PublishError, Refusal, RunOutcome,
     RunState, SaveError,
 };
-use jykre::cell_format::{duration, size};
-use jykre::parameters::ParameterProblem;
-use jykre::sql::SqlDialect;
-use jykre::tr;
-use jykre_core::automation::RunRecord;
-use jykre_storage::{ChainRef, OUTPUT_QUOTA_BYTES};
+use jovru::cell_format::{duration, size};
+use jovru::parameters::ParameterProblem;
+use jovru::sql::SqlDialect;
+use jovru::tr;
+use jovru_core::automation::RunRecord;
+use jovru_storage::{ChainRef, OUTPUT_QUOTA_BYTES};
 use std::time::Duration;
 
 /// How a line reads: its colour and icon follow.
@@ -96,7 +96,7 @@ pub fn cause_sentence(cause: Cause, kind: Option<JobKind>) -> &'static str {
         Cause::NotFound => tr!("The program or a file it needs was not found."),
 
         Cause::Unsupported => tr!("The driver does not support this."),
-        Cause::Internal => tr!("Jykre Studio failed internally."),
+        Cause::Internal => tr!("Jovru failed internally."),
         Cause::Exit => tr!("The program exited with a nonzero code or a signal."),
         Cause::Program => tr!("The program reported a failure (fail)."),
         Cause::Output => tr!("Its outputs did not match what the job declares."),
@@ -206,12 +206,12 @@ fn counters(
 pub fn interrupted_runs(count: usize) -> String {
     if count == 1 {
         tr!(
-            "1 run was active when Jykre Studio last closed; it is marked interrupted and was not run again."
+            "1 run was active when Jovru last closed; it is marked interrupted and was not run again."
         )
         .to_owned()
     } else {
         tr!(
-            "{0} runs were active when Jykre Studio last closed; they are marked interrupted and were not run again.",
+            "{0} runs were active when Jovru last closed; they are marked interrupted and were not run again.",
             count
         )
     }
@@ -289,7 +289,7 @@ pub fn record_lines(record: &RunRecord, dialect: Option<SqlDialect>) -> Vec<Line
         )),
         RunState::Interrupted => lines.push(Line::new(
             Level::Warning,
-            tr!("Interrupted: Jykre Studio closed while it ran. It was not run again."),
+            tr!("Interrupted: Jovru closed while it ran. It was not run again."),
         )),
         RunState::Succeeded => lines.push(Line::new(Level::Success, tr!("Succeeded."))),
         RunState::Running => lines.push(Line::new(Level::Info, tr!("Running."))),
@@ -455,7 +455,7 @@ pub fn run_error(
     job: &str,
     step: Option<&str>,
 ) -> Option<RunError> {
-    let report = jykre::error_report::ErrorReport::new(outcome.error.as_ref()?);
+    let report = jovru::error_report::ErrorReport::new(outcome.error.as_ref()?);
     let position = sql
         .and_then(|sql| report.line_and_column(sql))
         .map(|(line, column)| tr!("Line {0}, column {1} of the statement", line, column));
@@ -707,7 +707,7 @@ pub fn refusal(refusal: &Refusal) -> String {
         )
         .to_owned(),
         Refusal::Withdrawn => tr!("Stopped before it started (in the queue, or while its file was checked): it never ran.").to_owned(),
-        Refusal::ShuttingDown => tr!("Jykre Studio is closing.").to_owned(),
+        Refusal::ShuttingDown => tr!("Jovru is closing.").to_owned(),
         Refusal::History => tr!(
             "Its history row could not be written, so nothing was sent."
         )
@@ -1018,14 +1018,14 @@ pub fn stdin_note() -> &'static str {
 
 pub fn environment_note(denylist: &[&str]) -> String {
     tr!(
-        "The program inherits Jykre Studio's environment, minus {0} and the names you unset here. Anything else in the environment, secrets included, reaches the program.",
+        "The program inherits Jovru's environment, minus {0} and the names you unset here. Anything else in the environment, secrets included, reaches the program.",
         denylist.join(", ")
     )
 }
 
 pub fn trusted_note() -> &'static str {
     tr!(
-        "External code runs with your user's privileges and is not sandboxed. Grants protect Jykre Studio's own APIs, not your computer."
+        "External code runs with your user's privileges and is not sandboxed. Grants protect Jovru's own APIs, not your computer."
     )
 }
 
@@ -1068,7 +1068,7 @@ pub fn trusted_warning(program: &str) -> String {
 
 /// A stored time as `YYYY-MM-DD HH:MM UTC`, as the history and the
 /// versions list show it.
-pub fn utc(at: jykre::automation::UtcMillis) -> String {
+pub fn utc(at: jovru::automation::UtcMillis) -> String {
     let seconds = at.0.div_euclid(1000);
     let days = seconds.div_euclid(86_400);
     let of_day = seconds.rem_euclid(86_400);
@@ -1101,7 +1101,7 @@ pub fn quit(names: &[String]) -> (String, String) {
         tr!("{0} runs are active", names.len())
     };
     let description = tr!(
-        "Closing Jykre Studio stops them and empties the queue: {0}. A stopped write may or may not have been applied; nothing is run again. Closing waits up to about 11 s for them to stop.",
+        "Closing Jovru stops them and empties the queue: {0}. A stopped write may or may not have been applied; nothing is run again. Closing waits up to about 11 s for them to stop.",
         names.join(", ")
     );
     (title, description)
@@ -1110,9 +1110,9 @@ pub fn quit(names: &[String]) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jykre::automation::{JobId, RunId, UtcMillis};
-    use jykre_core::ConnectionId;
-    use jykre_core::automation::RunOrigin;
+    use jovru::automation::{JobId, RunId, UtcMillis};
+    use jovru_core::ConnectionId;
+    use jovru_core::automation::RunOrigin;
 
     fn record(kind: JobKind) -> RunRecord {
         RunRecord {
@@ -1176,11 +1176,11 @@ mod tests {
         }
     }
 
-    fn missing_table() -> jykre_core::DriverError {
-        jykre_core::DriverError::from_server(
-            jykre_core::ErrorCode::Database,
+    fn missing_table() -> jovru_core::DriverError {
+        jovru_core::DriverError::from_server(
+            jovru_core::ErrorCode::Database,
             "relation \"orderz\" does not exist",
-            jykre_core::ServerDiagnostic {
+            jovru_core::ServerDiagnostic {
                 sqlstate: Some("42P01".into()),
                 vendor_code: None,
                 position: Some(15),
@@ -1224,13 +1224,13 @@ mod tests {
         crate::app::source_text();
         let mut failed = outcome(JobKind::Process, RunState::Failed, Some(Cause::Exit));
         failed.effect_unknown = true;
-        failed.program = Some(jykre::automation::ProgramOutcome {
+        failed.program = Some(jovru::automation::ProgramOutcome {
             exit_code: Some(3),
             named: "python3".into(),
             ..Default::default()
         });
         let chain = ChainOutcome {
-            id: jykre_core::automation::ChainRunId::new(),
+            id: jovru_core::automation::ChainRunId::new(),
             state: RunState::Failed,
             cause: Some(Cause::Exit),
             failed_step: Some("export".into()),
@@ -1373,11 +1373,11 @@ mod tests {
         crate::app::source_text();
         assert_eq!(
             interrupted_runs(1),
-            "1 run was active when Jykre Studio last closed; it is marked interrupted and was not run again."
+            "1 run was active when Jovru last closed; it is marked interrupted and was not run again."
         );
         assert_eq!(
             interrupted_runs(2),
-            "2 runs were active when Jykre Studio last closed; they are marked interrupted and were not run again."
+            "2 runs were active when Jovru last closed; they are marked interrupted and were not run again."
         );
         let mut one = record(JobKind::Sql);
         one.reads_only = false;
@@ -1510,7 +1510,7 @@ mod tests {
         );
         assert!(outputs_note().contains("4096 bytes"));
         assert!(timeout_note(300_000, 300_000).contains("5 min 0 s (the default)"));
-        assert!(environment_note(&["JYKRE_*", "OTEL_*"]).contains("minus JYKRE_*, OTEL_*"));
+        assert!(environment_note(&["JOVRU_*", "OTEL_*"]).contains("minus JOVRU_*, OTEL_*"));
         assert_eq!(
             row_rule_cases(RowRule::AtMostOne)[2],
             "Several rows: the run fails (cause Output)."

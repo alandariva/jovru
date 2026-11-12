@@ -1,5 +1,5 @@
 use super::*;
-use jykre_secrets::SecretStore;
+use jovru_secrets::SecretStore;
 use secrecy::ExposeSecret as _;
 use std::{collections::HashMap, sync::Mutex};
 
@@ -55,7 +55,7 @@ impl SecretStore for MemoryVault {
 }
 fn fixture() -> (PathBuf, ConnectionProfile) {
     (
-        std::env::temp_dir().join(format!("jykre-service-{}", ConnectionId::new())),
+        std::env::temp_dir().join(format!("jovru-service-{}", ConnectionId::new())),
         ConnectionProfile {
             id: ConnectionId::new(),
             name: "Synthetic fixture".into(),
@@ -270,7 +270,7 @@ fn data_dir_prefers_override_then_platform_folder() {
         resolve_data_dir(None, platform),
         PathBuf::from("base").join(APP_DIR)
     );
-    assert_eq!(resolve_data_dir(None, None), PathBuf::from(".jykre"));
+    assert_eq!(resolve_data_dir(None, None), PathBuf::from(".jovru"));
 }
 
 #[tokio::test]
@@ -720,7 +720,7 @@ async fn a_superseded_preference_write_never_lands_after_the_newer_one() {
 
 #[tokio::test]
 async fn the_font_size_is_written_by_its_latest_ticket() {
-    let dir = std::env::temp_dir().join(format!("jykre-font-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-font-{}", ConnectionId::new()));
     let older = FONT_SIZE_WRITES.ask();
     let newer = FONT_SIZE_WRITES.ask();
     save_font_size(&dir, 18.0, newer).await.unwrap();

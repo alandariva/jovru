@@ -1,12 +1,12 @@
 //! SQLite driver: a database file opened through SQLx's bundled SQLite, with
 //! a dedicated connection per session and metadata read from SQLite's
-//! pragma functions (ADR-0027).
+//! pragma functions (D-0027).
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod config;
 pub use config::SqliteConfig;
 
-use jykre_core::*;
+use jovru_core::*;
 mod edit;
 mod runtime;
 

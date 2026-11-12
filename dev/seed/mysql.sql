@@ -7,8 +7,8 @@ SET NAMES utf8mb4;
 
 CREATE DATABASE catalog;
 CREATE DATABASE sales;
-GRANT ALL PRIVILEGES ON catalog.* TO 'jykre'@'%';
-GRANT ALL PRIVILEGES ON sales.* TO 'jykre'@'%';
+GRANT ALL PRIVILEGES ON catalog.* TO 'jovru'@'%';
+GRANT ALL PRIVILEGES ON sales.* TO 'jovru'@'%';
 
 SET SESSION cte_max_recursion_depth = 100000;
 
@@ -61,7 +61,7 @@ CREATE TABLE sales.event_log (
 );
 
 -- One column per common type, with typical, NULL, extreme and long values.
-CREATE TABLE jykre.type_showcase (
+CREATE TABLE jovru.type_showcase (
     id INT PRIMARY KEY,
     tiny_int TINYINT,
     small_int SMALLINT,
@@ -132,7 +132,7 @@ SELECT
     IF(i % 10 = 0, NULL, JSON_OBJECT('seq', i, 'ok', CAST(IF(i % 4 <> 3, 'true', 'false') AS JSON)))
 FROM seq;
 
-INSERT INTO jykre.type_showcase VALUES
+INSERT INTO jovru.type_showcase VALUES
     (1, 7, 42, 9007199254740993, 18446744073709551615, 123456789.0123456789, 3.141592653589793,
      TRUE, 'ação e café ☕', 'BRL', '2026-01-31', '23:59:59.123456', '2026-01-31 23:59:59.123456',
      '2026-01-31 23:59:59', 2026, '6f1ed002-ab5e-4b0b-a9a3-bfd8e3a8b5c1',

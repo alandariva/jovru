@@ -4,7 +4,7 @@
 pub mod config;
 pub use config::{MySqlConfig, MySqlSslMode};
 
-use jykre_core::*;
+use jovru_core::*;
 mod edit;
 mod position;
 mod runtime;

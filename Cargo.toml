@@ -1,5 +1,5 @@
 [package]
-name = "jykre"
+name = "jovru"
 description = "Native Rust and GPUI desktop workspace for PostgreSQL, MySQL, Databricks and SQLite"
 readme = "README.md"
 keywords = ["database", "sql", "gpui", "postgresql", "databricks"]
@@ -21,11 +21,11 @@ version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
-repository = "https://github.com/alandariva/jykre-studio"
+repository = "https://github.com/alandariva/jovru"
 authors = ["Alan de Oliveira"]
 publish = false
 
-# Rules from the Rust guidelines that a tool can check (ADR-0011). Every crate
+# Rules from the Rust guidelines that a tool can check (D-0011). Every crate
 # opts in with `[lints] workspace = true`; a new `allow` for these lints needs
 # the maintainer's approval and a comment.
 [workspace.lints.rust]
@@ -52,7 +52,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time",
 futures-util = "0.3"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
-# AI assistant (ADR-0028, approved 2026-11-06): genai talks to the
+# AI assistant (D-0028, approved 2026-11-06): genai talks to the
 # providers. It needs reqwest 0.13, so a second reqwest sits beside the 0.12
 # of the Databricks driver; TLS stays on ring (no aws-lc-rs) by installing
 # rustls' ring provider and leaving reqwest without one.
@@ -64,7 +64,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 tracing = { version = "0.1", default-features = false, features = ["std", "attributes"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "registry", "env-filter", "json", "tracing-log"] }
 tracing-appender = "0.2"
-# Telemetry over OTLP (ADR-0029, approved 2026-11-06): logs and traces sent
+# Telemetry over OTLP (D-0029, approved 2026-11-06): logs and traces sent
 # to the collector chosen in Preferences, off by default. HTTP uses the
 # reqwest 0.13 already in the tree (TLS on ring, no provider of its own);
 # gRPC uses tonic with ring and the system's roots. No metrics.
@@ -75,39 +75,39 @@ tracing-opentelemetry = { version = "0.34.0", default-features = false }
 opentelemetry-appender-tracing = { version = "0.33.1", default-features = false }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 # Process-tree supervision for automation's external programs (Q-11,
-# approved 2026-11-08, docs/plans/process-supervision-dependency.md): a Job
+# approved 2026-11-08, docs/standards/stack-and-dependencies.md): a Job
 # Object on Windows, a process group on Unix. Used only by
-# `jykre::automation`'s program executor; no `tracing` feature, whose spans
+# `jovru::automation`'s program executor; no `tracing` feature, whose spans
 # would carry fields outside the telemetry allowlist.
 process-wrap = { version = "10.0.1", default-features = false, features = ["tokio1", "job-object", "kill-on-drop", "process-group", "creation-flags"] }
 # Time zones of automation schedules (Q-33, approved 2026-11-08,
-# docs/plans/schedule-time-zone-dependency.md): the version already in
+# docs/standards/stack-and-dependencies.md): the version already in
 # Cargo.lock, default features (the system's zone database on Unix, the
 # bundled one on Windows). No cron or RRULE crate: the rule is our own form.
 jiff = "0.2.39"
-# SHA-256 fingerprints of automation snapshots (ADR-0034, approved
-# 2026-11-08): a direct dependency of jykre-storage only.
+# SHA-256 fingerprints of automation snapshots (D-0034, approved
+# 2026-11-08): a direct dependency of jovru-storage only.
 sha2 = "0.10"
-# SQL formatting by dialect (N010), behind jykre-sql-language's `sqruff`
+# SQL formatting by dialect (N010), behind jovru-sql-language's `sqruff`
 # feature; it has no default features to turn off.
 sqruff-lib = "0.44.0"
 # The Windows executable's icon and version details, from build.rs
 # (approved 2026-11-07). Without `toml`, it reads nothing from Cargo.toml.
 winresource = { version = "0.1.34", default-features = false }
-# Updates (ADR-0033, approved 2026-11-08): GitHub's release list, signature
+# Updates (D-0033, approved 2026-11-08): GitHub's release list, signature
 # verification (zipsign, ed25519ph) and archive extraction. Never its
 # `rustls` feature: through reqwest 0.13 it compiles aws-lc-rs; our own
 # reqwest client (TLS on ring) is passed in instead.
 self_update = { version = "1.3.3", default-features = false, features = ["github", "async", "signatures", "archive-tar", "compression-tar-gz", "archive-zip", "compression-zip-deflate"] }
-# Reading CSV and XLSX files for an import into a table (ADR-0040, approved
-# 2026-11-08, docs/plans/csv-and-xlsx-reading-dependencies.md). Used only by
-# `jykre::import`. `calamine`'s default is empty; `dates`, `chrono` and
+# Reading CSV and XLSX files for an import into a table (D-0040, approved
+# 2026-11-08, docs/standards/stack-and-dependencies.md). Used only by
+# `jovru::import`. `calamine`'s default is empty; `dates`, `chrono` and
 # `picture` stay off. `encoding_rs` was already in the tree and becomes
 # direct, without `fast-legacy-encode` or `simd-accel`.
 csv = "1.4.0"
 calamine = { version = "0.38.0", default-features = false }
 encoding_rs = "0.8.44"
-# MCP server for the assistant's tools (ADR-0042, Q-19 option A,
+# MCP server for the assistant's tools (D-0042, Q-19 option A,
 # approved 2026-11-10, docs/plans/rmcp-dependency.md). Server and
 # streamable HTTP only. No client, elicitation, stdio or reqwest:
 # the `reqwest` feature turns on reqwest's `rustls`, which compiles
@@ -119,18 +119,18 @@ rmcp = { version = "3.9.0", default-features = false, features = ["server", "tra
 gpui-kit = "0.9.0"
 # The editor providers take LSP types; the same version gpui-kit uses.
 lsp-types = { version = "0.97.0", features = ["proposed"] }
-jykre-core = { path = "crates/core" }
-jykre-driver-postgres = { path = "crates/driver-postgres" }
-jykre-driver-mysql = { path = "crates/driver-mysql" }
-jykre-driver-databricks = { path = "crates/driver-databricks" }
-jykre-driver-sqlite = { path = "crates/driver-sqlite" }
-jykre-storage = { path = "crates/storage" }
-jykre-secrets = { path = "crates/secrets" }
-jykre-assistant = { path = "crates/assistant" }
-jykre-sql = { path = "crates/sql" }
+jovru-core = { path = "crates/core" }
+jovru-driver-postgres = { path = "crates/driver-postgres" }
+jovru-driver-mysql = { path = "crates/driver-mysql" }
+jovru-driver-databricks = { path = "crates/driver-databricks" }
+jovru-driver-sqlite = { path = "crates/driver-sqlite" }
+jovru-storage = { path = "crates/storage" }
+jovru-secrets = { path = "crates/secrets" }
+jovru-assistant = { path = "crates/assistant" }
+jovru-sql = { path = "crates/sql" }
 # The editor's language features, used only by the editor adapter
 # (src/app/sql_editor); query execution never depends on them.
-jykre-sql-language = { path = "crates/sql-language" }
+jovru-sql-language = { path = "crates/sql-language" }
 tokio.workspace = true
 serde_json.workspace = true
 serde.workspace = true
@@ -139,7 +139,7 @@ dirs = "7"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
-# Telemetry over OTLP (ADR-0029); only `jykre::telemetry` uses them.
+# Telemetry over OTLP (D-0029); only `jovru::telemetry` uses them.
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
@@ -153,21 +153,21 @@ secrecy.workspace = true
 # Export to XLSX (approved 2026-11-04). Constant memory mode writes each row
 # to a temporary file as it is added, so an export never holds the sheet.
 rust_xlsxwriter = { version = "0.102.0", default-features = false, features = ["constant_memory"] }
-# Update check and signed self-install (ADR-0033); only `jykre::update`.
+# Update check and signed self-install (D-0033); only `jovru::update`.
 self_update.workspace = true
-# External programs of automation (Q-11); only `jykre::automation`.
+# External programs of automation (Q-11); only `jovru::automation`.
 process-wrap.workspace = true
 # Schedules' time zones (Q-33): the scheduler and the schedule views only.
 jiff.workspace = true
-# Reading CSV and XLSX for an import (ADR-0040); only `jykre::import`.
+# Reading CSV and XLSX for an import (D-0040); only `jovru::import`.
 csv.workspace = true
 calamine.workspace = true
 encoding_rs.workspace = true
 # The size of an XLSX's shared strings table, checked before `calamine`
-# opens the workbook (ADR-0040's proposal). Already in the tree through
+# opens the workbook (D-0040's proposal). Already in the tree through
 # `rust_xlsxwriter` and `self_update`; the update tests also write archives.
 zip = { version = "9", default-features = false }
-# MCP server (ADR-0042, Q-19). `rmcp`'s HTTP service does not listen;
+# MCP server (D-0042, Q-19). `rmcp`'s HTTP service does not listen;
 # hyper 1.12.0 and hyper-util 0.1.21 are the copies already in the lock.
 rmcp.workspace = true
 hyper = { version = "1.12.0", default-features = false, features = ["server", "http1"] }
@@ -177,7 +177,7 @@ hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"
 tower-service = "0.3.3"
 
 # A program's stdout and stderr in the console's OEM code page (CP437, CP850…)
-# are shown as text (ADR-0037, amended 2026-11-09): `windows-registry` reads
+# are shown as text (D-0037, amended 2026-11-09): `windows-registry` reads
 # that code page, `oem_cp` decodes it. Both safe; no `unsafe` in our code.
 [target.'cfg(windows)'.dependencies]
 oem_cp = "2.1.2"
@@ -191,14 +191,14 @@ workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-# Signed release archives for the update tests (ADR-0033): crates the
+# Signed release archives for the update tests (D-0033): crates the
 # updater already brings, with zipsign-api's signing turned on.
 zipsign-api = { version = "0.2.2", default-features = false, features = ["sign-tar", "sign-zip"] }
 tar = "0.4"
 flate2 = "1"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 
-# Hot paths with criterion (ADR-0010). `cargo xtask check --full` runs them in
+# Hot paths with criterion (D-0010). `cargo xtask check --full` runs them in
 # quick mode; compare a change with `--save-baseline main` / `--baseline main`.
 [[bench]]
 name = "hot_paths"
@@ -209,7 +209,7 @@ harness = false
 # assertions, unchecked otherwise. Debug assertions on for that crate keep
 # its indexing checked in release builds, so a malformed file panics (and
 # the import fails) instead of reading out of bounds. Approved by the
-# maintainer on 2026-11-08 (ADR-0040's proposal, residual risks).
+# maintainer on 2026-11-08 (D-0040's proposal, residual risks).
 [profile.release.package.debug_unsafe]
 debug-assertions = true
 
@@ -224,8 +224,8 @@ debug-assertions = true
 overflow-checks = true
 
 # SQLx 0.9.0 plus public readers of the transaction state the server reports
-# (ADR-0030, TD-001), from a fork pinned to one revision of its branch
-# `jykre/transaction-status` until a SQLx release has them. Every SQLx crate
+# (D-0030, TD-001), from a fork pinned to one revision of its branch
+# `jovru/transaction-status` until a SQLx release has them. Every SQLx crate
 # is patched, so the tree keeps one `sqlx-core`; the revision is allowed in
 # `deny.toml`.
 [patch.crates-io]

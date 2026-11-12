@@ -3,7 +3,7 @@
 //! the run's fingerprint.
 use super::definition::{JobDefinition, canonical_json};
 use super::process::Launch;
-use jykre_core::ConnectionId;
+use jovru_core::ConnectionId;
 use serde_json::{Value, json};
 
 /// A SQL run: the definition (its parameter specifications, never the

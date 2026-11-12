@@ -19,7 +19,7 @@ pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
     pub(crate) fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("jykre-update-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("jovru-update-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         Self(dir)
     }
@@ -361,8 +361,8 @@ async fn stub(routes: impl Fn(&str, &str) -> Reply + Send + Sync + 'static) -> S
     Stub { base, heads, task }
 }
 
-const LIST: &str = "/repos/alandariva/jykre-studio/releases?per_page=100";
-const ASSET: &str = "/repos/alandariva/jykre-studio/releases/assets/7";
+const LIST: &str = "/repos/alandariva/jovru/releases?per_page=100";
+const ASSET: &str = "/repos/alandariva/jovru/releases/assets/7";
 const FILE: &str = "/download/file?token=secret";
 
 /// The release list with `versions`, each with both platforms' archives.
@@ -379,7 +379,7 @@ fn release_list(base: &str, versions: &[&str]) -> String {
             serde_json::json!({
                 "tag_name": format!("v{version}"),
                 "created_at": "2026-11-08T00:00:00Z",
-                "name": format!("Jykre Studio {version}"),
+                "name": format!("Jovru {version}"),
                 "body": "notes",
                 "html_url": release::release_page(version),
                 "assets": [asset(Platform::LinuxX86_64), asset(Platform::WindowsX86_64)],
@@ -409,7 +409,7 @@ async fn the_check_reads_the_list_anonymously_and_offers_the_newest() {
     assert_eq!(candidate.version, "0.2.0-rc.1");
     assert_eq!(
         candidate.asset.map(|asset| asset.name).as_deref(),
-        Some("jykre-studio-v0.2.0-rc.1-linux-x86_64.tar.gz")
+        Some("jovru-v0.2.0-rc.1-linux-x86_64.tar.gz")
     );
     let heads = server.heads.lock().unwrap().join("\n").to_lowercase();
     assert!(heads.contains(&format!("user-agent: {}", user_agent().to_lowercase())));
@@ -468,7 +468,7 @@ async fn a_check_can_be_cancelled() {
 
 /// An installed folder of the previous version, with a file of the user's.
 fn installed(temp: &TempDir, platform: Platform) -> InstallDir {
-    let dir = temp.path().join("Jykre Studio");
+    let dir = temp.path().join("Jovru");
     std::fs::create_dir_all(dir.join("catalog/postgresql")).unwrap();
     std::fs::write(dir.join(platform.executable()), b"old binary").unwrap();
     std::fs::write(dir.join("LICENSE"), b"old license").unwrap();
@@ -552,7 +552,7 @@ async fn a_signed_release_replaces_the_folder_and_keeps_the_user_files() {
         expected.sort();
         let files: Vec<_> = tree(&dir.dir)
             .into_iter()
-            .filter(|(path, _)| !path.starts_with(".jykre-update/done-"))
+            .filter(|(path, _)| !path.starts_with(".jovru-update/done-"))
             .collect();
         assert_eq!(files, expected, "{platform:?}");
         let heads = server.heads.lock().unwrap().join("\n").to_lowercase();

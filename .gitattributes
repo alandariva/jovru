@@ -9,5 +9,5 @@
 *.ico binary
 *.svg text
 
-# Raw ed25519 public keys of the release signature (ADR-0033).
+# Raw ed25519 public keys of the release signature (D-0033).
 *.pub binary

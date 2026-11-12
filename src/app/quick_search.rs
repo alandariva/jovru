@@ -7,11 +7,11 @@
 //! with **Everything** on, the whole local cache is searched instead and
 //! its matches show with their ancestors. While typing on the tree the
 //! keyboard stays there, so the selection moves while the text is kept.
-//! The rules live in `jykre::explorer` (`quick_target`, `quick_step`,
+//! The rules live in `jovru::explorer` (`quick_target`, `quick_step`,
 //! `filter_rows`).
 use super::connections::OpenTable;
 use super::*;
-use jykre::explorer::QuickMode;
+use jovru::explorer::QuickMode;
 use std::sync::Arc;
 
 /// The key context of the explorer tree, for its shortcuts.
@@ -166,7 +166,7 @@ impl AppView {
         if let Some((index, path)) = self.explorer_selected.as_ref() {
             let mut before = 0;
             for (at, object) in self.shown_nodes(cx) {
-                let matches = jykre::explorer::quick_matches(&object.name, &text);
+                let matches = jovru::explorer::quick_matches(&object.name, &text);
                 if at == *index && object.path == *path {
                     position = matches.then_some(before + 1);
                     break;
@@ -192,7 +192,7 @@ impl AppView {
         let current = self.selected_position(&nodes);
         // The entries follow the text first, so the match can be scrolled to.
         self.sync_explorer(cx);
-        let at = jykre::explorer::quick_target(&names, current, &text)?;
+        let at = jovru::explorer::quick_target(&names, current, &text)?;
         let target = (nodes[at].0, nodes[at].1.path.clone());
         self.explorer_selected = Some(target.clone());
         self.reveal_explorer_node(target.0, &target.1);
@@ -261,7 +261,7 @@ impl AppView {
             .map(|(_, object)| object.name.as_str())
             .collect();
         let current = self.selected_position(&nodes);
-        if let Some(at) = jykre::explorer::quick_step(&names, current, &text, forward) {
+        if let Some(at) = jovru::explorer::quick_step(&names, current, &text, forward) {
             let (index, path) = (nodes[at].0, nodes[at].1.path.clone());
             self.select_node(index, &path, window, cx);
         }
@@ -282,10 +282,10 @@ impl AppView {
         else {
             return;
         };
-        if jykre::explorer::opens(&object) {
+        if jovru::explorer::opens(&object) {
             let preview = object.stored_at.clone().unwrap_or_else(|| path.clone());
             self.open_relation(index, &path, &preview, OpenTable::Data, window, cx);
-        } else if jykre::explorer::expandable(&object) {
+        } else if jovru::explorer::expandable(&object) {
             self.toggle_node(index, &path, cx);
         }
     }

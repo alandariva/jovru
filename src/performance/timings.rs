@@ -1,5 +1,5 @@
 //! The application's own UI-thread timings (`UiTimer`, target
-//! `jykre::ui_thread`), collected in memory during a performance run so each
+//! `jovru::ui_thread`), collected in memory during a performance run so each
 //! phase reports how long the production code took: a grid view rebuilt, a
 //! run's status or a result published, a history page shown.
 //!
@@ -17,7 +17,7 @@ use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::layer::{Context, Layer};
 
 /// The target `UiTimer` records under.
-pub const TARGET: &str = "jykre::ui_thread";
+pub const TARGET: &str = "jovru::ui_thread";
 
 /// Durations by operation, since they were last taken.
 #[derive(Clone, Default)]

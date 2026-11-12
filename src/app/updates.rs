@@ -1,16 +1,16 @@
-//! Updates ([ADR-0033](../../docs/adr/0033-update-check-and-signed-self-install.md)):
+//! Updates ([D-0033](../../docs/decisions/security.md#d-0033)):
 //! the daily check, **Preferences › About › Updates** and the status bar's
-//! badge. What to install and how lives in `jykre::update`; this module
+//! badge. What to install and how lives in `jovru::update`; this module
 //! starts the work, keeps its state and draws it.
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::drivers::{CancellationToken, ErrorCode};
-use jykre::update::{
+use jovru::drivers::{CancellationToken, ErrorCode};
+use jovru::update::{
     self, Candidate, Endpoints, Installability, ManualReason, Phase, Platform, Progress,
     UpdatePreferences, UpdateRecord, UpdateState,
 };
-use jykre::{backend, connection_store, tr};
+use jovru::{backend, connection_store, tr};
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -179,7 +179,7 @@ impl Updater {
 
     fn finish_check(
         &mut self,
-        answer: jykre::drivers::DriverResult<(
+        answer: jovru::drivers::DriverResult<(
             Result<Option<Candidate>, update::CheckFailure>,
             Installability,
         )>,
@@ -415,7 +415,7 @@ fn manual_reason(reason: ManualReason) -> &'static str {
             "This copy is not in the folder the release ships, so it is not replaced; download the release from its page."
         ),
         ManualReason::NotWritable => tr!(
-            "Jykre Studio cannot write to its folder; download the release and replace the folder by hand."
+            "Jovru cannot write to its folder; download the release and replace the folder by hand."
         ),
     }
 }
@@ -423,14 +423,9 @@ fn manual_reason(reason: ManualReason) -> &'static str {
 /// The state as a line for About.
 fn status(state: &UpdateState) -> Feedback {
     match state {
-        UpdateState::Idle => Feedback::new(
-            Tone::Info,
-            tr!("Not checked yet since Jykre Studio started."),
-        ),
+        UpdateState::Idle => Feedback::new(Tone::Info, tr!("Not checked yet since Jovru started.")),
         UpdateState::Checking { .. } => Feedback::new(Tone::Info, tr!("Checking for updates…")),
-        UpdateState::UpToDate { .. } => {
-            Feedback::new(Tone::Success, tr!("Jykre Studio is up to date."))
-        }
+        UpdateState::UpToDate { .. } => Feedback::new(Tone::Success, tr!("Jovru is up to date.")),
         UpdateState::Available { candidate, install } => {
             let available = tr!("Version {0} is available.", candidate.version);
             match install {
@@ -466,7 +461,7 @@ fn status(state: &UpdateState) -> Feedback {
         UpdateState::ReadyToRestart { version, .. } => Feedback::new(
             Tone::Success,
             tr!(
-                "Version {0} is installed; restart Jykre Studio to use it.",
+                "Version {0} is installed; restart Jovru to use it.",
                 version
             ),
         ),
@@ -543,7 +538,7 @@ impl Render for UpdateSettingsView {
                 ),
             )
             .child(label(tr!(
-                "Once a day Jykre Studio asks GitHub, without identifying you, whether a newer version exists; GitHub sees this computer's address and the version. Nothing is downloaded without your click, and only an archive signed with the release key is installed."
+                "Once a day Jovru asks GitHub, without identifying you, whether a newer version exists; GitHub sees this computer's address and the version. Nothing is downloaded without your click, and only an archive signed with the release key is installed."
             )))
             .child(
                 div()

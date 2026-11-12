@@ -1,6 +1,6 @@
 //! How a failure reads in the UI: a short title chosen from the error's code,
 //! the database's own message, a suggested action and the details a report
-//! needs ([UX](../docs/reference/ux.md#error-messages)).
+//! needs ([UX](../docs/reference/ux/feedback.md#error-messages)).
 use crate::drivers::{DriverError, ErrorCode};
 use crate::tr;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -116,7 +116,7 @@ impl ErrorReport {
     /// screenshot is required. `context` names the run and the statement.
     pub fn details(&self, context: &str) -> String {
         let mut text = format!(
-            "{}\n{}\nJykre Studio {}\nTime (UTC): {}\n",
+            "{}\n{}\nJovru {}\nTime (UTC): {}\n",
             self.title,
             self.message,
             env!("CARGO_PKG_VERSION"),
@@ -305,7 +305,7 @@ mod tests {
     fn vendor_and_standard_codes_read_together() {
         let error = DriverError::from_server(
             ErrorCode::Database,
-            "Table 'jykre.missing' doesn't exist",
+            "Table 'jovru.missing' doesn't exist",
             ServerDiagnostic {
                 sqlstate: Some("42S02".into()),
                 vendor_code: Some("1146".into()),

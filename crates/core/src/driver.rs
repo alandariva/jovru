@@ -19,13 +19,13 @@ pub struct DriverCapabilities {
     pub hierarchy: Vec<ObjectKind>,
     pub default_port: Option<u16>,
     pub identifier_quote: char,
-    /// Binds [`crate::QueryParameter`]s (ADR-0023, ADR-0026). A driver may
+    /// Binds [`crate::QueryParameter`]s (D-0023, D-0026). A driver may
     /// still reject them for some connections.
     #[serde(default)]
     pub named_parameters: bool,
     /// Implements [`Session::edit_target`], and [`Session::write`] or
     /// [`Session::write_script`] as [`crate::write::EditableTable::writes`]
-    /// says (ADR-0039).
+    /// says (D-0039).
     #[serde(default)]
     pub row_writes: bool,
 }
@@ -155,7 +155,7 @@ pub trait Session: Debug + Send {
     /// What the rows of a result with these columns can be written back to,
     /// read now from the server's catalog in this session. `statement` is
     /// the SQL the result was read with, as it ran; only a driver that
-    /// infers the table from it (Databricks, ADR-0039 section 9) reads it.
+    /// infers the table from it (Databricks, D-0039 section 9) reads it.
     /// Like [`Session::context`], asking discards a result still open for
     /// paging. The default cannot tell, so the result is read-only.
     async fn edit_target(
@@ -182,7 +182,7 @@ pub trait Session: Debug + Send {
         Err(DriverError::not_implemented("this driver", "writing rows"))
     }
 
-    /// The table at `path` as an import's target (ADR-0040): every column,
+    /// The table at `path` as an import's target (D-0040): every column,
     /// in table order, with its declared type, nullability, default and
     /// whether it can be written, read from the catalog in this session.
     /// `key` is empty: an import only inserts. The default answers
@@ -198,7 +198,7 @@ pub trait Session: Debug + Send {
 
     /// Opens a transaction that the following [`Session::write`]s with
     /// [`crate::write::WriteScope::Caller`] join, and
-    /// [`Session::end_writes`] ends (ADR-0040). Refused while the session
+    /// [`Session::end_writes`] ends (D-0040). Refused while the session
     /// already holds a transaction. The default reports `NotImplemented`.
     async fn begin_writes(&mut self, cancel: CancellationToken) -> DriverResult<()> {
         let _ = cancel;

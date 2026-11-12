@@ -1,7 +1,7 @@
 //! MCP bearer tokens, the records that bind each one to a connection, and
 //! the approval queue.
 //!
-//! [`token`] is the wire form `jykmcp_<id>_<secret>`: it generates, parses
+//! [`token`] is the wire form `jovmcp_<id>_<secret>`: it generates, parses
 //! and compares, and it does not open the vault. [`registry`] stores the
 //! record in the `assistant.mcp` setting and the secret in the vault.
 //! [`broker`] holds pending cards and their deadlines. [`server`] is the

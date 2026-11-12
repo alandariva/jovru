@@ -1,13 +1,13 @@
 //! The explorer's Favorites (0.2.0 M9): connections, tables and views kept
 //! above the connections, listed from local state and the metadata cache
-//! without reading a server ([`jykre::favorites`]).
+//! without reading a server ([`jovru::favorites`]).
 //!
 //! A table or view opens as **View data** does in the explorer, with its
 //! safeguards. A favorite whose connection was deleted, or whose object the
 //! cache no longer holds, is marked and can be removed; it is never pointed
 //! at another object.
 use super::*;
-use jykre::favorites::{Favorite, Favorites, SETTINGS_KEY};
+use jovru::favorites::{Favorite, Favorites, SETTINGS_KEY};
 
 /// Rows shown before the list scrolls.
 const VISIBLE_ROWS: usize = 6;

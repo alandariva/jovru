@@ -1,15 +1,15 @@
 //! `automation.db`: job definitions, published versions and run history
-//! ([ADR-0034](../../../docs/adr/0034-automation-database-service-and-lock.md),
-//! [ADR-0035](../../../docs/adr/0035-persisted-declared-outputs.md),
-//! [ADR-0036](../../../docs/adr/0036-published-versions-and-chain-runs.md),
-//! [ADR-0038](../../../docs/adr/0038-external-program-runs.md)).
+//! ([D-0034](../../../docs/decisions/automation.md#d-0034),
+//! [D-0035](../../../docs/decisions/automation.md#d-0035),
+//! [D-0036](../../../docs/decisions/automation.md#d-0036),
+//! [D-0038](../../../docs/decisions/automation.md#d-0038)).
 //!
 //! Only this module opens the file. Nothing is written here that the
 //! specification forbids: no input value, cell, scalar or server message. The
 //! one exception is the declared, opt-in, small and short-lived outputs of
-//! ADR-0035, stored in `run_outputs`.
+//! D-0035, stored in `run_outputs`.
 use crate::{error, open_pool_with, sql_error};
-use jykre_core::{
+use jovru_core::{
     ConnectionId, DriverError, DriverResult, ErrorCode, ParameterKind,
     automation::{
         Cause, ChainRunId, ChainRunRecord, GrantId, JobId, JobKind, MissedPolicy, OverlapPolicy,
@@ -41,7 +41,7 @@ pub const OUTPUT_QUOTA_BYTES: usize = 4096;
 const PRUNE_BATCH: usize = 500;
 
 // ---------------------------------------------------------------------------
-// The data-folder lock (ADR-0034, decision 4)
+// The data-folder lock (D-0034, decision 4)
 // ---------------------------------------------------------------------------
 
 /// An exclusive operating-system lock on `automation.lock`, held for as long
@@ -206,7 +206,7 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 /// The newest schema version this build writes.
 pub(crate) const LATEST_VERSION: i64 = 5;
 
-/// ADR-0034, migration 1.
+/// D-0034, migration 1.
 const STEP_1: &str = "
 CREATE TABLE jobs (
   id              TEXT PRIMARY KEY,
@@ -247,7 +247,7 @@ CREATE INDEX runs_by_start ON runs(started_at);
 CREATE INDEX runs_open     ON runs(state) WHERE state = 'running';
 ";
 
-/// ADR-0035, migration 2.
+/// D-0035, migration 2.
 const STEP_2: &str = "
 CREATE TABLE run_outputs (
   run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -270,7 +270,7 @@ CREATE INDEX run_outputs_expiring ON run_outputs(value_expires_at) WHERE expired
 ALTER TABLE runs ADD COLUMN outputs_stored INTEGER;
 ";
 
-/// ADR-0038, migration 3: `jobs` and `runs` are rebuilt (new table, copy,
+/// D-0038, migration 3: `jobs` and `runs` are rebuilt (new table, copy,
 /// drop, rename). `foreign_key_check` runs before the commit.
 const STEP_3: &str = "
 CREATE TABLE jobs_new (
@@ -342,7 +342,7 @@ CREATE INDEX runs_by_start ON runs(started_at);
 CREATE INDEX runs_open     ON runs(state) WHERE state = 'running';
 ";
 
-/// ADR-0036, migration 4: `jobs` is rebuilt for the kind `chain`; versions,
+/// D-0036, migration 4: `jobs` is rebuilt for the kind `chain`; versions,
 /// chain runs and the chain columns of `runs` arrive.
 const STEP_4: &str = "
 CREATE TABLE jobs_new (
@@ -395,7 +395,7 @@ CREATE INDEX chain_runs_by_start ON chain_runs(started_at);
 CREATE INDEX chain_runs_open     ON chain_runs(state) WHERE state = 'running';
 ";
 
-/// ADR-0041, migration 5: schedules and their grants; `runs` and
+/// D-0041, migration 5: schedules and their grants; `runs` and
 /// `chain_runs` are rebuilt so the origin takes `schedule`, with the
 /// schedule, the due time and the catch-up marker. `schedules` comes first:
 /// the rebuilt tables reference it.
@@ -674,7 +674,7 @@ pub struct ChainRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InUse {
     pub chains: Vec<ChainRef>,
-    /// The job's schedule runs this version (ADR-0041); deleting the job
+    /// The job's schedule runs this version (D-0041); deleting the job
     /// deletes its schedule instead.
     pub schedule: Option<ScheduleId>,
 }
@@ -697,12 +697,12 @@ pub struct NewRun {
     pub connection_revision: Option<i64>,
     pub program_fingerprint: Option<String>,
     /// The schedule, due time and catch-up marker of a scheduled run, or of
-    /// a scheduled chain's step (ADR-0041); `None` for a manual run.
+    /// a scheduled chain's step (D-0041); `None` for a manual run.
     pub scheduled: Option<RunSchedule>,
     pub started_at: UtcMillis,
 }
 
-/// One declared output to store (ADR-0035). `value` is `None` for NULL.
+/// One declared output to store (D-0035). `value` is `None` for NULL.
 /// `Debug` never shows the value.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OutputValue {
@@ -876,7 +876,7 @@ pub struct Pruned {
     pub program_runs: Vec<RunId>,
 }
 
-/// What the user edits of a schedule (ADR-0041). The rule, the zone and the
+/// What the user edits of a schedule (D-0041). The rule, the zone and the
 /// policies are what the consent covers; `notify` is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScheduleDraft {
@@ -1308,7 +1308,7 @@ impl AutomationRepository {
 
     /// Opens `dir/automation.db` for reading only, for an instance that does
     /// not hold the [`AutomationLock`]: it never creates, migrates or sets
-    /// aside the file, which belongs to the lock holder (ADR-0034, decision
+    /// aside the file, which belongs to the lock holder (D-0034, decision
     /// 4). `Ok(None)` when there is no file yet, or it is not yet at this
     /// version's schema (the holder migrates it); `Newer` when a newer
     /// version wrote it.
@@ -1631,7 +1631,7 @@ impl AutomationRepository {
         chains_using_in(&mut connection, job, version).await
     }
 
-    // ----- schedules and grants (ADR-0041) -----
+    // ----- schedules and grants (D-0041) -----
 
     /// Every schedule, oldest first.
     pub async fn schedules(&self) -> DriverResult<Vec<StoredSchedule>> {
@@ -2260,8 +2260,8 @@ impl AutomationRepository {
         Ok(())
     }
 
-    /// Marks what a closed application left running (ADR-0034 decision 5,
-    /// ADR-0036 decision 5, ADR-0038 decision 4). Never replays anything and
+    /// Marks what a closed application left running (D-0034 decision 5,
+    /// D-0036 decision 5, D-0038 decision 4). Never replays anything and
     /// never creates a row.
     pub async fn recover(&self, now: UtcMillis) -> DriverResult<Recovered> {
         let stamp = format_time(now);

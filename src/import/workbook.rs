@@ -1,5 +1,5 @@
 //! XLSX: one sheet of an `.xlsx` workbook through `calamine`'s cells reader
-//! ([proposal](../../docs/plans/csv-and-xlsx-reading-dependencies.md#memory-and-streaming)).
+//! ([proposal](../../docs/reference/drivers/editing-and-import.md#import-memory-and-streaming)).
 //!
 //! The cells reader streams the sheet, but opening the workbook reads its
 //! shared strings table whole. So the table's size is checked in the zip
@@ -9,7 +9,7 @@
 //!
 //! Cells arrive in file order, which is row-major in files written by Excel
 //! and the usual libraries; a cell whose row goes backwards stops the read
-//! at its address, never a silent reordering. Values follow ADR-0040,
+//! at its address, never a silent reordering. Values follow D-0040,
 //! section 3: a string is text, a number the shortest decimal that reads
 //! back as the stored double, a boolean a boolean, a date or time its
 //! calendar text without a time zone, an empty cell NULL, and an error cell
@@ -23,7 +23,7 @@ use std::io::{BufReader, Read, Seek};
 use std::path::Path;
 
 /// The largest shared strings table an import opens, uncompressed: the
-/// per-page memory ceiling of [Results](../../docs/reference/results.md#limits).
+/// per-page memory ceiling of [Results](../../docs/reference/results/model.md#limits).
 pub const MAX_SHARED_STRINGS_BYTES: u64 = 256 * 1024 * 1024;
 
 /// How much of the shared strings table is read to find the count of

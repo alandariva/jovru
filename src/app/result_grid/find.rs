@@ -4,9 +4,9 @@ use super::editing::Editing;
 use super::{ResultGrid, ResultGridEvent};
 use crate::app::ui::*;
 use gpui_kit::*;
-use jykre::cell_format;
-use jykre::grid::{self, CellMark, CellSelection, FindMode, GridKey, GridView};
-use jykre::tr;
+use jovru::cell_format;
+use jovru::grid::{self, CellMark, CellSelection, FindMode, GridKey, GridView};
+use jovru::tr;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ pub(super) struct FindState {
 }
 
 /// Cancels the worker when its owner closes or supersedes the search.
-struct FindCancellation(jykre_core::CancellationToken);
+struct FindCancellation(jovru_core::CancellationToken);
 
 /// The result search while its bar is open.
 struct OpenFind {
@@ -215,7 +215,7 @@ impl ResultGrid {
         let layout = self.layout.clone();
         let first_row = self.first_row;
         let focus = self.selection.map(|selection| selection.focus);
-        let cancel = jykre_core::CancellationToken::new();
+        let cancel = jovru_core::CancellationToken::new();
         self.find.cancel = Some(FindCancellation(cancel.clone()));
         self.find.task = Some(cx.spawn(async move |this, cx| {
             let (view, scan, hit_at) = cx

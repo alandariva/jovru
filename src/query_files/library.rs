@@ -4,7 +4,7 @@
 //! Never SQL or titles (the files hold them).
 //!
 //! It lives apart from `workspace.state`, whose writer keeps only the fields
-//! it knows ([ADR-0024](../../../docs/adr/0024-reports.md)). Keys this
+//! it knows ([D-0024](../../docs/decisions/results.md#d-0024)). Keys this
 //! version does not know are kept, in the value and in each entry.
 use super::names;
 use crate::reports::ConnectionRef;
@@ -258,9 +258,9 @@ impl QueryLibrary {
     }
 }
 
-/// The default directory of saved queries: `<Documents>/Jykre Studio/Queries`;
+/// The default directory of saved queries: `<Documents>/Jovru/Queries`;
 /// without a Documents folder, `<home>/Documents/…`; without a home, the data
-/// folder's `Queries`. With `JYKRE_CONFIG_DIR` set, `<it>/Queries`, so tests
+/// folder's `Queries`. With `JOVRU_CONFIG_DIR` set, `<it>/Queries`, so tests
 /// and manual checks never touch the user's documents.
 pub fn default_directory(data_dir: &Path) -> PathBuf {
     let isolated = std::env::var_os(crate::connection_store::CONFIG_DIR_VARIABLE)
@@ -284,7 +284,7 @@ fn resolve_default(
     }
     documents
         .or_else(|| home.map(|home| home.join("Documents")))
-        .map(|documents| documents.join("Jykre Studio").join("Queries"))
+        .map(|documents| documents.join("Jovru").join("Queries"))
         .unwrap_or_else(|| data_dir.join("Queries"))
 }
 
@@ -360,11 +360,11 @@ mod tests {
         );
         assert_eq!(
             resolve_default(None, Some("/docs".into()), None, data),
-            PathBuf::from("/docs/Jykre Studio/Queries")
+            PathBuf::from("/docs/Jovru/Queries")
         );
         assert_eq!(
             resolve_default(None, None, Some("/home/u".into()), data),
-            PathBuf::from("/home/u/Documents/Jykre Studio/Queries")
+            PathBuf::from("/home/u/Documents/Jovru/Queries")
         );
         assert_eq!(
             resolve_default(None, None, None, data),

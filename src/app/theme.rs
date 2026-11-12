@@ -1,12 +1,12 @@
 //! Puts the theme the user chose on screen: the application's palette
 //! ([`super::ui::colors`]) and the component kit's theme follow it
-//! together. The choice itself is [`jykre::theme::ThemeChoice`]. JSON is
+//! together. The choice itself is [`jovru::theme::ThemeChoice`]. JSON is
 //! read when a catalog is loaded, never while a view renders.
 use super::fonts::fonts;
 use super::ui::colors;
 use gpui_kit::component::{ActiveTheme, Theme, ThemeMode};
 use gpui_kit::*;
-use jykre::theme::{Catalog, Overrides, ThemeChoice};
+use jovru::theme::{Catalog, Overrides, ThemeChoice};
 use std::sync::Arc;
 
 /// The theme the user chose, for Preferences and to follow the system.
@@ -29,7 +29,7 @@ impl Global for ThemeOverrides {}
 
 /// Picker previews, resolved off the UI thread for both system appearances.
 #[derive(Clone, Default)]
-pub(super) struct ThemePreviews(pub [Vec<(ThemeChoice, jykre::theme::ResolvedTheme)>; 2]);
+pub(super) struct ThemePreviews(pub [Vec<(ThemeChoice, jovru::theme::ResolvedTheme)>; 2]);
 
 impl Global for ThemePreviews {}
 
@@ -73,7 +73,7 @@ pub(super) fn apply(choice: ThemeChoice, window: Option<&Window>, cx: &mut App) 
         tracing::warn!("{warning}");
     }
     let dark = resolved.appearance.is_dark();
-    jykre::theme::install(Arc::new(resolved));
+    jovru::theme::install(Arc::new(resolved));
     cx.set_global(ThemePreference(choice));
     // Changing the kit's mode loads its theme file again, which puts back
     // its own fonts; the SQL size the user chose stays. Colours are written
@@ -161,7 +161,7 @@ pub(super) fn apply(choice: ThemeChoice, window: Option<&Window>, cx: &mut App) 
 /// A token colour as the kit stores it. Alpha tokens keep the low byte;
 /// every other token is opaque.
 fn painted(token: &str, color: u32) -> Hsla {
-    if jykre::theme::carries_alpha(token) {
+    if jovru::theme::carries_alpha(token) {
         rgba(color).into()
     } else {
         rgb(color).into()

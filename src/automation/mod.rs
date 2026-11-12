@@ -1,6 +1,6 @@
 //! The automation engine ([specification](../../docs/plans/automation-engine-specification.md),
-//! [ADR-0034](../../docs/adr/0034-automation-database-service-and-lock.md) to
-//! [ADR-0038](../../docs/adr/0038-external-program-runs.md)).
+//! [D-0034](../../docs/decisions/automation.md#d-0034) to
+//! [D-0038](../../docs/decisions/automation.md#d-0038)).
 //!
 //! GPUI-free, like `reports`. [`Engine`] is an application-root service: it
 //! takes the data folder's lock, recovers what an earlier process left
@@ -14,7 +14,7 @@
 //! [`jjp`] for programs that take inputs and return outputs) and a linear
 //! chain of published versions ([`chain`]). A [`schedule`] runs a published
 //! version or a chain by a rule in a time zone while the application is
-//! open, in the instance holding the lock (ADR-0041).
+//! open, in the instance holding the lock (D-0041).
 
 pub mod chain;
 mod chain_run;
@@ -39,7 +39,7 @@ pub use engine::{
     OverviewEntry, Plan, PlanStep, PublishError, Recovery, RunHandle, SaveError,
 };
 pub use executor::{PrepareError, Prepared, prepare};
-pub use jykre_core::automation::{
+pub use jovru_core::automation::{
     Cause, ChainRunId, ChainRunRecord, JobId, JobKind, MissedPolicy, OverlapPolicy, RunId,
     RunOrigin, RunRecord, RunState, ScheduleId, ScheduleOutcome, UtcMillis,
 };
@@ -48,7 +48,7 @@ use crate::reports::ParameterSpec;
 use crate::result::ResultData;
 use chain::InputProblem;
 use definition::{ChainProblem, SqlBody};
-use jykre_core::{ConnectionId, DriverError, SessionContext};
+use jovru_core::{ConnectionId, DriverError, SessionContext};
 use outputs::{Output, OutputProblem};
 use queue::{Blocked, QueueFull};
 use std::path::PathBuf;
@@ -77,7 +77,7 @@ pub struct SqlJob {
 impl SqlJob {
     /// A job without parameters, with the limits a tab starts with.
     pub fn new(connection: ConnectionId, sql: impl Into<String>) -> Self {
-        let defaults = jykre_core::ExecutionOptions::default();
+        let defaults = jovru_core::ExecutionOptions::default();
         Self {
             connection,
             context: SessionContext::default(),
@@ -263,7 +263,7 @@ pub struct RunOutcome {
     pub program: Option<ProgramOutcome>,
     /// The declared outputs, when the job declares any and it got that far.
     pub outputs: Option<Result<Vec<Output>, OutputProblem>>,
-    /// ADR-0035: `None` when the job does not persist its outputs.
+    /// D-0035: `None` when the job does not persist its outputs.
     pub outputs_stored: Option<bool>,
     /// The terminal state could not be written; recovery will mark the run
     /// interrupted at the next start. The run is never sent again.

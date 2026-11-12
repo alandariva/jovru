@@ -1,5 +1,5 @@
 //! The shared run of one approved statement for the assistant and the MCP
-//! server (ADR-0042).
+//! server (D-0042).
 //!
 //! [`run_once`] is the runtime half of the assistant's query. It calls
 //! `query_in_context` and returns a [`QueryPreview`] plus the session to
@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use jykre_secrets::{SecretStore, SystemSecretStore};
-use jykre_storage::ConfigRepository;
+use jovru_secrets::{SecretStore, SystemSecretStore};
+use jovru_storage::ConfigRepository;
 
 use crate::assistant::released::{self, QueryPreview};
 use crate::backend::{self, SessionRun};
@@ -428,8 +428,8 @@ mod tests {
         SessionContext, async_trait,
     };
     use crate::mcp::McpTokenId;
-    use jykre_secrets::SecretStore;
-    use jykre_storage::ConfigRepository;
+    use jovru_secrets::SecretStore;
+    use jovru_storage::ConfigRepository;
     use serde_json::json;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -440,7 +440,7 @@ mod tests {
     impl Scratch {
         fn new() -> Self {
             let path =
-                std::env::temp_dir().join(format!("jykre-assistant-query-{}", ConnectionId::new()));
+                std::env::temp_dir().join(format!("jovru-assistant-query-{}", ConnectionId::new()));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
         }

@@ -10,9 +10,9 @@ use super::{
     Cause, Phase, Progress, Refusal, RunOutcome, RunState, RunStatus, SqlOutcome, UtcMillis,
     snapshot,
 };
-use jykre_core::CancellationToken;
-use jykre_core::automation::{JobKind, RunOrigin};
-use jykre_storage::{AutomationRepository, NewRun, OutputValue, RunFinish};
+use jovru_core::CancellationToken;
+use jovru_core::automation::{JobKind, RunOrigin};
+use jovru_storage::{AutomationRepository, NewRun, OutputValue, RunFinish};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime};
@@ -103,8 +103,8 @@ pub(super) async fn run(
             Ending {
                 outcome: Outcome::new(RunState::Failed, Some(Cause::Authentication), false),
                 done: Execution {
-                    error: Some(jykre_core::DriverError::new(
-                        jykre_core::ErrorCode::Authentication,
+                    error: Some(jovru_core::DriverError::new(
+                        jovru_core::ErrorCode::Authentication,
                         crate::tr!(
                             "The connection does not remember its password, and a scheduled run never asks for one."
                         ),
@@ -311,7 +311,7 @@ async fn finish(repository: &AutomationRepository, id: super::RunId, ending: End
             .iter()
             .map(|value| value.value.as_deref().map_or(0, str::len))
             .sum::<usize>()
-            <= jykre_storage::OUTPUT_QUOTA_BYTES
+            <= jovru_storage::OUTPUT_QUOTA_BYTES
     });
     let finished_at = UtcMillis::now();
     let written = repository

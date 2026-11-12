@@ -3,7 +3,7 @@
 //! idle, selecting, selecting near the last row, scrolling and panning
 //! sideways.
 use super::*;
-use jykre::performance::budget::GRID_FRAME_P95;
+use jovru::performance::budget::GRID_FRAME_P95;
 
 /// Ticks of each phase, 40 ms apart.
 pub(super) const PHASES: [(&str, usize); 5] = [

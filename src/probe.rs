@@ -1,5 +1,5 @@
 //! Measurements for the UI budgets in [Performance](../docs/standards/performance.md#how-to-measure)
-//! (ADR-0010), turned on with `JYKRE_PROBE=1`.
+//! (D-0010), turned on with `JOVRU_PROBE=1`.
 //!
 //! The application records the time of each frame (from the root view's
 //! `render` to the end of paint) and how late a 5 ms heartbeat on the UI
@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 /// The environment variable that turns the probe on.
-pub const VARIABLE: &str = "JYKRE_PROBE";
+pub const VARIABLE: &str = "JOVRU_PROBE";
 
 /// How often the heartbeat wakes; any extra delay is time the UI thread was
 /// busy.
@@ -17,7 +17,7 @@ pub const HEARTBEAT: Duration = Duration::from_millis(5);
 /// How often a summary is logged.
 pub const REPORT_EVERY: Duration = Duration::from_secs(5);
 
-/// Whether `JYKRE_PROBE` is set to anything but empty or `0`.
+/// Whether `JOVRU_PROBE` is set to anything but empty or `0`.
 pub fn enabled() -> bool {
     std::env::var_os(VARIABLE).is_some_and(|value| !value.is_empty() && value != "0")
 }

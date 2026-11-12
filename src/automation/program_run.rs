@@ -11,9 +11,9 @@ use super::{
     Cause, Phase, ProgramOutcome, Progress, Refusal, RunOutcome, RunState, RunStatus, UtcMillis,
     snapshot,
 };
-use jykre_core::CancellationToken;
-use jykre_core::automation::{JobKind, RunOrigin};
-use jykre_storage::{AutomationRepository, NewRun, OutputValue, RunFinish};
+use jovru_core::CancellationToken;
+use jovru_core::automation::{JobKind, RunOrigin};
+use jovru_storage::{AutomationRepository, NewRun, OutputValue, RunFinish};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, watch};
@@ -190,7 +190,7 @@ pub(super) async fn run(
             .iter()
             .map(|value| value.value.as_deref().map_or(0, str::len))
             .sum::<usize>()
-            <= jykre_storage::OUTPUT_QUOTA_BYTES
+            <= jovru_storage::OUTPUT_QUOTA_BYTES
     });
     let (exit_code, exit_signal) = match report.exit {
         Some(process::Exit::Code(code)) => (Some(i64::from(code)), None),

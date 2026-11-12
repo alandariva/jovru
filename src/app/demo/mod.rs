@@ -1,7 +1,7 @@
-//! Simulated connections, queries and results for `JYKRE_DEMO=1`. Nothing
+//! Simulated connections, queries and results for `JOVRU_DEMO=1`. Nothing
 //! here touches a database.
 pub mod assistant;
-use jykre::result::{ResultColumn, ResultData};
+use jovru::result::{ResultColumn, ResultData};
 
 pub const SALES_SQL: &str = "-- Revenue by category · Q3 2026\nSELECT\n    c.name AS category,\n    COUNT(o.id) AS orders,\n    SUM(o.total) AS revenue,\n    ROUND(AVG(o.total), 2) AS avg_ticket\nFROM orders o\nJOIN products p ON p.id = o.product_id\nJOIN categories c ON c.id = p.category_id\nWHERE o.created_at >= '2026-07-01'\n  AND o.created_at <  '2026-10-01'\n  AND o.status = 'completed'\nGROUP BY c.name\nORDER BY revenue DESC;";
 
@@ -95,10 +95,10 @@ pub const ORDER_COLUMNS: [(&str, &str, bool); 7] = [
     ("updated_at", "timestamp", false),
 ];
 
-/// The application runs the demo (`JYKRE_DEMO` is set). Only then does a
+/// The application runs the demo (`JOVRU_DEMO` is set). Only then does a
 /// tab without a connection run on sample data.
 pub fn enabled() -> bool {
-    std::env::var_os("JYKRE_DEMO").is_some()
+    std::env::var_os("JOVRU_DEMO").is_some()
 }
 
 /// The SQL dialect a demo connection pretends to speak, from its name.
@@ -306,13 +306,13 @@ pub fn sample_result(sql: &str) -> ResultData {
 /// Why the demo would refuse to run `sql`, or `None` when it accepts it. The
 /// demo only simulates read queries; real connections never use this check.
 pub fn preview_error(sql: &str) -> Option<&'static str> {
-    let first = jykre::sql::tokens(sql, None).into_iter().next()?;
+    let first = jovru::sql::tokens(sql, None).into_iter().next()?;
     let command = sql[first.0].to_ascii_uppercase();
     if !matches!(
         command.as_str(),
         "SELECT" | "WITH" | "EXPLAIN" | "SHOW" | "DESCRIBE" | "VALUES"
     ) {
-        Some(jykre::tr!(
+        Some(jovru::tr!(
             "The demo accepts only read queries (SELECT, WITH, EXPLAIN, SHOW, DESCRIBE or VALUES)."
         ))
     } else if command == "SELECT"
@@ -321,7 +321,7 @@ pub fn preview_error(sql: &str) -> Option<&'static str> {
             .trim()
             .eq_ignore_ascii_case("SELECT")
     {
-        Some(jykre::tr!("SELECT needs an expression or column."))
+        Some(jovru::tr!("SELECT needs an expression or column."))
     } else {
         None
     }

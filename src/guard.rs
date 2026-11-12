@@ -5,7 +5,7 @@
 //! question, so it errs towards asking: a `WHERE` that a subquery holds
 //! does not count, and anything it cannot read is left alone.
 use crate::drivers::SqlDialect;
-use jykre_sql::names::{Part, parts};
+use jovru_sql::names::{Part, parts};
 
 /// Why a statement deserves a second look.
 #[derive(Clone, Debug, PartialEq, Eq)]

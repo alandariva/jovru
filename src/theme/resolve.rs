@@ -20,8 +20,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 const MAX_DEPTH: usize = 8;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
-const BUNDLED_DARK: &str = include_str!("../../themes/jykre-dark.json");
-const BUNDLED_LIGHT: &str = include_str!("../../themes/jykre-light.json");
+const BUNDLED_DARK: &str = include_str!("../../themes/jovru-dark.json");
+const BUNDLED_LIGHT: &str = include_str!("../../themes/jovru-light.json");
 
 /// One theme file after it has parsed.
 #[derive(Clone, Debug, Deserialize)]
@@ -87,8 +87,8 @@ impl ResolvedTheme {
     pub fn builtin(appearance: Appearance) -> Self {
         let palette = Arc::new(appearance.palette().clone());
         let (id, name) = match appearance {
-            Appearance::Dark => (super::DARK_ID, "Jykre Dark"),
-            Appearance::Light => (super::LIGHT_ID, "Jykre Light"),
+            Appearance::Dark => (super::DARK_ID, "Jovru Dark"),
+            Appearance::Light => (super::LIGHT_ID, "Jovru Light"),
         };
         Self {
             id: id.to_owned(),
@@ -116,8 +116,8 @@ impl Catalog {
     /// The themes compiled into the binary. Used when no directory can be read.
     pub fn bundled() -> Self {
         let mut catalog = Self::default();
-        catalog.insert_source("jykre-dark.json", BUNDLED_DARK);
-        catalog.insert_source("jykre-light.json", BUNDLED_LIGHT);
+        catalog.insert_source("jovru-dark.json", BUNDLED_DARK);
+        catalog.insert_source("jovru-light.json", BUNDLED_LIGHT);
         catalog
     }
 

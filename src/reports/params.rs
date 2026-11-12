@@ -1,11 +1,11 @@
 //! A report's `:name` parameters: which ones its SQL holds, and the bound
-//! values for a run (ADR-0023). Values never go into the SQL text; each
+//! values for a run (D-0023). Values never go into the SQL text; each
 //! request carries them with the place of their markers, and the driver
 //! binds them. The rules shared with SQL tabs live in [`crate::parameters`].
 use super::ParameterSpec;
 pub use crate::parameters::{ParameterError, ParameterProblem, names};
 use crate::sql::{self, SqlDialect};
-use jykre_core::{ExecutionOptions, ParameterKind, QueryRequest};
+use jovru_core::{ExecutionOptions, ParameterKind, QueryRequest};
 use std::collections::HashMap;
 
 /// The parameter names of every SQL in `sqls`, each read by its own dialect
@@ -61,7 +61,7 @@ pub fn value(spec: &ParameterSpec, typed: &str) -> Result<Option<String>, Parame
             Ok(None)
         };
     }
-    if !jykre_core::is_parameter_value(spec.kind, &typed) {
+    if !jovru_core::is_parameter_value(spec.kind, &typed) {
         return Err(ParameterProblem::Invalid);
     }
     if !spec.choices.is_empty()
@@ -83,7 +83,7 @@ pub fn invalid_choices(spec: &ParameterSpec) -> Vec<usize> {
         .enumerate()
         .filter(|(_, choice)| {
             let choice = normalize(spec.kind, choice);
-            choice.is_empty() || !jykre_core::is_parameter_value(spec.kind, &choice)
+            choice.is_empty() || !jovru_core::is_parameter_value(spec.kind, &choice)
         })
         .map(|(index, _)| index)
         .collect()

@@ -101,8 +101,8 @@ pub fn step_inputs(
 mod tests {
     use super::*;
     use crate::automation::definition::{JobBody, OutputSpec, Protocol};
-    use jykre_core::ParameterKind;
-    use jykre_core::automation::JobId;
+    use jovru_core::ParameterKind;
+    use jovru_core::automation::JobId;
 
     fn program() -> JobDefinition {
         let mut job = JobDefinition::new_process("p");

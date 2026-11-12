@@ -12,7 +12,7 @@ use genai::chat::{
 };
 use genai::resolver::{AuthData, Endpoint};
 use genai::{ModelIden, ServiceTarget};
-use jykre_core::{CancellationToken, DriverError, DriverResult, ErrorCode, SecretString};
+use jovru_core::{CancellationToken, DriverError, DriverResult, ErrorCode, SecretString};
 use secrecy::ExposeSecret;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;

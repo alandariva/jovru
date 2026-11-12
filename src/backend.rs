@@ -7,7 +7,7 @@ use crate::telemetry::attributes::{
     db_system, namespace, operation_name, path_namespace, record_error, record_outcome,
 };
 use crate::tr;
-use jykre_storage::{
+use jovru_storage::{
     ChildPage, MetadataRepository, PageCursor, PageRequest, PendingRefresh, RefreshStatus,
     SearchCursor, SearchPage,
 };
@@ -323,14 +323,14 @@ pub async fn cached_relations(
 pub async fn read_text_files(dir: &Path, files: &[String], max_bytes: u64) -> Vec<Option<String>> {
     let span = crate::client_span!(
         "read_files",
-        jykre.files = crate::telemetry::attributes::count(files.len()),
-        jykre.bytes = tracing::field::Empty
+        jovru.files = crate::telemetry::attributes::count(files.len()),
+        jovru.bytes = tracing::field::Empty
     );
     let texts = read_text_files_in(dir, files, max_bytes)
         .instrument(span.clone())
         .await;
     let bytes: usize = texts.iter().flatten().map(String::len).sum();
-    span.record("jykre.bytes", crate::telemetry::attributes::count(bytes));
+    span.record("jovru.bytes", crate::telemetry::attributes::count(bytes));
     texts
 }
 
@@ -582,8 +582,8 @@ pub async fn refresh_metadata(
         depth = scope.0.len(),
         db.system.name = db_system(input.config.driver),
         db.namespace = path_namespace(&scope),
-        jykre.connection.id = %id,
-        jykre.metadata.depth = crate::telemetry::attributes::count(scope.0.len())
+        jovru.connection.id = %id,
+        jovru.metadata.depth = crate::telemetry::attributes::count(scope.0.len())
     );
     let started = Instant::now();
     let result = async {
@@ -822,9 +822,9 @@ async fn apply_selection_with(
         connection_id = %id,
         driver = ?input.config.driver,
         db.system.name = db_system(input.config.driver),
-        jykre.connection.id = %id,
-        jykre.namespaces.refreshed = tracing::field::Empty,
-        jykre.namespaces.failed = tracing::field::Empty
+        jovru.connection.id = %id,
+        jovru.namespaces.refreshed = tracing::field::Empty,
+        jovru.namespaces.failed = tracing::field::Empty
     );
     let started = Instant::now();
     let send = |update: RefreshProgress| {
@@ -896,7 +896,7 @@ async fn apply_selection_with(
                     "read_namespace",
                     db.system.name = db_system(input.config.driver),
                     db.namespace = path_namespace(&unit),
-                    jykre.metadata.objects = tracing::field::Empty
+                    jovru.metadata.objects = tracing::field::Empty
                 );
                 reads.spawn(
                     async move {
@@ -910,7 +910,7 @@ async fn apply_selection_with(
                         match &read {
                             Ok((objects, _)) => {
                                 span.record(
-                                    "jykre.metadata.objects",
+                                    "jovru.metadata.objects",
                                     crate::telemetry::attributes::count(objects.len()),
                                 );
                             }
@@ -1023,11 +1023,11 @@ async fn apply_selection_with(
     match &result {
         Ok(outcome) => {
             span.record(
-                "jykre.namespaces.refreshed",
+                "jovru.namespaces.refreshed",
                 crate::telemetry::attributes::count(outcome.refreshed),
             );
             span.record(
-                "jykre.namespaces.failed",
+                "jovru.namespaces.failed",
                 crate::telemetry::attributes::count(outcome.failures.len()),
             );
         }
@@ -1065,7 +1065,7 @@ fn runtime() -> DriverResult<&'static tokio::runtime::Runtime> {
 }
 
 /// A handle to the only runtime, for a service that spawns tasks of its own
-/// there (the automation engine, ADR-0034); never a second runtime.
+/// there (the automation engine, D-0034); never a second runtime.
 pub fn runtime_handle() -> DriverResult<tokio::runtime::Handle> {
     runtime().map(|runtime| runtime.handle().clone())
 }
@@ -1254,7 +1254,7 @@ async fn run_query(
 }
 
 /// [`query`] for a report panel, whose session belongs to one `context`
-/// (ADR-0025): the session opens, or reopens when it was lost, with the
+/// (D-0025): the session opens, or reopens when it was lost, with the
 /// connection the driver gives for that context
 /// ([`Driver::session_connection`]: another database's for a PostgreSQL
 /// profile that offers the server's databases), and every request carries
@@ -1372,13 +1372,13 @@ fn run_span(
         db.system.name = db_system(input.config.driver),
         db.namespace = tracing::field::Empty,
         db.response.returned_rows = tracing::field::Empty,
-        jykre.connection.id = tracing::field::Empty,
-        jykre.statements = crate::telemetry::attributes::count(requests.len()),
-        jykre.statements.completed = tracing::field::Empty,
-        jykre.session.reopened = tracing::field::Empty
+        jovru.connection.id = tracing::field::Empty,
+        jovru.statements = crate::telemetry::attributes::count(requests.len()),
+        jovru.statements.completed = tracing::field::Empty,
+        jovru.session.reopened = tracing::field::Empty
     );
     if let Some(connection) = connection {
-        span.record("jykre.connection.id", connection.to_string());
+        span.record("jovru.connection.id", connection.to_string());
     }
     if let Some(namespace) = requests
         .first()
@@ -1395,7 +1395,7 @@ fn log_run(span: &tracing::Span, started: Instant, run: &SessionRun) {
     if let Some(namespace) = run.context.as_ref().and_then(namespace) {
         span.record("db.namespace", namespace);
     }
-    span.record("jykre.session.reopened", run.reopened);
+    span.record("jovru.session.reopened", run.reopened);
     match &run.batch {
         Ok(batch) => {
             let rows: usize = batch.completed.iter().map(|r| r.data.row_count()).sum();
@@ -1404,7 +1404,7 @@ fn log_run(span: &tracing::Span, started: Instant, run: &SessionRun) {
                 crate::telemetry::attributes::count(rows),
             );
             span.record(
-                "jykre.statements.completed",
+                "jovru.statements.completed",
                 crate::telemetry::attributes::count(batch.completed.len()),
             );
             if let Some(error) = &batch.error {
@@ -1523,8 +1523,8 @@ async fn run_statements(
             db.namespace = tracing::field::Empty,
             db.response.returned_rows = tracing::field::Empty,
             db.response.status_code = tracing::field::Empty,
-            jykre.bytes = tracing::field::Empty,
-            jykre.rows.limit = crate::telemetry::attributes::count(request.options.max_rows)
+            jovru.bytes = tracing::field::Empty,
+            jovru.rows.limit = crate::telemetry::attributes::count(request.options.max_rows)
         );
         if let Some(namespace) = namespace(&request.options.context) {
             span.record("db.namespace", namespace);
@@ -1542,7 +1542,7 @@ async fn run_statements(
                     crate::telemetry::attributes::count(data.row_count()),
                 );
                 span.record(
-                    "jykre.bytes",
+                    "jovru.bytes",
                     crate::telemetry::attributes::count(data.memory_bytes()),
                 );
                 tracing::debug!(
@@ -1730,8 +1730,8 @@ pub async fn fetch(
         "fetch",
         db.namespace = tracing::field::Empty,
         db.response.returned_rows = tracing::field::Empty,
-        jykre.bytes = tracing::field::Empty,
-        jykre.rows.limit = crate::telemetry::attributes::count(options.max_rows)
+        jovru.bytes = tracing::field::Empty,
+        jovru.rows.limit = crate::telemetry::attributes::count(options.max_rows)
     );
     if let Some(namespace) = namespace(&options.context) {
         span.record("db.namespace", namespace);
@@ -1749,7 +1749,7 @@ pub async fn fetch(
             crate::telemetry::attributes::count(data.row_count()),
         );
         span.record(
-            "jykre.bytes",
+            "jovru.bytes",
             crate::telemetry::attributes::count(data.memory_bytes()),
         );
         tracing::debug!(
@@ -1796,7 +1796,7 @@ pub struct EditTargetRun {
 }
 
 /// Asks the tab's session what the result read with `statement`, whose
-/// columns are `columns`, can be written back to (ADR-0039). Like a run it
+/// columns are `columns`, can be written back to (D-0039). Like a run it
 /// takes the session and hands it back; asking discards a result still open
 /// for paging.
 pub async fn edit_target(
@@ -1835,7 +1835,7 @@ pub struct WriteRun {
 }
 
 /// Writes `request` in the tab's session, which the driver does atomically
-/// (ADR-0039), then asks the session's transaction state. Logged with its
+/// (D-0039), then asks the session's transaction state. Logged with its
 /// counts and outcome, never a value.
 pub async fn write(
     mut session: Box<dyn Session>,
@@ -1846,7 +1846,7 @@ pub async fn write(
     let span = crate::client_span!(
         "write",
         db.system.name = tracing::field::Empty,
-        jykre.statements = crate::telemetry::attributes::count(request.changes.len())
+        jovru.statements = crate::telemetry::attributes::count(request.changes.len())
     );
     let outcome = session
         .write(&request, cancel)
@@ -1948,7 +1948,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn offline_cache_pages_and_search_do_not_require_a_remote_connection() {
-        let dir = std::env::temp_dir().join(format!("jykre-offline-{}", ConnectionId::new()));
+        let dir = std::env::temp_dir().join(format!("jovru-offline-{}", ConnectionId::new()));
         let id = ConnectionId::new();
         let config = ConnectionConfig {
             driver: DriverKind::MySql,
@@ -2280,7 +2280,7 @@ mod tests {
 
     #[tokio::test]
     async fn telemetry_of_a_run_carries_metadata_only() {
-        let (subscriber, capture) = crate::telemetry::testing::capture("jykre=debug");
+        let (subscriber, capture) = crate::telemetry::testing::capture("jovru=debug");
         let _default = tracing::subscriber::set_default(subscriber);
         let input = ResolvedConnection {
             config: ConnectionConfig {
@@ -2348,8 +2348,8 @@ mod tests {
             "db.namespace=sales",
             "db.response.returned_rows=2 ",
             "db.response.returned_rows=4 ",
-            "jykre.statements=2 ",
-            &format!("jykre.connection.id={connection}"),
+            "jovru.statements=2 ",
+            &format!("jovru.connection.id={connection}"),
         ] {
             assert!(text.contains(expected), "{expected} missing: {text}");
         }
@@ -3224,7 +3224,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_selection_reads_only_its_namespaces_with_progress_and_drops_the_rest() {
-        let dir = std::env::temp_dir().join(format!("jykre-selection-{}", ConnectionId::new()));
+        let dir = std::env::temp_dir().join(format!("jovru-selection-{}", ConnectionId::new()));
         let id = ConnectionId::new();
         let driver = CatalogDriver::new(vec![("main", vec!["a", "b"]), ("other", vec!["x", "y"])]);
         let main = ObjectPath::default().child(ObjectKind::Catalog, "main");
@@ -3309,7 +3309,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_namespace_keeps_its_cache_and_cancelling_removes_nothing() {
-        let dir = std::env::temp_dir().join(format!("jykre-selection-{}", ConnectionId::new()));
+        let dir = std::env::temp_dir().join(format!("jovru-selection-{}", ConnectionId::new()));
         let id = ConnectionId::new();
         let everything = MetadataScope::everything();
         let cancel = CancellationToken::new();
@@ -3344,7 +3344,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn namespaces_are_read_in_parallel_and_system_waits_to_be_chosen() {
-        let dir = std::env::temp_dir().join(format!("jykre-parallel-{}", ConnectionId::new()));
+        let dir = std::env::temp_dir().join(format!("jovru-parallel-{}", ConnectionId::new()));
         let id = ConnectionId::new();
         // 4 catalogs × 5 schemas, plus the system catalog, each read taking
         // 40 ms, long enough for the reads started together to overlap. How
@@ -3405,7 +3405,7 @@ mod tests {
 
     #[tokio::test]
     async fn changing_tls_keeps_the_cache_and_another_user_empties_it() {
-        let dir = std::env::temp_dir().join(format!("jykre-identity-{}", ConnectionId::new()));
+        let dir = std::env::temp_dir().join(format!("jovru-identity-{}", ConnectionId::new()));
         let id = ConnectionId::new();
         let config = |user: &str, tls: &str| ConnectionConfig {
             driver: DriverKind::Postgres,

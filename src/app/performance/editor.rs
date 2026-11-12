@@ -3,9 +3,9 @@
 //! line** prompt, as a query tab builds them. Each jump opens the prompt as
 //! `Ctrl G` does, puts the target in its field and goes as `Enter` does.
 use super::*;
-use jykre::performance::budget::{OTHER_FRAME_P95, WITHIN_FRAME};
-use jykre::performance::data;
-use jykre::probe::Samples;
+use jovru::performance::budget::{OTHER_FRAME_P95, WITHIN_FRAME};
+use jovru::performance::data;
+use jovru::probe::Samples;
 
 /// The text's size: four times the threshold above which it is not
 /// wrapped.
@@ -31,7 +31,7 @@ pub(super) async fn run(
         .begin(cx, phase_status(PathId::Editor, "open", "1 MiB of SQL"))
         .await?;
     let ((), opened) = run.timed(cx, move |view, window, cx| {
-        let wrap = jykre::script_outline::soft_wrap(text.len(), true);
+        let wrap = jovru::script_outline::soft_wrap(text.len(), true);
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("sql")
@@ -84,8 +84,8 @@ pub(super) async fn run(
     let mut jumps = Samples::default();
     let mut past_end = 0;
     for (index, target) in targets.iter().enumerate() {
-        if let Some(parsed) = jykre::go_to_line::parse(target)
-            && jykre::go_to_line::place(parsed, lines).past_end
+        if let Some(parsed) = jovru::go_to_line::parse(target)
+            && jovru::go_to_line::place(parsed, lines).past_end
         {
             past_end += 1;
         }

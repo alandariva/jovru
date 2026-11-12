@@ -496,7 +496,7 @@ fn curated() -> Value {
     source(
         "curated",
         "Written by the project",
-        "https://github.com/alandariva/jykre-studio",
+        "https://github.com/alandariva/jovru",
         "CC0-1.0",
         true,
     )
@@ -1065,7 +1065,7 @@ fn mysql(root: &Path, dir: &Path) -> Result<(), String> {
                     service,
                     "mysql",
                     "-uroot",
-                    "-pjykre-test",
+                    "-pjovru-test",
                     "-N",
                     "-B",
                     "-e",

@@ -1,32 +1,32 @@
-<img src="assets/icon/jykre.svg" alt="Jykre Studio" width="96">
+<img src="assets/icon/jovru.svg" alt="Jovru" width="96">
 
-# Jykre Studio
+# Jovru
 
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **Explore databases. Query data. Stay focused.**
 
-Jykre Studio is a desktop application for exploring database structures,
+Jovru is a desktop application for exploring database structures,
 writing SQL queries and inspecting results in one native window.
 
-![Jykre Studio in the light theme: explorer, SQL editor and results](docs/images/main.png)
+![Jovru in the light theme: explorer, SQL editor and results](docs/images/main.png)
 
-![Jykre Studio in the dark theme](docs/images/main-dark.png)
+![Jovru in the dark theme](docs/images/main-dark.png)
 
 Both figures are the same demo workspace. The window labels the data as
 simulated, and nothing in them is a real connection. The rail opens the
 explorer, saved queries, reports, automation, run history and preferences.
 The mark above is the official icon
-([`assets/icon/jykre.svg`](assets/icon/jykre.svg)). The Windows executable
-embeds the same drawing as [`assets/icon/jykre.ico`](assets/icon/jykre.ico).
+([`assets/icon/jovru.svg`](assets/icon/jovru.svg)). The Windows executable
+embeds the same drawing as [`assets/icon/jovru.ico`](assets/icon/jovru.ico).
 
-## Why Jykre Studio?
+## Why Jovru?
 
 The everyday path is short: connect, look at the structure, run SQL, read
 the result.
 
-Jykre Studio is a workspace for that path. You browse schemas, tables and
+Jovru is a workspace for that path. You browse schemas, tables and
 columns without writing a query just to discover them. Each query tab keeps
 its own session. Results arrive page by page in a grid. A metadata cache on
 this computer stays browsable after a restart. Remembered passwords go to
@@ -80,14 +80,14 @@ Automation saves work you would otherwise run by hand: a **SQL Job** (one
 statement, with typed inputs bound by the driver), an **external program**
 started without a shell, or a **chain** that passes a job's declared outputs
 to the next step and stops at the first failure. A schedule can run a job or
-a chain while Jykre Studio is open.
+a chain while Jovru is open.
 
 Limits that matter before you rely on it:
 
 - **Nothing runs while the application is closed.** Times missed in that
   gap are not made up unless you choose to catch them up.
 - **There is no sandbox.** An external program runs with your privileges. It
-  can read your files and use the network. Jykre Studio supervises it; it
+  can read your files and use the network. Jovru supervises it; it
   does not contain it.
 - A program's stdout, stderr and `jjp/1` log are kept on this computer,
   under the data folder, for 7 days. Keep passwords and tokens out of that
@@ -99,8 +99,8 @@ Limits that matter before you rely on it:
 
 A short example of the local program protocol is in
 [`examples/jjp/`](examples/jjp/README.md). There is no SDK. Details are in
-[Security](docs/standards/security.md#automation-external-programs-and-jjp1)
-and [Reliability](docs/standards/reliability.md#automation).
+[Security](docs/reference/automation.md#automation-external-programs-and-jjp1)
+and [Reliability](docs/reference/automation.md#automation-1).
 
 ## Supported databases
 
@@ -111,7 +111,7 @@ and [Reliability](docs/standards/reliability.md#automation).
 | SQLite | Supported | An existing database file, opened with the SQLite bundled in the application. **Open read-only** is optional. A missing file is never created. No password. |
 | Databricks | Supported, with an external CLI | An authenticated [Databricks CLI](https://docs.databricks.com/dev-tools/cli/) profile. SQL needs a SQL warehouse or a classic all-purpose cluster that is already running. Metadata uses Unity Catalog. Not validated against a live workspace in CI. |
 
-PostgreSQL, MySQL and SQLite need nothing installed beside Jykre Studio.
+PostgreSQL, MySQL and SQLite need nothing installed beside Jovru.
 Databricks needs the CLI on the machine.
 
 ## Queries, sessions and credentials
@@ -130,7 +130,7 @@ transaction asks first. A failed statement does not drop the session.
 
 **Results stay bounded.** Each connection has a row limit, 1,000 by default
 and at most 100,000. A page also stops at 256 MB. The statement timeout is
-chosen in the editor toolbar. See [Results](docs/reference/results.md).
+chosen in the editor toolbar. See [Results](docs/reference/results/README.md).
 
 **Passwords stay out of the application's files.** **Remember password**
 stores a PostgreSQL or MySQL password in the operating system vault (Windows
@@ -153,13 +153,13 @@ server reports it.
 The [latest release](../../releases/latest) publishes a Windows x86_64 `.zip`
 and a Linux x86_64 `.tar.gz`.
 
-**Windows 10 or 11.** Extract the archive and run `jykre.exe`.
+**Windows 10 or 11.** Extract the archive and run `jovru.exe`.
 
 **Linux.** The published binary is built on Ubuntu 24.04 and needs glibc
 2.39 or newer. Extract the archive and, from that folder, run
-`./install.sh`. It adds Jykre Studio to the current user's application menu,
+`./install.sh`. It adds Jovru to the current user's application menu,
 with its icon. The desktop matches the window by the app id
-`io.github.alandariva.JykreStudio`. Run the script again after moving the
+`io.github.alandariva.Jovru`. Run the script again after moving the
 folder. `./install.sh --uninstall` removes the entry. File dialogs need
 `xdg-desktop-portal` with a backend such as `xdg-desktop-portal-gtk`.
 
@@ -182,8 +182,8 @@ The signature's context is the archive's file name. For the 0.4.0 archives,
 with [zipsign](https://crates.io/crates/zipsign) 0.2.2:
 
 ```bash
-zipsign verify zip --context jykre-studio-v0.4.0-windows-x86_64.zip jykre-studio-v0.4.0-windows-x86_64.zip assets/update/release-key.pub
-zipsign verify tar --context jykre-studio-v0.4.0-linux-x86_64.tar.gz jykre-studio-v0.4.0-linux-x86_64.tar.gz assets/update/release-key.pub
+zipsign verify zip --context jovru-v0.4.0-windows-x86_64.zip jovru-v0.4.0-windows-x86_64.zip assets/update/release-key.pub
+zipsign verify tar --context jovru-v0.4.0-linux-x86_64.tar.gz jovru-v0.4.0-linux-x86_64.tar.gz assets/update/release-key.pub
 ```
 
 ### Build from source
@@ -196,8 +196,8 @@ zipsign verify tar --context jykre-studio-v0.4.0-linux-x86_64.tar.gz jykre-studi
 - The Databricks CLI, only for Databricks connections.
 
 ```bash
-git clone https://github.com/alandariva/jykre-studio.git
-cd jykre-studio
+git clone https://github.com/alandariva/jovru.git
+cd jovru
 cargo run --release --locked
 ```
 
@@ -207,11 +207,11 @@ The first build downloads and compiles the dependencies. After that,
 To open the interface on simulated data that never reaches a server:
 
 ```bash
-JYKRE_DEMO=1 cargo run --locked
+JOVRU_DEMO=1 cargo run --locked
 ```
 
 ```powershell
-$env:JYKRE_DEMO='1'; cargo run --locked
+$env:JOVRU_DEMO='1'; cargo run --locked
 ```
 
 Demo connections and results are labelled as such.
@@ -220,18 +220,18 @@ Demo connections and results are labelled as such.
 
 | Platform | Data folder |
 | --- | --- |
-| Windows | `%LOCALAPPDATA%\JykreStudio` |
-| macOS | `~/Library/Application Support/JykreStudio` |
-| Linux | `$XDG_DATA_HOME/jykre-studio` (default `~/.local/share/jykre-studio`) |
+| Windows | `%LOCALAPPDATA%\Jovru` |
+| macOS | `~/Library/Application Support/Jovru` |
+| Linux | `$XDG_DATA_HOME/jovru` (default `~/.local/share/jovru`) |
 
-`JYKRE_CONFIG_DIR` points the application at another folder. Saved queries
-default to `Documents/Jykre Studio/Queries`, or the folder chosen in
+`JOVRU_CONFIG_DIR` points the application at another folder. Saved queries
+default to `Documents/Jovru/Queries`, or the folder chosen in
 **Preferences › Editor**. The files in the data folder are described in
-[Persistence](docs/reference/persistence.md).
+[Persistence](docs/reference/persistence/README.md).
 
 ## Getting started
 
-1. Launch Jykre Studio.
+1. Launch Jovru.
 2. Choose **+** in the explorer and create a connection. **Test connection**
    reaches the server. Saving checks the configuration and starts reading
    metadata for the objects you choose.
@@ -244,7 +244,7 @@ default to `Documents/Jykre Studio/Queries`, or the folder chosen in
 
 `Ctrl S` saves the tab to its `.sql` file. `Ctrl B` hides the explorer.
 Shortcuts can be changed in **Preferences › Shortcuts**. The full set is in
-[User experience](docs/reference/ux.md).
+[User experience](docs/reference/ux/README.md).
 
 ## Technology
 
@@ -300,7 +300,7 @@ Drivers, execution contracts, dependencies and release preparation also need
 [Testing](docs/standards/testing.md).
 
 The interface is available in English and Brazilian Portuguese. The locale
-comes from `JYKRE_LOCALE` (for example `pt-BR`) or from the operating system,
+comes from `JOVRU_LOCALE` (for example `pt-BR`) or from the operating system,
 and falls back to English. Adding a language is described in
 [UI guidelines](docs/standards/ui-guidelines.md#text).
 
@@ -318,10 +318,10 @@ Security fixes go to the latest release and the latest commit on `main`.
 
 | Topic | Document |
 | --- | --- |
-| Layout, states and shortcuts | [User experience](docs/reference/ux.md) |
-| Grid, export, editing, import and reports | [Results](docs/reference/results.md) |
-| Connection options and driver differences | [Drivers](docs/reference/drivers.md) |
-| Local files | [Persistence](docs/reference/persistence.md) |
+| Layout, states and shortcuts | [User experience](docs/reference/ux/README.md) |
+| Grid, export, editing, import and reports | [Results](docs/reference/results/README.md) |
+| Connection options and driver differences | [Drivers](docs/reference/drivers/README.md) |
+| Local files | [Persistence](docs/reference/persistence/README.md) |
 | Credentials, TLS and external programs | [Security](docs/standards/security.md) |
 | Architecture | [Architecture](docs/reference/architecture.md) |
 | Development index | [docs/README.md](docs/README.md) |

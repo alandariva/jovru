@@ -1,10 +1,10 @@
 //! Pure types the automation engine and its storage share
-//! ([ADR-0034](../../../docs/adr/0034-automation-database-service-and-lock.md),
+//! ([D-0034](../../../docs/decisions/automation.md#d-0034),
 //! decision 7): identities, states, causes and the records of a run. No I/O.
 //!
 //! Records hold what ran, where, when and how it ended, never input values,
 //! cells, scalars or server messages (specification, section 6.4). Declared
-//! outputs ([`RunOutput`]) are the one exception, under ADR-0035.
+//! outputs ([`RunOutput`]) are the one exception, under D-0035.
 use crate::{ConnectionId, ErrorCode, ParameterKind};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -57,11 +57,11 @@ uuid_id!(
     ChainRunId
 );
 uuid_id!(
-    /// Identity of a schedule (ADR-0041): at most one per job or chain.
+    /// Identity of a schedule (D-0041): at most one per job or chain.
     ScheduleId
 );
 uuid_id!(
-    /// Identity of a grant: the consent of one schedule (ADR-0041).
+    /// Identity of a grant: the consent of one schedule (D-0041).
     GrantId
 );
 
@@ -250,7 +250,7 @@ codes!(
     /// Who started a run.
     RunOrigin {
         Manual => "manual",
-        /// A schedule, at a due time (ADR-0041).
+        /// A schedule, at a due time (D-0041).
         Schedule => "schedule",
     }
 );
@@ -283,7 +283,7 @@ codes!(
 );
 
 codes!(
-    /// What happened at a schedule's last handled due time (ADR-0041).
+    /// What happened at a schedule's last handled due time (D-0041).
     ScheduleOutcome {
         /// A run was submitted on time.
         Started => "started",
@@ -359,10 +359,10 @@ pub struct RunRecord {
     pub log_bytes_stderr: Option<i64>,
     pub log_bytes_jjp: Option<i64>,
     /// `None`: the job does not persist outputs; `Some(false)`: they
-    /// exceeded the quota; `Some(true)`: stored (ADR-0035).
+    /// exceeded the quota; `Some(true)`: stored (D-0035).
     pub outputs_stored: Option<bool>,
     /// The schedule that started it; `None` for a manual run, or once the
-    /// schedule was deleted (ADR-0041).
+    /// schedule was deleted (D-0041).
     pub schedule_id: Option<ScheduleId>,
     /// The time it was due, exactly when the origin is `Schedule`.
     pub due_at: Option<UtcMillis>,
@@ -373,7 +373,7 @@ pub struct RunRecord {
     pub finished_at: Option<UtcMillis>,
 }
 
-/// What a chain run's history row says (ADR-0036).
+/// What a chain run's history row says (D-0036).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChainRunRecord {
     pub id: ChainRunId,
@@ -393,7 +393,7 @@ pub struct ChainRunRecord {
     pub finished_at: Option<UtcMillis>,
 }
 
-/// One declared output of a run, as stored under ADR-0035. `value` is
+/// One declared output of a run, as stored under D-0035. `value` is
 /// `None` when the output is NULL or its value expired. `Debug` never shows
 /// the value.
 #[derive(Clone, PartialEq, Eq)]

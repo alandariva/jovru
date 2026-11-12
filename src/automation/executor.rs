@@ -7,7 +7,7 @@ use crate::parameters::ParameterError;
 use crate::reports::params;
 use crate::result::{ResultBuilder, ResultData};
 use crate::sql::{self, SqlDialect};
-use jykre_core::{
+use jovru_core::{
     CancellationToken, ColumnInfo, Driver, DriverError, DriverOutcome, ExecutionOptions,
     QueryRequest, ResolvedConnection, Row, RowSink, SinkControl, TransactionStatus,
 };
@@ -133,7 +133,7 @@ pub(super) struct Report<'a> {
 /// Asking a driver to stop a write's result would let it cancel the
 /// statement, and a page is no proof that it finished.
 ///
-/// [`Session::fetch`]: jykre_core::Session::fetch
+/// [`Session::fetch`]: jovru_core::Session::fetch
 pub(super) async fn execute(
     driver: Arc<dyn Driver>,
     input: ResolvedConnection,
@@ -239,7 +239,7 @@ struct Completed {
 /// Reads the rest of a write's result after its first page, until the
 /// driver reports the end (rule 2 of section 4.6).
 async fn complete(
-    session: &mut dyn jykre_core::Session,
+    session: &mut dyn jovru_core::Session,
     options: &ExecutionOptions,
     first: DriverOutcome,
     sink: &mut JobSink,

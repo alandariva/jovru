@@ -1,16 +1,16 @@
 //! A report panel's chart or numbers, its own entity embedded with
 //! `.cached`, so the panel around it redraws without laying the chart out
-//! again ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
-//! It draws what [`jykre::reports::chart::visual`] computed when the result
+//! again ([D-0012](../../docs/decisions/results.md#d-0012)).
+//! It draws what [`jovru::reports::chart::visual`] computed when the result
 //! or the chart changed, never while rendering.
 use super::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::chart::{AreaChart, BarChart, PieChart};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::reports::chart::{ChartData, ChartPoint, Indicator, Visual};
-use jykre::reports::{ChartKind, Signal};
-use jykre::tr;
+use jovru::reports::chart::{ChartData, ChartPoint, Indicator, Visual};
+use jovru::reports::{ChartKind, Signal};
+use jovru::tr;
 use std::rc::Rc;
 
 /// The colours of the series, in order, in the theme on screen.

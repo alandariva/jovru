@@ -1,6 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-use jykre_core::*;
-use jykre_driver_postgres::PostgresDriver;
+use jovru_core::*;
+use jovru_driver_postgres::PostgresDriver;
 use serde_json::json;
 use std::time::Duration;
 #[derive(Default)]
@@ -30,17 +30,17 @@ impl IntrospectionSink for Metadata {
 fn input() -> ResolvedConnection {
     // The fixture port is chosen by Docker for each run: `cargo xtask check
     // --full` sets it, and docs/standards/testing.md shows how to run these by hand.
-    let port: u16 = std::env::var("JYKRE_TEST_PORT")
-        .expect("JYKRE_TEST_PORT must name the fixture port (see docs/standards/testing.md)")
+    let port: u16 = std::env::var("JOVRU_TEST_PORT")
+        .expect("JOVRU_TEST_PORT must name the fixture port (see docs/standards/testing.md)")
         .parse()
-        .expect("JYKRE_TEST_PORT must be a valid port");
+        .expect("JOVRU_TEST_PORT must be a valid port");
     ResolvedConnection {
         config: ConnectionConfig {
             driver: DriverKind::Postgres,
-            options: json!({"host":"127.0.0.1","port":port,"database":"jykre","user":"jykre","sslMode":"disable"}),
+            options: json!({"host":"127.0.0.1","port":port,"database":"jovru","user":"jovru","sslMode":"disable"}),
         },
         credentials: Credentials {
-            password: Some(SecretString::from("jykre-test".to_owned())),
+            password: Some(SecretString::from("jovru-test".to_owned())),
         },
     }
 }
@@ -51,7 +51,7 @@ async fn keep_state(session: &mut Box<dyn Session>) {
         .execute(
             &QueryRequest {
                 parameters: Vec::new(),
-                sql: "SET application_name TO 'jykre-kept'".into(),
+                sql: "SET application_name TO 'jovru-kept'".into(),
                 options: ExecutionOptions::default(),
             },
             &mut Sink::default(),
@@ -76,10 +76,10 @@ async fn assert_kept(session: &mut Box<dyn Session>) {
         )
         .await
         .unwrap();
-    assert_eq!(sink.rows, vec![vec![Cell::Text("jykre-kept".into())]]);
+    assert_eq!(sink.rows, vec![vec![Cell::Text("jovru-kept".into())]]);
 }
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_connection_queries_metadata_and_timeout() {
     tokio::time::timeout(Duration::from_secs(90), async {
     let driver = PostgresDriver;
@@ -259,7 +259,7 @@ async fn live_connection_queries_metadata_and_timeout() {
         .execute(
             &QueryRequest {
                 parameters: Vec::new(),
-                sql: "SELECT * FROM jykre_missing_table".into(),
+                sql: "SELECT * FROM jovru_missing_table".into(),
                 options: ExecutionOptions::default(),
             },
             &mut Sink::default(),
@@ -269,7 +269,7 @@ async fn live_connection_queries_metadata_and_timeout() {
         .unwrap_err();
     assert_eq!(failed.code, ErrorCode::Database);
     // The server's own message, SQLSTATE and position reach the user.
-    assert!(failed.message.contains("jykre_missing_table"), "{failed:?}");
+    assert!(failed.message.contains("jovru_missing_table"), "{failed:?}");
     let server = failed.server.clone().unwrap();
     assert_eq!(server.sqlstate.as_deref(), Some("42P01"));
     assert_eq!(server.position, Some(15));
@@ -336,7 +336,7 @@ async fn live_connection_queries_metadata_and_timeout() {
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
     tokio::time::timeout(Duration::from_secs(20), async {
         struct Stop {
@@ -402,7 +402,7 @@ async fn receiver_stop_keeps_the_session_and_a_fresh_session_works() {
     .expect("live scenario exceeded its time budget");
 }
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_discovery_lists_the_database_and_its_schemas_only() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = PostgresDriver;
@@ -414,7 +414,7 @@ async fn live_discovery_lists_the_database_and_its_schemas_only() {
             .unwrap();
         assert_eq!(root.len(), 1);
         assert_eq!(root[0].kind, ObjectKind::Database);
-        assert_eq!(root[0].name, "jykre");
+        assert_eq!(root[0].name, "jovru");
         let schemas = driver
             .discover_namespaces(&input, &root[0].path, cancel.clone())
             .await
@@ -453,14 +453,14 @@ async fn live_discovery_lists_the_database_and_its_schemas_only() {
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_metadata_has_exact_types_keys_comments_and_relation_kinds() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = PostgresDriver;
         let input = input();
         let cancel = CancellationToken::new();
         let public = ObjectPath::default()
-            .child(ObjectKind::Database, "jykre")
+            .child(ObjectKind::Database, "jovru")
             .child(ObjectKind::Schema, "public");
         assert_eq!(
             driver.default_namespaces(&input.config),
@@ -573,7 +573,7 @@ async fn text_in(session: &mut Box<dyn Session>, sql: &str, context: &SessionCon
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_the_tab_context_is_applied_once_and_reported() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = PostgresDriver;
@@ -589,7 +589,7 @@ async fn live_the_tab_context_is_applied_once_and_reported() {
         )
         .await;
         let chosen = SessionContext {
-            catalog: Some("jykre".into()),
+            catalog: Some("jovru".into()),
             schema: Some("gate_context".into()),
         };
         assert_eq!(
@@ -603,7 +603,7 @@ async fn live_the_tab_context_is_applied_once_and_reported() {
             "public"
         );
         let reported = session.context(CancellationToken::new()).await.unwrap();
-        assert_eq!(reported.catalog.as_deref(), Some("jykre"));
+        assert_eq!(reported.catalog.as_deref(), Some("jovru"));
         assert_eq!(reported.schema.as_deref(), Some("public"));
         // Choosing again applies the new choice once.
         assert_eq!(
@@ -640,7 +640,7 @@ async fn live_the_tab_context_is_applied_once_and_reported() {
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_a_report_session_opens_on_another_database() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = PostgresDriver;
@@ -672,7 +672,7 @@ async fn live_a_report_session_opens_on_another_database() {
         assert_eq!(reported.schema.as_deref(), Some("public"));
         // The session stays in the database it opened on.
         let home = SessionContext {
-            catalog: Some("jykre".into()),
+            catalog: Some("jovru".into()),
             schema: None,
         };
         assert!(
@@ -704,7 +704,7 @@ async fn state(session: &mut Box<dyn Session>) -> Option<TransactionStatus> {
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_the_transaction_state_is_reported_without_taking_a_snapshot() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = PostgresDriver;
@@ -725,7 +725,7 @@ async fn live_the_transaction_state_is_reported_without_taking_a_snapshot() {
         // Asking (and the context) took no snapshot: SET TRANSACTION, which
         // must come before any query, still works in a later run.
         let context = session.context(CancellationToken::new()).await.unwrap();
-        assert_eq!(context.catalog.as_deref(), Some("jykre"));
+        assert_eq!(context.catalog.as_deref(), Some("jovru"));
         text_in(
             &mut session,
             "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
@@ -767,7 +767,7 @@ async fn live_the_transaction_state_is_reported_without_taking_a_snapshot() {
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_commit_and_chain_opens_a_transaction_without_taking_its_snapshot() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = PostgresDriver;
@@ -808,13 +808,13 @@ async fn live_commit_and_chain_opens_a_transaction_without_taking_its_snapshot()
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_levels_partitions_inspection_permissions_and_databases() {
     tokio::time::timeout(Duration::from_secs(90), async {
         let driver = PostgresDriver;
         let input = input();
         let cancel = CancellationToken::new();
-        let db = ObjectPath::default().child(ObjectKind::Database, "jykre");
+        let db = ObjectPath::default().child(ObjectKind::Database, "jovru");
         let public = db.child(ObjectKind::Schema, "public");
         // TLS and the search path do not change which catalog a cache holds.
         let mut tuned = input.config.clone();
@@ -984,7 +984,7 @@ async fn live_levels_partitions_inspection_permissions_and_databases() {
             .iter()
             .map(|object| object.name.as_str())
             .collect();
-        assert!(names.contains(&"jykre") && names.contains(&"postgres"));
+        assert!(names.contains(&"jovru") && names.contains(&"postgres"));
         let other = ObjectPath::default().child(ObjectKind::Database, "postgres");
         driver
             .discover_namespaces(&every, &other, cancel.clone())
@@ -1015,7 +1015,7 @@ fn marked(sql: &str, name: &str, kind: ParameterKind, value: Option<&str>) -> Qu
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_named_parameters_are_bound_and_never_interpolated() {
     tokio::time::timeout(Duration::from_secs(60), async {
         let driver = PostgresDriver;
@@ -1118,7 +1118,7 @@ async fn live_named_parameters_are_bound_and_never_interpolated() {
     .expect("live named parameters took too long");
 }
 
-/// A sink that keeps the columns, for editing (ADR-0039).
+/// A sink that keeps the columns, for editing (D-0039).
 #[derive(Default)]
 struct Described {
     columns: Vec<ColumnInfo>,
@@ -1178,24 +1178,24 @@ fn text(value: &str) -> write::WriteValue {
 fn edit_setup(prefix: &str) -> Vec<String> {
     EDIT_SETUP
         .iter()
-        .map(|sql| sql.replace("jykre_edit", prefix))
+        .map(|sql| sql.replace("jovru_edit", prefix))
         .collect()
 }
 
 const EDIT_SETUP: [&str; 9] = [
-    "DROP VIEW IF EXISTS jykre_edit_view",
-    "DROP TABLE IF EXISTS jykre_edit_refs, jykre_edit_items, jykre_edit_loose, jykre_edit_measures",
-    "CREATE TABLE jykre_edit_items (id bigint PRIMARY KEY, amount numeric(38,10), note text, at timestamptz, raw bytea, label varchar(3), doubled bigint GENERATED ALWAYS AS (id * 2) STORED)",
-    "CREATE TABLE jykre_edit_refs (id int PRIMARY KEY, item bigint REFERENCES jykre_edit_items ON DELETE CASCADE)",
-    "CREATE TABLE jykre_edit_loose (a text)",
-    "CREATE TABLE jykre_edit_measures (v double precision PRIMARY KEY, w text)",
-    "CREATE VIEW jykre_edit_view AS SELECT id, note FROM jykre_edit_items",
-    "INSERT INTO jykre_edit_items (id, amount, note) VALUES (1, 1, 'one'), (2, 2, 'two')",
+    "DROP VIEW IF EXISTS jovru_edit_view",
+    "DROP TABLE IF EXISTS jovru_edit_refs, jovru_edit_items, jovru_edit_loose, jovru_edit_measures",
+    "CREATE TABLE jovru_edit_items (id bigint PRIMARY KEY, amount numeric(38,10), note text, at timestamptz, raw bytea, label varchar(3), doubled bigint GENERATED ALWAYS AS (id * 2) STORED)",
+    "CREATE TABLE jovru_edit_refs (id int PRIMARY KEY, item bigint REFERENCES jovru_edit_items ON DELETE CASCADE)",
+    "CREATE TABLE jovru_edit_loose (a text)",
+    "CREATE TABLE jovru_edit_measures (v double precision PRIMARY KEY, w text)",
+    "CREATE VIEW jovru_edit_view AS SELECT id, note FROM jovru_edit_items",
+    "INSERT INTO jovru_edit_items (id, amount, note) VALUES (1, 1, 'one'), (2, 2, 'two')",
     "SET TIME ZONE 'UTC'",
 ];
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_results_say_whether_they_can_be_written_back() {
     use write::{EditTarget, KeyKind, ReadOnlyReason, ReferenceAction, SideEffect};
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -1203,43 +1203,43 @@ async fn live_results_say_whether_they_can_be_written_back() {
             .open_session(&input(), CancellationToken::new())
             .await
             .unwrap();
-        for sql in edit_setup("jykre_target") {
+        for sql in edit_setup("jovru_target") {
             read(&mut session, &sql).await.unwrap();
         }
-        let items = target_of(&mut session, "SELECT * FROM jykre_target_items")
+        let items = target_of(&mut session, "SELECT * FROM jovru_target_items")
             .await
             .editable()
             .unwrap();
         assert_eq!((items.key.clone(), items.key_kind), (vec![0], KeyKind::PrimaryKey));
         assert!(!items.columns[6].as_ref().unwrap().writable, "generated");
-        assert_eq!(items.table.relation(), Some("jykre_target_items"));
+        assert_eq!(items.table.relation(), Some("jovru_target_items"));
         assert!(items.side_effects.contains(&SideEffect::Reference {
-            table: "jykre_target_refs".into(),
-            name: "jykre_target_refs_item_fkey".into(),
+            table: "jovru_target_refs".into(),
+            name: "jovru_target_refs_item_fkey".into(),
             on_delete: Some(ReferenceAction::Cascade),
             on_update: None,
         }));
         for (sql, reason) in [
             ("SELECT 1 AS n", ReadOnlyReason::ComputedOnly),
             (
-                "SELECT i.note, r.id FROM jykre_target_items i JOIN jykre_target_refs r ON r.item = i.id",
+                "SELECT i.note, r.id FROM jovru_target_items i JOIN jovru_target_refs r ON r.item = i.id",
                 ReadOnlyReason::SeveralTables,
             ),
             (
-                "SELECT * FROM jykre_target_view",
+                "SELECT * FROM jovru_target_view",
                 ReadOnlyReason::NotATable {
                     kind: "view".into(),
                 },
             ),
             (
-                "SELECT note FROM jykre_target_items",
+                "SELECT note FROM jovru_target_items",
                 ReadOnlyReason::KeyNotInResult {
                     missing: vec!["id".into()],
                 },
             ),
-            ("SELECT a FROM jykre_target_loose", ReadOnlyReason::NoKey),
+            ("SELECT a FROM jovru_target_loose", ReadOnlyReason::NoKey),
             (
-                "SELECT * FROM jykre_target_measures",
+                "SELECT * FROM jovru_target_measures",
                 ReadOnlyReason::KeyType { column: "v".into() },
             ),
         ] {
@@ -1249,7 +1249,7 @@ async fn live_results_say_whether_they_can_be_written_back() {
                 "{sql}"
             );
         }
-        for sql in edit_setup("jykre_target").iter().take(2) {
+        for sql in edit_setup("jovru_target").iter().take(2) {
             read(&mut session, sql).await.unwrap();
         }
         session.close().await.unwrap();
@@ -1259,7 +1259,7 @@ async fn live_results_say_whether_they_can_be_written_back() {
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_edits_are_bound_exact_and_honour_the_transaction() {
     use write::{RowChange, WriteOutcome, WriteValue};
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -1267,10 +1267,10 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
             .open_session(&input(), CancellationToken::new())
             .await
             .unwrap();
-        for sql in edit_setup("jykre_edit") {
+        for sql in edit_setup("jovru_edit") {
             read(&mut session, &sql).await.unwrap();
         }
-        let sql = "SELECT id, amount, note, at, raw, label FROM jykre_edit_items";
+        let sql = "SELECT id, amount, note, at, raw, label FROM jovru_edit_items";
         let items = target_of(&mut session, sql).await.editable().unwrap();
 
         // Outside a transaction: exact numbers, NULL apart from the text
@@ -1312,7 +1312,7 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
         );
         let rows = read(
             &mut session,
-            "SELECT id, amount, note, at, raw, label FROM jykre_edit_items ORDER BY id",
+            "SELECT id, amount, note, at, raw, label FROM jovru_edit_items ORDER BY id",
         )
         .await
         .unwrap()
@@ -1384,7 +1384,7 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
                 matched: 0
             }
         );
-        let count = read(&mut session, "SELECT count(*) FROM jykre_edit_items")
+        let count = read(&mut session, "SELECT count(*) FROM jovru_edit_items")
             .await
             .unwrap()
             .rows;
@@ -1395,7 +1395,7 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
         read(&mut session, "BEGIN").await.unwrap();
         read(
             &mut session,
-            "UPDATE jykre_edit_items SET note = 'mine' WHERE id = 2",
+            "UPDATE jovru_edit_items SET note = 'mine' WHERE id = 2",
         )
         .await
         .unwrap();
@@ -1434,7 +1434,7 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
         );
         let mine = read(
             &mut session,
-            "SELECT note FROM jykre_edit_items WHERE id IN (1, 2) ORDER BY id",
+            "SELECT note FROM jovru_edit_items WHERE id IN (1, 2) ORDER BY id",
         )
         .await
         .unwrap()
@@ -1446,7 +1446,7 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
         read(&mut session, "ROLLBACK").await.unwrap();
         let after = read(
             &mut session,
-            "SELECT note FROM jykre_edit_items WHERE id = 1",
+            "SELECT note FROM jovru_edit_items WHERE id = 1",
         )
         .await
         .unwrap()
@@ -1455,12 +1455,12 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
 
         // A table changed since the result was read is not written. The view
         // on the column would keep its type from changing.
-        read(&mut session, "DROP VIEW jykre_edit_view")
+        read(&mut session, "DROP VIEW jovru_edit_view")
             .await
             .unwrap();
         read(
             &mut session,
-            "ALTER TABLE jykre_edit_items ALTER COLUMN note TYPE varchar(100)",
+            "ALTER TABLE jovru_edit_items ALTER COLUMN note TYPE varchar(100)",
         )
         .await
         .unwrap();
@@ -1474,7 +1474,7 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
         .await
         .unwrap_err();
         assert_eq!(changed.code, ErrorCode::Validation);
-        for sql in edit_setup("jykre_edit").iter().take(2) {
+        for sql in edit_setup("jovru_edit").iter().take(2) {
             read(&mut session, sql).await.unwrap();
         }
         session.close().await.unwrap();
@@ -1483,12 +1483,12 @@ async fn live_edits_are_bound_exact_and_honour_the_transaction() {
     .expect("live edits took too long");
 }
 
-/// An import's writes (ADR-0040): the table's description, one transaction
+/// An import's writes (D-0040): the table's description, one transaction
 /// the import begins and ends, every value bound as text the server
 /// converts, a boolean as a boolean, and a rejected value failing at its
 /// change with nothing left behind.
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
     use write::{RowChange, WriteOutcome, WriteScope, WriteValue};
     tokio::time::timeout(Duration::from_secs(60), async {
@@ -1497,15 +1497,15 @@ async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
             .await
             .unwrap();
         for sql in [
-            "DROP TABLE IF EXISTS jykre_import",
-            "CREATE TABLE jykre_import (id bigint GENERATED BY DEFAULT AS IDENTITY, amount numeric(38,10), big bigint, day date, note text NOT NULL, flag boolean, doubled bigint GENERATED ALWAYS AS (big * 2) STORED)",
+            "DROP TABLE IF EXISTS jovru_import",
+            "CREATE TABLE jovru_import (id bigint GENERATED BY DEFAULT AS IDENTITY, amount numeric(38,10), big bigint, day date, note text NOT NULL, flag boolean, doubled bigint GENERATED ALWAYS AS (big * 2) STORED)",
         ] {
             read(&mut session, sql).await.unwrap();
         }
         let path = ObjectPath::default()
-            .child(ObjectKind::Database, "jykre")
+            .child(ObjectKind::Database, "jovru")
             .child(ObjectKind::Schema, "public")
-            .child(ObjectKind::Table, "jykre_import");
+            .child(ObjectKind::Table, "jovru_import");
         let target = session
             .table_target(&path, CancellationToken::new())
             .await
@@ -1575,7 +1575,7 @@ async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
         session.end_writes(true, CancellationToken::new()).await.unwrap();
         let rows = read(
             &mut session,
-            "SELECT amount::text, big::text, day::text, note, flag::text, doubled::text FROM jykre_import ORDER BY id",
+            "SELECT amount::text, big::text, day::text, note, flag::text, doubled::text FROM jovru_import ORDER BY id",
         )
         .await
         .unwrap()
@@ -1609,7 +1609,7 @@ async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
         assert_eq!(failed.change(), Some(1));
         assert!(failed.server.is_some(), "the server's own message");
         session.end_writes(false, CancellationToken::new()).await.unwrap();
-        let count = read(&mut session, "SELECT count(*)::text FROM jykre_import")
+        let count = read(&mut session, "SELECT count(*)::text FROM jovru_import")
             .await
             .unwrap()
             .rows;
@@ -1625,7 +1625,7 @@ async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
             .unwrap_err();
         assert_eq!(failed.change(), Some(0));
         session.end_writes(false, CancellationToken::new()).await.unwrap();
-        read(&mut session, "DROP TABLE jykre_import").await.unwrap();
+        read(&mut session, "DROP TABLE jovru_import").await.unwrap();
         session.close().await.unwrap();
     })
     .await
@@ -1633,7 +1633,7 @@ async fn live_an_import_writes_in_one_transaction_or_leaves_nothing() {
 }
 
 #[tokio::test]
-#[ignore = "requires jykre disposable Docker fixtures (cargo xtask check --full)"]
+#[ignore = "requires jovru disposable Docker fixtures (cargo xtask check --full)"]
 async fn live_a_write_left_open_is_not_undone_by_the_next_statement() {
     /// Takes the first rows, then stops reading.
     struct Few(usize);

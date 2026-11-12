@@ -1,7 +1,7 @@
 //! What a span may carry when it leaves this computer
-//! ([ADR-0029](../../docs/adr/0029-otlp-export-of-logs-and-traces.md)): an
+//! ([D-0029](../../docs/decisions/reliability.md#d-0029)): an
 //! allowlist of OpenTelemetry semantic-convention names, plus a few of
-//! Jykre's own under `jykre.`. Every other field a span records stays in the
+//! Jovru's own under `jovru.`. Every other field a span records stays in the
 //! local log and is removed before the span is exported, so a field added
 //! by mistake (SQL text, a host, a path) never reaches a collector.
 use crate::drivers::{DriverError, DriverKind, DriverResult, ErrorCode, SqlDialect};
@@ -33,28 +33,28 @@ pub const ALLOWED: &[&str] = &[
     "gen_ai.request.model",
     "gen_ai.usage.input_tokens",
     "gen_ai.usage.output_tokens",
-    // Jykre's own.
-    "jykre.connection.id",
-    "jykre.statements",
-    "jykre.statements.completed",
-    "jykre.rows.limit",
-    "jykre.bytes",
-    "jykre.session.reopened",
-    "jykre.metadata.depth",
-    "jykre.metadata.objects",
-    "jykre.namespaces.refreshed",
-    "jykre.namespaces.failed",
-    "jykre.export.format",
-    "jykre.export.rows",
-    "jykre.export.truncated",
-    "jykre.files",
-    "jykre.cli.command",
-    "jykre.vault.operation",
-    "jykre.vault.item",
-    "jykre.config.operation",
-    "jykre.assistant.tool",
-    "jykre.assistant.tool_calls",
-    "jykre.mcp.outcome",
+    // Jovru's own.
+    "jovru.connection.id",
+    "jovru.statements",
+    "jovru.statements.completed",
+    "jovru.rows.limit",
+    "jovru.bytes",
+    "jovru.session.reopened",
+    "jovru.metadata.depth",
+    "jovru.metadata.objects",
+    "jovru.namespaces.refreshed",
+    "jovru.namespaces.failed",
+    "jovru.export.format",
+    "jovru.export.rows",
+    "jovru.export.truncated",
+    "jovru.files",
+    "jovru.cli.command",
+    "jovru.vault.operation",
+    "jovru.vault.item",
+    "jovru.config.operation",
+    "jovru.assistant.tool",
+    "jovru.assistant.tool_calls",
+    "jovru.mcp.outcome",
 ];
 
 /// Whether a span attribute is exported.

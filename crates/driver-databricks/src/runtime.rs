@@ -1,5 +1,5 @@
 use crate::{ComputeKind, DatabricksConfig, auth::Auth};
-use jykre_core::*;
+use jovru_core::*;
 use reqwest::{Method, Url};
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
@@ -1224,7 +1224,7 @@ fn qualified_name(text: &str) -> Option<Vec<String>> {
     }
     rest.trim().is_empty().then_some(parts)
 }
-/// The Statement Execution API's typed parameters (ADR-0023). The server
+/// The Statement Execution API's typed parameters (D-0023). The server
 /// reads `:name` markers itself, so the SQL goes unchanged; a NULL omits
 /// `value`.
 fn statement_parameters(parameters: &[QueryParameter]) -> DriverResult<Vec<Value>> {
@@ -1464,7 +1464,7 @@ impl Session for DatabricksSession {
         Ok(())
     }
     /// Inferred from the statement's text and resolved against Unity
-    /// Catalog (ADR-0039, section 9); no compute runs and an open result
+    /// Catalog (D-0039, section 9); no compute runs and an open result
     /// stays open.
     async fn edit_target(
         &mut self,
@@ -1558,14 +1558,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires native Databricks CLI; cargo test -p jykre-driver-databricks native_cli_profile_syntax -- --ignored"]
+    #[ignore = "requires native Databricks CLI; cargo test -p jovru-driver-databricks native_cli_profile_syntax -- --ignored"]
     async fn native_cli_profile_syntax_resolves_bom_and_section_comments() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
         let dir =
-            std::env::temp_dir().join(format!("jykre-cli-profile-{}-{stamp}", std::process::id()));
+            std::env::temp_dir().join(format!("jovru-cli-profile-{}-{stamp}", std::process::id()));
         tokio::fs::create_dir(&dir).await.unwrap();
         let input = ResolvedConnection {
             config: ConnectionConfig {

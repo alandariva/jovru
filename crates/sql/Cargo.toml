@@ -1,5 +1,5 @@
 [package]
-name = "jykre-sql"
+name = "jovru-sql"
 description = "SQL tokens, statement splitting and position mapping by dialect, shared by query execution and the editor"
 version.workspace = true
 edition.workspace = true
@@ -13,4 +13,4 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-jykre-core = { path = "../core" }
+jovru-core = { path = "../core" }

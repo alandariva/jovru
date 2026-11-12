@@ -4,7 +4,7 @@
 //! A favorite names its connection by identity, so it survives a rename,
 //! and its object by structural path ([`ObjectPath`]), never by a label. It
 //! is stored as one JSON value in `config.db` settings
-//! ([Persistence](../docs/reference/persistence.md)); keys this version does
+//! ([Persistence](../docs/reference/persistence/README.md)); keys this version does
 //! not know are kept, and a value that cannot be read is reported and never
 //! written over. Listing favorites reads nothing from a server: whether an
 //! object still exists is answered by the metadata cache.

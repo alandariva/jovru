@@ -7,8 +7,8 @@ use crate::{
     metadata_scope::MetadataScope,
     result::{DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT},
 };
-use jykre_secrets::SecretStore;
-use jykre_storage::{ConfigRepository, MetadataRepository};
+use jovru_secrets::SecretStore;
+use jovru_storage::{ConfigRepository, MetadataRepository};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -18,15 +18,15 @@ use tracing::Instrument as _;
 
 /// Folder name inside the platform data directory, following each OS convention.
 const APP_DIR: &str = if cfg!(any(windows, target_os = "macos")) {
-    "JykreStudio"
+    "Jovru"
 } else {
-    "jykre-studio"
+    "jovru"
 };
 
 /// The variable that sets the data folder (tests and manual checks).
-pub const CONFIG_DIR_VARIABLE: &str = "JYKRE_CONFIG_DIR";
+pub const CONFIG_DIR_VARIABLE: &str = "JOVRU_CONFIG_DIR";
 
-/// `JYKRE_CONFIG_DIR`, else the per-user local data directory:
+/// `JOVRU_CONFIG_DIR`, else the per-user local data directory:
 /// `%LOCALAPPDATA%` on Windows, `~/Library/Application Support` on macOS and
 /// `$XDG_DATA_HOME` (default `~/.local/share`) on Linux.
 pub fn data_dir() -> PathBuf {
@@ -42,7 +42,7 @@ fn resolve_data_dir(configured: Option<OsString>, platform: Option<PathBuf>) -> 
         .map(PathBuf::from)
         .or_else(|| platform.map(|base| base.join(APP_DIR)))
         // Only without a home directory; the app then keeps data next to it.
-        .unwrap_or_else(|| PathBuf::from(".jykre"))
+        .unwrap_or_else(|| PathBuf::from(".jovru"))
 }
 pub fn default_path() -> PathBuf {
     data_dir().join("config.db")
@@ -113,7 +113,7 @@ pub struct LoadedConnections {
 /// five most recent distinct copies are kept), so a start that finds it
 /// damaged can offer to restore it.
 pub async fn load(dir: &Path, secrets: &dyn SecretStore) -> DriverResult<LoadedConnections> {
-    let span = crate::client_span!("config_read", jykre.config.operation = "connections");
+    let span = crate::client_span!("config_read", jovru.config.operation = "connections");
     let result = load_connections(dir, secrets)
         .instrument(span.clone())
         .await;
@@ -142,12 +142,12 @@ async fn load_connections(
 /// The newest copy of the configuration and when it was taken, for a start
 /// whose `config.db` cannot be opened.
 pub async fn latest_backup(dir: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
-    jykre_storage::config_backups(dir)
+    jovru_storage::config_backups(dir)
         .await
         .into_iter()
         .next()
         .map(|path| {
-            let taken = jykre_storage::config_backup_time(&path);
+            let taken = jovru_storage::config_backup_time(&path);
             (path, taken)
         })
 }
@@ -155,7 +155,7 @@ pub async fn latest_backup(dir: &Path) -> Option<(PathBuf, std::time::SystemTime
 /// Puts the copy `backup` in place of the damaged `config.db`, which is
 /// kept next to it; returns where it went.
 pub async fn restore_backup(dir: &Path, backup: &Path) -> DriverResult<PathBuf> {
-    jykre_storage::restore_config_backup(dir, backup).await
+    jovru_storage::restore_config_backup(dir, backup).await
 }
 
 async fn load_from(
@@ -377,7 +377,7 @@ pub async fn save(
         .get(profile.config.driver)?
         .validate_connection(&profile.config)?;
     validate_row_limit(preferences.row_limit)?;
-    let span = crate::client_span!("config_write", jykre.config.operation = "connection");
+    let span = crate::client_span!("config_write", jovru.config.operation = "connection");
     let result = async {
         let repository = ConfigRepository::open(dir).await?;
         let result = save_to(dir, profile, credentials, preferences, secrets, &repository).await;
@@ -469,11 +469,11 @@ async fn save_to(
     // failure leaves neither half saved and a retry keeps its revision.
     let settings = [
         (
-            jykre_storage::row_limit_key(profile.id),
+            jovru_storage::row_limit_key(profile.id),
             serde_json::json!(row_limit),
         ),
         (
-            jykre_storage::metadata_scope_key(profile.id),
+            jovru_storage::metadata_scope_key(profile.id),
             scope.to_value(),
         ),
         (
@@ -557,7 +557,7 @@ pub async fn delete(
     profile: &ConnectionProfile,
     secrets: &dyn SecretStore,
 ) -> DriverResult<Option<String>> {
-    let span = crate::client_span!("config_write", jykre.config.operation = "connection_delete");
+    let span = crate::client_span!("config_write", jovru.config.operation = "connection_delete");
     let result = async {
         let repository = ConfigRepository::open(dir).await?;
         let result = repository.delete(profile.id, profile.revision).await;
@@ -603,7 +603,7 @@ pub async fn write_setting(
     value: &serde_json::Value,
     operation: &'static str,
 ) -> DriverResult<()> {
-    let span = crate::client_span!("config_write", jykre.config.operation = operation);
+    let span = crate::client_span!("config_write", jovru.config.operation = operation);
     let result = async {
         let repository = ConfigRepository::open(dir).await?;
         let result = repository.set_setting(key, value).await;
@@ -649,7 +649,7 @@ impl LatestWrite {
         if self.asked.load(std::sync::atomic::Ordering::SeqCst) != ticket {
             return None;
         }
-        let span = crate::client_span!("config_write", jykre.config.operation = "preference");
+        let span = crate::client_span!("config_write", jovru.config.operation = "preference");
         let result = write.instrument(span.clone()).await;
         crate::telemetry::attributes::record_outcome(&span, &result);
         Some(result)
@@ -731,8 +731,8 @@ pub(crate) async fn vault_within<T>(
 ) -> DriverResult<T> {
     let span = crate::client_span!(
         "vault",
-        jykre.vault.item = call.item,
-        jykre.vault.operation = call.operation
+        jovru.vault.item = call.item,
+        jovru.vault.operation = call.operation
     );
     let result = tokio::time::timeout(limit, operation)
         .instrument(span.clone())

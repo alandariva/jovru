@@ -1,11 +1,11 @@
 //! The copy menu of the result toolbar: copies the selection, chooses the
 //! format `Ctrl C` copies in and holds the copy settings (the column names,
 //! the CSV separator and quoting, how NULL is written)
-//! ([Results](../../../docs/reference/results.md#copying)).
+//! ([Results](../../../docs/reference/results/transfer.md#copying)).
 use super::*;
 use crate::app::copying::{self, format_name, null_name, separator_name};
-use jykre::copy_as::{CopyFormat, CopyOptions, NullText};
-use jykre::export::{Quoting, Separator};
+use jovru::copy_as::{CopyFormat, CopyOptions, NullText};
+use jovru::export::{Quoting, Separator};
 
 /// A checked item of the copy menu that changes the options.
 fn option_item(

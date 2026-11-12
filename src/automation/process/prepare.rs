@@ -12,11 +12,11 @@ use std::io::{self, Read};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-/// Names never inherited from Studio's environment (section 9.1.3); a
+/// Names never inherited from Jovru's environment (section 9.1.3); a
 /// trailing `*` matches any name with that prefix. Matched without regard
 /// to case on Windows, whose names ignore it. The program editor lists them.
 pub const ENV_DENYLIST: &[&str] = &[
-    "JYKRE_*",
+    "JOVRU_*",
     "OTEL_*",
     "NODE_OPTIONS",
     "PYTHONPATH",
@@ -26,7 +26,7 @@ pub const ENV_DENYLIST: &[&str] = &[
 
 /// Where a `jjp/1` program finds the host (`127.0.0.1:<port>`); added after
 /// the denylist, the job's `unset` and its `set`.
-pub const JJP_ADDRESS_VARIABLE: &str = "JYKRE_JJP_ADDRESS";
+pub const JJP_ADDRESS_VARIABLE: &str = "JOVRU_JJP_ADDRESS";
 
 /// Why a run is refused before admission: nothing runs and no history is
 /// written (section 4.3). Paths name the user's own files, for the message
@@ -99,7 +99,7 @@ pub struct Launch {
     /// `sha256:` and the hex of the entrypoint when it was prepared; `None`
     /// when it could not be read (an unpublished job still runs).
     pub fingerprint: Option<String>,
-    /// Studio's environment minus the denylist and `unset`, plus `set`;
+    /// Jovru's environment minus the denylist and `unset`, plus `set`;
     /// [`super::run`] adds [`JJP_ADDRESS_VARIABLE`] under `jjp/1`.
     pub environment: Vec<(OsString, OsString)>,
     pub protocol: Protocol,
@@ -136,7 +136,7 @@ pub enum Prepared {
 }
 
 /// Checks a program job against the files as they are now, before its run
-/// is admitted. `base` is Studio's environment (`std::env::vars_os()`).
+/// is admitted. `base` is Jovru's environment (`std::env::vars_os()`).
 ///
 /// Refuses ([`Refused`]) a definition that cannot run as written: no
 /// program, a `.bat`/`.cmd`, a relative program path, a working directory
@@ -363,7 +363,7 @@ fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
 }
 
-/// Whether Studio's variable `name` is on the [`ENV_DENYLIST`].
+/// Whether Jovru's variable `name` is on the [`ENV_DENYLIST`].
 pub fn is_denied(name: &OsStr) -> bool {
     denied(name, cfg!(windows))
 }
@@ -395,7 +395,7 @@ fn starts_with(name: &OsStr, prefix: &str, fold: bool) -> bool {
     }
 }
 
-/// The program's environment (section 9.1.3): `base` (Studio's) without the
+/// The program's environment (section 9.1.3): `base` (Jovru's) without the
 /// [`ENV_DENYLIST`] and the job's `unset` names, then the job's `set`
 /// constants, then, for `jjp/1`, [`JJP_ADDRESS_VARIABLE`]. Names compare
 /// without regard to case on Windows. Pure: the caller passes `base`.
@@ -477,12 +477,12 @@ pub fn fingerprint_file(path: &Path) -> io::Result<String> {
 }
 
 // SHA-256 comes from storage, the one crate that depends on `sha2`
-// (ADR-0034).
-use jykre_storage::Fingerprinter;
+// (D-0034).
+use jovru_storage::Fingerprinter;
 
 #[cfg(test)]
 mod fingerprint_tests {
-    use jykre_storage::Fingerprinter;
+    use jovru_storage::Fingerprinter;
 
     fn hash(pieces: &[&[u8]]) -> String {
         let mut hasher = Fingerprinter::new();

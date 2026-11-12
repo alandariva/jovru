@@ -1,4 +1,4 @@
-//! Editing a Databricks result (ADR-0039, section 9): the protocol reports
+//! Editing a Databricks result (D-0039, section 9): the protocol reports
 //! no column's origin, so the table is inferred from the SQL text, by the
 //! maintainer's decision (E-3), and only for a single-table `SELECT` of
 //! plain columns. The table is resolved against Unity Catalog, and edits
@@ -6,11 +6,11 @@
 //! in a new query tab: nothing is written here.
 use super::{Client, Constraints, bounded};
 use crate::DatabricksDriver;
-use jykre_core::write::{
+use jovru_core::write::{
     EditTarget, EditableColumn, EditableTable, KeyKind, ReadOnlyReason, ScriptParameter, WriteMode,
     WriteRequest, WriteScript, WriteValue, statement,
 };
-use jykre_core::*;
+use jovru_core::*;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -275,7 +275,7 @@ fn item(tokens: &[Token]) -> Option<Item> {
 }
 
 /// The single-table `SELECT` the statement is, or `None` for anything else
-/// ([ADR-0039, section 9](../../../../docs/adr/0039-editing-result-data-through-the-driver.md)).
+/// ([D-0039, section 9](../../../../docs/decisions/results.md#d-0039)).
 fn infer(sql: &str) -> Option<Select> {
     let mut tokens = tokens(sql)?;
     while tokens.last() == Some(&Token::Symbol(';')) {

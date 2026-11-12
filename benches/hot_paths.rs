@@ -1,4 +1,4 @@
-//! Benchmarks for the hot paths listed in ADR-0010: building the grid view,
+//! Benchmarks for the hot paths listed in D-0010: building the grid view,
 //! converting driver rows to result data, splitting large scripts and
 //! reading a query tab's outline of them, paging
 //! metadata children from a large local cache and encoding a result for an
@@ -13,15 +13,15 @@
 // A development tool, like the tests: a setup that fails must stop the run.
 #![allow(clippy::expect_used)]
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use jykre::drivers::{
+use jovru::drivers::{
     CancellationToken, Cell, ColumnInfo, ConnectionConfig, ConnectionId, DriverKind,
     IntrospectionReport, MetadataObject, ObjectKind, ObjectPath, RowSink,
 };
-use jykre::grid::{ColumnSort, GridKey, GridView};
-use jykre::result::{
+use jovru::grid::{ColumnSort, GridKey, GridView};
+use jovru::result::{
     DEFAULT_MEMORY_CEILING, MAX_ROW_LIMIT, ResultBuilder, ResultColumn, ResultData,
 };
-use jykre_storage::MetadataRepository;
+use jovru_storage::MetadataRepository;
 use std::hint::black_box;
 
 /// Shaped like the `sales.event_log` seed: 100,000 rows of five columns.
@@ -142,7 +142,7 @@ fn statement_splitting(c: &mut Criterion) {
         })
         .collect();
     c.bench_function("split a 10,000-statement script", |b| {
-        b.iter(|| jykre::sql::statements(black_box(&script), None))
+        b.iter(|| jovru::sql::statements(black_box(&script), None))
     });
 }
 
@@ -152,31 +152,31 @@ fn sql_tokens(c: &mut Criterion) {
     let line = "SELECT o.id, 'a;b' AS text, count(*) FROM sales.orders o /* ; */ WHERE o.id > 42;
 ";
     let script = line.repeat(10 * 1024 * 1024 / line.len());
-    let tokens = jykre::sql::tokens(&script, None);
+    let tokens = jovru::sql::tokens(&script, None);
     let middle = script.len() / 2;
     let middle = (middle..script.len())
         .find(|at| script.is_char_boundary(*at))
         .unwrap_or(middle);
     let mut edited = script.clone();
     edited.insert(middle, 'x');
-    let edit = jykre::sql::Edit {
+    let edit = jovru::sql::Edit {
         start: middle,
         old_end: middle,
         new_end: middle + 1,
     };
     let mut group = c.benchmark_group("sql tokens of a 10 MB script");
     group.bench_function("whole text", |b| {
-        b.iter(|| jykre::sql::tokens(black_box(&script), None))
+        b.iter(|| jovru::sql::tokens(black_box(&script), None))
     });
     group.bench_function("after one keystroke", |b| {
-        b.iter(|| jykre::sql::relex(black_box(&tokens), black_box(&edited), edit, None))
+        b.iter(|| jovru::sql::relex(black_box(&tokens), black_box(&edited), edit, None))
     });
     // What the highlighter runs on the UI thread for a keystroke.
     group.bench_function("after one keystroke, in place", |b| {
         b.iter_batched(
             || tokens.clone(),
             |mut tokens| {
-                jykre::sql::relex_in_place(&mut tokens, black_box(&edited), edit, None);
+                jovru::sql::relex_in_place(&mut tokens, black_box(&edited), edit, None);
                 tokens
             },
             BatchSize::LargeInput,
@@ -194,7 +194,7 @@ fn editor_outline(c: &mut Criterion) {
     let mut group = c.benchmark_group("editor outline of a 4 MiB script");
     group.sample_size(10);
     group.bench_function("read", |b| {
-        b.iter(|| jykre::script_outline::Outline::read(1, black_box(&script), None))
+        b.iter(|| jovru::script_outline::Outline::read(1, black_box(&script), None))
     });
     group.finish();
 }
@@ -253,7 +253,7 @@ fn metadata_paging(c: &mut Criterion) {
         .enable_all()
         .build()
         .expect("a runtime");
-    let dir = std::env::temp_dir().join(format!("jykre-bench-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-bench-{}", ConnectionId::new()));
     let id = ConnectionId::new();
     let (repository, schema) = runtime.block_on(large_cache(&dir, id));
     let mut group = c.benchmark_group("metadata paging, 500,000 objects");
@@ -305,9 +305,9 @@ fn metadata_paging(c: &mut Criterion) {
 }
 
 /// Encoding a page for an export, as each part is before it reaches the
-/// file ([Results](../docs/reference/results.md#export)).
+/// file ([Results](../docs/reference/results/transfer.md#export)).
 fn export_encoding(c: &mut Criterion) {
-    use jykre::export::{Encoder, ExportFormat, ExportOptions, SqlTarget};
+    use jovru::export::{Encoder, ExportFormat, ExportOptions, SqlTarget};
     let result = event_log(100_000);
     let sql = SqlTarget {
         table: "sales.event_log".into(),
@@ -340,9 +340,9 @@ fn export_encoding(c: &mut Criterion) {
 }
 
 fn clipboard_encoding(c: &mut Criterion) {
-    use jykre::column_layout::ColumnLayout;
-    use jykre::copy_as::{self, Block, CopyFormat, CopyOptions, CopyRequest, CopySource, SqlStyle};
-    use jykre::grid::CellSelection;
+    use jovru::column_layout::ColumnLayout;
+    use jovru::copy_as::{self, Block, CopyFormat, CopyOptions, CopyRequest, CopySource, SqlStyle};
+    use jovru::grid::CellSelection;
     use std::sync::Arc;
     let result = Arc::new(event_log(100_000));
     let view = Arc::new(GridView::new(&result, GridKey::default()));
@@ -420,7 +420,7 @@ fn clipboard_encoding(c: &mut Criterion) {
     let mut group = c.benchmark_group("clipboard, page above 50 MiB");
     group.sample_size(10);
     group.bench_function("CSV legacy", |b| {
-        b.iter(|| jykre::cell_format::result_csv(black_box(&result)))
+        b.iter(|| jovru::cell_format::result_csv(black_box(&result)))
     });
     group.bench_function("CSV worker", |b| {
         b.iter(|| {

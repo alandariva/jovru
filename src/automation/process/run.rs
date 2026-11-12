@@ -10,7 +10,7 @@ use super::{
 use crate::automation::definition::Protocol;
 use crate::automation::jjp::{JjpEvent, JjpProgress, JjpRun, JjpSession, ProtocolProblem};
 use crate::automation::logs::{self, LogSize, LogWriter, Stream};
-use jykre_core::CancellationToken;
+use jovru_core::CancellationToken;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
@@ -340,7 +340,7 @@ async fn execute(request: ProgramRequest) -> ProgramReport {
 }
 
 fn empty_report(
-    run: jykre_core::automation::RunId,
+    run: jovru_core::automation::RunId,
     protocol: Protocol,
     fingerprint: Option<String>,
 ) -> ProgramReport {
@@ -369,7 +369,7 @@ fn not_started(mut report: ProgramReport, error: StartError, started: Instant) -
 }
 
 /// A run that never started keeps no logs.
-async fn discard_logs(data_dir: &Path, run: jykre_core::automation::RunId) {
+async fn discard_logs(data_dir: &Path, run: jovru_core::automation::RunId) {
     if let Err(error) = logs::delete_logs(data_dir, run).await {
         tracing::warn!(run = %run, error_kind = ?error.kind(), "empty program logs could not be removed");
     }
@@ -407,7 +407,7 @@ fn spawn(
         wrapped.wrap(flags);
     }
     // With a Job Object this also kills the job when its handle closes,
-    // so Windows ends the tree if Studio crashes.
+    // so Windows ends the tree if Jovru crashes.
     wrapped.wrap(KillOnDrop);
     wrapped.spawn()
 }

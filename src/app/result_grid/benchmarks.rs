@@ -2,7 +2,7 @@
 
 use super::{ROW_NUMBERS, ResultGrid};
 use gpui_kit::*;
-use jykre::grid::CellSelection;
+use jovru::grid::CellSelection;
 
 impl ResultGrid {
     pub(in crate::app) fn benchmark_begin(&mut self, bottom: bool, cx: &mut Context<Self>) {

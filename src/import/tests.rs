@@ -18,7 +18,7 @@ pub(super) struct Folder(pub(super) PathBuf);
 
 impl Folder {
     pub(super) fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("jykre-import-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("jovru-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -569,7 +569,7 @@ fn the_1904_epoch_shifts_dates_and_xlsxwriter_files_read_back() {
     let (_, records) = events(&path, &xlsx("Data")).unwrap();
     assert_eq!(values(&records), [vec![text("1900-01-01 00:00:00")]]);
 
-    // A workbook as rust_xlsxwriter (and so `jykre::export`) writes it.
+    // A workbook as rust_xlsxwriter (and so `jovru::export`) writes it.
     let path = folder.0.join("written.xlsx");
     let mut book = rust_xlsxwriter::Workbook::new();
     let sheet = book.add_worksheet();

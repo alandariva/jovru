@@ -1,10 +1,10 @@
-//! What the assistant may be told about a tab (ADR-0028). These types are
+//! What the assistant may be told about a tab (D-0028). These types are
 //! the allow-list: a request is built from them and from the metadata
 //! cache only. None of them holds a result's values, a bound parameter's
 //! value or a credential, and none can be built from a session.
 use crate::error_report::ErrorReport;
 use crate::result_tabs::{ResultState, ResultTab};
-use jykre_core::{ConnectionConfig, ConnectionId, SessionContext, SqlDialect};
+use jovru_core::{ConnectionConfig, ConnectionId, SessionContext, SqlDialect};
 use std::path::PathBuf;
 
 /// A failed statement's error, as the server reported it.

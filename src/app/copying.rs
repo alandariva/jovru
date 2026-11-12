@@ -1,15 +1,15 @@
 //! The copy menu's choices, shared by every result grid of the window: the
 //! format `Ctrl C` copies in and how the delimited formats write their
-//! fields ([Results](../../docs/reference/results.md#copying)). What each format writes
-//! lives in [`jykre::copy_as`]; this module keeps the choices, saves them and
+//! fields ([Results](../../docs/reference/results/transfer.md#copying)). What each format writes
+//! lives in [`jovru::copy_as`]; this module keeps the choices, saves them and
 //! runs every copy of a result off the UI thread ([`start`]): grid
 //! selections, pages, the inspector's value and report panels.
 use super::ui::{Feedback, Tone};
 use gpui_kit::*;
-use jykre::copy_as::{self, CopyFormat, CopyOptions, CopyRequest, NullText};
-use jykre::drivers::{CancellationToken, DriverError, DriverResult, ErrorCode};
-use jykre::export::Separator;
-use jykre::{backend, cell_format, connection_store, grid, tr};
+use jovru::copy_as::{self, CopyFormat, CopyOptions, CopyRequest, NullText};
+use jovru::drivers::{CancellationToken, DriverError, DriverResult, ErrorCode};
+use jovru::export::Separator;
+use jovru::{backend, cell_format, connection_store, grid, tr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

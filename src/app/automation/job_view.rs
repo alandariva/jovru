@@ -22,20 +22,20 @@ use crate::app::sql_editor::{GoToLine, SqlCatalogs, SqlEditor, SqlEditorEvent};
 use crate::app::ui::*;
 use gpui_kit::component::input::{EditorState, InputEvent, InputState};
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::automation::chain::form_values;
-use jykre::automation::definition::{
+use jovru::automation::chain::form_values;
+use jovru::automation::definition::{
     self, ChainStep, JobBody, JobDefinition, OutputSpec, Protocol, Source, SqlOutput,
 };
-use jykre::automation::{
+use jovru::automation::{
     Availability, ChainHandle, ChainRequest, ChainStatus, ConnectionInput, Engine, JobId, JobKind,
     JobRequest, Plan, Refusal, RunHandle, RunStatus, SqlJob,
 };
-use jykre::drivers::*;
-use jykre::grouped_tabs::TabStatus;
-use jykre::parameters::ParameterProblem;
-use jykre::reports::{ParameterSpec, params};
-use jykre::{backend, connection_store, tr};
-use jykre_storage::StoredVersion;
+use jovru::drivers::*;
+use jovru::grouped_tabs::TabStatus;
+use jovru::parameters::ParameterProblem;
+use jovru::reports::{ParameterSpec, params};
+use jovru::{backend, connection_store, tr};
+use jovru_storage::StoredVersion;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -71,7 +71,7 @@ pub enum Ask {
     Run,
     DeleteJob,
     DeleteVersion(i64),
-    /// Storing the outputs of a job on a production connection (ADR-0035).
+    /// Storing the outputs of a job on a production connection (D-0035).
     StoreOutputs,
     /// The consent dialog of the job's schedule (section 9.5.6).
     ScheduleConsent,
@@ -203,7 +203,7 @@ enum Shown {
 
 /// A program run's stdout and stderr, read from its logs when it ended.
 struct ProgramOutput {
-    run: jykre::automation::RunId,
+    run: jovru::automation::RunId,
     /// The chain's step that printed it.
     step: Option<String>,
     /// The stream on screen.
@@ -471,9 +471,9 @@ impl JobView {
 
     /// The tab's mark: a spinner while its run is active, then how it ended.
     pub fn tab_status(&self) -> TabStatus {
-        let ended = |state: jykre::automation::RunState| match state {
-            jykre::automation::RunState::Succeeded => TabStatus::Succeeded,
-            jykre::automation::RunState::Failed => TabStatus::Failed,
+        let ended = |state: jovru::automation::RunState| match state {
+            jovru::automation::RunState::Succeeded => TabStatus::Succeeded,
+            jovru::automation::RunState::Failed => TabStatus::Failed,
             _ => TabStatus::Cancelled,
         };
         match &self.active {
@@ -1152,7 +1152,7 @@ impl JobView {
         }
         self.store_fields(cx);
         if let Some(spec) = self.specs_mut().iter_mut().find(|spec| spec.name == name)
-            && spec.choices.len() < jykre::reports::MAX_CHOICES
+            && spec.choices.len() < jovru::reports::MAX_CHOICES
             && !spec.choices.contains(&choice)
         {
             spec.choices.push(choice);
@@ -1446,7 +1446,7 @@ impl JobView {
             .map_err(|error| error.message)?;
         let dialect = source.dialect.or_else(|| Some(driver.descriptor().dialect));
         let production =
-            source.environment == Some(jykre::connection_appearance::Environment::Production);
+            source.environment == Some(jovru::connection_appearance::Environment::Production);
         let revision = self.sources.revisions.get(&id).copied().unwrap_or(0);
         Ok((
             ConnectionInput {
@@ -1507,8 +1507,8 @@ impl JobView {
                 };
                 let dialect_now = dialect.unwrap_or(SqlDialect::Postgres);
                 let job = SqlJob::from_body(body, connection);
-                if let Err(error) = jykre::automation::prepare(&job, dialect_now, &values) {
-                    if let jykre::automation::PrepareError::Parameters(errors) = &error {
+                if let Err(error) = jovru::automation::prepare(&job, dialect_now, &values) {
+                    if let jovru::automation::PrepareError::Parameters(errors) = &error {
                         self.value_errors = errors
                             .iter()
                             .map(|error| (error.name.clone(), error.problem))
@@ -1522,7 +1522,7 @@ impl JobView {
                     return;
                 }
                 if !pending.confirmed {
-                    let risk = jykre::guard::risk(&body.sql, dialect)
+                    let risk = jovru::guard::risk(&body.sql, dialect)
                         .map(|risk| crate::app::workspace::risk_description(&[(0, risk)], 1));
                     if let Some((title, description)) = logic::production_confirmation(
                         &name,
@@ -1714,7 +1714,7 @@ impl JobView {
                                 Some(name.clone()),
                                 *production,
                                 production
-                                    .then(|| jykre::guard::risk(&sql.sql, *dialect))
+                                    .then(|| jovru::guard::risk(&sql.sql, *dialect))
                                     .flatten()
                                     .map(|risk| {
                                         crate::app::workspace::risk_description(&[(0, risk)], 1)
@@ -1832,7 +1832,7 @@ impl JobView {
         dialect: Option<SqlDialect>,
         cx: &mut Context<Self>,
     ) {
-        let _timer = jykre::logging::UiTimer::start("automation run status");
+        let _timer = jovru::logging::UiTimer::start("automation run status");
         match &status {
             RunStatus::Finished(outcome) => {
                 self.tick = None;
@@ -1868,7 +1868,7 @@ impl JobView {
     /// `step` names the chain's step it belongs to.
     fn show_result(
         &mut self,
-        outcome: Arc<jykre::automation::RunOutcome>,
+        outcome: Arc<jovru::automation::RunOutcome>,
         step: Option<String>,
         cx: &mut Context<Self>,
     ) {
@@ -1886,7 +1886,7 @@ impl JobView {
                     .await;
                 let _ = weak.update(cx, |this, cx| {
                     if let Some(data) = data {
-                        let _timer = jykre::logging::UiTimer::start("automation result");
+                        let _timer = jovru::logging::UiTimer::start("automation result");
                         this.has_result = data.column_count() > 0;
                         this.shown = if this.has_result {
                             Shown::Rows {
@@ -1922,7 +1922,7 @@ impl JobView {
             reading: true,
             scroll: UniformListScrollHandle::new(),
         }));
-        let failed = outcome.state != jykre::automation::RunState::Succeeded;
+        let failed = outcome.state != jovru::automation::RunState::Succeeded;
         let dir = self.engine.data_dir().to_path_buf();
         cx.spawn(async move |weak, cx| {
             let stdout = read_log_lines(dir.clone(), run, Stream::Stdout).await;
@@ -1993,7 +1993,7 @@ impl JobView {
     }
 
     fn show_chain_status(&mut self, status: ChainStatus, cx: &mut Context<Self>) {
-        let _timer = jykre::logging::UiTimer::start("automation chain status");
+        let _timer = jovru::logging::UiTimer::start("automation chain status");
         let mut follow = None;
         let mut last_step = None;
         // Each SQL step's connection by name, to say which one changed.
@@ -2035,7 +2035,7 @@ impl JobView {
                     *step_status = None;
                 }
                 ChainStatus::Finished(outcome) => {
-                    let changed = (outcome.cause == Some(jykre::automation::Cause::PlanChanged))
+                    let changed = (outcome.cause == Some(jovru::automation::Cause::PlanChanged))
                         .then_some(outcome.failed_step.as_ref())
                         .flatten()
                         .and_then(|step| {

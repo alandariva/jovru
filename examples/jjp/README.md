@@ -1,7 +1,7 @@
 # `jjp/1` example program
 
 `export.js` is a dependency-free Node.js (18 or later) program that speaks
-`jjp/1`, the protocol Jykre Studio's automation uses to give an external
+`jjp/1`, the protocol Jovru's automation uses to give an external
 program its inputs and take its outputs back
 ([specification](../../docs/plans/automation-engine-specification.md),
 section 9.2). It writes synthetic rows to a CSV file and returns how many it
@@ -22,7 +22,7 @@ wrote and where.
 
 1. Reads its token from the first line of **stdin**,
    `{"jjp":"1","token":"…"}`, up to end of file. Stdin is reserved for it.
-2. Connects to `JYKRE_JJP_ADDRESS` (`127.0.0.1:<port>`) and sends `hello`
+2. Connects to `JOVRU_JJP_ADDRESS` (`127.0.0.1:<port>`) and sends `hello`
    with the token. The answer carries the run's inputs (text or `null`),
    the milliseconds left before the deadline and the longest line allowed
    (1 MiB).
@@ -35,8 +35,8 @@ never JSON numbers, so nothing passes through floating point.
 
 ## Rules worth knowing
 
-- The program runs with your privileges; Studio supervises it, it does not
-  sandbox it. It inherits Studio's environment except `JYKRE_*`, `OTEL_*`,
+- The program runs with your privileges; Jovru supervises it, it does not
+  sandbox it. It inherits Jovru's environment except `JOVRU_*`, `OTEL_*`,
   `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP` and `PYTHONHOME`.
 - stdout, stderr and `log` messages are kept on this computer for 7 days,
   at most 1 MiB per stream: never print passwords, tokens or personal data.
