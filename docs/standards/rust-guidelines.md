@@ -11,7 +11,7 @@ rest of this document is checked in review.
   `DriverError` carries an `ErrorCode` and a message; the code is what callers
   and the UI branch on, never the message text.
 - Each crate converts the errors of its libraries at its boundary (as
-  `jykre-storage` does with `sql_error` and `json_error`). `sqlx::Error`,
+  `jovru-storage` does with `sql_error` and `json_error`). `sqlx::Error`,
   `reqwest::Error` and `keyring::Error` never appear in a public API.
 - Drivers map their database's errors to the right code; see
   [Reliability](reliability.md#error-classification).
@@ -41,12 +41,12 @@ rest of this document is checked in review.
   `tokio::process`. Opening and `try_lock`-ing a lock file, which never waits,
   is accepted.
 - Blocking libraries (the OS vault) run in `tokio::task::spawn_blocking`, as
-  `jykre-secrets` does.
+  `jovru-secrets` does.
 - CPU work above about 1 ms (converting a result, building an index, sorting
   thousands of items) does not run on the UI thread; see
   [Architecture](../reference/architecture.md#concurrency).
 - Traits used as objects (`dyn Driver`, `dyn Session`, `dyn SecretStore`) use
-  `#[async_trait]`, re-exported by `jykre-core`.
+  `#[async_trait]`, re-exported by `jovru-core`.
 - A future never holds a `std::sync::MutexGuard`, a `RefCell` borrow or an
   `Rc` across `.await`.
 - Every task has an owner. Tokio tasks are awaited or tied to a
@@ -74,14 +74,14 @@ rest of this document is checked in review.
 
 The application generates SQL only for metadata introspection, previews
 and table Data views, session commands, the statements that bind a
-report's parameters ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md))
+report's parameters (D-0023)
 and, in the drivers, the statements that write a result's edits
-([ADR-0039](../adr/0039-editing-result-data-through-the-driver.md)).
+(D-0039).
 
 - Values are **always** bound parameters, never interpolated into the text.
   A report's parameter values are bound by the driver too, and never appear
   in any SQL text, not even quoted
-  ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)).
+  (D-0023).
 - Identifiers that must appear in the text are quoted by the driver's quoting
   rules. Never `format!("SELECT * FROM {name}")` with an unquoted name.
 - SQL typed by the user is sent **as written**. The application does not
@@ -89,19 +89,19 @@ and, in the drivers, the statements that write a result's edits
   the row limit is applied while reading. The one exception is a report's
   `:name` markers: the PostgreSQL and MySQL drivers replace each one with a
   fixed reference to the bound value, such as
-  `(current_setting('jykre.p_0')::date)`, and change nothing else
-  ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)).
+  `(current_setting('jovru.p_0')::date)`, and change nothing else
+  (D-0023).
 
 ## Secrets
 
 - Every secret is a `secrecy::SecretString`. Call `expose_secret()` only at the
   exact point of use (building driver options, an HTTP header, the vault call).
 - Types that hold secrets do not implement `Serialize`. `compile_fail`
-  doctests in `jykre-core` guard `Credentials` and `ResolvedConnection`.
+  doctests in `jovru-core` guard `Credentials` and `ResolvedConnection`.
 
 ## Logs
 
-Production code logs through `tracing` ([ADR-0009](../adr/0009-structured-logging-and-timings.md))
+Production code logs through `tracing` (D-0009)
 and never prints to stdout or stderr. The rules in
 [Reliability](reliability.md#logs) apply: structured fields, spans with
 `skip_all` or explicit fields, SQL only at `trace`, and nothing from
@@ -122,7 +122,7 @@ and never prints to stdout or stderr. The rules in
 
 ## Lints
 
-These rules are enforced by workspace lints ([ADR-0011](../adr/0011-workspace-lints.md))
+These rules are enforced by workspace lints (D-0011)
 declared in the root `Cargo.toml`; every crate opts in with
 `[lints] workspace = true`, and Clippy in the gate fails on them:
 
@@ -147,7 +147,7 @@ Tests opt out of `unwrap_used`/`expect_used` with
 crate root and integration test file. Development tools allow only what their
 job needs, with a comment: `xtask` and the command-line examples may print,
 and the benchmarks may `expect` on their setup (approved by the maintainer on
-2026-11-02, [ADR-0011](../adr/0011-workspace-lints.md#implementation-notes)). A lint is never silenced in
+2026-11-02, D-0011). A lint is never silenced in
 production code to make the gate pass; an exception needs the maintainer's
 approval and a comment.
 
@@ -160,6 +160,10 @@ approval and a comment.
 - [ ] No secret in `Debug`, an error message, serialization or output.
 - [ ] No library error type leaks through a public API.
 
+## Decisions
+
+The reasoning behind this area's structural choices is in [Decisions: Rust guidelines](../decisions/rust-guidelines.md).
+
 ## Known deviations
 
-None at the moment.
+None.

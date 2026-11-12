@@ -4,11 +4,11 @@
 - **Implementation:** In progress
 - **Date:** 2026-11-10
 
-[ADR-0042](../adr/0042-mcp-server-for-the-assistant-tools.md) records the
+[D-0042](../decisions/assistant.md#d-0042) records the
 decision, and the `rmcp` proposal is [rmcp-dependency.md](rmcp-dependency.md).
 
 The maintainer approved this plan,
-[ADR-0042](../adr/0042-mcp-server-for-the-assistant-tools.md) and the `rmcp`
+[D-0042](../decisions/assistant.md#d-0042) and the `rmcp`
 dependency on 2026-11-10. The body remains the specification. Statements
 marked **(verified)** were checked in the code on branch `release/0.3.1` at
 `06377d1`; statements marked **(hypothesis)** were not, and must be checked
@@ -25,7 +25,7 @@ before implementation.
 
 ## 1. Summary
 
-Jykre Studio would host a [Model Context Protocol](https://modelcontextprotocol.io)
+Jovru would host a [Model Context Protocol](https://modelcontextprotocol.io)
 (MCP) server while it runs, so an external MCP client (an IDE agent, a
 desktop chat client, a CLI agent) can call the three tools the in-app
 assistant already offers its model: `search_objects`, `describe_relation`
@@ -34,7 +34,7 @@ bounds and the same privacy allow-list, and adds three things the in-app
 assistant does not need: **tokens** that say which client may call, **a
 per-token switch for each tool**, and **an approval surface that is not tied
 to a query tab**. It is not a second model client: it never sends a prompt
-to a provider and never touches `jykre-assistant`'s transport. The user
+to a provider and never touches `jovru-assistant`'s transport. The user
 controls it from an **MCP** section of the rail
 ([5.2](#52-create-a-new-token)).
 
@@ -43,45 +43,45 @@ controls it from an **MCP** section of the rail
 **Goal.** An MCP client the user chose can read the structure of one
 connection's metadata cache and, only with the user's two approvals, run one
 statement and receive its bounded result, exactly as the in-app model can
-([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)).
+([D-0028](../decisions/assistant.md#d-0028)).
 
 **Non-goals.**
 
 - No new tool. No tool that reads the server (Inspect, definitions), a
   session's state, a result tab, a bound parameter, a credential or a result
-  the user did not approve. ADR-0028 deferred live reads; this plan keeps
+  the user did not approve. D-0028 deferred live reads; this plan keeps
   them out ([section 14](#14-known-deviations-and-out-of-scope)).
 - No second implementation of the tools, the result cut or the statement
   checks. The MCP layer adapts calls and answers; the work is done by
   `CacheTools`, `run::query_sql`, `guard::risk` and `released`.
 - No model, prompt, provider, price or token count. The MCP server does not
-  use `jykre-assistant`'s `transport`, `ModelRequest` or `genai`.
+  use `jovru-assistant`'s `transport`, `ModelRequest` or `genai`.
 - No remote access. The server binds the loopback address only.
 - No MCP resources, prompts, sampling or elicitation. Approval happens in
-  Jykre Studio's window, never in the client.
+  Jovru's window, never in the client.
 - No headless mode. The server exists only while the application's window
   is open.
 
-## 3. Relationship to ADR-0028
+## 3. Relationship to D-0028
 
 The in-app assistant stays as it is. The MCP server is **another client of
 the same tools**:
 
-| | In-app assistant (ADR-0028) | MCP server (this plan) |
+| | In-app assistant (D-0028) | MCP server (this plan) |
 | --- | --- | --- |
-| Who decides which tool to call | A model Jykre calls through `jykre-assistant` | An external client's model, unknown to Jykre |
-| Where answers go | Into a `ModelRequest` the user can review before it leaves | Into an MCP tool result the client receives; what the client does next is outside Jykre's sight |
+| Who decides which tool to call | A model Jovru calls through `jovru-assistant` | An external client's model, unknown to Jovru |
+| Where answers go | Into a `ModelRequest` the user can review before it leaves | Into an MCP tool result the client receives; what the client does next is outside Jovru's sight |
 | Which tools | `CacheTools::specs(queries)` | The same specs, filtered by the token's enabled tools |
 | Which cache | The tab's connection (`SchemaScope` from the workspace) | The one connection the token is bound to |
 | Where `run_query` runs | The assistant's own session of that tab | A session of the MCP server's own, never a tab's |
 | Approval of `run_query` | Statement card, then result card, in the panel | The same two decisions, in the MCP section's **Requests** tab |
 | Review of cache tools | The next request is reviewable per **Review mode** | Each answer is reviewable before it is returned, per token ([5.5](#55-verify-and-approve-requests)) |
 
-ADR-0028 says "new tools read the local cache only unless an ADR says
+D-0028 says "new tools read the local cache only unless an ADR says
 otherwise". This plan adds no tool. It does add a **new destination** for
-what the tools return: ADR-0028 and the [Security](../standards/security.md#ai-assistant)
+what the tools return: D-0028 and the [Security](../standards/security.md#ai-assistant)
 standard speak of "the provider the user chose". An MCP client is a different
-destination, chosen by the user but not seen by Jykre. That change needs an
+destination, chosen by the user but not seen by Jovru. That change needs an
 ADR before implementation ([section 11](#11-what-needs-an-adr-and-what-can-stay-here)).
 
 ## 4. What the code does today
@@ -149,7 +149,7 @@ The MCP tools must match these. Sources: `src/assistant/tools.rs`,
   `QueryResult`, `.parameters`, `inspect_object`, `object_definition`,
   `ResolvedConnection`, `Credentials`, `backend::query`, `backend::fetch` and
   `held_pages`; only `src/assistant/released.rs` may name the first three.
-- `jykre-secrets` has `ApiKeyStore` over a fixed `ApiKeyAccount(&'static
+- `jovru-secrets` has `ApiKeyStore` over a fixed `ApiKeyAccount(&'static
   str)` (`assistant:{anthropic|openai|openai-compatible}:api-key`,
   `telemetry:otlp:headers`). It cannot name an account built at run time.
 - `jjp/1` (`src/automation/jjp.rs`) already has a loopback listener and a
@@ -170,14 +170,14 @@ assistant; it does not configure the server, a token or a pending call.
 ### 5.1 Principles
 
 1. **The token is a credential.** It lives only in the OS vault through
-   `jykre-secrets` ([ADR-0004](../adr/0004-os-vault-for-credentials.md)),
+   `jovru-secrets` ([D-0004](../decisions/security.md#d-0004)),
    is shown once, and is never written to `config.db`, JSON, settings, logs,
    telemetry, error messages, `Debug` output, a URL or a command line.
 2. **One token, one connection** ([5.2.4](#524-binding-to-one-connection)).
 3. **Default deny.** A new token has `search_objects` and
    `describe_relation` enabled and `run_query` disabled. Every call is
    reviewed until the user relaxes the review for that token.
-4. **Approval is in Jykre, never in the client.** The client is the party
+4. **Approval is in Jovru, never in the client.** The client is the party
    being authorised; it cannot answer its own request. MCP elicitation is not
    used.
 5. **Same answers as in-app.** The text a client receives is the text the
@@ -220,9 +220,9 @@ Sidebar, while MCP is selected
 │                                                                 │
 │ Requests                                              2 waiting │
 │                                                                 │
-│ Cursor on laptop   jykmcp_k3f9q2…   PG · Sales (Production)     │
+│ Cursor on laptop   jovmcp_k3f9q2…   PG · Sales (Production)     │
 │ search ✓  describe ✓  run_query ✗   every call                  │
-│ CLI agent          jykmcp_8hw1zt…   SQLite · fixtures  Expired  │
+│ CLI agent          jovmcp_8hw1zt…   SQLite · fixtures  Expired  │
 │                                                                 │
 │ Tokens are kept in the system vault. A token is shown once.     │
 └─────────────────────────────────────────────────────────────────┘
@@ -266,7 +266,7 @@ Main area: the open MCP tabs (each its own grey group)
    vault entry is removed and the tab says so; no half-made token remains.
 3. The same tab switches to **Copy your token**: the token in a read-only,
    selectable, monospaced field, a **Copy** button, and the text "This is the
-   only time Jykre Studio shows this token. Store it in your MCP client's
+   only time Jovru shows this token. Store it in your MCP client's
    configuration." Below it, a ready-to-paste client snippet (the address
    and an `Authorization: Bearer` header placeholder) **without** the token
    in it, so a snippet copied to a chat or a ticket does not carry it.
@@ -278,11 +278,11 @@ Main area: the open MCP tabs (each its own grey group)
 
 #### 5.2.3 What the token is
 
-`jykmcp_<id>_<secret>`:
+`jovmcp_<id>_<secret>`:
 
 - `<id>`: 10 random lowercase base32 characters (50 bits), **not secret**.
   It identifies the record, names the vault account and is what the user
-  sees later as the prefix `jykmcp_<id>…`.
+  sees later as the prefix `jovmcp_<id>…`.
 - `<secret>`: 256 random bits as 64 lowercase hex digits, from the
   operating system's secure random source through the `ring` provider rustls
   already installs (as `jjp/1`'s `Token::generate`). No new dependency.
@@ -316,22 +316,22 @@ The record stores the connection's ID and its profile **revision** and
 environment label at creation. A later change to that connection's profile
 (host, user, driver, environment label) **suspends** the token until the
 user confirms it again on the token's tab, as schedule grants do
-([ADR-0041](../adr/0041-schedules-and-grants.md)). Deleting the connection
+([D-0041](../decisions/automation.md#d-0041)). Deleting the connection
 deletes its tokens and their vault entries. (Hypothesis: the `revision`
 column of `connections` changes on exactly those edits; to check in
-`jykre-storage`.)
+`jovru-storage`.)
 
 #### 5.2.5 Where the secret is stored, and what is shown later
 
 | Item | Where | Shown later |
 | --- | --- | --- |
-| The token's secret part | OS vault only, service `JykreStudio`, account `mcp:token:<id>` | Never |
-| `<id>` | `config.db` record and the vault account name | As the prefix `jykmcp_<id>…` |
+| The token's secret part | OS vault only, service `Jovru`, account `mcp:token:<id>` | Never |
+| `<id>` | `config.db` record and the vault account name | As the prefix `jovmcp_<id>…` |
 | Name, connection ID, its revision and label, created and expiry times, enabled tools, review policy, suspended reason | `config.db`, setting `assistant.mcp` (JSON, beside `assistant.preferences`; no new table) | Yes |
 | Last used time, connected clients, activity | Memory only, for this run of the application | Yes, until quit |
 
 The vault account is new: `ApiKeyAccount` only has fixed `&'static str`
-names. `jykre-secrets` would gain an account type built only from a
+names. `jovru-secrets` would gain an account type built only from a
 validated `<id>` (10 base32 characters), so no free text reaches the vault
 ([Q-2](#12-open-questions-for-the-maintainer)). Its accounts must never
 collide with `connection:` or `assistant:` names, tested as
@@ -349,10 +349,10 @@ per request after that.
   Service, past the time limit). There is no session-only token and no
   fallback to a file ([Q-5](#12-open-questions-for-the-maintainer)).
 - **At first use:** the request fails with HTTP 503 and a generic body
-  ("Jykre Studio cannot read this token from the system vault."); the token's
+  ("Jovru cannot read this token from the system vault."); the token's
   row shows **Vault unavailable**, and its tab offers **Try again**. The
   client is never told whether the token was right.
-- **A record whose vault entry is missing** (removed outside Jykre): the row
+- **A record whose vault entry is missing** (removed outside Jovru): the row
   shows **Token missing from the vault**; requests with it fail as
   unauthorised; the token's tab offers only **Rotate** and **Delete**.
 - **At revoke or delete:** the record is removed and the in-memory secret
@@ -459,7 +459,7 @@ panel on the edge of the window.
   ([5.2.1](#521-where)).
 - While a card is waiting, the rail's MCP icon shows the count, in amber,
   the way Automation's icon shows scheduled runs that ended badly
-  ([User experience](../reference/ux.md)). The status bar names it
+  ([User experience](../reference/ux/README.md)). The status bar names it
   (**MCP · n waiting**, or **MCP · Listening**, or **MCP · Off because …**)
   and opens this tab. Neither draws a card. A new card updates both, and
   when the window is not focused it asks the window system for attention
@@ -491,14 +491,14 @@ the in-app `ReviewMode`:
 | **First call of each client session** | The first cache answer of each MCP session waits on a card; later ones are returned at once and listed in Activity | No |
 | **Never** | Answers are returned at once and listed in Activity | No |
 
-Why this matches ADR-0028:
+Why this matches D-0028:
 
-- ADR-0028 requires every request to be **reviewable** before it leaves and
+- D-0028 requires every request to be **reviewable** before it leaves and
   starts in discovery mode (pause before every request). The MCP server
-  cannot see the client's request to its own model, so the place where Jykre
-  data leaves Jykre is the tool result. Reviewing each tool result is the
+  cannot see the client's request to its own model, so the place where Jovru
+  data leaves Jovru is the tool result. Reviewing each tool result is the
   closest equivalent, and is the default.
-- ADR-0028 lets the user relax review (**first only**, **never**); the same
+- D-0028 lets the user relax review (**first only**, **never**); the same
   choices exist here, per token, and every answer still appears in
   Activity with its arguments and size.
 - Enabling the tool alone never covers a call under **Every call**. **Never**
@@ -509,7 +509,7 @@ Why this matches ADR-0028:
 
 **Don't send** returns a normal result: "The user chose not to share this
 answer." (a new text, in `released`'s style). Comments and defaults are sent
-as in-app (ADR-0028 allows them); the card shows them before they leave.
+as in-app (D-0028 allows them); the card shows them before they leave.
 
 #### 5.5.3 Approval of `run_query`
 
@@ -571,7 +571,7 @@ error result; no card).
 | Result not sent | normal | `released::withheld` text |
 | No answer in time | error | [5.5.4](#554-deadlines-while-the-user-has-not-answered) |
 | Another query pending | error | [5.5.3](#553-approval-of-run_query) |
-| Server paused | error | "Jykre Studio is not accepting requests now." |
+| Server paused | error | "Jovru is not accepting requests now." |
 
 #### 5.5.6 What is logged
 
@@ -595,7 +595,7 @@ telemetry allowlist; none holds free text.
 | --- | --- | --- |
 | **Server off** (default) | Section: switch off; no status bar line | Connection refused (nothing listens) |
 | **Port in use** | Section: "Port 47321 is in use; choose another"; status bar **MCP · Off because the port is in use** | Connection refused |
-| **Demo** (`JYKRE_DEMO`) | Section: "Not available in the demo"; switch disabled | Nothing listens |
+| **Demo** (`JOVRU_DEMO`) | Section: "Not available in the demo"; switch disabled | Nothing listens |
 | **No tokens** (empty) | Tokens list: "No tokens yet. Create one for each MCP client." and **New token…** | 401 |
 | **Listening, idle** | Section **Listening**; status bar **MCP · Listening** | — |
 | **Pending** | **Requests** tab; rail count; status bar **MCP · n waiting** | Waiting; progress notifications |
@@ -623,17 +623,17 @@ application runs, as the in-app conversation does; they are never written.
 
 | Piece | Location (proposed) | GPUI | Notes |
 | --- | --- | --- | --- |
-| Token format, generation, comparison, expiry | `jykre::mcp::token` | No | Pattern of `jjp/1`'s `Token` |
-| Token records, enabled tools, review policy, suspension | `jykre::mcp::registry` | No | Reads and writes the `assistant.mcp` setting and the vault |
-| Pending requests, ordering, deadlines, decisions | `jykre::mcp::broker` | No | One state machine; publishes a counter like `Engine::changes` |
-| Protocol adapter (`initialize`, `tools/list`, `tools/call`, cancellation, progress) | `jykre::mcp::server` | No | Calls `CacheTools`, `run::query_sql`, `guard::risk`, `released` |
-| Card state machine (asked, running, review, done) | `jykre::assistant::approval` | No | Moved out of `assistant_panel.rs`, shared by that panel and the **Requests** tab |
-| Running an approved statement | `jykre::assistant_query` (outside `src/assistant/`) | No | The runtime half of `Workspace::run_assistant_query`, shared; returns only a `QueryPreview` |
+| Token format, generation, comparison, expiry | `jovru::mcp::token` | No | Pattern of `jjp/1`'s `Token` |
+| Token records, enabled tools, review policy, suspension | `jovru::mcp::registry` | No | Reads and writes the `assistant.mcp` setting and the vault |
+| Pending requests, ordering, deadlines, decisions | `jovru::mcp::broker` | No | One state machine; publishes a counter like `Engine::changes` |
+| Protocol adapter (`initialize`, `tools/list`, `tools/call`, cancellation, progress) | `jovru::mcp::server` | No | Calls `CacheTools`, `run::query_sql`, `guard::risk`, `released` |
+| Card state machine (asked, running, review, done) | `jovru::assistant::approval` | No | Moved out of `assistant_panel.rs`, shared by that panel and the **Requests** tab |
+| Running an approved statement | `jovru::assistant_query` (outside `src/assistant/`) | No | The runtime half of `Workspace::run_assistant_query`, shared; returns only a `QueryPreview` |
 | `SchemaScope` for a connection without a tab | Beside `facts` | No | Context: the connection's default (hypothesis: empty `SessionContext` resolves as a new session would) |
 | MCP section: sidebar, token tabs, **Requests** tab | `src/app/mcp_section.rs` | Yes | Presents; sends intents. Same shape as `src/app/automation/` |
 
 `src/mcp/` and `src/app/mcp_section.rs` join the `assistant_privacy` scan.
-`jykre::assistant_query` is the one new module that names
+`jovru::assistant_query` is the one new module that names
 `backend::query_in_context`, as the workspace does today; it hands back only
 a `QueryPreview`, so `released.rs` stays the only code that turns a result
 into text.
@@ -724,7 +724,7 @@ of the ADR in [section 11](#11-what-needs-an-adr-and-what-can-stay-here).
   tools answer from what is there, with the existing texts; the card shows
   the last refresh time.
 - **Quit.** The listener closes first; pending cards close as **Cancelled:
-  Jykre Studio is quitting** and their clients get an error result if the
+  Jovru is quitting** and their clients get an error result if the
   connection is still open; running queries are cancelled and their sessions
   closed within the shutdown deadline. Nothing is resumed at the next start.
 
@@ -737,13 +737,13 @@ text is that token's connection, not one description shared by every client.
 On the 2026-07-28 shape the client reads it from `server/discover`. A client
 that still sends `initialize` gets the same fields and no session id.
 
-- `serverInfo.name` stays `jykre-studio`, a stable identifier.
-- `serverInfo.title` is `Jykre Studio — ` plus the connection's current name
+- `serverInfo.name` stays `jovru`, a stable identifier.
+- `serverInfo.title` is `Jovru — ` plus the connection's current name
   as the sidebar shows it, and the environment label when the connection has
-  one: `Jykre Studio — Sales (Production)`.
+  one: `Jovru — Sales (Production)`.
 - `instructions` is a short text for the model: this server reads the
   metadata cache of that connection; if `run_query` is enabled, statements
-  run only there, and only after the user approves them in Jykre Studio. It
+  run only there, and only after the user approves them in Jovru. It
   names the connection the same way. It does not include the host, the user,
   a credential or SQL.
 
@@ -783,7 +783,7 @@ refusals and the tool answers that are errors. Today a tool error is a
 string starting with `Error:`; rather than test that prefix, `CacheTools::call`
 would return a small typed answer (text plus whether it failed) whose text is
 unchanged for the in-app path. No `outputSchema` is declared: the answers are
-text by design (ADR-0028).
+text by design (D-0028).
 
 The MCP server does not send the in-app system prompt. What the client is
 told about the connection is [8.1](#81-what-the-client-is-told-when-it-connects);
@@ -814,15 +814,15 @@ it through the result card.
 
 | Threat | Mitigation |
 | --- | --- |
-| **Stolen token** | Loopback only; expiry; revoke and rotate; one connection per token; `run_query` off by default and each statement and result approved in Jykre's window, so a token alone never runs SQL or moves a value; cache answers reviewed per call by default; Activity shows every call. The client's configuration file holds the token and is outside Jykre's control; the section says so |
+| **Stolen token** | Loopback only; expiry; revoke and rotate; one connection per token; `run_query` off by default and each statement and result approved in Jovru's window, so a token alone never runs SQL or moves a value; cache answers reviewed per call by default; Activity shows every call. The client's configuration file holds the token and is outside Jovru's control; the section says so |
 | **A process of the same user** | Same as `jjp/1`: the token protects against other users and port guessing, not against the same user, who can read the client's configuration anyway. Approval in the window remains the barrier for values |
 | **Browser on this computer (DNS rebinding, CSRF)** | `Origin`/`Host` validation, no CORS, bearer header required |
 | **A client that retries a declined query** | One pending query per token; each retry is a new card the user sees, marked with how many times that statement was declined since the process started; **Pause** stays in the section and **Revoke** on the token's tab. The server does not stop asking ([Q-16](#12-open-questions-for-the-maintainer)) |
 | **A client that asks for tools the token lacks** | Not listed; `-32602`; no card; counted only |
-| **Prompt injection in SQL or `purpose`** | Both rendered as plain text, never markup; `purpose` in a quoted "The client says:" box, never in Jykre's own wording; the statement shown in full with no cut; `query_sql` refuses several statements and `:name`; `guard::risk` badges; control and bidirectional characters shown as visible escapes in the card (new; [Q-17](#12-open-questions-for-the-maintainer)); nothing runs without **Run** |
-| **Metadata comments or defaults that hold secrets** | Sent as in-app (ADR-0028 allows them); under **Every call** the card shows the answer before it leaves; a per-token "leave out comments and defaults" option would change `describe`'s output and is [Q-18](#12-open-questions-for-the-maintainer) |
+| **Prompt injection in SQL or `purpose`** | Both rendered as plain text, never markup; `purpose` in a quoted "The client says:" box, never in Jovru's own wording; the statement shown in full with no cut; `query_sql` refuses several statements and `:name`; `guard::risk` badges; control and bidirectional characters shown as visible escapes in the card (new; [Q-17](#12-open-questions-for-the-maintainer)); nothing runs without **Run** |
+| **Metadata comments or defaults that hold secrets** | Sent as in-app (D-0028 allows them); under **Every call** the card shows the answer before it leaves; a per-token "leave out comments and defaults" option would change `describe`'s output and is [Q-18](#12-open-questions-for-the-maintainer) |
 | **Result values that carry instructions** | Text only; only after **Send result** |
-| **Demo mode** | The server never starts with `JYKRE_DEMO`; the section says so |
+| **Demo mode** | The server never starts with `JOVRU_DEMO`; the section says so |
 | **Token in logs, URLs or argv** | Header only; URL tokens refused; log and telemetry tests ([section 13](#13-verification-after-a-future-implementation)) |
 | **Resource exhaustion** | Body limit, 4 concurrent HTTP connections, one pending query per token, bounded Activity and cursors |
 
@@ -834,10 +834,10 @@ the stack needs an ADR. This one needs **one new ADR**, proposed by an agent
 and accepted only by the maintainer, before any code:
 
 - A new destination for the tools' answers (an external client), extending
-  ADR-0028's privacy statement and review rule, and the Security standard's
+  D-0028's privacy statement and review rule, and the Security standard's
   "AI assistant" section.
 - A new listening socket in the application (beside `jjp/1`'s).
-- A new vault account family in `jykre-secrets` (crate API change and a new
+- A new vault account family in `jovru-secrets` (crate API change and a new
   row in Security's credential table).
 - The dependency in [section 6](#6-transport), with the policy's proposal
   (why, licence, health, weight, features).
@@ -847,10 +847,10 @@ default values (port, deadlines, expiry choices, limits), the refactors that
 move the card state machine and the query run out of views, and the
 verification list. The new `assistant.mcp` setting uses the existing
 `settings` table, so it is not a schema change; it is documented in
-[Persistence](../reference/persistence.md) when implemented.
+[Persistence](../reference/persistence/README.md) when implemented.
 
 Not changed: `Driver`, `Session`, `RowSink`, `IntrospectionSink`,
-`SecretStore`, the SQLite schema, `jykre-assistant`.
+`SecretStore`, the SQLite schema, `jovru-assistant`.
 
 ## 12. Open questions for the maintainer
 
@@ -881,7 +881,7 @@ limit and the cache answer were spelled out.
 | Q-20 | **Answered.** The card shows the purpose and the client's self-reported name, both as quoted text from the client. |
 
 **Q-2 and Q-5, the Windows vault.** Credential Manager limits one generic
-credential's secret to 2,560 bytes (`CRED_MAX_CREDENTIAL_BLOB_SIZE`). Jykre
+credential's secret to 2,560 bytes (`CRED_MAX_CREDENTIAL_BLOB_SIZE`). Jovru
 already stores passwords and API keys through the `keyring` crate into that
 vault (`crates/secrets`). The maintainer chose one credential per token.
 A token is a few dozen bytes, so the cap does not apply. Putting every
@@ -929,7 +929,7 @@ Nothing here was run: this task changes documentation only, and
 
 | Item | Status |
 | --- | --- |
-| Live reads (Inspect, object definitions) | Out of scope, as ADR-0028 deferred them ("later, with consent per tool"); no MCP tool reads the server |
+| Live reads (Inspect, object definitions) | Out of scope, as D-0028 deferred them ("later, with consent per tool"); no MCP tool reads the server |
 | The in-app assistant's conversation, prompts, compaction and costs | Not exposed through MCP |
 | MCP resources, prompts, sampling, elicitation | Not offered |
 | Remote or non-loopback access, TLS for the endpoint | Out of scope |

@@ -2,7 +2,7 @@
 
 **Date:** November 10, 2026
 **Approval:** Approved by the maintainer on 2026-11-10 (Q-19, option A),
-together with [ADR-0042](../adr/0042-mcp-server-for-the-assistant-tools.md).
+together with [D-0042](../decisions/assistant.md#d-0042).
 **Implementation:** In progress (crate added; the server is not written yet).
 **For:** not assigned to a release
 ([Q-1](assistant-mcp.md#12-open-questions-for-the-maintainer) of the
@@ -25,12 +25,12 @@ All were read on 2026-11-10.
 ## Request
 
 Add [`rmcp`](https://crates.io/crates/rmcp) 3.9.0 (`Apache-2.0`) as a
-workspace dependency of the `jykre` package. Nothing calls it until
-`jykre::mcp` is written. No dummy use is added to silence a warning.
+workspace dependency of the `jovru` package. Nothing calls it until
+`jovru::mcp` is written. No dummy use is added to silence a warning.
 
 ```toml
 # [workspace.dependencies]
-# MCP server for the assistant's tools (ADR-0042, Q-19 option A,
+# MCP server for the assistant's tools (D-0042, Q-19 option A,
 # approved 2026-11-10, docs/plans/rmcp-dependency.md). Server and
 # streamable HTTP only. No client, elicitation, stdio or reqwest:
 # the `reqwest` feature turns on reqwest's `rustls`, which compiles
@@ -40,8 +40,8 @@ rmcp = { version = "3.9.0", default-features = false, features = ["server", "tra
 ```
 
 ```toml
-# [dependencies] of the jykre package
-# MCP server (ADR-0042, Q-19). Nothing calls it until `jykre::mcp` is written.
+# [dependencies] of the jovru package
+# MCP server (D-0042, Q-19). Nothing calls it until `jovru::mcp` is written.
 rmcp.workspace = true
 ```
 
@@ -162,7 +162,7 @@ transport is plain HTTP. `hyper` 1.12.0 stays the copy already in the tree
 through `reqwest`.
 
 `hyper` 1.12.0 and `hyper-util` 0.1.21, already in the lock, are now direct
-dependencies of `jykre` so the Tower `StreamableHttpService` can bind a
+dependencies of `jovru` so the Tower `StreamableHttpService` can bind a
 loopback socket. No other HTTP stack was added.
 
 `reqwest`'s feature on `rmcp` is `reqwest?/rustls`. In this workspace that

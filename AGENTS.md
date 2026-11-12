@@ -1,30 +1,26 @@
 # Project documentation
 
-`docs/README.md` is the source of truth for how this project is built. Read
-its golden rules, `docs/reference/architecture.md` and
-`docs/standards/workflow.md` before the first task, and the document for each
-area you change (UI, performance,
-persistence, security, reliability, results, UX). If a request contradicts the
-documentation, stop and ask instead of improvising. Follow `docs/standards/`;
-mandatory requirements in `docs/reference/` remain binding. Plans and research
-do not grant implementation approval. Documents that track gaps end with a
-*Known deviations* table: new code follows the standard, and existing code is
-migrated only when that is the goal of the work.
+`docs/README.md` is the source of truth for how this project is built and
+explains how the folders are organized. Read its golden rules,
+`docs/reference/architecture.md` and `docs/standards/workflow.md` before the
+first task, and the documents of each area you change. If a request
+contradicts the documentation, stop and ask instead of improvising. Follow
+`docs/standards/`; mandatory requirements in `docs/reference/` remain binding.
+Plans and research do not grant implementation approval. Documents that track
+gaps end with a *Known deviations* table: new code follows the standard, and
+existing code is migrated only when that is the goal of the work.
 
 - UI changes follow `docs/standards/ui-guidelines.md` and must not break a
   budget in `docs/standards/performance.md`; report numbers when the touched
   path is measured.
 - Do not add or upgrade dependencies, change core contracts, the SQLite schema
-  or an ADR without the maintainer's approval. When a dependency would serve
-  better than our own code, propose it
-  (see `docs/standards/stack-and-dependencies.md`)
-  instead of narrowing the feature or hand-rolling a replacement to avoid it.
-
-- Keep documentation and filenames in English, using `kebab-case` for document
-  names (release versions and numbered ADRs retain their conventions).
-- File documents by purpose as described in `docs/README.md`: standards,
-  reference, plans, research and ADRs. Keep approval separate from implementation
-  progress and update links when documents move.
+  or an accepted decision (recorded in `docs/decisions/`) without the
+  maintainer's approval. When a dependency would serve better than our own
+  code, propose it (see `docs/standards/stack-and-dependencies.md`) instead of
+  narrowing the feature or hand-rolling a replacement to avoid it.
+- Documentation conventions (English, `kebab-case`, where each kind of document
+  goes, keeping approval separate from implementation progress, updating links
+  when documents move) are in `docs/README.md`.
 
 # Verifying changes
 

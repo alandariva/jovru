@@ -24,7 +24,7 @@
 
 ## Mechanisms
 
-- **A session per tab** ([ADR-0014](../adr/0014-a-session-per-tab.md)). A tab
+- **A session per tab** (D-0014). A tab
   opens a session on its first run and keeps it until the tab closes, its
   connection changes or the session is lost, so state such as the current
   schema and temporary tables carries over between runs (only autocommit is
@@ -95,7 +95,6 @@
 | Update check: connecting to GitHub, then the whole release list | 15 s each; cancellable |
 | Update download | 15 s to connect, 30 s of silence while the body arrives, 10 min in all; cancellable |
 | Update: verifying the signature and unpacking the archive | 120 s; cancellable. The swap that follows is renames only and is neither cancelled nor timed: a rename refused on Windows (an antivirus holding the file) is tried 5 times, 200 ms apart, then undone |
-
 | Automation: a SQL Job or a program run | The job's own timeout, default 300 s; reaching it fails the run with `timeout` |
 | Automation: a run waiting for a slot | 60 s in the queue (FIFO, at most 8 waiting, 4 per connection), then it leaves with `queue_timeout` |
 | Automation: a stopped SQL run bringing its session back | 11 s in all (the drivers' 5 s recovery plus the close's 5 s and a margin); past it the work is dropped, which drops the session |
@@ -116,105 +115,11 @@ A new network operation gets an explicit timeout and a row in this table.
 
 ## Automation
 
-The engine ([Architecture](../reference/architecture.md#run-a-job)) follows
-these rules; the specification explains why
-([sections 4.6, 5 and 9](../plans/automation-engine-specification.md)).
+The automation engine's reliability rules (no replay, the completion rule,
+`effect_unknown`, arbitration, Stop and the deadline, the queue, chains, quit
+and schedules) are in
+[Automation](../reference/automation.md#automation-1).
 
-- **No replay, ever.** A run is not sent or started a second time after a
-  failure, a timeout, a crash, a lost history write or a restart. There are no
-  retries, no leases and no resume; the user starts a new run on purpose,
-  knowing from the history what the earlier one did. A schedule's catch-up
-  (ADR-0041) does not break this rule: it is a **new run** for a due time no
-  run started for, marked `catch_up`, never a second sending of a run that
-  started; an `interrupted` run is never caught up.
-- **Completion rule (SQL).** A run succeeds only once the statement is
-  confirmed complete. A statement that `reads_only` (by the dialect's tokens,
-  a warning and not a boundary) keeps up to the job's row limit and the
-  memory ceiling and stops reading there: the result is `truncated` and the
-  run still succeeds. Any other statement keeps the same rows but is read **to
-  its end** into a sink that counts and discards (`rows_discarded`) until the
-  driver reports the end, and the engine never asks the driver to stop early,
-  since stopping a write's result could cancel the statement. A page is not
-  proof that a write finished.
-- **`effect_unknown`.** Set when something may have been done that the
-  history cannot confirm: a SQL statement that is not `reads_only` and was
-  sent but neither confirmed nor refused by the server (a deadline, a Stop,
-  a lost connection, a protocol or internal failure); every program run that
-  started and did not succeed, since Studio cannot know what a program did;
-  and every run recovery marks `interrupted` (SQL that only reads excepted). It
-  is shown with the run and is never cleared by running again.
-- **Terminal write before publish.** The owner writes the run's terminal
-  state, and then publishes it. If the row cannot be written *before* the run
-  starts, the run is refused and nothing is sent or started. If the terminal
-  write fails *after* it ended, the user is told (`history_failed`), the run
-  is not repeated, and its row stays `running` until recovery marks it
-  `interrupted` at the next start, with `effect_unknown` as above. Chains
-  follow the same order.
-- **Arbitration.** The first event the owner observes decides the outcome and
-  later ones are ignored. A SQL run decides between the confirmed completion,
-  Stop and the deadline (a completion already confirmed wins over a Stop that
-  became ready in the same instant, since it is what happened). A program
-  decides between its exit, Stop, the deadline and a `jjp/1` protocol
-  failure. A Stop is `cancelled`; a deadline is `failed` with `timeout`.
-- **Stop and the deadline, SQL.** The work's token is cancelled; the driver
-  interrupts the server-side work and brings the session back to a known
-  state, or closes it, within 5 s. The owner waits for that for at most 11 s
-  and then drops the work, which drops the session. A write that was already
-  sent is `effect_unknown`.
-- **Stop and the deadline, programs.** The program is asked to end and its
-  whole tree is killed after 5 s ([Q-17](../plans/automation-engine-specification.md#12-decisions-required-from-the-maintainer)).
-  Under `jjp/1` the request is a `cancel` message that never waits for the
-  program to read it; otherwise it is `SIGTERM` to the process group on Unix.
-  A protocol failure kills the tree at once, a program that exits on its own
-  has whatever it left in its group or job killed, and a descendant that
-  left the group (`setsid`) and still holds the pipes is abandoned after 2 s
-  rather than keeping the run open. Dropping the run's future also kills the
-  tree. On Windows the program cannot be asked to end (see Known deviations):
-  it gets the 5 s and is then killed with its Job Object, which also ends the
-  tree if Studio itself dies.
-- **Queue.** At most 2 runs are active and 1 per connection profile (programs
-  count only towards the global limit); at most 8 wait, 4 per connection, in
-  FIFO order, for at most 60 s. A run beyond the queue is refused at once
-  with the limit it met; a run whose connection is busy does not block a
-  later one on another connection. Waiting runs live in memory and are
-  dropped when the application quits.
-- **Chains.** A chain holds no slot of its own, so a global limit of 1 still
-  progresses: each step releases its slot, session or program before the next
-  asks for one. The first step that does not succeed stops the chain, and
-  later steps never start. Stop cascades to the active or queued step; the
-  chain's deadline cancels the step and fails the chain with `timeout`. A step
-  whose connection profile changed after the plan was confirmed, or whose
-  published program file changed, fails with `plan_changed` (**PlanChanged**);
-  a step that finds the queue full fails with `queue_full`.
-- **Quit.** `Engine::shutdown` refuses new runs, empties the queue, stops
-  every run and chain, waits until each run has closed its session or its
-  program and written its terminal state, and releases the lock so another
-  instance can take over. With SQL runs that takes at most about 11 s, with
-  programs the 5 s grace; the interface asks before quitting with runs
-  active, and declining keeps the application open.
-- **Schedules.** The scheduler runs only in the lock holder and stops first
-  when quitting; catch-ups and a due time waiting under *queue one* live in
-  memory and are dropped by quitting, losing the lock, turning the schedule
-  off, editing it or a suspension (they stay counted as missed). Each
-  schedule remembers its last handled due time and never considers an
-  earlier one, so a wall clock set back repeats nothing. A time counts as
-  handled once its mark is written, once the scheduler took it while the
-  application runs, or once a run was admitted for it (the run's row holds
-  the schedule and the due time), so a mark that could not be written, or a
-  crash before it, never runs the same due time twice. Before each run the
-  grant is checked against the connections' profile revisions and
-  environment labels, the chain's revision, the target's fingerprint and the
-  zone; any difference suspends the schedule and takes its queued run out of
-  the queue, as **Stop** does (an active run is not stopped). A chain is
-  queued until its first step starts: while that step is prepared or waits
-  for a slot, turning the schedule off, deleting it or a suspension stops
-  the chain, and no step runs; once a step started, the chain goes on. A scheduled run
-  opens no dialog: without a remembered password it is admitted and fails
-  with `authentication`, nothing sent; a chain fails before its first step.
-  A scheduled run refused by a full queue or past its wait leaves no run row;
-  the schedule records `refused` with the reason.
-- **Recovery and retention** are in
-  [Persistence](../reference/persistence.md#automation-automationdb).
 
 ## Error classification
 
@@ -240,16 +145,16 @@ A test of the error mapping is required in each driver ([Testing](testing.md)).
 
 ## Logs
 
-Logs follow [ADR-0009](../adr/0009-structured-logging-and-timings.md) and are set
-up by `jykre::logging::init` when the application starts:
+Logs follow D-0009 and are set
+up by `jovru::logging::init` when the application starts:
 
 - `tracing` with `tracing-subscriber`; `tracing-appender` writes in the
   background.
-- JSON lines in `<data folder>/logs/jykre.<date>.log`, one file per day,
+- JSON lines in `<data folder>/logs/jovru.<date>.log`, one file per day,
   keeping the last 7; readable lines on the console in debug builds.
-- Default level `info` for `jykre*` crates and `warn` for dependencies,
-  configurable with `JYKRE_LOG` (`EnvFilter` syntax, for example
-  `JYKRE_LOG=jykre=debug`).
+- Default level `info` for `jovru*` crates and `warn` for dependencies,
+  configurable with `JOVRU_LOG` (`EnvFilter` syntax, for example
+  `JOVRU_LOG=jovru=debug`).
 - A panic hook records panics with their location and a backtrace.
 - Runs (`backend::query`) log their outcome at `info` (duration, statements,
   rows, error code); each statement logs its time, size and limit at `debug`;
@@ -263,9 +168,25 @@ up by `jykre::logging::init` when the application starts:
 - When the user turns it on, the same events (except `trace`, the frame
   probe, UI-thread timings below a warning and events with a free-text
   field) and the spans of external calls are also sent to an OpenTelemetry
-  collector ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md),
+  collector (D-0029,
   [Security](security.md#telemetry)). UI-thread timings use the target
-  `jykre::ui_thread`.
+  `jovru::ui_thread`.
+  - The bridges are added to the subscriber when logging starts, behind
+    per-layer filters. Until the preferences are read, what they capture is
+    held in memory (at most 1,024 spans and 1,024 log records) and then sent
+    or dropped, so the start of the application can be exported. A signal
+    turned off stops being captured at once.
+  - The SDK's batch processors run on threads of their own and each export
+    is polled inside the application's only Tokio runtime; no second
+    runtime is created. Timeouts are in [Timeouts](#timeouts).
+  - Log records are copied before export without `log.file`,
+    `log.module_path`, `code.*` (from the `log` crate bridge: a path on the
+    computer that built a dependency) and the event name, which the bridge
+    takes from the source file and line.
+  - Counts and sizes on spans are recorded as `i64`
+    (`telemetry::attributes::count`), because the span bridge records
+    unsigned integers as text. `list_profiles` and `list_compute` of the
+    Databricks connection dialog have the driver's HTTP and CLI spans only.
 
 ### Levels
 
@@ -285,11 +206,11 @@ Use them whenever they exist in context: `connection_id`, `driver`,
 logging arguments by accident.
 
 A span around an external call (a database, a server, a program, the vault,
-a file) is a `client` span, `jykre::client_span!` in the library, with
+a file) is a `client` span, `jovru::client_span!` in the library, with
 OpenTelemetry semantic-convention names for what telemetry may export
 (`db.system.name`, `db.namespace`, `db.operation.name`,
 `db.response.returned_rows`, `error.type`, `http.request.method`,
-`url.template`, `process.exit.code`, `gen_ai.*`) and `jykre.*` for the rest.
+`url.template`, `process.exit.code`, `gen_ai.*`) and `jovru.*` for the rest.
 It records how it ended with `telemetry::attributes::record_outcome`.
 `backend::run` carries the caller's span into the runtime.
 
@@ -306,10 +227,15 @@ parameters, and SQL above `trace`. See [Security](security.md#logs-and-diagnosti
 - **Open log folder**, under Diagnostics in Preferences, opens the log
   folder in the system's file manager.
 
+## Decisions
+
+The reasoning behind this area's structural choices is in [Decisions: Reliability, errors and logs](../decisions/reliability.md).
+
 ## Known deviations
 
 | Standard | Current code |
 | --- | --- |
 | Retries with backoff for idempotent reads | No automatic retries |
-| Clean shutdown with a deadline | Dropping a workspace cancels its run; there is no explicit shutdown sequence for tabs. Automation has one: `Engine::shutdown` stops its runs and waits for their terminal writes ([above](#automation)) |
-| Stop asks a program to end before killing it | On Windows a program is not asked: the graceful request there is `CTRL_BREAK_EVENT`, which needs `unsafe` Win32 calls (the workspace forbids `unsafe_code`) and a console the program does not have. A program with no `jjp/1` waits the 5 s grace and is killed with its Job Object; under `jjp/1` it still receives `cancel`. To be validated on Windows by the [checklist](../plans/releases/0.3.0-windows-checklist.md) |
+| Clean shutdown with a deadline | Dropping a workspace cancels its run and closes its sessions in the background, without waiting; only the final writes of tabs and reports and the automation engine (`Engine::shutdown`) are awaited |
+
+The deviation of Stop on Windows, where a program is not asked to end first, is in [Automation](../reference/automation.md#known-deviations).

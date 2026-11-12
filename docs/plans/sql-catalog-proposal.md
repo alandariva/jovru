@@ -347,12 +347,12 @@ for each line of keywords.jsonl, functions.jsonl and types.jsonl:
 
 Consumers avoiding ranges can use version snapshots.
 
-### 10.3 Jykre Studio consumption
+### 10.3 Jovru consumption
 
-Until the separate repository exists, local catalog/ data is generated through cargo xtask catalogs; see [ADR-0021](../adr/0021-sql-catalogs-read-at-run-time.md).
+Until the separate repository exists, local catalog/ data is generated through cargo xtask catalogs; see [D-0021](../decisions/sql-catalogs.md#d-0021).
 
-- Read **at runtime**, at startup off the UI thread, from the first directory containing a catalog: JYKRE_SQL_CATALOG_DIR, catalog beside the executable (included in releases), then repository catalog in development.
-- Pointing JYKRE_SQL_CATALOG_DIR at an external checkout simulates the final arrangement.
+- Read **at runtime**, at startup off the UI thread, from the first directory containing a catalog: JOVRU_SQL_CATALOG_DIR, catalog beside the executable (included in releases), then repository catalog in development.
+- Pointing JOVRU_SQL_CATALOG_DIR at an external checkout simulates the final arrangement.
 - Currently choose each dialect's latest version; server-specific filtering requires per-session driver version reporting (Q9).
 - Network only through explicit xtask commands, never during build/application execution.
 
@@ -368,7 +368,7 @@ Until the separate repository exists, local catalog/ data is generated through c
 | Q6 | MySQL help-table syntax-line format [H] |
 | Q7 | Can DESCRIBE FUNCTION signatures and Spark usage text safely use Apache-2.0 source attribution? [H] |
 | Q8 | Initial versions: PG 14+, MySQL 8.0 or 8.4+, Databricks from first observation? |
-| Q9 | Can each Jykre session report server version for catalog filtering? |
+| Q9 | Can each Jovru session report server version for catalog filtering? |
 
 ## Sources
 
