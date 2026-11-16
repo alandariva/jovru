@@ -266,7 +266,7 @@ is declared.
 One token is one saved connection. A user who wants two connections creates
 two tokens.
 
-- **Form:** `jykmcp_<id>_<secret>`. `<id>` is 10 lowercase base32 characters
+- **Form:** `jovmcp_<id>_<secret>`. `<id>` is 10 lowercase base32 characters
   (`abcdefghijklmnopqrstuvwxyz234567`), not secret: it names the record and
   the vault account and is the prefix shown later. `<secret>` is 256 bits as
   64 lowercase hex digits from the secure random source of the `ring`

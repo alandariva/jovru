@@ -178,12 +178,12 @@ Your own files there, and the data folder, are left as they are. The request
 carries your address and the version. A development build, or a folder the
 application cannot write, offers the release page instead.
 
-The signature's context is the archive's file name. For the 0.4.0 archives,
+The signature's context is the archive's file name. For the 0.5.0 archives,
 with [zipsign](https://crates.io/crates/zipsign) 0.2.2:
 
 ```bash
-zipsign verify zip --context jovru-v0.4.0-windows-x86_64.zip jovru-v0.4.0-windows-x86_64.zip assets/update/release-key.pub
-zipsign verify tar --context jovru-v0.4.0-linux-x86_64.tar.gz jovru-v0.4.0-linux-x86_64.tar.gz assets/update/release-key.pub
+zipsign verify zip --context jovru-v0.5.0-windows-x86_64.zip jovru-v0.5.0-windows-x86_64.zip assets/update/release-key.pub
+zipsign verify tar --context jovru-v0.5.0-linux-x86_64.tar.gz jovru-v0.5.0-linux-x86_64.tar.gz assets/update/release-key.pub
 ```
 
 ### Build from source
@@ -265,14 +265,16 @@ crates fit together is in
 ## Project status
 
 The project is in active development. The latest release is
-[v0.4.0](../../releases/tag/v0.4.0).
+[v0.5.0](../../releases/tag/v0.5.0).
 
 Version 0.2.0 made daily use reliable, including updates from signed
 releases. Version 0.3.0 adds automation while the application is open,
 editing in the result grid, CSV and Excel import, shortcuts you choose, and
 grid columns that can be hidden, moved, frozen and found. Version 0.4.0 adds
 an optional local MCP server, so an external assistant you choose can use the
-same read-only tools as the in-app assistant.
+same read-only tools as the in-app assistant. Version 0.5.0 renames the
+application to Jovru, gives the assistant room for longer answers and turns,
+and fixes bugs in the MCP server, grid edits, import and automation.
 
 Windows is the primary platform. Linux is validated on Ubuntu 24.04 with
 X11. Wayland and macOS are not validated. Behavior can change between

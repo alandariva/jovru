@@ -4080,7 +4080,7 @@ dependencies = [
 
 [[package]]
 name = "jovru"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "calamine",
  "criterion",
@@ -4134,7 +4134,7 @@ dependencies = [
 
 [[package]]
 name = "jovru-assistant"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "futures-util",
  "genai",
@@ -4150,7 +4150,7 @@ dependencies = [
 
 [[package]]
 name = "jovru-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -4164,7 +4164,7 @@ dependencies = [
 
 [[package]]
 name = "jovru-driver-databricks"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "jovru-core",
  "reqwest 0.12.28",
@@ -4177,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "jovru-driver-mysql"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "futures-util",
  "jovru-core",
@@ -4190,7 +4190,7 @@ dependencies = [
 
 [[package]]
 name = "jovru-driver-postgres"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "futures-util",
  "jovru-core",
@@ -4203,7 +4203,7 @@ dependencies = [
 
 [[package]]
 name = "jovru-driver-sqlite"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "futures-util",
  "jovru-core",
@@ -4215,7 +4215,7 @@ dependencies = [
 
 [[package]]
 name = "jovru-secrets"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "jovru-core",
  "keyring",
@@ -4225,14 +4225,14 @@ dependencies = [
 
 [[package]]
 name = "jovru-sql"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "jovru-core",
 ]
 
 [[package]]
 name = "jovru-sql-language"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "jovru-core",
  "jovru-sql",
@@ -4243,7 +4243,7 @@ dependencies = [
 
 [[package]]
 name = "jovru-storage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "jovru-core",
  "serde_json",
@@ -10284,7 +10284,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde_json",
 ]
