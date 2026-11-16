@@ -7,8 +7,8 @@ use crate::automation::schedule::{
     Clock, ManualClock, ScheduleConnection, ScheduleError, missing_defaults,
 };
 use crate::connection_appearance::Environment;
-use jykre_core::automation::{MissedPolicy, OverlapPolicy, ScheduleId, ScheduleOutcome};
-use jykre_storage::{ScheduleDraft, StoredSchedule};
+use jovru_core::automation::{MissedPolicy, OverlapPolicy, ScheduleId, ScheduleOutcome};
+use jovru_storage::{ScheduleDraft, StoredSchedule};
 use secrecy::SecretString;
 
 const MINUTE: Duration = Duration::from_secs(60);

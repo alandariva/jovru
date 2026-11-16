@@ -3,7 +3,7 @@
 //! the run's fingerprint.
 use super::definition::{JobDefinition, canonical_json};
 use super::process::Launch;
-use jykre_core::ConnectionId;
+use jovru_core::ConnectionId;
 use serde_json::{Value, json};
 
 /// A SQL run: the definition (its parameter specifications, never the
@@ -27,7 +27,9 @@ pub(super) fn sql(
 }
 
 /// A program run: the definition, what was resolved to start it, and the
-/// entrypoint's fingerprint. Environment values are never part of it.
+/// entrypoint's fingerprint. The definition's own constants (arguments and
+/// `environment.set` values) are part of it, as the job saved them; values
+/// from the machine's environment are not, only the count of names.
 pub(super) fn program(definition: &JobDefinition, launch: Option<&Launch>) -> String {
     canonical_json(&json!({
         "kind": "process",

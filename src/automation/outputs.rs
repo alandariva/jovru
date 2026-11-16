@@ -1,12 +1,12 @@
-//! Declared outputs (specification, section 9.3.2; ADR-0035): what a chain
+//! Declared outputs (specification, section 9.3.2; D-0035): what a chain
 //! may read from a step, by name and kind, with the exact text the database
 //! or the program gave and NULL apart from the text `NULL`.
 //!
-//! Values are held in memory only, except for jobs that opt in to ADR-0035.
+//! Values are held in memory only, except for jobs that opt in to D-0035.
 //! They never reach a log, a span or an error message.
 use super::definition::{OutputSpec, RowRule, SqlOutput};
 use crate::result::ResultData;
-use jykre_core::{ParameterKind, is_parameter_value};
+use jovru_core::{ParameterKind, is_parameter_value};
 
 /// The most one value may take in memory.
 pub const MAX_VALUE_BYTES: usize = 64 * 1024;

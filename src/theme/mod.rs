@@ -30,21 +30,21 @@ pub const SETTINGS_KEY: &str = "appearance.theme";
 pub const OVERRIDES_KEY: &str = "appearance.theme_overrides";
 
 /// Id of the bundled dark theme.
-pub const DARK_ID: &str = "jykre-dark";
+pub const DARK_ID: &str = "jovru-dark";
 
 /// Id of the bundled light theme.
-pub const LIGHT_ID: &str = "jykre-light";
+pub const LIGHT_ID: &str = "jovru-light";
 
 /// The theme the user chose.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ThemeChoice {
     /// Follows the operating system, also when it changes while the
-    /// application runs. Draws `jykre-dark` or `jykre-light`.
+    /// application runs. Draws `jovru-dark` or `jovru-light`.
     #[default]
     System,
-    /// Always `jykre-light`.
+    /// Always `jovru-light`.
     Light,
-    /// Always `jykre-dark`.
+    /// Always `jovru-dark`.
     Dark,
     /// A theme file's id, loaded from disk or from the bundled files.
     Named(String),

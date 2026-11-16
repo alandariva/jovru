@@ -1,30 +1,30 @@
-//! Measures the SQL Job completion rule (docs/plans/automation-sql-job-poc.md,
+//! Measures the SQL Job completion rule (docs/reference/automation.md,
 //! section 5): a write that returns more rows than the row limit, read to
 //! its end. Prints the rows read and discarded, the time from the first
 //! page to the confirmed end, rows per second and memory.
 //!
-//! Without `JYKRE_CONNECTION` it uses a new SQLite file in the temporary
+//! Without `JOVRU_CONNECTION` it uses a new SQLite file in the temporary
 //! folder. With it (a non-sensitive ConnectionConfig JSON, password in
-//! `JYKRE_PASSWORD`), it creates and drops a table of its own there: use only
-//! the local fixtures. `JYKRE_ROWS` sets the rows (default 100,000).
+//! `JOVRU_PASSWORD`), it creates and drops a table of its own there: use only
+//! the local fixtures. `JOVRU_ROWS` sets the rows (default 100,000).
 // A command-line example: printing the measurement is its output.
 #![allow(clippy::print_stdout)]
-use jykre::automation::definition::{JobBody, JobDefinition};
-use jykre::automation::{Availability, ConnectionInput, Engine, JobRequest, RunStatus};
-use jykre::drivers::*;
+use jovru::automation::definition::{JobBody, JobDefinition};
+use jovru::automation::{Availability, ConnectionInput, Engine, JobRequest, RunStatus};
+use jovru::drivers::*;
 use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let rows: u64 = match std::env::var("JYKRE_ROWS") {
-        Ok(rows) => rows.parse().map_err(|_| "JYKRE_ROWS must be a number")?,
+    let rows: u64 = match std::env::var("JOVRU_ROWS") {
+        Ok(rows) => rows.parse().map_err(|_| "JOVRU_ROWS must be a number")?,
         Err(_) => 100_000,
     };
-    let (input, file) = match std::env::var("JYKRE_CONNECTION") {
+    let (input, file) = match std::env::var("JOVRU_CONNECTION") {
         Ok(json) => {
             let config: ConnectionConfig =
                 serde_json::from_str(&json).map_err(|_| "Invalid connection configuration JSON")?;
-            let password = std::env::var("JYKRE_PASSWORD").ok().map(SecretString::from);
+            let password = std::env::var("JOVRU_PASSWORD").ok().map(SecretString::from);
             (
                 ResolvedConnection {
                     config,
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Err(_) => {
             let path = std::env::temp_dir().join(format!(
-                "jykre-automation-drain-{}.sqlite",
+                "jovru-automation-drain-{}.sqlite",
                 ConnectionId::new()
             ));
             std::fs::write(&path, b"")?;
@@ -74,7 +74,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let data_dir = std::env::temp_dir().join(format!(
-        "jykre-automation-drain-data-{}",
+        "jovru-automation-drain-data-{}",
         ConnectionId::new()
     ));
     let engine = Engine::start(tokio::runtime::Handle::current(), data_dir.clone());

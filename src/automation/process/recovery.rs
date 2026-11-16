@@ -1,12 +1,12 @@
 //! Programs left running by a crash (specification, section 9.1.6; Q-29).
 //!
-//! On Unix a program's process group survives a crash of Studio. Its run
+//! On Unix a program's process group survives a crash of Jovru. Its run
 //! records the group ID (the leader's PID) and the leader's start time as
 //! the system reports it; at the next start, a group is offered for ending
 //! only while its leader still exists **with that start time**, so a PID the
 //! system gave to another process is never touched. Linux reports the start
 //! time in `/proc/<pid>/stat`; other systems record none, so nothing is ever
-//! offered there. On Windows the Job Object ends the tree with Studio.
+//! offered there. On Windows the Job Object ends the tree with Jovru.
 use std::io;
 
 /// The leader's start time: field 22 of `/proc/<pid>/stat` (clock ticks

@@ -72,7 +72,7 @@ impl Default for ExecutionOptions {
     }
 }
 
-/// The type a parameter's value is read as (ADR-0023).
+/// The type a parameter's value is read as (D-0023).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParameterKind {
     Text,
@@ -87,7 +87,7 @@ pub enum ParameterKind {
 }
 
 /// A named value the driver binds: it travels apart from the SQL text and is
-/// never written into it (ADR-0023). The caller finds the markers; `markers`
+/// never written into it (D-0023). The caller finds the markers; `markers`
 /// holds the byte ranges of this parameter's `:name` markers in
 /// [`QueryRequest::sql`]. A driver replaces each marker with a fixed
 /// reference to the bound value, or sends the SQL unchanged when the server
@@ -289,11 +289,25 @@ fn is_date(value: &str) -> bool {
     else {
         return false;
     };
-    digits(year, 4)
-        && digits(month, 2)
-        && digits(day, 2)
-        && (1..=12).contains(&month.parse::<u8>().unwrap_or(0))
-        && (1..=31).contains(&day.parse::<u8>().unwrap_or(0))
+    if !(digits(year, 4) && digits(month, 2) && digits(day, 2)) {
+        return false;
+    }
+    let (year, month, day) = (
+        year.parse::<u32>().unwrap_or(0),
+        month.parse::<u8>().unwrap_or(0),
+        day.parse::<u8>().unwrap_or(0),
+    );
+    // A day the calendar lacks (`2026-02-30`) is refused here: MySQL would
+    // turn it into NULL and the query would return nothing without an error.
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let last = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=last).contains(&day)
 }
 
 fn is_timestamp(value: &str) -> bool {
@@ -329,7 +343,7 @@ pub struct ColumnInfo {
     pub data_type: String,
     pub nullable: Option<bool>,
     /// Where the column's values come from, as the protocol described it
-    /// when the statement was prepared, with no extra I/O (ADR-0039).
+    /// when the statement was prepared, with no extra I/O (D-0039).
     pub origin: ColumnOrigin,
 }
 
@@ -345,7 +359,7 @@ impl ColumnInfo {
     }
 }
 
-/// Where a result column's values come from (ADR-0039).
+/// Where a result column's values come from (D-0039).
 #[non_exhaustive]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum ColumnOrigin {

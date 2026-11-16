@@ -11,11 +11,11 @@ use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::cell_format::{self, ValueFamily};
-use jykre::column_layout::{ColumnLayout, ColumnWidths};
-use jykre::grid::{self, CellMark, CellSelection, ColumnSort, GridView, selection_block};
-use jykre::grid_edit::{Overlay, RowMark};
-use jykre::tr;
+use jovru::cell_format::{self, ValueFamily};
+use jovru::column_layout::{ColumnLayout, ColumnWidths};
+use jovru::grid::{self, CellMark, CellSelection, ColumnSort, GridView, selection_block};
+use jovru::grid_edit::{Overlay, RowMark};
+use jovru::tr;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -224,7 +224,7 @@ pub(super) struct Strip {
     flexible: bool,
 }
 
-/// The text colour of a value, by its family ([Results](../../docs/reference/results.md#value-presentation)).
+/// The text colour of a value, by its family ([Results](../../../docs/reference/results/model.md#value-presentation)).
 pub(super) fn value_color(raw: Option<&str>, family: ValueFamily, c: &Palette) -> u32 {
     if raw.is_none() {
         c.value_null
@@ -1035,7 +1035,7 @@ mod tests {
     #[test]
     fn grid_paint_preserves_value_roles_alpha_and_optional_stripes() {
         crate::app::source_text();
-        let mut palette = jykre::theme::builtin_dark().clone();
+        let mut palette = jovru::theme::builtin_dark().clone();
         palette.value_number = 0x123456;
         palette.value_null = 0xabcdef;
         palette.match_bg = 0x12345678;

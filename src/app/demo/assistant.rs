@@ -1,7 +1,7 @@
 //! The demo's assistant: canned answers, no network. Only the demo
-//! (`JYKRE_DEMO`) uses it; a real tab talks to the configured provider.
+//! (`JOVRU_DEMO`) uses it; a real tab talks to the configured provider.
 use super::OPTIMIZED_SQL;
-use jykre::tr;
+use jovru::tr;
 
 /// The canned answer to `question` and the SQL it suggests.
 pub fn answer(question: &str) -> (String, Option<&'static str>) {

@@ -1,5 +1,5 @@
 [package]
-name = "jykre-driver-sqlite"
+name = "jovru-driver-sqlite"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-jykre-core = { path = "../core" }
+jovru-core = { path = "../core" }
 serde.workspace = true
 serde_json.workspace = true
 
-# The same SQLx and bundled SQLite that jykre-storage uses (ADR-0027).
+# The same SQLx and bundled SQLite that jovru-storage uses (D-0027).
 sqlx = { workspace = true, features = ["sqlite"] }
 futures-util.workspace = true
 tokio.workspace = true

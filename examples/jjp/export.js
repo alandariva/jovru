@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// A `jjp/1` program for Jykre Studio's automation: it writes synthetic rows
+// A `jjp/1` program for Jovru's automation: it writes synthetic rows
 // to a CSV file and returns how many it wrote and where. Node.js 18 or
 // later, no dependencies. See README.md next to it.
 //
@@ -125,9 +125,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function main() {
   const token = await readToken();
-  const address = process.env.JYKRE_JJP_ADDRESS;
+  const address = process.env.JOVRU_JJP_ADDRESS;
   if (!address) {
-    throw new Error('JYKRE_JJP_ADDRESS is not set: run this from Jykre Studio');
+    throw new Error('JOVRU_JJP_ADDRESS is not set: run this from Jovru');
   }
   const socket = await connect(address);
   const host = new Host(socket);
@@ -151,7 +151,7 @@ async function main() {
   const batch = Math.max(1, Math.ceil(rows / 20));
   for (let row = 1; row <= rows; row++) {
     if (host.cancelled) {
-      // Stop asked us to end: say so and leave; Studio kills the program
+      // Stop asked us to end: say so and leave; Jovru kills the program
       // if it is still running 5 s after asking.
       await host.request('fail', { code: 'CANCELLED', message: `stopped after ${row - 1} rows` });
       socket.end();

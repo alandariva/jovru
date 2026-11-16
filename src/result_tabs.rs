@@ -8,7 +8,7 @@
 //! are read from the result the session keeps open.
 use crate::error_report::ErrorReport;
 use crate::result::{ResultColumn, ResultData, ResultLimit};
-use jykre_core::QueryParameter;
+use jovru_core::QueryParameter;
 use std::sync::Arc;
 
 /// Where the results of a run go.
@@ -110,7 +110,7 @@ pub struct ResultTab {
     /// error's position there.
     pub origin: Option<usize>,
     /// The `:name` values bound for the statement, so running it again for
-    /// an export reads the result shown (ADR-0026).
+    /// an export reads the result shown (D-0026).
     pub parameters: Vec<QueryParameter>,
     pub state: ResultState,
     pub rows_affected: Option<u64>,
@@ -201,7 +201,7 @@ impl ResultTab {
         self.released
     }
 
-    /// What an export of this tab can read ([Results](../docs/reference/results.md#export)).
+    /// What an export of this tab can read ([Results](../docs/reference/results/transfer.md#export)).
     pub fn export_source(&self) -> ExportSource {
         if self.state != ResultState::Done
             || self

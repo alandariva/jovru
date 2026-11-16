@@ -6,7 +6,7 @@
 //! It loads no connection, workspace, vault or data folder of the user:
 //! every file and database it makes lives in a temporary folder removed at
 //! the end. What needs no window (the data, the budgets, the report) is
-//! `jykre::performance`. Closing the window stops the run at its next
+//! `jovru::performance`. Closing the window stops the run at its next
 //! update.
 mod automation;
 mod columns;
@@ -20,14 +20,14 @@ use super::{probe, result_grid::ResultGrid, ui::*};
 use gpui_kit::component::input::{Editor, EditorState};
 use gpui_kit::component::{Theme, ThemeMode, TitleBar};
 use gpui_kit::*;
-use jykre::performance::budget::{Budget, Metric};
-use jykre::performance::report::{Environment, Report, Section};
-use jykre::performance::selection::{self, PathId};
-use jykre::performance::temp::{self, TempFolder};
-use jykre::performance::timings::Timings;
-use jykre::performance::{self as metrics, Counters};
-use jykre::probe::Summary;
-use jykre::tr;
+use jovru::performance::budget::{Budget, Metric};
+use jovru::performance::report::{Environment, Report, Section};
+use jovru::performance::selection::{self, PathId};
+use jovru::performance::temp::{self, TempFolder};
+use jovru::performance::timings::Timings;
+use jovru::performance::{self as metrics, Counters};
+use jovru::probe::Summary;
+use jovru::tr;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -37,7 +37,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Why a frame or stall metric is missing without the probe.
-const PROBE_OFF: &str = "the frame probe is off; run with JYKRE_PROBE=1 to time frames and stalls";
+const PROBE_OFF: &str = "the frame probe is off; run with JOVRU_PROBE=1 to time frames and stalls";
 
 /// What the window shows.
 enum Stage {
@@ -432,7 +432,7 @@ impl PerformanceView {
 
 impl Render for PerformanceView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // With `JYKRE_PROBE=1` the frame probe times this window's frames.
+        // With `JOVRU_PROBE=1` the frame probe times this window's frames.
         probe::frame_started();
         probe::rendered("PerformanceView");
         let body = match &mut self.stage {
@@ -509,7 +509,7 @@ pub fn run(paths: Result<Vec<PathId>, String>) {
             ..TitleBar::window_options()
         };
         if open_window(options, cx, |window, cx| {
-            window.set_window_title("Jykre Studio · Performance test");
+            window.set_window_title("Jovru · Performance test");
             cx.new(|cx| PerformanceView::new(paths, timings, probe, leftovers, window, cx))
         })
         .is_err()

@@ -9,8 +9,8 @@
 //! A definition holds no input value: a parameter's default is part of the
 //! definition, as in reports, and a chain's constants are written in it.
 use crate::reports::{ParameterSpec, unknown, with_extra};
-use jykre_core::automation::{JobId, JobKind, parameter_kind_str, parse_parameter_kind};
-use jykre_core::{ConnectionId, ParameterKind, SessionContext, is_parameter_name};
+use jovru_core::automation::{JobId, JobKind, parameter_kind_str, parse_parameter_kind};
+use jovru_core::{ConnectionId, ParameterKind, SessionContext, is_parameter_name};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
@@ -64,7 +64,7 @@ pub struct SqlBody {
     pub outputs: Vec<SqlOutput>,
     /// How the outputs are taken from zero, one or several rows.
     pub row: RowRule,
-    /// Store the outputs' values under ADR-0035.
+    /// Store the outputs' values under D-0035.
     pub persist_outputs: bool,
 }
 
@@ -105,7 +105,7 @@ impl RowRule {
     }
 }
 
-/// How a program talks to Studio (section 9.1.2).
+/// How a program talks to Jovru (section 9.1.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Protocol {
     /// Fixed arguments, no inputs and no outputs; success is exit 0.
@@ -132,7 +132,7 @@ impl Protocol {
     }
 }
 
-/// What a program's environment loses and gains beyond Studio's own
+/// What a program's environment loses and gains beyond Jovru's own
 /// (section 9.1.3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EnvironmentSpec {
@@ -357,7 +357,7 @@ impl JobDefinition {
         }
     }
 
-    /// Whether the job stores its outputs' values (ADR-0035).
+    /// Whether the job stores its outputs' values (D-0035).
     pub fn persists_outputs(&self) -> bool {
         match &self.body {
             JobBody::Sql(sql) => sql.persist_outputs && !sql.outputs.is_empty(),

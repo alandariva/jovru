@@ -1,4 +1,4 @@
-//! **Preferences › Diagnostics › Telemetry** (ADR-0029): whether logs and
+//! **Preferences › Diagnostics › Telemetry** (D-0029): whether logs and
 //! traces go to an OpenTelemetry collector, which protocol reaches it, its
 //! address, and headers for its authentication (kept in the system vault,
 //! never shown back). Saving applies the choice at once.
@@ -8,9 +8,9 @@ use gpui_kit::assets::IconName as I;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::drivers::{CancellationToken, DriverError, ErrorCode};
-use jykre::telemetry::{self, Headers, Protocol, TelemetryPreferences};
-use jykre::{backend, connection_store, tr};
+use jovru::drivers::{CancellationToken, DriverError, ErrorCode};
+use jovru::telemetry::{self, Headers, Protocol, TelemetryPreferences};
+use jovru::{backend, connection_store, tr};
 use std::sync::Arc;
 use std::time::Instant;
 

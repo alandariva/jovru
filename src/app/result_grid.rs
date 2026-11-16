@@ -1,11 +1,11 @@
 //! The result grid: its own entity, embedded in the workspace with
-//! `.cached(...)` ([ADR-0012](../../docs/adr/0012-result-grid-as-a-cached-entity.md)).
+//! `.cached(...)` ([D-0012](../../docs/decisions/results.md#d-0012)).
 //!
 //! Hover, scroll, selection, drags and copies notify only this entity; the
 //! workspace learns what it shows (the selected count, the selection's
 //! statistics, notices) through [`ResultGridEvent`]. What the grid derives
-//! from a result lives in [`jykre::grid`], [`jykre::stats`] and
-//! [`jykre::copy_as`].
+//! from a result lives in [`jovru::grid`], [`jovru::stats`] and
+//! [`jovru::copy_as`].
 mod benchmarks;
 mod column_search;
 mod copying;
@@ -33,11 +33,11 @@ use self::selection::Gesture;
 use super::ui::*;
 use gpui_kit::component::menu::ContextMenuExt as _;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::column_layout::{ColumnLayout, ColumnWidths};
-use jykre::grid::{CellSelection, ColumnSort, GridCache, GridKey, GridView, WidthsCache};
-use jykre::grid_edit::EditSession;
-use jykre::result::ResultData;
-use jykre::result_tabs::ResultId;
+use jovru::column_layout::{ColumnLayout, ColumnWidths};
+use jovru::grid::{CellSelection, ColumnSort, GridCache, GridKey, GridView, WidthsCache};
+use jovru::grid_edit::EditSession;
+use jovru::result::ResultData;
+use jovru::result_tabs::ResultId;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -63,7 +63,7 @@ pub enum ResultGridEvent {
     PanelChanged,
     /// Editing started on a result tab whose table is not known yet: the
     /// workspace reads it from the session and answers with
-    /// [`ResultGrid::set_editing`] (ADR-0039).
+    /// [`ResultGrid::set_editing`] (D-0039).
     EditRequested(ResultId),
     /// The pending edits changed.
     EditsChanged,

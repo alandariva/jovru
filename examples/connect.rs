@@ -1,8 +1,8 @@
-//! Configuration through JYKRE_CONNECTION (non-sensitive JSON) and
-//! JYKRE_PASSWORD; optionally JYKRE_SQL and JYKRE_METADATA=1.
+//! Configuration through JOVRU_CONNECTION (non-sensitive JSON) and
+//! JOVRU_PASSWORD; optionally JOVRU_SQL and JOVRU_METADATA=1.
 // A command-line example: printing what the driver returns is its output.
 #![allow(clippy::print_stdout)]
-use jykre::drivers::*;
+use jovru::drivers::*;
 
 struct Output;
 impl RowSink for Output {
@@ -26,8 +26,8 @@ impl IntrospectionSink for MetadataCount {
 }
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let json = std::env::var("JYKRE_CONNECTION")
-        .map_err(|_| "Set JYKRE_CONNECTION to a non-sensitive ConnectionConfig JSON")?;
+    let json = std::env::var("JOVRU_CONNECTION")
+        .map_err(|_| "Set JOVRU_CONNECTION to a non-sensitive ConnectionConfig JSON")?;
     let config: ConnectionConfig =
         serde_json::from_str(&json).map_err(|_| "Invalid connection configuration JSON")?;
     let driver = builtin_registry()?.get(config.driver)?;
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = ResolvedConnection {
         config,
         credentials: Credentials {
-            password: std::env::var("JYKRE_PASSWORD").ok().map(SecretString::from),
+            password: std::env::var("JOVRU_PASSWORD").ok().map(SecretString::from),
         },
     };
     let cancel = CancellationToken::new();
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Connected: {:?}",
         driver.test(&input, cancel.clone()).await?
     );
-    if std::env::var("JYKRE_METADATA").as_deref() == Ok("1") {
+    if std::env::var("JOVRU_METADATA").as_deref() == Ok("1") {
         let mut count = MetadataCount::default();
         let report = driver
             .introspect(&input, &mut count, cancel.clone())
@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             report.warnings.len()
         );
     }
-    if let Ok(sql) = std::env::var("JYKRE_SQL") {
+    if let Ok(sql) = std::env::var("JOVRU_SQL") {
         let mut session = driver.open_session(&input, cancel.clone()).await?;
         let outcome = session
             .execute(

@@ -1,7 +1,7 @@
 //! A report's print document: one self-contained HTML file with its title,
 //! description and parameters, then each panel with its chart or numbers
 //! and table, laid out in two columns like the report, which the browser
-//! prints or saves as PDF (ADR-0024, ADR-0025).
+//! prints or saves as PDF (D-0024, D-0025).
 //!
 //! It is the one place results reach the disk, and only at a path the user
 //! chose; nothing here picks a path or writes a temporary file. The page
@@ -515,7 +515,7 @@ pub async fn write(path: PathBuf, contents: String) -> std::io::Result<()> {
     use tracing::Instrument as _;
     let span = crate::client_span!(
         "write_file",
-        jykre.bytes = crate::telemetry::attributes::count(contents.len())
+        jovru.bytes = crate::telemetry::attributes::count(contents.len())
     );
     let written = tokio::fs::write(path, contents)
         .instrument(span.clone())

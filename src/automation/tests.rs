@@ -7,13 +7,13 @@ use super::*;
 use crate::drivers::SqliteDriver;
 use crate::parameters::{ParameterError, ParameterProblem};
 use crate::sql::SqlDialect;
-use jykre_core::{
+use jovru_core::{
     CancellationToken, Cell, ColumnInfo, ConnectionConfig, Credentials, Driver, DriverCapabilities,
     DriverDescriptor, DriverKind, DriverOutcome, DriverResult, DriverStatus, ExecutionOptions,
     IntrospectionReport, IntrospectionSink, ObjectKind, ParameterKind, QueryRequest,
     ResolvedConnection, RowSink, ServerInfo, Session, SinkControl, async_trait,
 };
-use jykre_storage::{AutomationRepository, HistoryEntry, HistoryFilter, NewRun};
+use jovru_storage::{AutomationRepository, HistoryEntry, HistoryFilter, NewRun};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -163,7 +163,7 @@ impl Driver for Scripted {
 // Engines and jobs.
 
 fn data_dir() -> PathBuf {
-    std::env::temp_dir().join(format!("jykre-automation-engine-{}", RunId::new()))
+    std::env::temp_dir().join(format!("jovru-automation-engine-{}", RunId::new()))
 }
 
 async fn engine_in(dir: PathBuf, limits: Limits) -> Engine {
@@ -282,7 +282,7 @@ struct SqliteFile {
 
 impl SqliteFile {
     async fn new(setup: &[&str]) -> Self {
-        let path = std::env::temp_dir().join(format!("jykre-automation-{}.sqlite", RunId::new()));
+        let path = std::env::temp_dir().join(format!("jovru-automation-{}.sqlite", RunId::new()));
         std::fs::write(&path, b"").unwrap();
         let input = ResolvedConnection {
             config: ConnectionConfig {
@@ -626,7 +626,7 @@ async fn a_run_never_touches_a_transaction_open_in_another_session() {
     assert!(!outcome.effect_unknown);
     assert!(matches!(
         tab.transaction(CancellationToken::new()).await.unwrap(),
-        Some(jykre_core::TransactionStatus::Open { .. })
+        Some(jovru_core::TransactionStatus::Open { .. })
     ));
     let seen = exec(&mut *tab, "SELECT count(*) FROM a").await;
     assert_eq!(seen.value(0, 0), Some("1"));
@@ -730,6 +730,9 @@ async fn the_queue_refuses_beyond_its_size_and_after_its_wait() {
         late.finished().await,
         RunStatus::Refused(Refusal::QueueTimeout)
     ));
+    // The active run's row is written after its admission, not with it: wait
+    // for the run to execute so a slow disk cannot make the history empty.
+    eventually(Duration::from_secs(5), || executing(&active)).await;
     let history = engine
         .repository()
         .unwrap()
@@ -878,7 +881,7 @@ async fn runs_left_running_are_interrupted_at_start_and_never_replayed() {
     let dir = data_dir();
     std::fs::create_dir_all(&dir).unwrap();
     let repository = match AutomationRepository::open(&dir).await.unwrap() {
-        jykre_storage::Opened::Ready(repository) => repository,
+        jovru_storage::Opened::Ready(repository) => repository,
         _ => unreachable!("a new file"),
     };
     let left = |reads_only: bool| NewRun {
@@ -1062,7 +1065,7 @@ async fn no_value_cell_or_message_is_stored_or_logged() {
 }
 
 // ---------------------------------------------------------------------------
-// Declared outputs (section 9.3.2, ADR-0035).
+// Declared outputs (section 9.3.2, D-0035).
 
 fn with_outputs(job: &mut JobDefinition, row: RowRule) {
     let body = body(job);
@@ -1543,7 +1546,7 @@ async fn history_lists_runs_and_chain_runs_without_their_steps() {
 }
 
 // ---------------------------------------------------------------------------
-// History that cannot be written (section 6.3, ADR-0034 decision 3).
+// History that cannot be written (section 6.3, D-0034 decision 3).
 
 /// A session that holds `automation.db`'s write lock, as a failing disk
 /// would refuse every write, until it is closed.
@@ -1738,7 +1741,7 @@ async fn a_nonzero_exit_fails_with_exit_and_an_unknown_effect() {
 async fn a_program_that_cannot_start_fails_without_an_unknown_effect() {
     let engine = program_engine().await;
     let mut job = program_job("exit:0", Protocol::None, &[]);
-    program_body(&mut job).program = "jykre-no-such-program-4f1".into();
+    program_body(&mut job).program = "jovru-no-such-program-4f1".into();
     let mut handle = engine.submit(program_run(job, &[])).unwrap();
     let outcome = finished(&mut handle).await;
     assert_eq!(
@@ -1852,7 +1855,7 @@ async fn a_changed_program_file_stops_its_chain_step_until_published_again() {
     let file = SqliteFile::new(&chain_file_setup()).await;
     let engine = program_engine().await;
     engine.set_connection_revisions(HashMap::from([(file.id, 1)]));
-    let entrypoint = std::env::temp_dir().join(format!("jykre-entry-{}.txt", RunId::new()));
+    let entrypoint = std::env::temp_dir().join(format!("jovru-entry-{}.txt", RunId::new()));
     std::fs::write(&entrypoint, b"version one").unwrap();
     let mut program = program_job("exit:0", Protocol::None, &[]);
     program_body(&mut program).entrypoint = Some(entrypoint.to_string_lossy().into_owned());

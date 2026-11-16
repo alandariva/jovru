@@ -13,7 +13,7 @@ use crate::drivers::{
 };
 use crate::import::mapping::{Mapping, MatchBy, TargetColumn};
 use crate::result::{ResultColumn, ResultData};
-use jykre_storage::{AutomationRepository, NewRun, RunFinish};
+use jovru_storage::{AutomationRepository, NewRun, RunFinish};
 use serde_json::json;
 use std::io::Write as _;
 use std::path::Path;
@@ -539,7 +539,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_seeded_history_reads_back_in_pages() {
         let folder = super::super::temp::TempFolder::create().unwrap();
-        let jykre_storage::Opened::Ready(repository) =
+        let jovru_storage::Opened::Ready(repository) =
             AutomationRepository::open(folder.path()).await.unwrap()
         else {
             unreachable!("a new file");
@@ -561,7 +561,7 @@ mod tests {
         .await
         .unwrap();
         let page = repository
-            .history(&jykre_storage::HistoryFilter {
+            .history(&jovru_storage::HistoryFilter {
                 job: Some(job.id),
                 limit: 20,
                 ..Default::default()
@@ -570,7 +570,7 @@ mod tests {
             .unwrap();
         assert_eq!(page.len(), 20);
         let failed = repository
-            .history(&jykre_storage::HistoryFilter {
+            .history(&jovru_storage::HistoryFilter {
                 state: Some(RunState::Failed),
                 limit: 100,
                 ..Default::default()

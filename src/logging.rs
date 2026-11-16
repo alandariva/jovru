@@ -1,16 +1,16 @@
-//! Structured logs and timings ([ADR-0009](../docs/adr/0009-structured-logging-and-timings.md)).
+//! Structured logs and timings ([D-0009](../docs/decisions/reliability.md#d-0009)).
 //!
 //! The application calls [`init`] once at startup. Logs go to
-//! `<data folder>/logs/` as JSON lines, one file per day (`jykre.<date>.log`),
+//! `<data folder>/logs/` as JSON lines, one file per day (`jovru.<date>.log`),
 //! keeping the last seven; debug builds also print readable lines to the
-//! console. The default level is `info` for Jykre's crates and `warn` for
-//! dependencies; `JYKRE_LOG` overrides it with `EnvFilter` syntax.
+//! console. The default level is `info` for Jovru's crates and `warn` for
+//! dependencies; `JOVRU_LOG` overrides it with `EnvFilter` syntax.
 //!
 //! Never log passwords, tokens, headers, connection URLs, cell values, query
 //! parameters or SQL above `trace` ([Reliability](../docs/standards/reliability.md#never-logged)).
 //!
-//! The same events, and Jykre's spans, can also be sent to an OpenTelemetry
-//! collector when the user turns it on ([`crate::telemetry`], ADR-0029).
+//! The same events, and Jovru's spans, can also be sent to an OpenTelemetry
+//! collector when the user turns it on ([`crate::telemetry`], D-0029).
 use crate::drivers::{DriverError, DriverResult, ErrorCode};
 use std::{
     path::Path,
@@ -23,14 +23,14 @@ use tracing_appender::{
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// The environment variable that overrides the log filter.
-pub const FILTER_VARIABLE: &str = "JYKRE_LOG";
+pub const FILTER_VARIABLE: &str = "JOVRU_LOG";
 
-/// `info` for Jykre's crates, `warn` for everything else, and nothing from
+/// `info` for Jovru's crates, `warn` for everything else, and nothing from
 /// the AI provider library: some of its warnings carry streamed answers,
-/// which are payloads (ADR-0028). The assistant logs its own rounds.
-pub const DEFAULT_FILTER: &str = "warn,jykre=info,jykre_core=info,jykre_storage=info,\
-jykre_secrets=info,jykre_driver_postgres=info,jykre_driver_mysql=info,\
-jykre_driver_databricks=info,jykre_assistant=info,genai=off";
+/// which are payloads (D-0028). The assistant logs its own rounds.
+pub const DEFAULT_FILTER: &str = "warn,jovru=info,jovru_core=info,jovru_storage=info,\
+jovru_secrets=info,jovru_driver_postgres=info,jovru_driver_mysql=info,\
+jovru_driver_databricks=info,jovru_assistant=info,genai=off";
 
 /// UI-thread work longer than this is logged as a warning.
 pub const UI_THREAD_WARNING: Duration = Duration::from_millis(100);
@@ -57,7 +57,7 @@ pub fn log_dir(data_dir: &Path) -> std::path::PathBuf {
     data_dir.join("logs")
 }
 
-/// The filter in effect: `JYKRE_LOG` when it is set and valid, otherwise
+/// The filter in effect: `JOVRU_LOG` when it is set and valid, otherwise
 /// [`DEFAULT_FILTER`].
 pub fn filter() -> EnvFilter {
     EnvFilter::try_from_env(FILTER_VARIABLE).unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER))
@@ -73,7 +73,7 @@ pub fn init(data_dir: &Path) -> DriverResult<LogGuard> {
         .map_err(|_| DriverError::new(ErrorCode::Internal, "Could not open the log folder."))?;
     let appender = Builder::new()
         .rotation(Rotation::DAILY)
-        .filename_prefix("jykre")
+        .filename_prefix("jovru")
         .filename_suffix("log")
         .max_log_files(KEPT_FILES)
         .build(log_dir(data_dir))
@@ -145,14 +145,14 @@ impl Drop for UiTimer {
         // (crate::telemetry::filter::UI_THREAD_TARGET).
         if elapsed > UI_THREAD_WARNING {
             tracing::warn!(
-                target: "jykre::ui_thread",
+                target: "jovru::ui_thread",
                 operation = self.operation,
                 elapsed_ms,
                 "slow UI-thread work"
             );
         } else {
             tracing::debug!(
-                target: "jykre::ui_thread",
+                target: "jovru::ui_thread",
                 operation = self.operation,
                 elapsed_ms,
                 "UI-thread work"
@@ -268,17 +268,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_filter_parses_and_names_every_jykre_crate() {
+    fn the_default_filter_parses_and_names_every_jovru_crate() {
         assert!(EnvFilter::try_new(DEFAULT_FILTER).is_ok());
         for krate in [
-            "jykre",
-            "jykre_core",
-            "jykre_storage",
-            "jykre_secrets",
-            "jykre_driver_postgres",
-            "jykre_driver_mysql",
-            "jykre_driver_databricks",
-            "jykre_assistant",
+            "jovru",
+            "jovru_core",
+            "jovru_storage",
+            "jovru_secrets",
+            "jovru_driver_postgres",
+            "jovru_driver_mysql",
+            "jovru_driver_databricks",
+            "jovru_assistant",
         ] {
             assert!(DEFAULT_FILTER.contains(&format!("{krate}=info")), "{krate}");
         }

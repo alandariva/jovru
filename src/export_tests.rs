@@ -277,7 +277,7 @@ fn file_names_never_become_paths_or_reserved_names() {
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "jykre-export-{name}-{}",
+        "jovru-export-{name}-{}",
         crate::drivers::ConnectionId::new()
     ));
     std::fs::create_dir_all(&dir).unwrap();

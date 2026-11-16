@@ -1,5 +1,5 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-use jykre_core::*;
+use jovru_core::*;
 use serde_json::json;
 use std::sync::{
     Arc, Mutex,
@@ -580,10 +580,10 @@ async fn a_session_that_knows_no_context_reports_an_empty_one() {
 }
 
 /// A driver that cannot tell where a column comes from keeps every result
-/// read-only (ADR-0039, section 7).
+/// read-only (D-0039, section 7).
 #[tokio::test]
 async fn a_session_that_cannot_tell_keeps_results_read_only() {
-    use jykre_core::write::*;
+    use jovru_core::write::*;
     let mut session: Box<dyn Session> = Box::new(TestSession {
         requests: Arc::new(Mutex::new(Vec::new())),
         closed: Arc::new(AtomicBool::new(false)),
@@ -608,14 +608,14 @@ async fn a_session_that_cannot_tell_keeps_results_read_only() {
         },
         changes: vec![],
         timeout: None,
-        scope: jykre_core::write::WriteScope::Atomic,
+        scope: jovru_core::write::WriteScope::Atomic,
     };
     let written = session
         .write(&request, CancellationToken::new())
         .await
         .unwrap_err();
     assert_eq!(written.code, ErrorCode::NotImplemented);
-    // Nor can it import (ADR-0040).
+    // Nor can it import (D-0040).
     assert_eq!(
         session
             .table_target(&request.target.table, CancellationToken::new())
@@ -774,6 +774,11 @@ fn parameter_validation_rejects_bad_names_values_and_markers() {
         (ParameterKind::Boolean, "yes"),
         (ParameterKind::Date, "2024-13-01"),
         (ParameterKind::Date, "24-01-01"),
+        (ParameterKind::Date, "2026-02-30"),
+        (ParameterKind::Date, "2023-02-29"),
+        (ParameterKind::Date, "1900-02-29"),
+        (ParameterKind::Date, "2024-04-31"),
+        (ParameterKind::Timestamp, "2026-02-30 10:00"),
         (ParameterKind::Timestamp, "2024-01-01"),
         (ParameterKind::Timestamp, "2024-01-01 24:00"),
         (ParameterKind::Timestamp, "2024-01-01 10:00."),
@@ -807,6 +812,8 @@ fn parameter_values_of_each_kind_are_accepted() {
         (ParameterKind::Number, "1E-9"),
         (ParameterKind::Boolean, "false"),
         (ParameterKind::Date, "2024-02-29"),
+        (ParameterKind::Date, "2000-02-29"),
+        (ParameterKind::Date, "2024-04-30"),
         (ParameterKind::Timestamp, "2024-02-29 23:59"),
         (ParameterKind::Timestamp, "2024-02-29T23:59:59.123456"),
         (ParameterKind::Text, ""),

@@ -1,4 +1,4 @@
-//! Whether this copy of Jykre Studio can replace itself: a release build,
+//! Whether this copy of Jovru can replace itself: a release build,
 //! in the folder the release workflow ships, that the user can write to.
 //! Anything else (a development build, a package another tool installed, a
 //! read-only folder) is offered the release's page instead.
@@ -37,7 +37,7 @@ pub enum Installability {
 }
 
 /// Decides for the executable `exe`. Touches the disk: it creates and
-/// removes a file in `<folder>/.jykre-update/` to learn whether the folder
+/// removes a file in `<folder>/.jovru-update/` to learn whether the folder
 /// can be written to, so it runs off the UI thread.
 pub fn detect(
     exe: &Path,
@@ -140,7 +140,7 @@ mod tests {
             detect(&exe, Some(platform), false, true),
             Installability::ManualOnly(ManualReason::NoAsset)
         );
-        let renamed = temp.path().join("jykre-dev");
+        let renamed = temp.path().join("jovru-dev");
         assert_eq!(
             detect(&renamed, Some(platform), true, true),
             Installability::ManualOnly(ManualReason::NotReleaseLayout)

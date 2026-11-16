@@ -12,7 +12,7 @@ use genai::chat::{
 };
 use genai::resolver::{AuthData, Endpoint};
 use genai::{ModelIden, ServiceTarget};
-use jykre_core::{CancellationToken, DriverError, DriverResult, ErrorCode, SecretString};
+use jovru_core::{CancellationToken, DriverError, DriverResult, ErrorCode, SecretString};
 use secrecy::ExposeSecret;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -36,7 +36,7 @@ impl Default for Timeouts {
             connect: Duration::from_secs(15),
             first_byte: Duration::from_secs(120),
             between_chunks: Duration::from_secs(60),
-            round: Duration::from_secs(300),
+            round: Duration::from_secs(900),
         }
     }
 }

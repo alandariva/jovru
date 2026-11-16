@@ -1,4 +1,4 @@
-//! How a report runs (ADR-0025): which panels run, with which requests,
+//! How a report runs (D-0025): which panels run, with which requests,
 //! grouped by where they run (a connection and a database of it), and which
 //! session each group uses.
 //!
@@ -16,7 +16,7 @@ use crate::backend::SessionRun;
 use crate::grouped_tabs::TabStatus;
 use crate::result::{DEFAULT_MEMORY_CEILING, ResultData};
 use crate::sql::SqlDialect;
-use jykre_core::{
+use jovru_core::{
     CancellationToken, ConnectionId, DriverError, DriverResult, ErrorCode, ExecutionOptions,
     QueryRequest, Session, SessionContext,
 };
@@ -680,7 +680,7 @@ mod tests {
     use crate::backend::{QueryBatch, QueryResult};
     use crate::reports::{ChartKind, Panel};
     use crate::result::ResultColumn;
-    use jykre_core::{DriverOutcome, ParameterKind, TransactionStatus};
+    use jovru_core::{DriverOutcome, ParameterKind, TransactionStatus};
 
     fn context(schema: Option<&str>) -> SessionContext {
         SessionContext {
@@ -746,12 +746,12 @@ mod tests {
     #[derive(Debug)]
     struct Idle;
 
-    #[jykre_core::async_trait]
+    #[jovru_core::async_trait]
     impl Session for Idle {
         async fn execute(
             &mut self,
             _: &QueryRequest,
-            _: &mut dyn jykre_core::RowSink,
+            _: &mut dyn jovru_core::RowSink,
             _: CancellationToken,
         ) -> DriverResult<DriverOutcome> {
             Ok(DriverOutcome::default())

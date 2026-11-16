@@ -2,7 +2,7 @@
 //! instructions to the model, not interface text, so they do not follow the
 //! user's locale; the model is asked to answer in the user's language.
 use super::facts::{ErrorFacts, RunFacts};
-use jykre_core::SessionContext;
+use jovru_core::SessionContext;
 use std::fmt::Write as _;
 
 /// What every conversation starts with. `queries` says whether the model
@@ -23,7 +23,7 @@ pub fn system_prompt(engine: &str, language: &str, queries: bool) -> String {
            structure your tools return.\n"
     };
     format!(
-        "You are the SQL assistant inside Jykre Studio, a desktop SQL client. The user works \
+        "You are the SQL assistant inside Jovru, a desktop SQL client. The user works \
          with {engine}; write SQL in its dialect.\n\
          \n\
          What you can and cannot do:\n\

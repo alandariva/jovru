@@ -18,7 +18,7 @@ pub(super) struct Folder(pub(super) PathBuf);
 
 impl Folder {
     pub(super) fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("jykre-import-{}", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("jovru-import-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
         Self(path)
     }
@@ -194,6 +194,48 @@ fn rows_know_their_line_past_blank_lines_and_either_line_ending() {
         "{}",
         error.message
     );
+}
+
+#[test]
+fn a_blank_line_of_a_one_column_file_is_a_row_with_nothing_in_it() {
+    let folder = Folder::new();
+    // The export of `a`, NULL, `b` and then NULL, written as this
+    // application writes it.
+    let path = folder.file("one.csv", b"nick\na\n\nb\n\n");
+    let (_, rows) = events(&path, &csv(CsvOptions::default())).unwrap();
+    assert_eq!(
+        values(&rows),
+        [
+            vec![text("a")],
+            vec![ImportValue::Null],
+            vec![text("b")],
+            vec![ImportValue::Null],
+        ]
+    );
+    assert_eq!(
+        rows.iter().map(|row| row.line).collect::<Vec<_>>(),
+        [2, 3, 4, 5]
+    );
+    // Either line ending, and a file whose last value has no line break.
+    let path = folder.file("crlf.csv", b"nick\r\na\r\n\r\n\r\nb");
+    let (_, rows) = events(&path, &csv(CsvOptions::default())).unwrap();
+    assert_eq!(
+        values(&rows),
+        [
+            vec![text("a")],
+            vec![ImportValue::Null],
+            vec![ImportValue::Null],
+            vec![text("b")],
+        ]
+    );
+    // Without a trailing blank line nothing is added.
+    let path = folder.file("plain.csv", b"nick\na\nb\n");
+    let (_, rows) = events(&path, &csv(CsvOptions::default())).unwrap();
+    assert_eq!(values(&rows), [vec![text("a")], vec![text("b")]]);
+    // Several columns still skip blank lines.
+    let path = folder.file("two.csv", b"a,b\n1,2\n\n3,4\n\n");
+    let (_, rows) = events(&path, &csv(CsvOptions::default())).unwrap();
+    assert_eq!(rows.len(), 2);
 }
 
 #[test]
@@ -527,7 +569,7 @@ fn the_1904_epoch_shifts_dates_and_xlsxwriter_files_read_back() {
     let (_, records) = events(&path, &xlsx("Data")).unwrap();
     assert_eq!(values(&records), [vec![text("1900-01-01 00:00:00")]]);
 
-    // A workbook as rust_xlsxwriter (and so `jykre::export`) writes it.
+    // A workbook as rust_xlsxwriter (and so `jovru::export`) writes it.
     let path = folder.0.join("written.xlsx");
     let mut book = rust_xlsxwriter::Workbook::new();
     let sheet = book.add_worksheet();

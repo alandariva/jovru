@@ -7,18 +7,18 @@
 //! and each change rebuilds the keymap from that copy, leaving out the
 //! default bindings of an action the user gave other keys and adding those
 //! keys in the same contexts. What a key means, how it reads, where it
-//! collides and how the choices are stored is `jykre::keymap`, outside the
-//! views ([User experience](../../docs/reference/ux.md#keyboard-shortcuts)).
+//! collides and how the choices are stored is `jovru::keymap`, outside the
+//! views ([User experience](../../docs/reference/ux/shortcuts.md#keyboard-shortcuts)).
 use super::*;
 use gpui_kit::base::actions as ui;
 use gpui_kit::base::input as text;
-use jykre::keymap::{Assigned, Key, Scope, UserKeys};
+use jovru::keymap::{Assigned, Key, Scope, UserKeys};
 
 /// The key context of a result tab, for moving it.
 pub(super) const RESULT_TABS_CONTEXT: &str = "ResultTabs";
 
 actions!(
-    jykre,
+    jovru,
     [
         /// Ctrl+Shift+P: searches tables and saved queries in the local
         /// cache, or closes that search.
@@ -97,7 +97,7 @@ actions!(
         GridExtendPageDown,
         /// Enter: shows the focused cell's full value in the side panel.
         GridInspect,
-        /// F2: edits the focused cell of an editable result (ADR-0039).
+        /// F2: edits the focused cell of an editable result (D-0039).
         GridEditCell,
         /// Ctrl+Shift+N: sets the selected cells to NULL.
         GridSetNull,
@@ -470,7 +470,7 @@ impl ShortcutState {
             .default_bindings(action)
             .filter_map(|binding| binding_key(binding, self.os))
             .collect();
-        jykre::keymap::unique_keys(&keys)
+        jovru::keymap::unique_keys(&keys)
     }
 
     fn scopes(&self, action: &str) -> Vec<Scope> {
@@ -672,7 +672,7 @@ impl AppView {
         cx.spawn(async move |weak, cx| {
             let value = backend::run(async move {
                 let repository = ConfigRepository::open(&dir).await?;
-                let value = repository.setting(jykre::keymap::SETTINGS_KEY).await;
+                let value = repository.setting(jovru::keymap::SETTINGS_KEY).await;
                 repository.close().await;
                 value
             })
@@ -688,7 +688,7 @@ impl AppView {
                         return;
                     }
                 };
-                let read = jykre::keymap::UserKeys::from_value(value.as_ref(), |action| {
+                let read = jovru::keymap::UserKeys::from_value(value.as_ref(), |action| {
                     is_customizable(action, cx)
                 });
                 if read.needs_rewrite() {
@@ -848,7 +848,7 @@ pub(super) fn persist_user_keys(user: UserKeys, cx: &mut App) -> Task<Result<(),
                 .run(ticket, async {
                     let repository = ConfigRepository::open(&dir).await?;
                     let result = repository
-                        .set_setting(jykre::keymap::SETTINGS_KEY, &value)
+                        .set_setting(jovru::keymap::SETTINGS_KEY, &value)
                         .await;
                     repository.close().await;
                     result
@@ -866,7 +866,7 @@ mod tests {
     // standard one.
     use super::{Group, catalog, context, default_bindings, fixed_title};
     use gpui_kit::{KeyBinding, OperatingSystem};
-    use jykre::keymap::{Assigned, Key, Scope};
+    use jovru::keymap::{Assigned, Key, Scope};
     use std::collections::HashSet;
 
     /// The editor component's `ui::SelectUp` also moves through lists; the
@@ -876,7 +876,7 @@ mod tests {
         crate::app::source_text();
         use super::{ShortcutState, covers};
         use gpui_kit::base::actions::SelectUp;
-        use jykre::keymap::UserKeys;
+        use jovru::keymap::UserKeys;
         let mut state = ShortcutState {
             defaults: vec![
                 KeyBinding::new("shift-up", SelectUp, Some("Input")),
@@ -900,7 +900,7 @@ mod tests {
         );
         assert!(covers(&state.defaults[0], name));
         // An application action is changed in every context it has.
-        let go = "jykre::GoToLine";
+        let go = "jovru::GoToLine";
         assert!(covers(&state.defaults[2], go) && covers(&state.defaults[3], go));
         assert_eq!(state.scopes(go), [Scope::SqlEditor, Scope::Window]);
         let alt = Key::parse("alt-k").unwrap_or_default();
@@ -939,7 +939,7 @@ mod tests {
             .into_iter()
             .collect();
         for entry in catalog() {
-            if entry.action.starts_with("jykre::") {
+            if entry.action.starts_with("jovru::") {
                 assert!(bound.contains(entry.action), "{} has no key", entry.action);
             }
         }
@@ -980,7 +980,7 @@ mod tests {
         }
         for one in &assigned {
             for key in &one.keys {
-                let found = jykre::keymap::conflicts(&assigned, &one.action, &one.scopes, key);
+                let found = jovru::keymap::conflicts(&assigned, &one.action, &one.scopes, key);
                 assert!(
                     found.is_empty(),
                     "{} {} collides with {:?}",

@@ -1,5 +1,5 @@
 //! Which file column fills which table column
-//! ([ADR-0040](../../docs/adr/0040-importing-files-into-a-table.md#2-the-table-and-its-columns)).
+//! ([D-0040](../../docs/decisions/drivers.md#d-0040)).
 //!
 //! Each table column is filled from one file column, or left out so it
 //! takes its default. A required column (`NOT NULL` without a default) left

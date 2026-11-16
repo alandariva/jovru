@@ -5,13 +5,13 @@
 //! Nothing here knows GPUI. The application gives the keymap's default
 //! bindings as plain data (an action's name, its keys and the context they
 //! apply in) and applies what this module decides
-//! ([User experience](../docs/reference/ux.md#keyboard-shortcuts)).
+//! ([User experience](../docs/reference/ux/shortcuts.md#keyboard-shortcuts)).
 use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fmt;
 
 /// The setting that holds the keys the user chose, by action:
-/// `{"jykre::GoToLine": ["ctrl-l"], "input::Search": []}`. An action that is
+/// `{"jovru::GoToLine": ["ctrl-l"], "input::Search": []}`. An action that is
 /// not there keeps its default keys; an empty list leaves it without one.
 pub const SETTINGS_KEY: &str = "keymap.shortcuts";
 
@@ -226,7 +226,7 @@ impl Scope {
 /// The keys an action has now, and where they apply.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Assigned {
-    /// The action's name in the keymap (`jykre::GoToLine`, `input::Search`).
+    /// The action's name in the keymap (`jovru::GoToLine`, `input::Search`).
     pub action: String,
     pub scopes: Vec<Scope>,
     pub keys: Vec<Key>,
@@ -490,12 +490,12 @@ mod tests {
     fn a_key_collides_with_the_actions_it_already_reaches() {
         let all = [
             assigned(
-                "jykre::NewTab",
+                "jovru::NewTab",
                 &[Scope::Window, Scope::SqlEditor],
                 &["ctrl-t"],
                 true,
             ),
-            assigned("jykre::GoToLine", &[Scope::SqlEditor], &["ctrl-g"], true),
+            assigned("jovru::GoToLine", &[Scope::SqlEditor], &["ctrl-g"], true),
             assigned("input::SelectAll", &[Scope::TextField], &["ctrl-a"], true),
             assigned(
                 "input::Backspace",
@@ -503,7 +503,7 @@ mod tests {
                 &["backspace"],
                 false,
             ),
-            assigned("jykre::RefreshNode", &[Scope::Explorer], &["f5"], true),
+            assigned("jovru::RefreshNode", &[Scope::Explorer], &["f5"], true),
         ];
         let names = |found: Vec<&Assigned>| -> Vec<String> {
             found.into_iter().map(|a| a.action.clone()).collect()
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(
             names(conflicts(
                 &all,
-                "jykre::ShowPreferences",
+                "jovru::ShowPreferences",
                 &[Scope::Window],
                 &key("ctrl-a")
             )),
@@ -521,28 +521,28 @@ mod tests {
         assert_eq!(
             names(conflicts(
                 &all,
-                "jykre::ShowPreferences",
+                "jovru::ShowPreferences",
                 &[Scope::Window],
                 &key("f5")
             )),
-            ["jykre::RefreshNode"]
+            ["jovru::RefreshNode"]
         );
         // An editor action does not reach the explorer.
-        assert!(conflicts(&all, "jykre::GoToLine", &[Scope::SqlEditor], &key("f5")).is_empty());
+        assert!(conflicts(&all, "jovru::GoToLine", &[Scope::SqlEditor], &key("f5")).is_empty());
         assert_eq!(
             names(conflicts(
                 &all,
-                "jykre::GoToLine",
+                "jovru::GoToLine",
                 &[Scope::SqlEditor],
                 &key("ctrl-t")
             )),
-            ["jykre::NewTab"]
+            ["jovru::NewTab"]
         );
         // Its own key is not a collision.
-        assert!(conflicts(&all, "jykre::GoToLine", &[Scope::SqlEditor], &key("ctrl-g")).is_empty());
+        assert!(conflicts(&all, "jovru::GoToLine", &[Scope::SqlEditor], &key("ctrl-g")).is_empty());
         let typing = conflicts(
             &all,
-            "jykre::GoToLine",
+            "jovru::GoToLine",
             &[Scope::SqlEditor],
             &key("backspace"),
         );
@@ -554,35 +554,35 @@ mod tests {
     fn chosen_keys_replace_the_defaults_and_go_back_to_them() {
         let defaults = [key("ctrl-w"), key("ctrl-f4")];
         let mut keys = UserKeys::default();
-        assert_eq!(keys.effective("jykre::CloseActiveTab", &defaults), defaults);
-        keys.set("jykre::CloseActiveTab", vec![key("ctrl-q")], &defaults);
+        assert_eq!(keys.effective("jovru::CloseActiveTab", &defaults), defaults);
+        keys.set("jovru::CloseActiveTab", vec![key("ctrl-q")], &defaults);
         assert_eq!(
-            keys.effective("jykre::CloseActiveTab", &defaults),
+            keys.effective("jovru::CloseActiveTab", &defaults),
             [key("ctrl-q")]
         );
-        assert!(keys.is_chosen("jykre::CloseActiveTab"));
+        assert!(keys.is_chosen("jovru::CloseActiveTab"));
         // Choosing the defaults again is the same as not choosing.
-        keys.set("jykre::CloseActiveTab", defaults.to_vec(), &defaults);
+        keys.set("jovru::CloseActiveTab", defaults.to_vec(), &defaults);
         assert!(keys.is_empty());
         // Taking a key away from an action leaves it the others.
         keys.take_key(
-            "jykre::CloseActiveTab",
+            "jovru::CloseActiveTab",
             &defaults,
             &key("ctrl-w"),
             &defaults,
         );
         assert_eq!(
-            keys.effective("jykre::CloseActiveTab", &defaults),
+            keys.effective("jovru::CloseActiveTab", &defaults),
             [key("ctrl-f4")]
         );
         keys.take_key(
-            "jykre::CloseActiveTab",
+            "jovru::CloseActiveTab",
             &[key("ctrl-f4")],
             &key("ctrl-f4"),
             &defaults,
         );
-        assert_eq!(keys.effective("jykre::CloseActiveTab", &defaults), []);
-        keys.reset("jykre::CloseActiveTab");
+        assert_eq!(keys.effective("jovru::CloseActiveTab", &defaults), []);
+        keys.reset("jovru::CloseActiveTab");
         assert!(keys.is_empty());
         keys.set("a::B", vec![key("f6")], &[]);
         keys.set("a::C", vec![key("f7")], &[]);
@@ -593,12 +593,12 @@ mod tests {
     #[test]
     fn the_setting_reads_back_what_it_stores() {
         let mut keys = UserKeys::default();
-        keys.set("jykre::GoToLine", vec![key("ctrl-l")], &[key("ctrl-g")]);
+        keys.set("jovru::GoToLine", vec![key("ctrl-l")], &[key("ctrl-g")]);
         keys.set("input::Search", vec![], &[key("ctrl-f")]);
         let value = keys.to_value();
         assert_eq!(
             value,
-            json!({"input::Search": [], "jykre::GoToLine": ["ctrl-l"]})
+            json!({"input::Search": [], "jovru::GoToLine": ["ctrl-l"]})
         );
         let read = UserKeys::from_value(Some(&value), |_| true);
         assert_eq!(read.keys, keys);
@@ -609,17 +609,17 @@ mod tests {
     #[test]
     fn what_cannot_be_read_is_ignored_and_named() {
         let value = json!({
-            "jykre::GoToLine": ["ctrl-l"],
-            "jykre::Gone": ["ctrl-k"],
+            "jovru::GoToLine": ["ctrl-l"],
+            "jovru::Gone": ["ctrl-k"],
             "input::Search": "ctrl-f",
             "input::Replace": ["ctrl-x ctrl-r"],
         });
-        let read = UserKeys::from_value(Some(&value), |action| action != "jykre::Gone");
-        assert_eq!(read.keys.get("jykre::GoToLine"), Some(&[key("ctrl-l")][..]));
+        let read = UserKeys::from_value(Some(&value), |action| action != "jovru::Gone");
+        assert_eq!(read.keys.get("jovru::GoToLine"), Some(&[key("ctrl-l")][..]));
         assert_eq!(read.keys.actions().count(), 1);
         assert_eq!(
             read.ignored,
-            ["input::Replace", "input::Search", "jykre::Gone"]
+            ["input::Replace", "input::Search", "jovru::Gone"]
         );
         assert!(read.needs_rewrite());
         let broken = UserKeys::from_value(Some(&json!(["ctrl-l"])), |_| true);

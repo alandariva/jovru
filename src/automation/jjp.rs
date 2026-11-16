@@ -18,7 +18,7 @@
 //! The token, input values and outputs never reach `tracing`, an error or
 //! a `Debug` output: [`TokenLine`] and [`NamedValues`] redact themselves.
 //! `log` messages and the `fail` message go to the run's `jjp.log` only
-//! ([ADR-0037](../../docs/adr/0037-program-logs-on-disk.md)).
+//! ([D-0037](../../docs/decisions/automation.md#d-0037)).
 mod connection;
 mod frame;
 mod message;
@@ -27,8 +27,8 @@ mod tests;
 
 use super::definition::OutputSpec;
 use super::logs::{LOG_LIMIT, LogSize, LogWriter, Stream};
-use jykre_core::CancellationToken;
-use jykre_core::automation::RunId;
+use jovru_core::CancellationToken;
+use jovru_core::automation::RunId;
 use std::fmt;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -607,7 +607,7 @@ impl RunShared {
 
     /// The host's own note in `jjp.log`.
     async fn note(&self, text: &str) {
-        self.write_log(format!("[jykre] {text}\n").as_bytes(), FAIL_ROOM)
+        self.write_log(format!("[jovru] {text}\n").as_bytes(), FAIL_ROOM)
             .await;
     }
 }

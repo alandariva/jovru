@@ -155,8 +155,8 @@ mod tests {
         let installable = UpdateState::Available {
             candidate: candidate(),
             install: Installability::SelfInstall(InstallDir {
-                dir: PathBuf::from("/opt/jykre"),
-                exe: PathBuf::from("/opt/jykre/jykre"),
+                dir: PathBuf::from("/opt/jovru"),
+                exe: PathBuf::from("/opt/jovru/jovru"),
             }),
         };
         let actions = installable.actions();
@@ -182,7 +182,7 @@ mod tests {
         );
         let ready = UpdateState::ReadyToRestart {
             version: "0.2.1".to_owned(),
-            restart_path: PathBuf::from("/opt/jykre/jykre"),
+            restart_path: PathBuf::from("/opt/jovru/jovru"),
         };
         assert!(ready.actions().restart);
         let failed = UpdateState::Failed {

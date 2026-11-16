@@ -9,7 +9,7 @@
 //! - a query context, from Spark 3.4: `== SQL(line 1, position 15) ==`, whose
 //!   character is one-based. A context in a view (`== SQL of VIEW v(…) ==`)
 //!   points into the view's text, not the statement, and is not read.
-use jykre_core::DriverError;
+use jovru_core::DriverError;
 
 /// Adds the position the message names to `error`, when the server gave
 /// none and the position falls inside `sql`, the statement as sent. Any
@@ -88,7 +88,7 @@ fn position_in(sql: &str, line: usize, character: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jykre_core::{ErrorCode, ServerDiagnostic};
+    use jovru_core::{ErrorCode, ServerDiagnostic};
 
     fn at(sql: &str, token: &str) -> usize {
         sql[..sql.find(token).unwrap_or(sql.len())].chars().count() + 1

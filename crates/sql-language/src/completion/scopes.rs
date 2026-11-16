@@ -10,9 +10,9 @@
 //! `alias.` names a relation of that query or, as in a correlated subquery,
 //! of an enclosing one. The text may be unfinished: a parenthesis left open
 //! keeps its query open to the end of the statement.
-use jykre_core::SqlDialect;
-use jykre_sql::TokenKind;
-use jykre_sql::names::{Name, Part, name_at, parts};
+use jovru_core::SqlDialect;
+use jovru_sql::TokenKind;
+use jovru_sql::names::{Name, Part, name_at, parts};
 use std::ops::Range;
 
 /// Words that end a relation reference instead of being its alias.
@@ -287,7 +287,7 @@ pub(crate) struct Scopes {
 impl Scopes {
     /// Reads `statement` by the rules of `dialect`.
     pub(crate) fn new(statement: &str, dialect: Option<SqlDialect>) -> Self {
-        let tokens = jykre_sql::tokens(statement, dialect)
+        let tokens = jovru_sql::tokens(statement, dialect)
             .into_iter()
             .filter(|(_, kind)| *kind != TokenKind::Comment);
         // MySQL's executable comments (`/*! … */`) are hints, not structure.
@@ -990,8 +990,8 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::{Output, Read, Scopes, select_outputs};
-    use jykre_core::SqlDialect;
-    use jykre_sql::names::{Name, parts};
+    use jovru_core::SqlDialect;
+    use jovru_sql::names::{Name, parts};
     use std::time::{Duration, Instant};
 
     /// The relations seen at the `‸` in `sql`: after `alias.`, the one it

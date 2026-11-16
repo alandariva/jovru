@@ -6,8 +6,8 @@ use super::{Jobs, kind_icon, words};
 use crate::app::ui::*;
 use gpui_kit::assets::IconName as I;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::automation::{ChainStatus, Engine, OverviewEntry, RunStatus};
-use jykre::tr;
+use jovru::automation::{ChainStatus, Engine, OverviewEntry, RunStatus};
+use jovru::tr;
 use std::time::{Duration, Instant};
 
 pub struct RunsView {

@@ -1,5 +1,5 @@
 //! Finding a result's columns by name, ignoring case and accents, computed
-//! without a window ([Results](../docs/reference/results.md#grid)).
+//! without a window ([Results](../docs/reference/results/grid.md#grid)).
 //!
 //! [`find`] lists the columns whose name holds the text, shown and hidden
 //! ones in alphabetical order, each with the byte ranges of its name that

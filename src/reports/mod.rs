@@ -1,14 +1,14 @@
 //! Reports: panels of saved SQL with shared named parameters, each panel
-//! with its own connection, database and chart (ADR-0024, ADR-0025).
+//! with its own connection, database and chart (D-0024, D-0025).
 //!
 //! The library is one JSON value under its own `config.db` setting
-//! ([Persistence](../../docs/reference/persistence.md)). It holds definitions only: never
+//! ([Persistence](../../docs/reference/persistence/README.md)). It holds definitions only: never
 //! a result, and never the values typed for a run, only each parameter's
 //! default. Reading tolerates missing fields and keeps the ones it does not
 //! know, so a version that writes the value back loses nothing another
 //! version stored.
 use crate::parameters::{kind_str, parse_kind};
-use jykre_core::{ConnectionId, ParameterKind, SessionContext};
+use jovru_core::{ConnectionId, ParameterKind, SessionContext};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
@@ -131,7 +131,7 @@ impl ParameterSpec {
     pub(crate) fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
         let name = object.get("name")?.as_str()?;
-        if !jykre_core::is_parameter_name(name) {
+        if !jovru_core::is_parameter_name(name) {
             return None;
         }
         let known = ["name", "label", "kind", "default", "required", "choices"];
@@ -862,7 +862,7 @@ impl Report {
     /// panel uses any more loses its own.
     pub fn reconcile_parameters(
         &mut self,
-        dialect: impl Fn(&ConnectionRef) -> Option<jykre_core::SqlDialect>,
+        dialect: impl Fn(&ConnectionRef) -> Option<jovru_core::SqlDialect>,
     ) {
         let names = params::names_all(
             self.panels

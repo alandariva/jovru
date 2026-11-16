@@ -269,7 +269,7 @@ impl LogSwitch {
 
     /// Gives the switch its provider's logger; until then nothing passes.
     pub fn attach(&self, provider: &SdkLoggerProvider) {
-        let _ = self.factory.set(provider.logger("jykre"));
+        let _ = self.factory.set(provider.logger("jovru"));
     }
 
     /// Sends `next` the records held while pending and makes it the

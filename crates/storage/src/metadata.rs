@@ -37,7 +37,7 @@ CREATE TABLE scope_status (
 
 /// The metadata file's schema version: version 1 is [`SCHEMA`]; each later
 /// version is one step of [`STEPS`], applied in order. A released step is
-/// never edited ([ADR-0018](../../../docs/adr/0018-metadata-cache-migrations.md)).
+/// never edited ([D-0018](../../../docs/decisions/persistence.md#d-0018)).
 const VERSION: i64 = 3;
 
 /// Step 2: Unicode search names (filled by [`migrate`]) and the time of the
@@ -49,7 +49,7 @@ const STEP_2: &str = "ALTER TABLE objects ADD COLUMN search_name TEXT; ALTER TAB
 const STEP_2_INDEX: &str = "INSERT INTO objects_fts(objects_fts) VALUES('rebuild'); CREATE TRIGGER objects_fts_insert AFTER INSERT ON objects BEGIN INSERT INTO objects_fts(rowid,search_name) VALUES(new.rowid,new.search_name); END; CREATE TRIGGER objects_fts_delete AFTER DELETE ON objects BEGIN INSERT INTO objects_fts(objects_fts,rowid,search_name) VALUES('delete',old.rowid,old.search_name); END; CREATE TRIGGER objects_fts_update AFTER UPDATE OF search_name ON objects BEGIN INSERT INTO objects_fts(objects_fts,rowid,search_name) VALUES('delete',old.rowid,old.search_name); INSERT INTO objects_fts(rowid,search_name) VALUES(new.rowid,new.search_name); END;";
 
 /// Step 3: compact keys and one copy of each path
-/// ([ADR-0019](../../../docs/adr/0019-compact-metadata-cache-keys.md)).
+/// ([D-0019](../../../docs/decisions/persistence.md#d-0019)).
 /// Refreshes left behind by a closed application are dropped, as
 /// [`MetadataRepository::recover_interrupted`] would (foreign keys are off
 /// during a step, so nothing cascades), and the secondary indexes go while
@@ -232,7 +232,7 @@ const RETAIN_STATUSES: &str = "DELETE FROM scope_status WHERE scope_key<>'' AND 
 /// (`%25`, `%2F`), joined by `/`. No segment holds the separator, so the
 /// descendants of a node are exactly the keys from `key/` up to `key0` ('0'
 /// follows '/'), and neither dots, LIKE wildcards nor case folding can change
-/// node identity ([ADR-0019](../../../docs/adr/0019-compact-metadata-cache-keys.md)).
+/// node identity ([D-0019](../../../docs/decisions/persistence.md#d-0019)).
 fn key(path: &ObjectPath) -> DriverResult<String> {
     path.0
         .iter()

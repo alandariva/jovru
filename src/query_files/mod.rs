@@ -1,5 +1,5 @@
 //! Saved queries as plain `.sql` files (0.2.0 M7,
-//! [ADR-0031](../../docs/adr/0031-saved-queries-as-sql-files.md)).
+//! [D-0031](../../docs/decisions/persistence.md#d-0031)).
 //!
 //! The files hold only SQL: a query's title is its file name, and its tags
 //! and connection live in the local [`library`] state. Everything here is
@@ -427,7 +427,7 @@ pub(crate) mod testing {
     impl Folder {
         pub fn new() -> Self {
             let path =
-                std::env::temp_dir().join(format!("jykre-query-files-{}", uuid::Uuid::new_v4()));
+                std::env::temp_dir().join(format!("jovru-query-files-{}", uuid::Uuid::new_v4()));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
         }

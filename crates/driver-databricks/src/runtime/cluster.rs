@@ -546,7 +546,7 @@ impl ClusterResult {
 }
 
 /// The Spark SQL literal a classic cluster reads for a parameter
-/// (ADR-0026). Text travels as the hex of its UTF-8 bytes, so no quote,
+/// (D-0026). Text travels as the hex of its UTF-8 bytes, so no quote,
 /// backslash or comment from the value reaches the SQL whatever the
 /// cluster's escaping settings; the other kinds are written only after
 /// checking that they hold nothing but their own characters. A NULL is a
@@ -637,7 +637,7 @@ impl Session for ClusterSession {
     ) -> DriverResult<DriverOutcome> {
         request.validate()?;
         // The command API has no bound values: each marker becomes a typed
-        // literal that never holds the value's own text (ADR-0026).
+        // literal that never holds the value's own text (D-0026).
         let sql = if request.parameters.is_empty() {
             request.sql.clone()
         } else {
@@ -744,7 +744,7 @@ impl Session for ClusterSession {
     }
     /// As on a warehouse: inferred from the statement's text and resolved
     /// against Unity Catalog; the generated tab's markers become typed
-    /// literals when it runs here (ADR-0026).
+    /// literals when it runs here (D-0026).
     async fn edit_target(
         &mut self,
         statement: &str,

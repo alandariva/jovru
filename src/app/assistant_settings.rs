@@ -1,4 +1,4 @@
-//! **Preferences › Assistant** (ADR-0028): which provider and model answer,
+//! **Preferences › Assistant** (D-0028): which provider and model answer,
 //! the API key (kept in the system vault, never shown back), when a request
 //! is reviewed before it leaves, and the prices used to show costs. The
 //! choices are a window global every assistant panel follows.
@@ -7,10 +7,10 @@ use gpui_kit::assets::IconName as I;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::assistant::{self, AssistantPreferences, run::ReviewMode};
-use jykre::drivers::{CancellationToken, DriverError, ErrorCode, SecretString};
-use jykre::{backend, connection_store, tr};
-use jykre_assistant::{Assistant, KeyUse, Price, ProviderKind, Timeouts};
+use jovru::assistant::{self, AssistantPreferences, run::ReviewMode};
+use jovru::drivers::{CancellationToken, DriverError, ErrorCode, SecretString};
+use jovru::{backend, connection_store, tr};
+use jovru_assistant::{Assistant, KeyUse, Price, ProviderKind, Timeouts};
 use std::sync::Arc;
 use std::time::Instant;
 

@@ -1,6 +1,6 @@
 use crate::MySqlConfig;
 use futures_util::TryStreamExt;
-use jykre_core::*;
+use jovru_core::*;
 use secrecy::ExposeSecret;
 use sqlx::mysql::{MySqlConnectOptions, MySqlConnection, MySqlSslMode};
 use sqlx::{
@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 pub(crate) fn map_error(error: sqlx::Error) -> DriverError {
     // Without TLS, `caching_sha2_password` (MySQL 8's default) and
     // `sha256_password` send the password RSA-encrypted when the server has
-    // not cached it, and SQLx is built without its RSA feature (ADR-0002).
+    // not cached it, and SQLx is built without its RSA feature (D-0002).
     // SQLx 0.9 reports that as a configuration error, earlier versions as a
     // protocol error; either way it must not read as a broken protocol.
     let rsa_disabled = |message: &str| message.contains("RSA auth backend disabled");
@@ -1424,15 +1424,26 @@ fn decode(row: &sqlx::mysql::MySqlRow) -> DriverResult<Row> {
         let bytes = <Vec<u8> as sqlx::Decode<sqlx::MySql>>::decode(value)
             .map_err(|_| DriverError::new(ErrorCode::Protocol, "Invalid database value"))?;
         let kind = row.columns()[index].type_info().name();
+        // A spatial value is an SRID and WKB bytes, not text, so it is
+        // binary like a BLOB. Any other value that is not UTF-8 is kept as
+        // bytes too, so one such column does not fail the whole query.
         if matches!(
             kind,
-            "BLOB" | "TINYBLOB" | "MEDIUMBLOB" | "LONGBLOB" | "BINARY" | "VARBINARY" | "BIT"
+            "BLOB"
+                | "TINYBLOB"
+                | "MEDIUMBLOB"
+                | "LONGBLOB"
+                | "BINARY"
+                | "VARBINARY"
+                | "BIT"
+                | "GEOMETRY"
         ) {
             cells.push(Cell::Binary(bytes));
         } else {
-            cells.push(Cell::Text(String::from_utf8(bytes).map_err(|_| {
-                DriverError::new(ErrorCode::Protocol, "Invalid database text encoding")
-            })?));
+            match String::from_utf8(bytes) {
+                Ok(text) => cells.push(Cell::Text(text)),
+                Err(invalid) => cells.push(Cell::Binary(invalid.into_bytes())),
+            }
         }
     }
     Ok(cells)
@@ -1785,7 +1796,7 @@ ORDER BY k.table_schema, k.table_name, k.constraint_name, k.ordinal_position"#;
 
 /// The session variable that holds parameter `index` for a run.
 fn parameter_variable(index: usize) -> String {
-    format!("@jykre_p_{index}")
+    format!("@jovru_p_{index}")
 }
 
 /// The scale an exact number keeps: its fraction digits, at most MySQL's 30;
@@ -1800,7 +1811,7 @@ fn decimal_scale(value: &str) -> usize {
         .min(30)
 }
 
-/// What a parameter's marker becomes (ADR-0023): a read of the variable
+/// What a parameter's marker becomes (D-0023): a read of the variable
 /// bound before the statement, cast to the parameter's type, or a typed
 /// NULL. Neither holds the value. Text is read as it is, so it keeps the
 /// connection's collation.
@@ -1841,7 +1852,7 @@ fn bind_statement(parameters: &[QueryParameter]) -> Option<String> {
 mod tests {
     use super::{Limit, bind_statement, parameter_reference};
     use futures_util::FutureExt;
-    use jykre_core::{
+    use jovru_core::{
         CancellationToken, ErrorCode, ExecutionOptions, ParameterKind, QueryParameter, QueryRequest,
     };
     use std::time::Duration;
@@ -1913,16 +1924,16 @@ mod tests {
         let bound = request.with_references(parameter_reference);
         assert_eq!(
             bound,
-            "SELECT @jykre_p_0, CAST(@jykre_p_1 AS DECIMAL(65,3)), \
-             CAST(@jykre_p_2 AS DECIMAL(65,30)), @jykre_p_3, CAST(@jykre_p_4 AS DATE), \
-             CAST(@jykre_p_5 AS DATETIME(6)), CAST(NULL AS DECIMAL(65,30))"
+            "SELECT @jovru_p_0, CAST(@jovru_p_1 AS DECIMAL(65,3)), \
+             CAST(@jovru_p_2 AS DECIMAL(65,30)), @jovru_p_3, CAST(@jovru_p_4 AS DATE), \
+             CAST(@jovru_p_5 AS DATETIME(6)), CAST(NULL AS DECIMAL(65,30))"
         );
         assert!(!bound.contains("DROP"));
         assert_eq!(
             bind_statement(&request.parameters).as_deref(),
             Some(
-                "SET @jykre_p_0 = ?, @jykre_p_1 = ?, @jykre_p_2 = ?, @jykre_p_3 = ?, \
-                 @jykre_p_4 = ?, @jykre_p_5 = ?"
+                "SET @jovru_p_0 = ?, @jovru_p_1 = ?, @jovru_p_2 = ?, @jovru_p_3 = ?, \
+                 @jovru_p_4 = ?, @jovru_p_5 = ?"
             )
         );
         assert_eq!(bind_statement(&[]), None);

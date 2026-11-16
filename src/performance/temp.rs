@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The start of every folder's name.
-pub const PREFIX: &str = "jykre-performance-";
+pub const PREFIX: &str = "jovru-performance-";
 
 /// A folder the run made; dropping it removes it, as a last resort.
 #[derive(Debug)]

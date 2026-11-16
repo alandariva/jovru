@@ -1,12 +1,12 @@
 use super::*;
-use jykre_core::ErrorCode;
+use jovru_core::ErrorCode;
 use std::path::PathBuf;
 
 const T0: UtcMillis = UtcMillis(1_800_000_000_000);
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 fn dir() -> PathBuf {
-    std::env::temp_dir().join(format!("jykre-automation-{}", RunId::new()))
+    std::env::temp_dir().join(format!("jovru-automation-{}", RunId::new()))
 }
 
 async fn ready(dir: &Path) -> AutomationRepository {
@@ -593,7 +593,7 @@ async fn a_read_only_open_refuses_a_file_that_fails_its_check() {
 fn lock_holder_helper() {
     // Run by `a_killed_process_releases_the_lock` in a child process; a
     // plain run of the suite does nothing here.
-    let Ok(dir) = std::env::var("JYKRE_TEST_LOCK_DIR") else {
+    let Ok(dir) = std::env::var("JOVRU_TEST_LOCK_DIR") else {
         return;
     };
     let dir = PathBuf::from(dir);
@@ -624,7 +624,7 @@ async fn a_killed_process_releases_the_lock() {
             "automation::tests::lock_holder_helper",
             "--test-threads=1",
         ])
-        .env("JYKRE_TEST_LOCK_DIR", &dir)
+        .env("JOVRU_TEST_LOCK_DIR", &dir)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -1400,7 +1400,7 @@ async fn pruning_expires_values_then_deletes_old_rows() {
 #[tokio::test]
 async fn no_input_value_reaches_the_file() {
     // The engine never hands a value to storage except declared outputs
-    // (ADR-0035); this checks that storage keeps to what it was given.
+    // (D-0035); this checks that storage keeps to what it was given.
     const INPUT: &str = "SENTINEL-INPUT-7f3a9c";
     const OUTPUT: &str = "SENTINEL-OUTPUT-51b2e8";
     let dir = dir();
@@ -1756,7 +1756,7 @@ async fn a_program_that_ran_is_known_to_the_next_instance() {
 }
 #[tokio::test]
 async fn deleted_values_are_overwritten_in_the_file() {
-    // ADR-0035: an expired value must not linger in free pages.
+    // D-0035: an expired value must not linger in free pages.
     let dir = dir();
     let repo = ready(&dir).await;
     let on: i64 = sqlx::query_scalar("PRAGMA secure_delete")
@@ -1839,13 +1839,13 @@ async fn a_version_number_that_runs_still_name_is_never_given_again() {
     // Debug never shows a stored value.
     let value = OutputValue {
         name: "n".into(),
-        kind: jykre_core::ParameterKind::Text,
+        kind: jovru_core::ParameterKind::Text,
         value: Some("secret-value-1".into()),
     };
     assert!(!format!("{value:?}").contains("secret-value-1"));
 }
 
-// ----- schedules and grants (ADR-0041) -----
+// ----- schedules and grants (D-0041) -----
 
 fn draft(job: JobId, version: Option<i64>) -> ScheduleDraft {
     ScheduleDraft {

@@ -8,7 +8,7 @@ pub use super::fonts::fonts;
 /// The colour tokens of one theme. Views name a token
 /// (`rgb(colors().text)`), never a raw value. The values come from the
 /// resolved JSON theme ([UI guidelines](../../docs/standards/ui-guidelines.md#colours-and-theme)).
-pub use jykre::theme::Palette;
+pub use jovru::theme::Palette;
 
 /// The palette of the theme on screen. Cloning the handle is an `Arc`
 /// clone of a theme already resolved; rendering does not read JSON.
@@ -24,17 +24,17 @@ impl std::ops::Deref for ActivePalette {
 
 /// The application surface (shell, buttons, trees, dialogs).
 pub fn colors() -> ActivePalette {
-    ActivePalette(std::sync::Arc::clone(&jykre::theme::active().application))
+    ActivePalette(std::sync::Arc::clone(&jovru::theme::active().application))
 }
 
 /// The SQL editor surface. Equals [`colors`] until an editor override is set.
 pub fn editor_colors() -> ActivePalette {
-    ActivePalette(std::sync::Arc::clone(&jykre::theme::active().editor))
+    ActivePalette(std::sync::Arc::clone(&jovru::theme::active().editor))
 }
 
 /// The result grid surface. Equals [`colors`] until a results override is set.
 pub fn results_colors() -> ActivePalette {
-    ActivePalette(std::sync::Arc::clone(&jykre::theme::active().results))
+    ActivePalette(std::sync::Arc::clone(&jovru::theme::active().results))
 }
 
 /// Meaning of a feedback message. Colour and icon follow the meaning, so an
@@ -119,8 +119,8 @@ pub fn icon(name: IconName, color: u32) -> Icon {
     Icon::new(name).size(px(16.)).text_color(rgb(color))
 }
 
-/// The product icon, `assets/icon/jykre.svg`.
-const APP_MARK: &[u8] = include_bytes!("../../assets/icon/jykre.svg");
+/// The product icon, `assets/icon/jovru.svg`.
+const APP_MARK: &[u8] = include_bytes!("../../assets/icon/jovru.svg");
 
 /// The product icon, `edge` wide. It is rasterized once for each size in
 /// device pixels: a GPUI `img` of the SVG would make a 2048-pixel texture
@@ -342,8 +342,8 @@ pub fn divider() -> Div {
 }
 
 /// The shade of a connection colour the user chose.
-pub fn connection_color(color: jykre::connection_appearance::ConnectionColor) -> u32 {
-    use jykre::connection_appearance::ConnectionColor as C;
+pub fn connection_color(color: jovru::connection_appearance::ConnectionColor) -> u32 {
+    use jovru::connection_appearance::ConnectionColor as C;
     match color {
         C::Mint => colors().mint,
         C::Teal => colors().teal,
@@ -357,38 +357,38 @@ pub fn connection_color(color: jykre::connection_appearance::ConnectionColor) ->
 }
 
 /// What a connection colour is called, for its swatch's label.
-pub fn connection_color_name(color: jykre::connection_appearance::ConnectionColor) -> &'static str {
-    use jykre::connection_appearance::ConnectionColor as C;
+pub fn connection_color_name(color: jovru::connection_appearance::ConnectionColor) -> &'static str {
+    use jovru::connection_appearance::ConnectionColor as C;
     match color {
-        C::Mint => jykre::tr!("Mint"),
-        C::Teal => jykre::tr!("Teal"),
-        C::Blue => jykre::tr!("Blue"),
-        C::Purple => jykre::tr!("Purple"),
-        C::Pink => jykre::tr!("Pink"),
-        C::Red => jykre::tr!("Red"),
-        C::Amber => jykre::tr!("Amber"),
-        C::Slate => jykre::tr!("Slate"),
+        C::Mint => jovru::tr!("Mint"),
+        C::Teal => jovru::tr!("Teal"),
+        C::Blue => jovru::tr!("Blue"),
+        C::Purple => jovru::tr!("Purple"),
+        C::Pink => jovru::tr!("Pink"),
+        C::Red => jovru::tr!("Red"),
+        C::Amber => jovru::tr!("Amber"),
+        C::Slate => jovru::tr!("Slate"),
     }
 }
 
 /// The badge an environment shows after the connection's name.
-pub fn environment_badge(environment: jykre::connection_appearance::Environment) -> Div {
-    use jykre::connection_appearance::Environment as E;
+pub fn environment_badge(environment: jovru::connection_appearance::Environment) -> Div {
+    use jovru::connection_appearance::Environment as E;
     let (text, color) = match environment {
-        E::Development => (jykre::tr!("DEV"), colors().mint),
-        E::Staging => (jykre::tr!("STAGING"), colors().amber),
-        E::Production => (jykre::tr!("PROD"), colors().red),
+        E::Development => (jovru::tr!("DEV"), colors().mint),
+        E::Staging => (jovru::tr!("STAGING"), colors().amber),
+        E::Production => (jovru::tr!("PROD"), colors().red),
     };
     badge(text, color)
 }
 
 /// What an environment is called in the connection dialog.
-pub fn environment_name(environment: jykre::connection_appearance::Environment) -> &'static str {
-    use jykre::connection_appearance::Environment as E;
+pub fn environment_name(environment: jovru::connection_appearance::Environment) -> &'static str {
+    use jovru::connection_appearance::Environment as E;
     match environment {
-        E::Development => jykre::tr!("Development"),
-        E::Staging => jykre::tr!("Staging"),
-        E::Production => jykre::tr!("Production"),
+        E::Development => jovru::tr!("Development"),
+        E::Staging => jovru::tr!("Staging"),
+        E::Production => jovru::tr!("Production"),
     }
 }
 

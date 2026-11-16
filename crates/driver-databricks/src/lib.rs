@@ -7,7 +7,7 @@ pub use auth::{CliProfile, list_profiles};
 pub use config::{ComputeKind, DatabricksConfig};
 pub use runtime::{ComputeResource, list_compute};
 
-use jykre_core::*;
+use jovru_core::*;
 mod auth;
 mod position;
 mod runtime;

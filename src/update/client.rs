@@ -237,14 +237,14 @@ mod tests {
     fn only_the_repository_release_files_are_downloaded() {
         let github = Endpoints::github();
         assert!(github.asset_url_allowed(
-            "https://api.github.com/repos/alandariva/jykre-studio/releases/assets/123456"
+            "https://api.github.com/repos/alandariva/jovru/releases/assets/123456"
         ));
         for refused in [
-            "https://api.github.com/repos/other/jykre-studio/releases/assets/1",
-            "https://api.github.com/repos/alandariva/jykre-studio/releases/assets/",
-            "https://api.github.com/repos/alandariva/jykre-studio/releases/assets/1/../2",
-            "http://api.github.com/repos/alandariva/jykre-studio/releases/assets/1",
-            "https://evil.example/repos/alandariva/jykre-studio/releases/assets/1",
+            "https://api.github.com/repos/other/jovru/releases/assets/1",
+            "https://api.github.com/repos/alandariva/jovru/releases/assets/",
+            "https://api.github.com/repos/alandariva/jovru/releases/assets/1/../2",
+            "http://api.github.com/repos/alandariva/jovru/releases/assets/1",
+            "https://evil.example/repos/alandariva/jovru/releases/assets/1",
         ] {
             assert!(!github.asset_url_allowed(refused), "{refused}");
         }

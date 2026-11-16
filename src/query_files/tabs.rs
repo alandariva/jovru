@@ -1,5 +1,5 @@
 //! The restored tabs' text at start, read off the UI thread: from each
-//! tab's recovery file, otherwise from its `.sql` file (ADR-0031).
+//! tab's recovery file, otherwise from its `.sql` file (D-0031).
 use super::{FileError, OnDisk, check, read, recovery};
 use crate::workspace_state::WorkspaceState;
 use std::path::{Path, PathBuf};

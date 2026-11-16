@@ -10,7 +10,7 @@ use super::{
 use crate::automation::definition::Protocol;
 use crate::automation::jjp::{JjpEvent, JjpProgress, JjpRun, JjpSession, ProtocolProblem};
 use crate::automation::logs::{self, LogSize, LogWriter, Stream};
-use jykre_core::CancellationToken;
+use jovru_core::CancellationToken;
 #[cfg(unix)]
 use process_wrap::tokio::ProcessGroup;
 use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
@@ -216,6 +216,8 @@ async fn execute(request: ProgramRequest) -> ProgramReport {
     tracing::debug!(run = %run, pid = ?tree.group, "program started");
 
     let mut jjp_open = session.is_some();
+    // Until the program says `hello` there is no link to carry a cancel.
+    let mut hello_said = false;
     let decision = loop {
         let event = {
             let leader = tree.child.inner_mut().wait();
@@ -232,7 +234,10 @@ async fn execute(request: ProgramRequest) -> ProgramReport {
             Event::Stop => break Decision::Stop,
             Event::Deadline => break Decision::Deadline,
             Event::Jjp(Some(JjpEvent::Failed(problem))) => break Decision::Protocol(problem),
-            Event::Jjp(Some(JjpEvent::Hello)) => progress.hello(),
+            Event::Jjp(Some(JjpEvent::Hello)) => {
+                hello_said = true;
+                progress.hello();
+            }
             Event::Jjp(Some(JjpEvent::Progress(update))) => progress.update(update),
             // Recorded by the session; the run still ends with the exit.
             Event::Jjp(Some(JjpEvent::Terminal(_))) => {}
@@ -257,7 +262,15 @@ async fn execute(request: ProgramRequest) -> ProgramReport {
             };
             progress.phase(ProgramPhase::Stopping);
             match &session {
-                Some(session) => session.cancel(),
+                Some(session) => {
+                    session.cancel();
+                    // A program that has not said `hello` yet (a slow start)
+                    // gets no `cancel` message, so it is asked to end the way
+                    // a program without the protocol is.
+                    if !hello_said {
+                        ask_to_end(tree.child.as_ref());
+                    }
+                }
                 None => ask_to_end(tree.child.as_ref()),
             }
             let (exit, ended) = end_within_grace(&mut tree, timings).await;
@@ -327,7 +340,7 @@ async fn execute(request: ProgramRequest) -> ProgramReport {
 }
 
 fn empty_report(
-    run: jykre_core::automation::RunId,
+    run: jovru_core::automation::RunId,
     protocol: Protocol,
     fingerprint: Option<String>,
 ) -> ProgramReport {
@@ -356,7 +369,7 @@ fn not_started(mut report: ProgramReport, error: StartError, started: Instant) -
 }
 
 /// A run that never started keeps no logs.
-async fn discard_logs(data_dir: &Path, run: jykre_core::automation::RunId) {
+async fn discard_logs(data_dir: &Path, run: jovru_core::automation::RunId) {
     if let Err(error) = logs::delete_logs(data_dir, run).await {
         tracing::warn!(run = %run, error_kind = ?error.kind(), "empty program logs could not be removed");
     }
@@ -394,7 +407,7 @@ fn spawn(
         wrapped.wrap(flags);
     }
     // With a Job Object this also kills the job when its handle closes,
-    // so Windows ends the tree if Studio crashes.
+    // so Windows ends the tree if Jovru crashes.
     wrapped.wrap(KillOnDrop);
     wrapped.spawn()
 }

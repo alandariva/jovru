@@ -1,12 +1,12 @@
 //! Saving and restoring the workspace between sessions: open query tabs,
 //! saved queries of an earlier version and history
-//! ([`jykre::workspace_state`]). A tab whose text must survive a crash (a
+//! ([`jovru::workspace_state`]). A tab whose text must survive a crash (a
 //! draft, or a file tab's unsaved edits) keeps it in a recovery file,
 //! written before the state that names it
-//! ([ADR-0031](../../docs/adr/0031-saved-queries-as-sql-files.md)).
+//! ([D-0031](../../docs/decisions/persistence.md#d-0031)).
 use super::*;
-use jykre::query_files::{self as files, recovery, tabs::Filled, tabs::Problem};
-use jykre::workspace_state::{SETTINGS_KEY, TabState, WorkspaceState};
+use jovru::query_files::{self as files, recovery, tabs::Filled, tabs::Problem};
+use jovru::workspace_state::{SETTINGS_KEY, TabState, WorkspaceState};
 
 /// Changes are written once they settle, so typing does not write on every
 /// keystroke.
@@ -186,7 +186,7 @@ impl AppView {
                                     Feedback::new(
                                         Tone::Warning,
                                         tr!(
-                                            "Text recovered after Jykre Studio stopped unexpectedly. Save it to a file or close the tab."
+                                            "Text recovered after Jovru stopped unexpectedly. Save it to a file or close the tab."
                                         ),
                                     ),
                                     cx,
@@ -302,7 +302,7 @@ fn problem_notice(problem: &Problem, tab: &TabState) -> Feedback {
         Problem::Changed => Feedback::new(
             Tone::Warning,
             tr!(
-                "{0} changed on disk while Jykre Studio was closed. The tab keeps your unsaved edits; saving asks how to resolve it.",
+                "{0} changed on disk while Jovru was closed. The tab keeps your unsaved edits; saving asks how to resolve it.",
                 name
             ),
         ),

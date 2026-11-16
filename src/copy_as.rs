@@ -1,7 +1,7 @@
 //! The copy formats of a result's selection: tab-separated text, CSV, JSON,
 //! JSON Lines, a Markdown or HTML table, `INSERT` statements, an `IN` list,
 //! values separated by commas and the column names
-//! ([Results](../docs/reference/results.md#copying)).
+//! ([Results](../docs/reference/results/transfer.md#copying)).
 //!
 //! Values are written from the database's text, never reinterpreted: a
 //! number of a number column is written as the database wrote it, a
@@ -12,7 +12,7 @@
 //!
 //! [`CopyOptions`] are the choices of the copy menu: the format `Ctrl C`
 //! copies in and how the delimited formats write their fields. They are kept
-//! in the settings as `copy.preferences` ([Persistence](../docs/reference/persistence.md)).
+//! in the settings as `copy.preferences` ([Persistence](../docs/reference/persistence/README.md)).
 use crate::cell_format::{self, ValueFamily};
 use crate::column_layout::ColumnLayout;
 use crate::decimal;
@@ -21,7 +21,7 @@ use crate::export::{Quoting, Separator, push_csv_field};
 use crate::grid::{CellSelection, block_columns, selection_block};
 use crate::result::ResultData;
 use crate::sql::string_literal;
-use jykre_core::SqlDialect;
+use jovru_core::SqlDialect;
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -217,7 +217,7 @@ pub static PREFERENCE_WRITES: crate::connection_store::LatestWrite =
 
 /// Reads the copy preferences kept in the data folder `dir`.
 pub async fn load_preferences(dir: &Path) -> DriverResult<CopyOptions> {
-    let repository = jykre_storage::ConfigRepository::open(dir).await?;
+    let repository = jovru_storage::ConfigRepository::open(dir).await?;
     let value = repository.setting(PREFERENCES_KEY).await;
     repository.close().await;
     Ok(CopyOptions::from_value(value?.as_ref()))
@@ -229,7 +229,7 @@ pub async fn load_preferences(dir: &Path) -> DriverResult<CopyOptions> {
 pub async fn save_preferences(dir: &Path, options: CopyOptions, ticket: u64) -> DriverResult<()> {
     PREFERENCE_WRITES
         .run(ticket, async {
-            let repository = jykre_storage::ConfigRepository::open(dir).await?;
+            let repository = jovru_storage::ConfigRepository::open(dir).await?;
             let result = repository
                 .set_setting(PREFERENCES_KEY, &options.to_value())
                 .await;
@@ -385,7 +385,29 @@ pub(crate) fn literal(
             "f" | "false" | "0" => "FALSE".into(),
             _ => string_literal(value, dialect),
         },
+        ValueFamily::Binary => {
+            binary_literal(value, dialect).unwrap_or_else(|| string_literal(value, dialect))
+        }
         _ => string_literal(value, dialect),
+    }
+}
+
+/// Bytes shown as `0x…` written as the dialect's binary literal, so the
+/// script stores the bytes and not their hexadecimal text. PostgreSQL shows
+/// `\x…`, which is already a valid `bytea` literal as text, so it is left to
+/// [`string_literal`]. `None` for text that is not hexadecimal bytes.
+fn binary_literal(value: &str, dialect: Option<SqlDialect>) -> Option<String> {
+    let digits = value.trim().strip_prefix("0x")?;
+    if digits.len() % 2 != 0 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    match dialect? {
+        SqlDialect::Postgres => Some(format!("'\\x{digits}'")),
+        // `0x` alone is not a literal in MySQL; an empty string is the same bytes.
+        SqlDialect::MySql if digits.is_empty() => Some("''".into()),
+        SqlDialect::MySql => Some(format!("0x{digits}")),
+        SqlDialect::Sqlite | SqlDialect::DatabricksSql => Some(format!("X'{digits}'")),
+        _ => None,
     }
 }
 
@@ -684,6 +706,23 @@ mod tests {
             quote_name: quote,
             table: "public.people",
         }
+    }
+
+    #[test]
+    fn binary_values_are_written_as_the_dialect_binary_literal() {
+        let literal_of = |value, dialect| literal(Some(value), ValueFamily::Binary, Some(dialect));
+        assert_eq!(literal_of("0x0102", SqlDialect::MySql), "0x0102");
+        assert_eq!(literal_of("0x", SqlDialect::MySql), "''");
+        assert_eq!(literal_of("0x0102", SqlDialect::Sqlite), "X'0102'");
+        assert_eq!(literal_of("0x0A0b", SqlDialect::DatabricksSql), "X'0A0b'");
+        assert_eq!(literal_of("0x", SqlDialect::Sqlite), "X''");
+        assert_eq!(literal_of("0x0102", SqlDialect::Postgres), "'\\x0102'");
+        // PostgreSQL's own text form is already a `bytea` literal.
+        assert_eq!(literal_of("\\x0102", SqlDialect::Postgres), "'\\x0102'");
+        // Text that is not whole bytes stays a quoted string.
+        assert_eq!(literal_of("0x012", SqlDialect::MySql), "'0x012'");
+        assert_eq!(literal_of("0xzz", SqlDialect::Sqlite), "'0xzz'");
+        assert_eq!(literal(None, ValueFamily::Binary, None), "NULL");
     }
 
     #[test]

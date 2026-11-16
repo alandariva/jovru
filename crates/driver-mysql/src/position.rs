@@ -2,7 +2,7 @@
 //! syntax errors (1064 and the like) end with `near '<text>' at line <n>`,
 //! where `<text>` is the statement from the token it stopped at, cut at 80
 //! characters, and `<n>` the line of that token in the statement.
-use jykre_core::DriverError;
+use jovru_core::DriverError;
 
 /// How many characters of the statement MySQL quotes after `near`.
 const QUOTED: usize = 80;
@@ -75,7 +75,7 @@ fn offset_of(near: &str, line: usize, sql: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jykre_core::{ErrorCode, ServerDiagnostic};
+    use jovru_core::{ErrorCode, ServerDiagnostic};
 
     /// MySQL's message for error 1064, as the server writes it.
     fn message(near: &str, line: usize) -> String {
@@ -156,7 +156,7 @@ mod tests {
     fn other_messages_and_text_that_is_not_there_give_no_position() {
         let sql = "SELECT * FROM missing";
         for other in [
-            "Table 'jykre.missing' doesn't exist".to_owned(),
+            "Table 'jovru.missing' doesn't exist".to_owned(),
             "Unknown column 'x' in 'field list'".to_owned(),
             message("FORM t", 0),
             message("not in the statement", 1),

@@ -6,9 +6,9 @@
 //! out; without it, a simple built-in layout does.
 #[cfg(not(feature = "sqruff"))]
 use crate::catalog::{is_builtin_function, is_builtin_keyword};
-use jykre_sql::{SqlDialect, statements};
+use jovru_sql::{SqlDialect, statements};
 #[cfg(not(feature = "sqruff"))]
-use jykre_sql::{TokenKind, tokens};
+use jovru_sql::{TokenKind, tokens};
 use std::ops::Range;
 
 /// Why [`format`] could not format the SQL.
@@ -115,7 +115,7 @@ fn format_statement(statement: &str, dialect: Option<SqlDialect>) -> Option<(Str
 /// was, so the script keeps its separation and every statement keeps its own
 /// first line. Only whitespace and the case of keywords change, so literals,
 /// comments and identifiers keep their meaning and
-/// [`map_offset`](jykre_sql::map_offset) finds any
+/// [`map_offset`](jovru_sql::map_offset) finds any
 /// position again; a result that would change anything else is refused. A
 /// statement that does not parse in the dialect is left as it was
 /// (`partial`).
@@ -322,7 +322,7 @@ select 3;";
 #[cfg(all(test, feature = "sqruff"))]
 mod tests {
     use super::format;
-    use jykre_sql::{SqlDialect, TokenKind, map_offset, statements, tokens};
+    use jovru_sql::{SqlDialect, TokenKind, map_offset, statements, tokens};
 
     const MYSQL: Option<SqlDialect> = Some(SqlDialect::MySql);
     const POSTGRES: Option<SqlDialect> = Some(SqlDialect::Postgres);
@@ -488,7 +488,7 @@ mod tests {
 #[cfg(all(test, not(feature = "sqruff")))]
 mod builtin_tests {
     use super::{format, format_range, same_text};
-    use jykre_sql::{SqlDialect, map_offset, statements};
+    use jovru_sql::{SqlDialect, map_offset, statements};
 
     const MYSQL: Option<SqlDialect> = Some(SqlDialect::MySql);
 

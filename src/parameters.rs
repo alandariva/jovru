@@ -1,9 +1,9 @@
 //! `:name` parameters shared by reports and SQL tabs: which ones a SQL text
 //! holds, how a typed value is checked, and the requests that carry them
-//! (ADR-0023, ADR-0026). Values never go into the SQL text; each request
+//! (D-0023, D-0026). Values never go into the SQL text; each request
 //! carries them with the place of their markers, and the driver binds them.
 use crate::sql::{self, SqlDialect};
-use jykre_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
+use jovru_core::{ExecutionOptions, ParameterKind, QueryParameter, QueryRequest};
 
 /// Every kind, in the order forms offer them.
 pub const KINDS: [ParameterKind; 5] = [
@@ -61,7 +61,7 @@ pub fn normalize(
             Ok(None)
         };
     }
-    if jykre_core::is_parameter_value(kind, &typed) {
+    if jovru_core::is_parameter_value(kind, &typed) {
         Ok(Some(typed))
     } else {
         Err(ParameterProblem::Invalid)
@@ -195,7 +195,7 @@ pub fn infer_kind(typed: &str) -> ParameterKind {
         (ParameterKind::Timestamp, trimmed),
     ]
     .into_iter()
-    .find(|(kind, text)| jykre_core::is_parameter_value(*kind, text))
+    .find(|(kind, text)| jovru_core::is_parameter_value(*kind, text))
     .map_or(ParameterKind::Text, |(kind, _)| kind)
 }
 

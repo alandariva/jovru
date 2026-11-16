@@ -1,4 +1,4 @@
-use jykre::tr;
+use jovru::tr;
 mod assistant_panel;
 mod assistant_settings;
 mod automation;
@@ -50,14 +50,14 @@ use gpui_kit::component::{
     tooltip::Tooltip,
 };
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::explorer::{Tree, TreeRow};
-use jykre::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId, TabId};
-use jykre::query::ShortcutAction;
-use jykre::refresh_queue::RefreshQueue;
-use jykre::workspace_state::QueryEntry;
-use jykre::{backend, connection_store, drivers::*, result::DEFAULT_ROW_LIMIT};
-use jykre_secrets::SystemSecretStore;
-use jykre_storage::{ConfigRepository, RefreshStatus};
+use jovru::explorer::{Tree, TreeRow};
+use jovru::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId, TabId};
+use jovru::query::ShortcutAction;
+use jovru::refresh_queue::RefreshQueue;
+use jovru::workspace_state::QueryEntry;
+use jovru::{backend, connection_store, drivers::*, result::DEFAULT_ROW_LIMIT};
+use jovru_secrets::SystemSecretStore;
+use jovru_storage::{ConfigRepository, RefreshStatus};
 use layout::{ASSISTANT_WIDTH, EXPLORER_WIDTH, splitter};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -141,7 +141,7 @@ fn confirm(
 }
 
 actions!(
-    jykre,
+    jovru,
     [
         /// Ctrl+Enter: the selection, or the statement at the cursor, in place
         /// of the last result tab created.
@@ -251,9 +251,9 @@ struct Connection {
     detail: String,
     /// The colour its explorer entry and tab group share: the one the user
     /// chose, or the driver's.
-    color: jykre::connection_appearance::ConnectionColor,
+    color: jovru::connection_appearance::ConnectionColor,
     /// The colour and environment the user chose.
-    appearance: jykre::connection_appearance::Appearance,
+    appearance: jovru::connection_appearance::Appearance,
     group: TabGroupId,
     expanded: bool,
     input: Option<ResolvedConnection>,
@@ -267,9 +267,9 @@ struct Connection {
     /// Refreshes asked for while another runs, started in order.
     refresh_queue: RefreshQueue,
     /// What the user chose to introspect; pending until they choose.
-    scope: jykre::metadata_scope::MetadataScope,
+    scope: jovru::metadata_scope::MetadataScope,
     /// How far reading the chosen namespaces got, while it runs.
-    progress: Option<jykre::metadata_scope::RefreshProgress>,
+    progress: Option<jovru::metadata_scope::RefreshProgress>,
     status: Feedback,
     notice: Option<String>,
 }
@@ -303,7 +303,7 @@ struct AppView {
     /// The report tabs, apart from the query tabs ([`reports`]).
     report_tabs: HashMap<TabId, reports::ReportTab>,
     /// The saved reports.
-    reports: jykre::reports::ReportLibrary,
+    reports: jovru::reports::ReportLibrary,
     /// The automation engine, its jobs and tabs ([`automation`]).
     automation: automation::Host,
     /// The MCP listener, its tokens and the Requests tab ([`mcp_section`]).
@@ -320,10 +320,10 @@ struct AppView {
     saved_queries: Vec<QueryEntry>,
     history: Vec<QueryEntry>,
     /// Query tabs closed in this session, for **Reopen closed query tab**.
-    closed_tabs: jykre::closed_tabs::ClosedTabs,
+    closed_tabs: jovru::closed_tabs::ClosedTabs,
     /// What is local about the saved-query files: identities, tags,
-    /// connections, the directory (ADR-0031).
-    query_library: jykre::query_files::library::QueryLibrary,
+    /// connections, the directory (D-0031).
+    query_library: jovru::query_files::library::QueryLibrary,
     /// The local library state was read, so it may be written.
     persist_library: bool,
     library_revision: u64,
@@ -331,7 +331,7 @@ struct AppView {
     library_scan: Option<CancellationToken>,
     library_scanned_at: Option<std::time::Instant>,
     /// The files the last scan found.
-    library_found: Vec<jykre::query_files::scan::Found>,
+    library_found: Vec<jovru::query_files::scan::Found>,
     /// The last scan stopped at a bound.
     library_stopped: bool,
     /// Library entries whose file the last scan did not find.
@@ -355,7 +355,7 @@ struct AppView {
     /// The question about unsaved files was answered for this close.
     files_settled: bool,
     /// The explorer's favorites, read at start with the connections.
-    favorites: jykre::favorites::Favorites,
+    favorites: jovru::favorites::Favorites,
     /// Favorites are written only once they were read, so a value that
     /// could not be read is never written over.
     persist_favorites: bool,
@@ -386,12 +386,12 @@ struct AppView {
     settings_page: settings::SettingsPage,
     /// Keeps Tab inside Preferences.
     settings_focus: FocusHandle,
-    /// Preferences > Assistant (ADR-0028).
+    /// Preferences > Assistant (D-0028).
     assistant_settings: Entity<assistant_settings::AssistantSettingsView>,
     telemetry_settings: Entity<telemetry_settings::TelemetrySettingsView>,
     /// Preferences › Shortcuts (0.3.0 A12).
     shortcut_editor: Entity<shortcut_editor::ShortcutEditor>,
-    /// Updates (ADR-0033): Preferences › About › Updates and the status
+    /// Updates (D-0033): Preferences › About › Updates and the status
     /// bar's badge, which share the `updates::Updater`.
     update_settings: Entity<updates::UpdateSettingsView>,
     update_badge: Entity<updates::UpdateBadge>,
@@ -428,7 +428,7 @@ struct AppView {
     connection_port: Entity<InputState>,
     connection_row_limit: Entity<InputState>,
     /// The colour and environment chosen in the connection dialog.
-    connection_appearance: jykre::connection_appearance::Appearance,
+    connection_appearance: jovru::connection_appearance::Appearance,
     connection_password: Entity<InputState>,
     connection_ssl: Entity<InputState>,
     /// PostgreSQL: the search_path sessions start with.
@@ -516,9 +516,9 @@ struct AppView {
     quick_revision: u64,
     /// Whether the quick search marks its matches or shows only them; kept
     /// from one search to the next.
-    explorer_quick_mode: jykre::explorer::QuickMode,
+    explorer_quick_mode: jovru::explorer::QuickMode,
     /// The quick search the explorer entries were last built for.
-    explorer_quick_key: Option<(String, jykre::explorer::QuickMode)>,
+    explorer_quick_key: Option<(String, jovru::explorer::QuickMode)>,
     /// The explorer tree's own focus: it keeps the keyboard while a filter
     /// hides the selected node, so typing goes on.
     explorer_focus: FocusHandle,
@@ -700,7 +700,7 @@ impl AppView {
             assistant_split,
             panels: HashMap::new(),
             report_tabs: HashMap::new(),
-            reports: jykre::reports::ReportLibrary::default(),
+            reports: jovru::reports::ReportLibrary::default(),
             automation: automation::Host::default(),
             mcp: mcp_section::Host::default(),
             persist_reports: false,
@@ -717,13 +717,13 @@ impl AppView {
                 tr!("Revenue by category"),
                 tr!("PostgreSQL · Local"),
                 SALES_SQL,
-                jykre::workspace_state::RunStatus::Succeeded,
+                jovru::workspace_state::RunStatus::Succeeded,
                 None,
                 None,
             )],
             next_saved_id: 2,
-            closed_tabs: jykre::closed_tabs::ClosedTabs::default(),
-            query_library: jykre::query_files::library::QueryLibrary::default(),
+            closed_tabs: jovru::closed_tabs::ClosedTabs::default(),
+            query_library: jovru::query_files::library::QueryLibrary::default(),
             persist_library: false,
             library_revision: 0,
             library_scan: None,
@@ -739,7 +739,7 @@ impl AppView {
             unsaved_marked: std::collections::HashSet::new(),
             discard_file_edits: false,
             files_settled: false,
-            favorites: jykre::favorites::Favorites::default(),
+            favorites: jovru::favorites::Favorites::default(),
             persist_favorites: false,
             favorites_revision: 0,
             favorites_scroll: UniformListScrollHandle::new(),
@@ -855,7 +855,7 @@ impl AppView {
             explorer_quick: None,
             explorer_everything: false,
             quick_revision: 0,
-            explorer_quick_mode: jykre::explorer::QuickMode::default(),
+            explorer_quick_mode: jovru::explorer::QuickMode::default(),
             explorer_quick_key: None,
             explorer_focus: cx.focus_handle(),
             selected_bounds: Default::default(),
@@ -993,7 +993,7 @@ impl AppView {
         app._subscriptions
             .push(cx.observe_window_appearance(window, |this, window, cx| {
                 let choice = theme::choice(cx);
-                if choice == jykre::theme::ThemeChoice::System {
+                if choice == jovru::theme::ThemeChoice::System {
                     this.set_theme(choice, window, cx);
                 }
             }));
@@ -1008,17 +1008,17 @@ impl AppView {
                 (
                     tr!("PostgreSQL · Local"),
                     "localhost:5432",
-                    jykre::connection_appearance::ConnectionColor::Mint,
+                    jovru::connection_appearance::ConnectionColor::Mint,
                 ),
                 (
                     "Databricks · Dev",
                     "analytics / development",
-                    jykre::connection_appearance::ConnectionColor::Blue,
+                    jovru::connection_appearance::ConnectionColor::Blue,
                 ),
                 (
                     tr!("MySQL · Finance"),
                     "finance / development",
-                    jykre::connection_appearance::ConnectionColor::Pink,
+                    jovru::connection_appearance::ConnectionColor::Pink,
                 ),
             ] {
                 let group = app.tabs.update(cx, |tabs, cx| {
@@ -1048,7 +1048,7 @@ impl AppView {
                     revalidate_hours: 0,
                     refreshing: None,
                     refresh_queue: RefreshQueue::default(),
-                    scope: jykre::metadata_scope::MetadataScope::default(),
+                    scope: jovru::metadata_scope::MetadataScope::default(),
                     progress: None,
                     status: Feedback::new(Tone::Info, tr!("Demo · simulated data")),
                     notice: None,
@@ -1088,7 +1088,7 @@ impl AppView {
         app.start_mcp(window, cx);
         assistant_settings::load(cx);
         telemetry_settings::load(cx);
-        jykre::telemetry::startup_finished();
+        jovru::telemetry::startup_finished();
         app
     }
 
@@ -1211,8 +1211,8 @@ impl AppView {
             .take(PALETTE_SAVED_LIMIT)
             .map(|entry| PaletteItem::Saved(entry.id));
         self.command_matches = saved.chain(relations).collect::<Vec<_>>();
-        self.command_more = jykre::palette::truncate(&mut self.command_matches, &query);
-        self.command_selected = jykre::palette::keep(chosen.as_ref(), &self.command_matches);
+        self.command_more = jovru::palette::truncate(&mut self.command_matches, &query);
+        self.command_selected = jovru::palette::keep(chosen.as_ref(), &self.command_matches);
         self.command_scroll.scroll_to_item(self.command_selected);
     }
 
@@ -1245,7 +1245,7 @@ impl AppView {
     /// otherwise a new tab linked to it, so the tab shows whether it is
     /// saved and the save button updates it.
     fn open_saved_query(&mut self, entry: QueryEntry, window: &mut Window, cx: &mut Context<Self>) {
-        // A file of the library opens from disk (ADR-0031).
+        // A file of the library opens from disk (D-0031).
         if self.is_file_entry(entry.id) {
             self.open_library_file(entry.id, window, cx);
             return;
@@ -1350,7 +1350,7 @@ impl AppView {
             let current = tabs
                 .active_tab()
                 .and_then(|active| ids.iter().position(|id| *id == active));
-            current.map(|current| ids[jykre::palette::step(current, ids.len(), delta)])
+            current.map(|current| ids[jovru::palette::step(current, ids.len(), delta)])
         };
         if let Some(tab) = next {
             self.show_tab(tab, window, cx);
@@ -1427,7 +1427,7 @@ impl AppView {
                         }
                     }
                     WorkspaceEvent::Executed(entry) => {
-                        jykre::workspace_state::WorkspaceState::record(
+                        jovru::workspace_state::WorkspaceState::record(
                             &mut this.history,
                             entry.clone(),
                         );
@@ -1510,7 +1510,7 @@ impl AppView {
                                 } else {
                                     tr!(
                                         "Run and lose {0} pending changes?",
-                                        jykre::cell_format::count(*pending)
+                                        jovru::cell_format::count(*pending)
                                     )
                                 },
                                 description: tr!(
@@ -1746,7 +1746,7 @@ impl AppView {
             .values()
             .filter(|panel| panel.read(cx).has_open_transaction())
             .count();
-        // Last, runs still active are named and stopped (ADR-0034).
+        // Last, runs still active are named and stopped (D-0034).
         if open == 0 || self.transactions_settled {
             if !self.automation_may_close(window, cx) {
                 return false;
@@ -1756,12 +1756,12 @@ impl AppView {
         let (title, description) = if open == 1 {
             (
                 tr!("A transaction is open in a tab.").to_string(),
-                tr!("Closing Jykre Studio rolls it back.").to_string(),
+                tr!("Closing Jovru rolls it back.").to_string(),
             )
         } else {
             (
                 tr!("Transactions are open in {0} tabs.", open),
-                tr!("Closing Jykre Studio rolls them back.").to_string(),
+                tr!("Closing Jovru rolls them back.").to_string(),
             )
         };
         let view = cx.entity().downgrade();
@@ -1866,7 +1866,7 @@ impl AppView {
         } else {
             None
         };
-        // Edits not written are lost with the tab (ADR-0039).
+        // Edits not written are lost with the tab (D-0039).
         let pending = self
             .panels
             .get(&tab)
@@ -1882,7 +1882,7 @@ impl AppView {
                     } else {
                         tr!(
                             "The {0} pending changes to its results are lost.",
-                            jykre::cell_format::count(pending)
+                            jovru::cell_format::count(pending)
                         )
                     }
                 ),
@@ -1895,7 +1895,7 @@ impl AppView {
                 } else {
                     tr!(
                         "Closing the tab loses {0} pending changes to its results.",
-                        jykre::cell_format::count(pending)
+                        jovru::cell_format::count(pending)
                     )
                 },
                 tr!("Close and discard"),
@@ -2046,7 +2046,7 @@ impl AppView {
             // them; Ctrl+Alt+Enter always runs all of them.
             report.view.update(cx, |view, cx| {
                 if all {
-                    view.run(jykre::reports::run::RunScope::All, cx);
+                    view.run(jovru::reports::run::RunScope::All, cx);
                 } else {
                     view.run_shortcut(window, cx);
                 }
@@ -2497,7 +2497,7 @@ impl AppView {
                     )
                 })
                 .when_some(self.config_backup.as_ref(), |s, (_, taken)| {
-                    let age = jykre::explorer::format_age(
+                    let age = jovru::explorer::format_age(
                         std::time::SystemTime::now()
                             .duration_since(*taken)
                             .unwrap_or_default(),
@@ -2747,7 +2747,7 @@ impl AppView {
                 format!("{tags}{}", context.join(" · ")),
             )
         } else {
-            use jykre::workspace_state::RunStatus;
+            use jovru::workspace_state::RunStatus;
             let (symbol, color) = match entry.status {
                 Some(RunStatus::Failed) => (I::CircleX, colors().red),
                 Some(RunStatus::Cancelled) => (I::Ban, colors().amber),
@@ -2756,14 +2756,14 @@ impl AppView {
             };
             let mut detail = vec![entry.connection.clone()];
             if let Some(at) = entry.time() {
-                detail.push(jykre::explorer::format_age(
+                detail.push(jovru::explorer::format_age(
                     std::time::SystemTime::now()
                         .duration_since(at)
                         .unwrap_or_default(),
                 ));
             }
             if let Some(elapsed) = entry.elapsed_ms {
-                detail.push(jykre::cell_format::duration(elapsed));
+                detail.push(jovru::cell_format::duration(elapsed));
             }
             if let Some(outcome) = &entry.detail {
                 detail.push(outcome.clone());
@@ -2979,7 +2979,7 @@ impl AppView {
                         )
                     })
                     .when(saved, |s| {
-                        let tags = jykre::workspace_state::all_tags(&self.saved_queries);
+                        let tags = jovru::workspace_state::all_tags(&self.saved_queries);
                         s.when(!tags.is_empty(), |s| {
                             s.child(
                                 div()
@@ -3113,7 +3113,7 @@ impl AppView {
                     div()
                         .text_size(px(14.))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .child("Jykre Studio"),
+                        .child("Jovru"),
                 ),
             )
             .child(divider())
@@ -3369,7 +3369,7 @@ impl AppView {
         // What the text asked for is marked where the row shows it: the
         // words without `#tag` filters, and those filters in the tags.
         let typed = self.command.read(cx).value().to_string();
-        let words = jykre::workspace_state::without_tag_filters(&typed);
+        let words = jovru::workspace_state::without_tag_filters(&typed);
         let words = words.trim();
         let tag_filters: Vec<&str> = typed
             .split_whitespace()
@@ -3382,7 +3382,7 @@ impl AppView {
             }
             marked(
                 value.to_owned(),
-                jykre::palette::highlights(value, &needles),
+                jovru::palette::highlights(value, &needles),
             )
         };
         let text = |name: String, detail: String, tags: bool| {
@@ -3519,7 +3519,7 @@ impl Render for AppView {
                 .update(cx, |input, cx| input.focus(window, cx));
         }
         column()
-            .id("jykre")
+            .id("jovru")
             .relative()
             .size_full()
             .overflow_hidden()
@@ -3665,7 +3665,7 @@ impl Render for AppView {
                     && !event.keystroke.modifiers.modified()
                 {
                     let delta = if event.keystroke.key == "up" { -1 } else { 1 };
-                    this.command_selected = jykre::palette::step(
+                    this.command_selected = jovru::palette::step(
                         this.command_selected,
                         this.command_matches.len(),
                         delta,
@@ -3786,7 +3786,7 @@ impl Render for AppView {
                             .items_center()
                             .child(self.update_badge.clone())
                             .child(label(format!(
-                                "Jykre Studio · v{}",
+                                "Jovru · v{}",
                                 env!("CARGO_PKG_VERSION")
                             ))),
                     ),
@@ -3886,7 +3886,7 @@ pub(crate) fn application_bindings() -> Vec<KeyBinding> {
 /// The application's identity on Linux: the Wayland app ID and the X11
 /// `WM_CLASS`. The desktop finds the window's name and icon in
 /// `<APP_ID>.desktop`, which `assets/linux/install.sh` installs.
-const APP_ID: &str = "io.github.alandariva.JykreStudio";
+const APP_ID: &str = "io.github.alandariva.Jovru";
 
 pub fn run() {
     application().with_assets(assets::AllAssets).run(|cx| {
@@ -3900,7 +3900,7 @@ pub fn run() {
         // chose are applied over it once they are read.
         shortcuts::install(cx);
         // The system's theme until the preference is read.
-        theme::apply(jykre::theme::ThemeChoice::System, None, cx);
+        theme::apply(jovru::theme::ThemeChoice::System, None, cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
                 None,
@@ -3912,7 +3912,7 @@ pub fn run() {
             ..TitleBar::window_options()
         };
         let opened = open_window(options, cx, |window, cx| {
-            window.set_window_title("Jykre Studio · Workspace");
+            window.set_window_title("Jovru · Workspace");
             cx.new(|cx| AppView::new(window, cx))
         });
         if opened.is_err() {
@@ -3923,11 +3923,11 @@ pub fn run() {
 }
 
 /// The first call of every test of the application: its assertions read the
-/// source text, whatever the machine's language ([`jykre::i18n::use_source_locale`]).
+/// source text, whatever the machine's language ([`jovru::i18n::use_source_locale`]).
 #[cfg(test)]
 pub(crate) fn source_text() {
     assert!(
-        jykre::i18n::use_source_locale(),
+        jovru::i18n::use_source_locale(),
         "a test read a translated text before choosing the source locale"
     );
 }
@@ -3937,7 +3937,7 @@ mod tests {
     use super::APP_ID;
 
     const DESKTOP_ENTRY: &str =
-        include_str!("../../assets/linux/io.github.alandariva.JykreStudio.desktop");
+        include_str!("../../assets/linux/io.github.alandariva.Jovru.desktop");
 
     /// The desktop matches the window to its entry by the app ID, and the
     /// entry names the icon `install.sh` installs under the same ID.

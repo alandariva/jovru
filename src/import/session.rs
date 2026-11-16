@@ -1,5 +1,5 @@
 //! An import's own session, and the writer that puts the batches into the
-//! table through it ([ADR-0040](../../docs/adr/0040-importing-files-into-a-table.md#4-session-transaction-and-outcome)).
+//! table through it ([D-0040](../../docs/decisions/drivers.md#d-0040)).
 //!
 //! The import opens a session of its own in the table's context, as a SQL
 //! Job does, never a tab's. The driver describes the table there

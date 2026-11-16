@@ -1,4 +1,4 @@
-//! A panel of a report ([ADR-0025](../../docs/adr/0025-report-panels.md)):
+//! A panel of a report ([D-0025](../../docs/decisions/results.md#d-0025)):
 //! its SQL, the connection and database it runs in, and the chart,
 //! numbers or table it shows. It is its own entity, embedded with
 //! `.cached`, so hovering one panel's grid does not lay the others out.
@@ -22,17 +22,17 @@ use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputSt
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
-use jykre::drivers::*;
-use jykre::reports::chart::{self, ChartProblem, Visual};
-use jykre::reports::export::PanelDocument;
-use jykre::reports::run::{PanelOutcome, PanelPhase};
-use jykre::reports::{
+use jovru::copy_as::{CopyFormat, CopyOptions, CopyRequest, CopySource};
+use jovru::drivers::*;
+use jovru::reports::chart::{self, ChartProblem, Visual};
+use jovru::reports::export::PanelDocument;
+use jovru::reports::run::{PanelOutcome, PanelPhase};
+use jovru::reports::{
     ChartKind, ChartSpec, Comparison, Condition, ConnectionRef, Direction, Panel, PanelId, Signal,
     Width,
 };
-use jykre::result::ResultData;
-use jykre::{backend, tr};
+use jovru::result::ResultData;
+use jovru::{backend, tr};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -61,7 +61,7 @@ pub struct ReportSource {
     /// `None` while the connection cannot run (no profile, demo).
     pub input: Option<ResolvedConnection>,
     pub row_limit: u32,
-    pub environment: Option<jykre::connection_appearance::Environment>,
+    pub environment: Option<jovru::connection_appearance::Environment>,
     pub dialect: Option<SqlDialect>,
     /// The databases (namespaces) a panel may run in.
     pub choices: Vec<SessionContext>,
@@ -143,7 +143,7 @@ pub fn source_menu(
                 menu = menu.label(tr!("Refresh the metadata to list namespaces"));
             }
             for choice in &source.choices {
-                menu = menu.item(item(jykre::ddl::context_label(choice), choice.clone()));
+                menu = menu.item(item(jovru::ddl::context_label(choice), choice.clone()));
             }
             menu
         });
@@ -550,7 +550,7 @@ impl ReportPanel {
         } else {
             name
         };
-        jykre::reports::source_label(name, &self.panel.context)
+        jovru::reports::source_label(name, &self.panel.context)
     }
 
     /// Whether the connection exists and lists the panel's database.
@@ -1703,10 +1703,10 @@ impl ReportPanel {
         if let Some(shown) = &self.shown {
             parts.push(tr!(
                 "{0} rows",
-                jykre::cell_format::count(shown.data.row_count())
+                jovru::cell_format::count(shown.data.row_count())
             ));
             if let Some(elapsed) = shown.elapsed_ms {
-                parts.push(jykre::cell_format::duration(elapsed as u64));
+                parts.push(jovru::cell_format::duration(elapsed as u64));
             }
         }
         row()

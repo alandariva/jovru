@@ -1,4 +1,4 @@
-//! Loopback MCP HTTP server (ADR-0042).
+//! Loopback MCP HTTP server (D-0042).
 //!
 //! `rmcp`'s [`StreamableHttpService`] is a Tower service: it does not bind a
 //! socket. This module serves it with HTTP/1 on `127.0.0.1` only. Nothing
@@ -31,7 +31,7 @@ use hyper::server::conn::http1;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
-use jykre_assistant::ToolCall;
+use jovru_assistant::ToolCall;
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ContentBlock, DiscoverResult, Implementation,
     InitializeRequestParams, JsonObject, ListToolsResult, ProgressNotificationParam,
@@ -65,7 +65,7 @@ const IDLE_CONNECTION: Duration = Duration::from_secs(60);
 const HEADER_AND_BODY: Duration = Duration::from_secs(10);
 const AUTH_WARN_EVERY: Duration = Duration::from_secs(10);
 const UNAUTHORIZED: &str = "Unauthorized";
-const VAULT_BODY: &str = "Jykre Studio cannot read this token from the system vault.";
+const VAULT_BODY: &str = "Jovru cannot read this token from the system vault.";
 
 /// Whether the loopback socket is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +84,7 @@ pub enum ListenState {
 ///
 /// `S` defaults to the operating-system vault. Tests pass a store that
 /// never calls it. The view uses [`McpEndpoint::listen`] and [`McpEndpoint::off`].
-pub struct McpEndpoint<S = jykre_secrets::SystemSecretStore> {
+pub struct McpEndpoint<S = jovru_secrets::SystemSecretStore> {
     /// Used when there is no registry (`off` and `demo`).
     local: ListenState,
     shared: Option<Arc<Shared<S>>>,
@@ -123,6 +123,9 @@ struct Shared<S> {
     /// The client's self-reported name, in memory only. Not logged.
     client_names: Mutex<HashMap<McpTokenId, String>>,
     waiters: Mutex<HashMap<CardId, tokio::sync::oneshot::Sender<Signal>>>,
+    /// Cancels the database statement of a card that is running. A decision
+    /// that settles the card (Stop, a revoked token, quitting) fires it.
+    running: Mutex<HashMap<CardId, CancellationToken>>,
     warned: Mutex<HashMap<&'static str, Instant>>,
     kept: tokio::sync::Mutex<HashMap<McpTokenId, Box<dyn Session>>>,
     host: McpQueryHost,
@@ -130,7 +133,6 @@ struct Shared<S> {
     listen: Mutex<ListenState>,
     port: Mutex<u16>,
     tasks: Mutex<Option<Tasks>>,
-    runtime: tokio::runtime::Handle,
 }
 
 struct PendingQuery {
@@ -205,7 +207,7 @@ impl<S> McpEndpoint<S> {
     }
 }
 
-impl McpEndpoint<jykre_secrets::SystemSecretStore> {
+impl McpEndpoint<jovru_secrets::SystemSecretStore> {
     /// No registry and no socket.
     pub fn off() -> Self {
         Self::bare(ListenState::Off)
@@ -218,7 +220,7 @@ impl McpEndpoint<jykre_secrets::SystemSecretStore> {
         if demo {
             return Self::bare(ListenState::Demo);
         }
-        let registry = match TokenRegistry::open(&data_dir, jykre_secrets::SystemSecretStore).await
+        let registry = match TokenRegistry::open(&data_dir, jovru_secrets::SystemSecretStore).await
         {
             Ok(registry) => registry,
             Err(_) => return Self::bare(ListenState::Off),
@@ -247,7 +249,37 @@ impl McpEndpoint<jykre_secrets::SystemSecretStore> {
         };
         shared.registry.lock().await.set_enabled(enabled).await?;
         let data_dir = shared.data_dir.clone();
-        let registry = TokenRegistry::open(&data_dir, jykre_secrets::SystemSecretStore).await?;
+        let registry = TokenRegistry::open(&data_dir, jovru_secrets::SystemSecretStore).await?;
+        let port = registry.settings().port;
+        self.shutdown().await;
+        Ok(if enabled {
+            Self::start(data_dir, registry, port).await
+        } else {
+            Self::park(data_dir, registry, ListenState::Off)
+        })
+    }
+
+    /// Persists `port` and returns the endpoint that uses it. A listening
+    /// endpoint closes its socket and binds the new port; one that is off
+    /// only remembers it. A failed settings write leaves this endpoint
+    /// running on its old port. Port 0 is refused. Demo endpoints stay inert.
+    pub async fn change_port(&self, port: u16) -> crate::drivers::DriverResult<Self> {
+        if self.local == ListenState::Demo {
+            return Ok(self.clone());
+        }
+        let Some(shared) = &self.shared else {
+            return Err(crate::drivers::DriverError::new(
+                crate::drivers::ErrorCode::NotFound,
+                tr!("The MCP server is off."),
+            ));
+        };
+        let enabled = {
+            let mut registry = shared.registry.lock().await;
+            registry.set_port(port).await?;
+            registry.settings().enabled
+        };
+        let data_dir = shared.data_dir.clone();
+        let registry = TokenRegistry::open(&data_dir, jovru_secrets::SystemSecretStore).await?;
         let port = registry.settings().port;
         self.shutdown().await;
         Ok(if enabled {
@@ -260,7 +292,7 @@ impl McpEndpoint<jykre_secrets::SystemSecretStore> {
 
 impl<S> McpEndpoint<S>
 where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     /// Listens on `127.0.0.1:port`. Port 0 asks the operating system for a
     /// free port. Does not consult the enabled flag: [`Self::listen`] does.
@@ -350,25 +382,6 @@ where
         lock(&shared.risky).get(&card).copied().unwrap_or(false)
     }
 
-    /// Persists the port. The caller rebinds. Port 0 is ignored.
-    pub fn set_port(&self, port: u16) {
-        let Some(shared) = &self.shared else {
-            return;
-        };
-        if port == 0 {
-            return;
-        }
-        *lock(&shared.port) = port;
-        let runtime = shared.runtime.clone();
-        let shared = Arc::clone(shared);
-        runtime.spawn(async move {
-            let mut registry = shared.registry.lock().await;
-            if registry.set_port(port).await.is_ok() {
-                *lock(&shared.records) = registry.settings().tokens.clone();
-            }
-        });
-    }
-
     /// The setting currently in memory. Empty when this endpoint was not given a registry.
     pub async fn settings(&self) -> McpSettings {
         let Some(shared) = &self.shared else {
@@ -401,11 +414,23 @@ where
         let Some(shared) = &self.shared else {
             return false;
         };
+        // The cancel handle exists before the card can be stopped, so a Stop
+        // right after the approval still reaches the statement.
+        let added = match lock(&shared.running).entry(card) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(CancellationToken::new());
+                true
+            }
+        };
         let permit = {
             let mut broker = lock(&shared.broker);
             broker.approve_statement(card)
         };
         let Some(permit) = permit else {
+            if added {
+                lock(&shared.running).remove(&card);
+            }
             return false;
         };
         let sender = lock(&shared.waiters).remove(&card);
@@ -766,6 +791,7 @@ impl<S> Shared<S> {
             risky: Mutex::new(HashMap::new()),
             client_names: Mutex::new(HashMap::new()),
             waiters: Mutex::new(HashMap::new()),
+            running: Mutex::new(HashMap::new()),
             warned: Mutex::new(HashMap::new()),
             kept: tokio::sync::Mutex::new(HashMap::new()),
             host: McpQueryHost::new(),
@@ -773,14 +799,13 @@ impl<S> Shared<S> {
             listen: Mutex::new(state),
             port: Mutex::new(port),
             tasks: Mutex::new(None),
-            runtime: tokio::runtime::Handle::current(),
         }
     }
 }
 
 impl<S> Shared<S>
 where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     fn deliver(&self, settled: Option<Settled>) -> Option<CardId> {
         let settled = settled?;
@@ -792,6 +817,16 @@ where
     fn dispatch(&self, settled: Vec<Settled>) {
         if settled.is_empty() {
             return;
+        }
+        {
+            // A statement that is still running when its card settles is
+            // stopped on the server too, not left to finish unseen.
+            let mut running = lock(&self.running);
+            for one in &settled {
+                if let Some(cancel) = running.remove(&one.card) {
+                    cancel.cancel();
+                }
+            }
         }
         let mut waiters = lock(&self.waiters);
         let mut pending = lock(&self.pending);
@@ -818,13 +853,16 @@ where
     }
 
     async fn forget_token(&self, id: McpTokenId) {
+        // Cards the token left open cannot be approved after it ends.
+        let settled = lock(&self.broker).close_token(id, Instant::now());
+        self.dispatch(settled);
         lock(&self.tools).remove(&id);
         self.kept.lock().await.remove(&id);
         self.host.close_token(id).await;
     }
 
     async fn connection_face(&self, id: ConnectionId) -> Option<ConnectionFace> {
-        let repository = match jykre_storage::ConfigRepository::open(&self.data_dir).await {
+        let repository = match jovru_storage::ConfigRepository::open(&self.data_dir).await {
             Ok(repository) => repository,
             Err(_) => return None,
         };
@@ -848,17 +886,17 @@ where
     async fn description(&self, record: &TokenRecord) -> (String, String) {
         let Some(face) = self.connection_face(record.connection_id).await else {
             return (
-                "Jykre Studio".to_owned(),
+                "Jovru".to_owned(),
                 "This server's connection is not available.".to_owned(),
             );
         };
         let shown = shown_name(&face.name, face.environment);
-        let title = format!("Jykre Studio — {shown}");
+        let title = format!("Jovru — {shown}");
         let mut instructions = format!("This server reads the metadata cache of {shown}.");
         if record.tools.run_query {
             instructions.push_str(" Statements run only on ");
             instructions.push_str(&shown);
-            instructions.push_str(", and only after the user approves them in Jykre Studio.");
+            instructions.push_str(", and only after the user approves them in Jovru.");
         }
         (title, instructions)
     }
@@ -989,7 +1027,7 @@ fn environment_word(environment: Environment) -> &'static str {
 }
 
 fn server_config(title: String, instructions: String) -> ServerConfig {
-    let info = Implementation::new("jykre-studio", env!("CARGO_PKG_VERSION")).with_title(title);
+    let info = Implementation::new("jovru", env!("CARGO_PKG_VERSION")).with_title(title);
     ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
         .with_server_info(info)
         .with_instructions(instructions)
@@ -1072,7 +1110,7 @@ fn leaks_token(query: &str) -> bool {
             return true;
         }
     }
-    query.to_ascii_lowercase().contains("jykmcp_")
+    query.to_ascii_lowercase().contains("jovmcp_")
 }
 
 fn loopback_origin(value: &str) -> bool {
@@ -1091,7 +1129,7 @@ fn loopback_origin(value: &str) -> bool {
 
 fn spawn_listener<S>(shared: Arc<Shared<S>>, listener: TcpListener) -> Tasks
 where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     let config = StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
@@ -1159,7 +1197,7 @@ async fn accept_loop<S>(
     connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
     cancel: CancellationToken,
 ) where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     loop {
         let permit = tokio::select! {
@@ -1174,6 +1212,12 @@ async fn accept_loop<S>(
             accepted = listener.accept() => accepted,
         };
         let Ok((stream, _)) = accepted else {
+            // A failure that lasts (no file handles left) would otherwise
+            // spin here with no pause.
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                () = tokio::time::sleep(Duration::from_millis(100)) => {}
+            }
             continue;
         };
         let gate = gate.clone();
@@ -1189,7 +1233,7 @@ async fn accept_loop<S>(
 
 async fn serve_one<S>(stream: TcpStream, gate: Gate<S>, permit: OwnedSemaphorePermit)
 where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     let _permit = permit;
     let io = TokioIo::new(PaceIo::new(stream));
@@ -1313,7 +1357,7 @@ type InnerBody<S> =
 
 impl<S> tower_service::Service<Request<Incoming>> for Gate<S>
 where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     type Response = Response<GateBody<InnerBody<S>>>;
     type Error = Infallible;
@@ -1345,7 +1389,7 @@ async fn authorize<S>(
     request: Request<Incoming>,
 ) -> Result<Request<Incoming>, (StatusCode, &'static str)>
 where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     if request.uri().query().is_some_and(leaks_token) {
         shared.warn_refused("query");
@@ -1534,11 +1578,11 @@ struct Handler<S> {
 
 impl<S> ServerHandler for Handler<S>
 where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     fn get_info(&self) -> ServerConfig {
         server_config(
-            "Jykre Studio".to_owned(),
+            "Jovru".to_owned(),
             "This server's connection is not available.".to_owned(),
         )
     }
@@ -1559,7 +1603,7 @@ where
         if let Some(record) = accepted(&context) {
             let (title, instructions) = self.shared.description(&record).await;
             info.server_info =
-                Implementation::new("jykre-studio", env!("CARGO_PKG_VERSION")).with_title(title);
+                Implementation::new("jovru", env!("CARGO_PKG_VERSION")).with_title(title);
             info.instructions = Some(instructions);
         }
         Ok(info)
@@ -1572,7 +1616,7 @@ where
         let (title, instructions) = match accepted(&context) {
             Some(record) => self.shared.description(&record).await,
             None => (
-                "Jykre Studio".to_owned(),
+                "Jovru".to_owned(),
                 "This server's connection is not available.".to_owned(),
             ),
         };
@@ -1610,10 +1654,10 @@ where
         };
         let span = tracing::info_span!(
             "mcp_tool",
-            jykre.assistant.tool = logged_tool_name(&request.name),
-            jykre.mcp.outcome = tracing::field::Empty,
-            jykre.bytes = tracing::field::Empty,
-            jykre.connection.id = %record.connection_id,
+            jovru.assistant.tool = logged_tool_name(&request.name),
+            jovru.mcp.outcome = tracing::field::Empty,
+            jovru.bytes = tracing::field::Empty,
+            jovru.connection.id = %record.connection_id,
             elapsed_ms = tracing::field::Empty,
         );
         let started = Instant::now();
@@ -1622,9 +1666,9 @@ where
             .instrument(span.clone())
             .await;
         let elapsed = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        span.record("jykre.mcp.outcome", finished.outcome);
+        span.record("jovru.mcp.outcome", finished.outcome);
         span.record(
-            "jykre.bytes",
+            "jovru.bytes",
             crate::telemetry::attributes::count(finished.bytes),
         );
         span.record("elapsed_ms", elapsed);
@@ -1640,7 +1684,7 @@ struct Finished {
 
 impl<S> Handler<S>
 where
-    S: jykre_secrets::McpTokenStore + 'static,
+    S: jovru_secrets::McpTokenStore + 'static,
 {
     async fn dispatch_tool(
         &self,
@@ -1774,7 +1818,10 @@ where
         context: &RequestContext<RoleServer>,
     ) -> Finished {
         let card = permit.card();
-        let cancel = CancellationToken::new();
+        let Some(cancel) = lock(&self.shared.running).get(&card).cloned() else {
+            // The card was stopped before the statement started.
+            return finished_client(error_text(Outcome::Declined, QUERY_DECLINED), false);
+        };
         let bridge = cancel.clone();
         let stop = self.shared.cancel.clone();
         let request_stop = context.ct.clone();
@@ -1798,6 +1845,7 @@ where
         )
         .await;
         watch.abort();
+        lock(&self.shared.running).remove(&card);
         if context.ct.is_cancelled() {
             let settled = lock(&self.shared.broker).cancel(card, Instant::now());
             self.shared.deliver(settled);
@@ -1944,7 +1992,7 @@ fn accepted(context: &RequestContext<RoleServer>) -> Option<TokenRecord> {
         .map(|accepted| accepted.record.clone())
 }
 
-fn mcp_tool(spec: jykre_assistant::ToolSpec) -> Tool {
+fn mcp_tool(spec: jovru_assistant::ToolSpec) -> Tool {
     let annotations = match spec.name.as_str() {
         RUN_QUERY => ToolAnnotations::new()
             .read_only(false)
@@ -1982,9 +2030,9 @@ mod tests {
     };
     use super::{ListenState, McpEndpoint, UNAUTHORIZED, lock};
     use crate::drivers::{ConnectionId, DriverResult, SecretString};
-    use jykre_core::async_trait;
-    use jykre_secrets::{McpTokenAccount, McpTokenStore};
-    use jykre_storage::ConfigRepository;
+    use jovru_core::async_trait;
+    use jovru_secrets::{McpTokenAccount, McpTokenStore};
+    use jovru_storage::ConfigRepository;
     use secrecy::ExposeSecret as _;
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, SocketAddr};
@@ -2028,7 +2076,7 @@ mod tests {
     }
 
     fn temp_dir() -> PathBuf {
-        std::env::temp_dir().join(format!("jykre-mcp-server-{}", ConnectionId::new()))
+        std::env::temp_dir().join(format!("jovru-mcp-server-{}", ConnectionId::new()))
     }
 
     async fn save_fixture_settings(dir: &Path, settings: &McpSettings) {

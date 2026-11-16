@@ -2,12 +2,12 @@
 //! queries and the history.
 //!
 //! The state is stored as one JSON value in `config.db` settings
-//! ([Persistence](../docs/reference/persistence.md)). Reading tolerates missing or
+//! ([Persistence](../docs/reference/persistence/README.md)). Reading tolerates missing or
 //! unknown fields, so a file written by another version still opens.
 use crate::drivers::ObjectPath;
 use crate::parameters::{KindChoice, TabParameter};
 use crate::query_files::{Fingerprint, TextFormat};
-use jykre_core::is_parameter_name;
+use jovru_core::is_parameter_name;
 use serde_json::{Value, json};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -54,13 +54,13 @@ pub struct TabState {
     /// The table or view the tab was opened for, so opening it again shows
     /// this tab instead of a copy.
     pub object: Option<ObjectPath>,
-    /// What the tab's `:name` fields hold, kept with the tab (ADR-0026).
+    /// What the tab's `:name` fields hold, kept with the tab (D-0026).
     pub parameters: Vec<TabParameter>,
     /// The statement the tab reads its table's rows with, when it was opened
     /// as the table's Data view; its result tab is called Data. `None` for
     /// other tabs and tabs from older versions.
     pub data_sql: Option<String>,
-    /// The `.sql` file the tab edits (ADR-0031).
+    /// The `.sql` file the tab edits (D-0031).
     pub file: Option<TabFile>,
     /// The tab's recovery file, when its text is kept apart from the state
     /// (a draft, or a file tab's edits not saved yet): `sql` is then not
@@ -577,7 +577,7 @@ mod tests {
                     },
                     TabParameter {
                         name: "day".into(),
-                        kind: KindChoice::Fixed(jykre_core::ParameterKind::Date),
+                        kind: KindChoice::Fixed(jovru_core::ParameterKind::Date),
                         text: "kept while NULL".into(),
                         null: true,
                     },

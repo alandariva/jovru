@@ -1,5 +1,6 @@
 use super::*;
-use jykre_secrets::SecretStore;
+use jovru_secrets::SecretStore;
+use secrecy::ExposeSecret as _;
 use std::{collections::HashMap, sync::Mutex};
 
 fn preferences(row_limit: u32) -> Preferences {
@@ -54,7 +55,7 @@ impl SecretStore for MemoryVault {
 }
 fn fixture() -> (PathBuf, ConnectionProfile) {
     (
-        std::env::temp_dir().join(format!("jykre-service-{}", ConnectionId::new())),
+        std::env::temp_dir().join(format!("jovru-service-{}", ConnectionId::new())),
         ConnectionProfile {
             id: ConnectionId::new(),
             name: "Synthetic fixture".into(),
@@ -269,7 +270,7 @@ fn data_dir_prefers_override_then_platform_folder() {
         resolve_data_dir(None, platform),
         PathBuf::from("base").join(APP_DIR)
     );
-    assert_eq!(resolve_data_dir(None, None), PathBuf::from(".jykre"));
+    assert_eq!(resolve_data_dir(None, None), PathBuf::from(".jovru"));
 }
 
 #[tokio::test]
@@ -719,7 +720,7 @@ async fn a_superseded_preference_write_never_lands_after_the_newer_one() {
 
 #[tokio::test]
 async fn the_font_size_is_written_by_its_latest_ticket() {
-    let dir = std::env::temp_dir().join(format!("jykre-font-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-font-{}", ConnectionId::new()));
     let older = FONT_SIZE_WRITES.ask();
     let newer = FONT_SIZE_WRITES.ask();
     save_font_size(&dir, 18.0, newer).await.unwrap();
@@ -815,6 +816,82 @@ async fn each_start_keeps_a_copy_of_the_configuration_to_restore() {
     let loaded = load(&dir, &vault).await.unwrap();
     assert_eq!(loaded.connections.len(), 1);
     assert_eq!(loaded.connections[0].profile.id, saved.id);
+    backend::release_caches(&dir).await;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_save_of_a_saved_connection_keeps_the_password_the_vault_held() {
+    let (dir, mut profile) = fixture();
+    profile.remember_password = true;
+    let vault = MemoryVault::default();
+    let with_password = |text: &str| Credentials {
+        password: Some(SecretString::from(text.to_owned())),
+    };
+    let held = |vault: &MemoryVault, id: ConnectionId| {
+        vault
+            .passwords
+            .lock()
+            .unwrap()
+            .get(&id)
+            .map(|password| password.expose_secret().to_owned())
+    };
+    let saved = save(
+        &dir,
+        profile.clone(),
+        with_password("old"),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
+    let id = saved.profile.id;
+    assert_eq!(held(&vault, id).as_deref(), Some("old"));
+
+    // A second connection owns the name the edit then asks for.
+    let (_, mut other) = fixture();
+    other.name = "Other fixture".into();
+    save(
+        &dir,
+        other,
+        Credentials::default(),
+        preferences(1_000),
+        &vault,
+    )
+    .await
+    .unwrap();
+
+    let mut edited = saved.profile;
+    edited.name = "Other fixture".into();
+    let failed = save(
+        &dir,
+        edited,
+        with_password("new"),
+        preferences(1_000),
+        &vault,
+    )
+    .await;
+    assert!(failed.is_err());
+    // The saved profile still signs in with the password it had.
+    assert_eq!(held(&vault, id).as_deref(), Some("old"));
+
+    // A connection that was never saved leaves no password behind.
+    let (_, mut fresh) = fixture();
+    fresh.name = "Other fixture".into();
+    fresh.remember_password = true;
+    let fresh_id = fresh.id;
+    assert!(
+        save(
+            &dir,
+            fresh,
+            with_password("never saved"),
+            preferences(1_000),
+            &vault,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(held(&vault, fresh_id), None);
     backend::release_caches(&dir).await;
     std::fs::remove_dir_all(dir).unwrap();
 }

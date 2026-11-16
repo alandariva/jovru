@@ -6,7 +6,7 @@
 //! real loopback connection; no child process is needed.
 use super::*;
 use crate::automation::logs;
-use jykre_core::ParameterKind;
+use jovru_core::ParameterKind;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -17,7 +17,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 const WAIT: Duration = Duration::from_secs(10);
 
 fn data_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("jykre-jjp-{label}-{}", RunId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-jjp-{label}-{}", RunId::new()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -599,7 +599,7 @@ async fn log_messages_past_the_quota_are_dropped_and_counted() {
     // The `fail` line always fits, even with the log full.
     assert!(text.contains("[fail E_LAST] last words\n"));
     assert!(text.ends_with(&format!(
-        "[jykre] {dropped} messages dropped past the 1 MiB limit\n"
+        "[jovru] {dropped} messages dropped past the 1 MiB limit\n"
     )));
     std::fs::remove_dir_all(data).unwrap();
 }

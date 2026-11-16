@@ -52,6 +52,6 @@ pub mod update;
 pub mod workspace_state;
 
 /// Tokens, statement splitting and position mapping by dialect
-/// (`jykre-sql`). The editor's language features live apart, in
-/// `jykre-sql-language`, which nothing in this library uses.
-pub use jykre_sql as sql;
+/// (`jovru-sql`). The editor's language features live apart, in
+/// `jovru-sql-language`, which nothing in this library uses.
+pub use jovru_sql as sql;

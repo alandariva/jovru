@@ -5,11 +5,11 @@ typed tokens, keeps that result in memory, and paints from it. A new file
 in a themes directory is available without recompiling. Font size, density,
 panel sizes and layout are not part of a theme
 ([UI guidelines](../standards/ui-guidelines.md#colours-and-theme),
-[Persistence](persistence.md)).
+[Persistence](persistence/README.md)).
 
 ## Architecture
 
-There is one theme system. `jykre::theme` loads files, checks them, resolves
+There is one theme system. `jovru::theme` loads files, checks them, resolves
 inheritance and overrides, and stores the result. Views read
 `ui::colors()`, `ui::editor_colors()` or `ui::results_colors()`. Those
 return a handle to a palette already resolved; drawing does not parse JSON.
@@ -22,7 +22,7 @@ and radius with colour and have no aliases, inheritance or result tokens.
 
 Resolution runs when the catalog is loaded (startup, and again when
 Preferences opens) and when the choice or the system appearance changes.
-`jykre::theme::install` publishes the result. Later frames clone an `Arc`.
+`jovru::theme::install` publishes the result. Later frames clone an `Arc`.
 The grid converts its paint colours to GPUI's HSLA representation once per
 visible row batch and shares them across the cells. Neither the palette nor
 that projection is retained as view state.
@@ -43,11 +43,11 @@ Preferences lists it; it does not add a second picker.
 
 In order, a later file with the same `id` replaces an earlier one:
 
-1. The two themes compiled into the binary (`themes/jykre-dark.json` and
-   `themes/jykre-light.json`, also the fallback).
+1. The two themes compiled into the binary (`themes/jovru-dark.json` and
+   `themes/jovru-light.json`, also the fallback).
 2. `themes/` next to the executable.
-3. `themes/` in the data folder (`JYKRE_CONFIG_DIR` when set, otherwise the
-   folder [Persistence](persistence.md) already uses).
+3. `themes/` in the data folder (`JOVRU_CONFIG_DIR` when set, otherwise the
+   folder [Persistence](persistence/README.md) already uses).
 
 To add a theme, save `my-theme.json` in either `themes/` directory and open
 Preferences. The file's `name` appears next to System, Light and Dark. The
@@ -217,7 +217,7 @@ be used. The ready action keeps `color.accent`.
 
 ## A new theme
 
-`ocean.json`, placed in a themes directory. It inherits Jykre Dark and
+`ocean.json`, placed in a themes directory. It inherits Jovru Dark and
 changes the accent. Every other token stays the bundled dark value.
 
 ```json
@@ -226,7 +226,7 @@ changes the accent. Every other token stays the bundled dark value.
   "id": "ocean",
   "name": "Ocean",
   "appearance": "dark",
-  "extends": "jykre-dark",
+  "extends": "jovru-dark",
   "tokens": {
     "color.accent": "#3d8bfd",
     "color.on-accent": "#04101f",
@@ -262,7 +262,7 @@ file, so replacing a file does not wipe them.
 
 1. Add the field and its token name in `palette_fields!` in
    `src/theme/palette.rs`, and a value in both `DARK` and `LIGHT`.
-2. Set it in `themes/jykre-dark.json` and `themes/jykre-light.json`.
+2. Set it in `themes/jovru-dark.json` and `themes/jovru-light.json`.
    Prefer an alias when the colour already exists.
 3. If the low byte is alpha, add the name to `carries_alpha`.
 4. Read it from `colors()`, `editor_colors()` or `results_colors()` at the
@@ -294,7 +294,7 @@ These stay hardcoded. They are not a second theme.
 | Place | Why |
 | --- | --- |
 | `src/reports/export.rs` print HTML and chart SVG | A printed page has its own stylesheet. It is not the window theme. |
-| `assets/icon/jykre.svg` | The product icon, not a window surface. |
+| `assets/icon/jovru.svg` | The product icon, not a window surface. |
 | `src/grouped_tabs` test and picker fixtures | Fixture colours for tests, not the product. |
 | Connection hues | The user picks a hue (`ConnectionColor`). `connection_color` resolves it from the theme when drawn. |
 | Diagnostic underline backgrounds inside the kit | `StatusColors` fields that carry a diagnostic fill are private. Foreground fallbacks follow `theme.red`, `theme.yellow`, `theme.blue`, `theme.green` and `theme.cyan`, which this system sets from `state.error`, `state.warning`, `color.blue`, `state.success` and `color.teal`. |
@@ -312,4 +312,3 @@ size back.
 | Standard | Current code |
 | --- | --- |
 | Each declared component token affects its component | `dialog.background`, `dialog.border`, `tooltip.background` and `tooltip.foreground` are parsed but not wired to their surfaces. App dialogs still use global panel and border tokens; kit tooltips share the menu's popover colours. |
-| Long collections are virtualized | Preferences caches resolved previews but builds all theme cards. Large catalogs still increase the element count of that page. |

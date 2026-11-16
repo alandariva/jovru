@@ -205,7 +205,7 @@ fn input() -> ResolvedConnection {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("jykre-exporting-{name}-{}", ConnectionId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-exporting-{name}-{}", ConnectionId::new()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

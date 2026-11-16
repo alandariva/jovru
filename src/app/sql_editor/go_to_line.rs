@@ -2,14 +2,14 @@
 //! action) opens a small field over the editor's top right corner; `Enter`
 //! moves the cursor to the line (and column) typed, `Esc` gives the keyboard
 //! back to the editor, and leaving the field closes it. What is typed and
-//! where it leads are read by `jykre::go_to_line`; the editor's own
+//! where it leads are read by `jovru::go_to_line`; the editor's own
 //! search bar closes first, since it sits in the same place.
 use super::SqlEditor;
 use crate::app::ui::{colors, column, row};
 use gpui_kit::component::Sizable;
 use gpui_kit::component::input::{Escape, Input, InputEvent, InputState};
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::{go_to_line, tr};
+use jovru::{go_to_line, tr};
 
 /// The prompt of one editor; closed until `Ctrl G`. The host embeds it next
 /// to the editor, in a parent that is `relative`.

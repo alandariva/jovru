@@ -6,8 +6,8 @@
 //! statement leaves the cache as it was, which a refresh fixes, so anything
 //! unclear is ignored rather than guessed.
 use crate::drivers::{ObjectKind, ObjectPath, SessionContext, SqlDialect};
-pub use jykre_sql::names::Name;
-use jykre_sql::names::{Part, name_at, parts, stored};
+pub use jovru_sql::names::Name;
+use jovru_sql::names::{Part, name_at, parts, stored};
 
 /// What a statement changed.
 #[derive(Clone, Debug, PartialEq, Eq)]

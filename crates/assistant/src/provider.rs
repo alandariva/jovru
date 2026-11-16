@@ -1,5 +1,5 @@
 //! Which provider answers, with which model and at which address.
-use jykre_core::{DriverError, DriverResult};
+use jovru_core::{DriverError, DriverResult};
 use serde::{Deserialize, Serialize};
 
 /// A provider family. Each speaks its own wire protocol; any server that

@@ -5,7 +5,7 @@
 //! the maintainer and reaches only the release workflow's `sign` job, as
 //! the `ZIPSIGN_PRIVATE_KEY` secret. To rotate it, add the new key here,
 //! sign with both for a release, then remove the old one
-//! ([Security](../../docs/standards/security.md#updates)).
+//! ([Security](../../docs/reference/updates.md#updates)).
 
 /// Any one of these keys may sign an archive.
 pub const RELEASE_KEYS: &[self_update::VerifyingKey] =

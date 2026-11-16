@@ -7,10 +7,10 @@ use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::cell_format;
-use jykre::column_search::{self, ColumnMatch};
-use jykre::grid::CellSelection;
-use jykre::tr;
+use jovru::cell_format;
+use jovru::column_search::{self, ColumnMatch};
+use jovru::grid::CellSelection;
+use jovru::tr;
 use std::{cell::Cell, ops::Range, rc::Rc};
 
 #[derive(Default)]
@@ -166,7 +166,7 @@ impl ResultGrid {
         find.matches = column_search::find(self.result.columns(), &self.layout, &text);
         find.text = text;
         let columns: Vec<usize> = find.matches.iter().map(|found| found.column).collect();
-        find.highlighted = jykre::palette::keep(previous.as_ref(), &columns);
+        find.highlighted = jovru::palette::keep(previous.as_ref(), &columns);
         find.scroll
             .scroll_to_item(find.highlighted, ScrollStrategy::Nearest);
         cx.notify();
@@ -175,7 +175,7 @@ impl ResultGrid {
     /// `↑` and `↓` in the field: the match `Enter` chooses, wrapping.
     fn step_column_match(&mut self, delta: isize, cx: &mut Context<Self>) {
         if let Some(find) = &mut self.column_search.dialog {
-            find.highlighted = jykre::palette::step(find.highlighted, find.matches.len(), delta);
+            find.highlighted = jovru::palette::step(find.highlighted, find.matches.len(), delta);
             find.scroll
                 .scroll_to_item(find.highlighted, ScrollStrategy::Nearest);
             cx.notify();

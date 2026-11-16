@@ -1,8 +1,8 @@
 # Large `.sql` files in the editor: the D7 limit
 
 - **Approval:** Approved by the maintainer on 2026-11-08: option A with C,
-  the limit stays 4 MiB ([ADR-0031](../adr/0031-saved-queries-as-sql-files.md) D7)
-- **Implementation:** Partial. A is done (`jykre::script_outline::soft_wrap`,
+  the limit stays 4 MiB ([D-0031](../decisions/persistence.md#d-0031) D7)
+- **Implementation:** Partial. A is done (`jovru::script_outline::soft_wrap`,
   measured below); C, the upstream issue, is drafted and not filed. On the
   reference machine (2026-11-08) a 4 MiB file opens in one frame of 54 ms,
   one just under 256 KiB, still wrapped, in 185 ms, and a click into a
@@ -15,7 +15,7 @@
 
 ## Where things stand
 
-ADR-0031 (D7) keeps a 4 MiB limit for a file opened into a tab only if the
+D-0031 (D7) keeps a 4 MiB limit for a file opened into a tab only if the
 editor meets the frame budget at that size. Two costs stood in the way:
 
 1. **Ours, on every edit and notification.** The workspace copied the whole
@@ -47,7 +47,7 @@ building the rope, once.
 | Option | What the user sees | Cost and risk |
 | --- | --- | --- |
 | A. Turn soft wrap off for a file above a threshold (for example 256 KiB) | Long lines of a large file scroll sideways instead of wrapping; smaller files are unchanged | A few lines in the workspace; no dependency change. Typing stays as measured. A window resize does not re-wrap the large file either |
-| B. Lower the limit and keep soft wrap | Files above the limit are refused with the size and the limit | No size within reach meets the frame budget: 64 KiB already takes 81–131 ms. Keeping the opening stall under the 300 ms progress threshold ([User experience](../reference/ux.md#always-visible-states)) needs about 200 KiB on the reference machine |
+| B. Lower the limit and keep soft wrap | Files above the limit are refused with the size and the limit | No size within reach meets the frame budget: 64 KiB already takes 81–131 ms. Keeping the opening stall under the 300 ms progress threshold ([User experience](../reference/ux/states.md#always-visible-states)) needs about 200 KiB on the reference machine |
 | C. Ask upstream for lazy or background wrapping (wrap only rows on screen, or measure lines off the UI thread) | Nothing changes until a release has it | Needs an issue or pull request to `gpui-kit`, then a dependency upgrade, which the maintainer approves ([Stack and dependencies](../standards/stack-and-dependencies.md)) |
 | D. Keep the limit and the stall, show a notice before opening a large file | The window freezes for seconds with a warning first | Does not meet D7 |
 
@@ -56,7 +56,7 @@ building the rope, once.
 **A, with C in parallel; keep the 4 MiB limit.** With soft wrap off above
 256 KiB, every size up to 4 MiB measured opens in one frame of at most
 62 ms and types within the budgets. That needs confirming on the reference
-machine before ADR-0031 records it. If the maintainer prefers soft wrap for
+machine before D-0031 records it. If the maintainer prefers soft wrap for
 every file, the number for D7 is **192 KiB**: at 1.4 ms per KiB it opens in
 about 270 ms, under the 300 ms progress threshold. It still misses the frame
 budget, and D7 would record that as a known deviation.

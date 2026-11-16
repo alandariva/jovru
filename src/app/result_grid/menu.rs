@@ -6,11 +6,11 @@ use super::{Inspector, StatsScope};
 use crate::app::copying::format_name;
 use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::cell_format;
-use jykre::column_layout::ColumnLayout;
-use jykre::copy_as::CopyFormat;
-use jykre::grid_edit;
-use jykre::tr;
+use jovru::cell_format;
+use jovru::column_layout::ColumnLayout;
+use jovru::copy_as::CopyFormat;
+use jovru::grid_edit;
+use jovru::tr;
 
 /// Hidden columns the menu lists by name; finding a column reaches the rest.
 const HIDDEN_IN_MENU: usize = 20;
@@ -27,7 +27,7 @@ struct EditItems {
 }
 
 /// The menu's editing items: only a query tab's result can be edited
-/// (ADR-0039, section 1), so a report panel's or a job's grid shows them
+/// (D-0039, section 1), so a report panel's or a job's grid shows them
 /// disabled with the reason, as does a query tab known to be read-only.
 fn edit_items(query_tab: bool, read_only: Option<String>, has_selection: bool) -> EditItems {
     let reason = if query_tab {

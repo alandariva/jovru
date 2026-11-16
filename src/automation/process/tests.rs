@@ -10,7 +10,7 @@ use super::*;
 use crate::automation::definition::{EnvironmentSpec, OutputSpec, PinnedFile, ProcessBody};
 use crate::automation::jjp::{JjpConfig, ProtocolProblem};
 use crate::automation::logs::{self, LOG_LIMIT, Stream};
-use jykre_core::ParameterKind;
+use jovru_core::ParameterKind;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 fn data_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("jykre-program-{label}-{}", RunId::new()));
+    let dir = std::env::temp_dir().join(format!("jovru-program-{label}-{}", RunId::new()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -187,8 +187,8 @@ impl Peer {
 fn the_environment_drops_the_denylist_and_unset_then_sets_and_adds_the_address() {
     let base = os(&[
         ("PATH", "/bin"),
-        ("JYKRE_LOG", "debug"),
-        ("JYKRE_CONFIG_DIR", "/data"),
+        ("JOVRU_LOG", "debug"),
+        ("JOVRU_CONFIG_DIR", "/data"),
         ("OTEL_EXPORTER_OTLP_HEADERS", "authorization=secret"),
         ("NODE_OPTIONS", "--require x"),
         ("PYTHONPATH", "p"),
@@ -196,13 +196,13 @@ fn the_environment_drops_the_denylist_and_unset_then_sets_and_adds_the_address()
         ("PYTHONHOME", "h"),
         ("AWS_PROFILE", "prod"),
         ("LOG_FORMAT", "json"),
-        ("jykre_lower", "kept where names have case"),
+        ("jovru_lower", "kept where names have case"),
     ]);
     let spec = EnvironmentSpec {
         unset: vec!["AWS_PROFILE".into()],
         set: vec![
             ("LOG_FORMAT".into(), "plain".into()),
-            ("JYKRE_JJP_ADDRESS".into(), "the job's own".into()),
+            ("JOVRU_JJP_ADDRESS".into(), "the job's own".into()),
         ],
     };
     let address: SocketAddr = "127.0.0.1:4000".parse().unwrap();
@@ -211,12 +211,12 @@ fn the_environment_drops_the_denylist_and_unset_then_sets_and_adds_the_address()
         unix,
         os(&[
             ("PATH", "/bin"),
-            ("jykre_lower", "kept where names have case"),
+            ("jovru_lower", "kept where names have case"),
             ("LOG_FORMAT", "plain"),
-            ("JYKRE_JJP_ADDRESS", "127.0.0.1:4000"),
+            ("JOVRU_JJP_ADDRESS", "127.0.0.1:4000"),
         ])
     );
-    // Windows ignores case: `jykre_lower` is denied, `Path` is replaced.
+    // Windows ignores case: `jovru_lower` is denied, `Path` is replaced.
     let mut spec_windows = spec.clone();
     spec_windows.set.push(("Path".into(), "C:\\tools".into()));
     let windows = environment_with(base.clone(), &spec_windows, None, true);
@@ -224,14 +224,14 @@ fn the_environment_drops_the_denylist_and_unset_then_sets_and_adds_the_address()
         windows,
         os(&[
             ("LOG_FORMAT", "plain"),
-            ("JYKRE_JJP_ADDRESS", "the job's own"),
+            ("JOVRU_JJP_ADDRESS", "the job's own"),
             ("Path", "C:\\tools"),
         ])
     );
     // Without `jjp/1`, the job's own value stays; the host's comes last.
     assert!(
         environment_with(base.clone(), &spec, None, false).contains(&(
-            OsString::from("JYKRE_JJP_ADDRESS"),
+            OsString::from("JOVRU_JJP_ADDRESS"),
             OsString::from("the job's own")
         ))
     );
@@ -239,7 +239,7 @@ fn the_environment_drops_the_denylist_and_unset_then_sets_and_adds_the_address()
     assert!(removed.contains(&OsString::from("AWS_PROFILE")));
     assert!(removed.contains(&OsString::from("OTEL_EXPORTER_OTLP_HEADERS")));
     assert!(!removed.contains(&OsString::from("PATH")));
-    assert!(is_denied(OsString::from("JYKRE_ANYTHING").as_os_str()));
+    assert!(is_denied(OsString::from("JOVRU_ANYTHING").as_os_str()));
     assert!(!is_denied(OsString::from("NODE_PATH").as_os_str()));
     assert_eq!(ENV_DENYLIST.len(), 6);
 }
@@ -333,7 +333,7 @@ fn definitions_that_cannot_run_are_refused_before_anything_starts() {
             path: "relative/dir".into()
         })
     );
-    let missing = std::env::temp_dir().join(format!("jykre-missing-{}", RunId::new()));
+    let missing = std::env::temp_dir().join(format!("jovru-missing-{}", RunId::new()));
     assert_eq!(
         with(&|body| body.working_directory = Some(missing.to_string_lossy().into_owned())),
         Err(Refused::WorkingDirectory {
@@ -399,11 +399,11 @@ fn a_changed_or_missing_pinned_file_refuses_the_run() {
 
 #[tokio::test]
 async fn a_missing_program_fails_with_not_found_and_keeps_no_logs() {
-    let missing = std::env::temp_dir().join(format!("jykre-no-program-{}", RunId::new()));
+    let missing = std::env::temp_dir().join(format!("jovru-no-program-{}", RunId::new()));
     for program in [
         missing.to_string_lossy().into_owned(),
         format!(
-            "jykre-no-such-program-{}",
+            "jovru-no-such-program-{}",
             RunId::new().to_string().replace('-', "")
         ),
     ] {
@@ -481,7 +481,7 @@ async fn a_program_the_system_refuses_keeps_the_system_s_words() {
     use std::os::unix::fs::PermissionsExt;
     let data = data_dir("no-interpreter");
     let program = data.join("tool");
-    std::fs::write(&program, b"#!/jykre-no-such-interpreter\nexit 0\n").unwrap();
+    std::fs::write(&program, b"#!/jovru-no-such-interpreter\nexit 0\n").unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut body = test_child::body("exit:0", Protocol::None, &[]);
     body.program = program.to_string_lossy().into_owned();
@@ -896,11 +896,11 @@ async fn newline_free_spam_is_bounded_on_disk_and_ends_with_the_marker() {
         let text = std::fs::read_to_string(&path).unwrap();
         let marker = text.lines().last().unwrap();
         assert!(
-            marker.starts_with("[jykre] ")
+            marker.starts_with("[jovru] ")
                 && marker.ends_with(" bytes dropped past the 1 MiB limit")
         );
         let dropped: u64 = marker
-            .trim_start_matches("[jykre] ")
+            .trim_start_matches("[jovru] ")
             .split(' ')
             .next()
             .unwrap()
@@ -918,7 +918,7 @@ async fn denylisted_variables_are_not_inherited_and_nothing_is_logged() {
     let _default = tracing::subscriber::set_default(subscriber);
     let data = data_dir("sentinel");
     let names = [
-        "JYKRE_SENTINEL",
+        "JOVRU_SENTINEL",
         "OTEL_EXPORTER_OTLP_HEADERS",
         "NODE_OPTIONS",
         "PYTHONPATH",

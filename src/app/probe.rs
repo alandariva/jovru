@@ -1,14 +1,14 @@
-//! The frame probe and heartbeat behind `JYKRE_PROBE=1` (ADR-0010).
+//! The frame probe and heartbeat behind `JOVRU_PROBE=1` (D-0010).
 //!
 //! A frame is timed from the start of the root view's `render` to a canvas
 //! painted last. The heartbeat is a UI-thread task that sleeps 5 ms in a
 //! loop; any extra delay is time the UI thread was busy. Every few seconds
 //! the summary (median, p95 and maximum frame, longest stall and which views
-//! rendered) is logged at `info` under the `jykre::probe` target. The
+//! rendered) is logged at `info` under the `jovru::probe` target. The
 //! performance run (`--test-performance`) also keeps each phase's frames and
 //! stalls apart ([`begin_phase`], [`end_phase`]) for its report.
 use gpui_kit::*;
-use jykre::probe::{self, HEARTBEAT, REPORT_EVERY, Samples, Summary};
+use jovru::probe::{self, HEARTBEAT, REPORT_EVERY, Samples, Summary};
 use std::{cell::RefCell, collections::BTreeMap, time::Instant};
 
 #[derive(Default)]
@@ -49,7 +49,7 @@ fn with(update: impl FnOnce(&mut Probe)) {
     });
 }
 
-/// Turns the probe on when `JYKRE_PROBE` asks for it and starts the
+/// Turns the probe on when `JOVRU_PROBE` asks for it and starts the
 /// heartbeat. Call once, on the UI thread. Returns whether it is on.
 pub fn start(cx: &mut App) -> bool {
     if !probe::enabled() {
@@ -137,7 +137,7 @@ fn report(probe: &mut Probe) {
     let stall = probe.stalls.take_summary();
     if let Some(frames) = probe.frames.take_summary() {
         tracing::info!(
-            target: "jykre::probe",
+            target: "jovru::probe",
             frames = frames.count,
             median_ms = probe::ms(frames.median),
             p95_ms = probe::ms(frames.p95),

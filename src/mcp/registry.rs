@@ -1,4 +1,4 @@
-//! Records of MCP client tokens (ADR-0042).
+//! Records of MCP client tokens (D-0042).
 //!
 //! The secret is the 64 hex digits only. It is written to the OS vault and,
 //! after a successful read, may sit in memory until the token is revoked,
@@ -11,9 +11,9 @@ use super::token::{McpToken, McpTokenId};
 use crate::connection_appearance::Environment;
 use crate::connection_store::{LatestWrite, VAULT_TIMEOUT, VaultCall, vault_within};
 use crate::tr;
-use jykre_core::{ConnectionId, DriverError, DriverResult, ErrorCode, SecretString, async_trait};
-use jykre_secrets::{McpTokenAccount, McpTokenStore};
-use jykre_storage::ConfigRepository;
+use jovru_core::{ConnectionId, DriverError, DriverResult, ErrorCode, SecretString, async_trait};
+use jovru_secrets::{McpTokenAccount, McpTokenStore};
+use jovru_storage::ConfigRepository;
 use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -953,10 +953,10 @@ mod tests {
     use crate::connection_appearance::Environment;
     use crate::connection_store::VAULT_TIMEOUT;
     use crate::mcp::{McpToken, McpTokenId};
-    use jykre_core::{
+    use jovru_core::{
         ConnectionId, DriverError, DriverResult, ErrorCode, SecretString, async_trait,
     };
-    use jykre_secrets::McpTokenStore;
+    use jovru_secrets::McpTokenStore;
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -987,7 +987,7 @@ mod tests {
     }
 
     fn mcp_token(id: &str, fill: &str) -> McpToken {
-        McpToken::parse(&format!("jykmcp_{id}_{}", fill.repeat(32))).unwrap()
+        McpToken::parse(&format!("jovmcp_{id}_{}", fill.repeat(32))).unwrap()
     }
 
     fn draft_named(token: McpToken, name: &str) -> TokenDraft {
@@ -1232,7 +1232,7 @@ mod tests {
     #[test]
     fn from_value_drops_a_bad_id_preserves_unknown_suspension_and_omits_a_secret() {
         let secret = "ab".repeat(32);
-        let wire = format!("jykmcp_{ID_A}_{secret}");
+        let wire = format!("jovmcp_{ID_A}_{secret}");
         let connection = "11111111-1111-4111-8111-111111111111";
         let value = json!({
             "enabled": true,
@@ -1303,7 +1303,7 @@ mod tests {
         let stored = settings.to_value();
         let text = stored.to_string();
         assert!(!text.contains(&secret));
-        assert!(!text.contains("jykmcp_"));
+        assert!(!text.contains("jovmcp_"));
         assert!(!text.contains("\"secret\""));
         assert_eq!(stored["tokens"][0]["suspended"], "later-version");
         assert!(stored["tokens"][0].get("secret").is_none());
@@ -1430,17 +1430,17 @@ mod tests {
         let secret = token.expose_secret().to_owned();
         let rendered = format!("{:?}", draft(mcp_token(ID_A, "ab")));
         assert!(!rendered.contains(&secret));
-        assert!(!rendered.contains("jykmcp_"));
+        assert!(!rendered.contains("jovmcp_"));
         registry.create(draft(token)).await.unwrap();
         assert_eq!(vault.sets(), 1);
         assert_eq!(writer.writes(), 1);
         assert_eq!(vault.secret_of(ID_A).as_deref(), Some(secret.as_str()));
-        assert!(!vault.secret_of(ID_A).unwrap().contains("jykmcp_"));
+        assert!(!vault.secret_of(ID_A).unwrap().contains("jovmcp_"));
         let saved = writer.saved().unwrap();
         assert_eq!(&saved, registry.settings());
         let text = saved.to_value().to_string();
         assert!(!text.contains(&secret));
-        assert!(!text.contains("jykmcp_"));
+        assert!(!text.contains("jovmcp_"));
         let record = registry.record(&McpTokenId::parse(ID_A).unwrap()).unwrap();
         assert_eq!(record.name, "Cursor on laptop");
         assert_eq!(record.connection_id, conn(1));
@@ -2257,7 +2257,7 @@ mod tests {
     #[tokio::test]
     async fn an_older_settings_write_cannot_land_after_a_newer_one() {
         let _settings_guard = super::super::SETTINGS_TEST_LOCK.lock().await;
-        let dir = std::env::temp_dir().join(format!("jykre-mcp-{}", ConnectionId::new()));
+        let dir = std::env::temp_dir().join(format!("jovru-mcp-{}", ConnectionId::new()));
         let _remove = RemoveDir(dir.clone());
         assert_eq!(load_settings(&dir).await.unwrap(), McpSettings::default());
         let token = record(ID_A, conn(1), 4, "staging", Some("later-version"));
@@ -2281,7 +2281,7 @@ mod tests {
             .unwrap();
         assert_eq!(registry.settings(), &newer);
         let text = registry.settings().to_value().to_string();
-        assert!(!text.contains("jykmcp_"));
+        assert!(!text.contains("jovmcp_"));
         assert_eq!(
             registry.settings().tokens[0].suspended.as_deref(),
             Some("later-version")
@@ -2318,6 +2318,6 @@ mod tests {
         assert!(!rendered.contains(&secret));
         assert!(!rendered.contains(&kept));
         assert!(!rendered.contains("Secret("));
-        assert!(!rendered.contains("jykmcp_"));
+        assert!(!rendered.contains("jovmcp_"));
     }
 }

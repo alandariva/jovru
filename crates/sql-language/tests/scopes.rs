@@ -2,8 +2,8 @@
 //! Which columns completion offers at the cursor, over the cases of
 //! `fixtures/scopes.txt` in the three dialects: the relations of the cache
 //! whose columns it reads, and the columns CTEs and derived tables make.
-use jykre_core::{ObjectKind, ObjectPath, SessionContext, SqlDialect};
-use jykre_sql_language::completion::{NameIndex, Relation, Source, Wanted, request};
+use jovru_core::{ObjectKind, ObjectPath, SessionContext, SqlDialect};
+use jovru_sql_language::completion::{NameIndex, Relation, Source, Wanted, request};
 use std::collections::HashSet;
 
 const CURSOR: char = '‸';
@@ -101,7 +101,7 @@ fn setup(dialect: &str) -> (SqlDialect, Vec<ObjectKind>, SessionContext) {
         "postgres" => (
             SqlDialect::Postgres,
             vec![ObjectKind::Database, ObjectKind::Schema],
-            context(Some("jykre")),
+            context(Some("jovru")),
         ),
         "mysql" => (SqlDialect::MySql, vec![ObjectKind::Database], context(None)),
         "databricks" => (

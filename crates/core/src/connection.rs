@@ -73,7 +73,7 @@ pub struct ConnectionConfig {
 /// They deliberately implement neither Serialize nor Deserialize.
 ///
 /// ```compile_fail
-/// use jykre_core::Credentials;
+/// use jovru_core::Credentials;
 /// let credentials = Credentials::default();
 /// serde_json::to_string(&credentials).unwrap();
 /// ```
@@ -86,7 +86,7 @@ pub struct Credentials {
 /// Databricks will resolve its CLI token internally rather than use a password.
 ///
 /// ```compile_fail
-/// use jykre_core::ResolvedConnection;
+/// use jovru_core::ResolvedConnection;
 /// fn persist(connection: &ResolvedConnection) {
 ///     serde_json::to_string(connection).unwrap();
 /// }

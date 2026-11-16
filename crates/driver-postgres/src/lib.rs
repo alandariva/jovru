@@ -4,7 +4,7 @@
 pub mod config;
 pub use config::{PostgresConfig, PostgresSslMode};
 
-use jykre_core::*;
+use jovru_core::*;
 mod edit;
 mod runtime;
 

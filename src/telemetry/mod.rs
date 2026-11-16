@@ -1,15 +1,15 @@
 //! Optional export of logs and traces over OTLP
-//! ([ADR-0029](../../docs/adr/0029-otlp-export-of-logs-and-traces.md)).
+//! ([D-0029](../../docs/decisions/reliability.md#d-0029)).
 //!
 //! Off by default. **Preferences › Diagnostics › Telemetry** turns logs and
 //! traces on separately and names the collector (OTLP over HTTP/protobuf or
 //! gRPC); headers for its authentication are kept in the system vault.
 //!
-//! - **Logs** are the events of the local log, as filtered by `JYKRE_LOG`,
+//! - **Logs** are the events of the local log, as filtered by `JOVRU_LOG`,
 //!   except `trace` (SQL and payloads), the frame probe, UI-thread timings
 //!   below a warning and events with a field that may hold free text
 //!   ([`filter::LOCAL_ONLY_FIELDS`]).
-//! - **Traces** are Jykre's spans around external calls (databases, HTTP,
+//! - **Traces** are Jovru's spans around external calls (databases, HTTP,
 //!   the Databricks CLI, the AI provider, the vault, files), with only the
 //!   attributes in [`attributes::ALLOWED`]: operation, database system and
 //!   name, durations, row counts and error codes. Never SQL, values,
@@ -27,7 +27,7 @@ pub mod switch;
 use crate::drivers::{CancellationToken, DriverError, DriverResult, ErrorCode, SecretString};
 use crate::tr;
 use filter::{ExportGate, Signal};
-use jykre_secrets::{ApiKeyAccount, ApiKeyStore, SystemSecretStore};
+use jovru_secrets::{ApiKeyAccount, ApiKeyStore, SystemSecretStore};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::logs::SdkLoggerProvider;
@@ -63,7 +63,7 @@ macro_rules! client_span {
 pub const PREFERENCES_KEY: &str = "telemetry.preferences";
 
 /// The service name collectors see.
-pub const SERVICE_NAME: &str = "jykre-studio";
+pub const SERVICE_NAME: &str = "jovru";
 
 /// How long the exit waits for what is still queued.
 pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -279,7 +279,7 @@ pub static PREFERENCE_WRITES: crate::connection_store::LatestWrite =
 
 /// Reads the preferences kept in the data folder `dir`.
 pub async fn load_preferences(dir: &Path) -> DriverResult<TelemetryPreferences> {
-    let repository = jykre_storage::ConfigRepository::open(dir).await?;
+    let repository = jovru_storage::ConfigRepository::open(dir).await?;
     let value = repository.setting(PREFERENCES_KEY).await;
     repository.close().await;
     Ok(TelemetryPreferences::from_value(value?.as_ref()))
@@ -293,7 +293,7 @@ pub async fn save_preferences(
 ) -> DriverResult<()> {
     PREFERENCE_WRITES
         .run(ticket, async {
-            let repository = jykre_storage::ConfigRepository::open(dir).await?;
+            let repository = jovru_storage::ConfigRepository::open(dir).await?;
             let result = repository
                 .set_setting(PREFERENCES_KEY, &preferences.to_value())
                 .await;
@@ -455,7 +455,7 @@ where
     S: tracing::Subscriber + for<'span> LookupSpan<'span> + Send + Sync,
 {
     let traces = tracing_opentelemetry::layer()
-        .with_tracer(tracer_provider.tracer("jykre"))
+        .with_tracer(tracer_provider.tracer("jovru"))
         .with_location(false)
         .with_threads(false)
         .with_target(false)
@@ -627,7 +627,7 @@ fn test_span() -> opentelemetry_sdk::trace::SpanData {
         events: opentelemetry_sdk::trace::SpanEvents::default(),
         links: opentelemetry_sdk::trace::SpanLinks::default(),
         status: Status::Unset,
-        instrumentation_scope: opentelemetry::InstrumentationScope::builder("jykre").build(),
+        instrumentation_scope: opentelemetry::InstrumentationScope::builder("jovru").build(),
     }
 }
 

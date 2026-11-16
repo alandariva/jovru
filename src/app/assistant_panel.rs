@@ -1,15 +1,15 @@
-//! The assistant panel (ADR-0028): a conversation with the configured model
+//! The assistant panel (D-0028): a conversation with the configured model
 //! about the tab's connection. It is its own cached entity, so a streamed
-//! answer redraws the panel only (ADR-0012), and it shows everything that
+//! answer redraws the panel only (D-0012), and it shows everything that
 //! leaves the computer: each request before it is sent (when the review
 //! mode asks), each tool the model called with what it was answered, and
 //! the tokens and cost of every round.
 //!
 //! The panel decides nothing about privacy: the workspace builds each
 //! request's first message from the facts allow-list, the tools read the
-//! metadata cache only (`jykre::assistant`), and a query the model asks for
+//! metadata cache only (`jovru::assistant`), and a query the model asks for
 //! runs only once the user approves it, its result leaving only once the
-//! user sends it, through `jykre::assistant::released`.
+//! user sends it, through `jovru::assistant::released`.
 use super::assistant_settings::{self, AssistantSettings};
 use super::demo;
 use super::ui::*;
@@ -19,16 +19,16 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::assistant::facts::SchemaScope;
-use jykre::assistant::released::{self, QueryPreview};
-use jykre::assistant::run::{
+use jovru::assistant::facts::SchemaScope;
+use jovru::assistant::released::{self, QueryPreview};
+use jovru::assistant::run::{
     self, CompactionKind, Conversation, Next, QueryDecision, Round, RoundState, ToolStep,
 };
-use jykre::assistant::tools::CacheTools;
-use jykre::assistant::{self as library, AssistantPreferences, prompts};
-use jykre::drivers::{CancellationToken, DriverError, DriverResult, ErrorCode};
-use jykre::{backend, tr};
-use jykre_assistant::{
+use jovru::assistant::tools::CacheTools;
+use jovru::assistant::{self as library, AssistantPreferences, prompts};
+use jovru::drivers::{CancellationToken, DriverError, DriverResult, ErrorCode};
+use jovru::{backend, tr};
+use jovru_assistant::{
     Assistant, KeyUse, Message, RoundEvent, RoundResult, Timeouts, ToolCall, sql_blocks,
 };
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -78,7 +78,7 @@ struct QueryCard {
     call: ToolCall,
     sql: String,
     purpose: Option<String>,
-    risk: Option<jykre::guard::Risk>,
+    risk: Option<jovru::guard::Risk>,
     state: CardState,
 }
 
@@ -302,7 +302,7 @@ impl AssistantPanel {
     }
 
     /// Where unqualified names resolve now; the conversation goes on.
-    pub(super) fn set_context(&mut self, context: jykre::drivers::SessionContext) {
+    pub(super) fn set_context(&mut self, context: jovru::drivers::SessionContext) {
         if let Some(target) = &mut self.target {
             target.context = context;
         }
@@ -505,7 +505,7 @@ impl AssistantPanel {
             return;
         };
         if self.conversation.is_none() {
-            let language = if jykre::i18n::locale().starts_with("pt") {
+            let language = if jovru::i18n::locale().starts_with("pt") {
                 "Brazilian Portuguese"
             } else {
                 "English"
@@ -733,7 +733,7 @@ impl AssistantPanel {
                 Ok(sql) => {
                     self.cards.push(QueryCard {
                         purpose: run::query_purpose(&call).map(str::to_owned),
-                        risk: jykre::guard::risk(&sql, dialect),
+                        risk: jovru::guard::risk(&sql, dialect),
                         call,
                         sql,
                         state: CardState::Asked,
@@ -2172,7 +2172,7 @@ fn count_short(count: u64) -> String {
         1_000..1_000_000 => format!("{:.1}k", count as f64 / 1_000.0),
         _ => format!("{:.1}M", count as f64 / 1_000_000.0),
     };
-    if jykre::i18n::locale().starts_with("pt") {
+    if jovru::i18n::locale().starts_with("pt") {
         text.replace('.', ",")
     } else {
         text
@@ -2208,7 +2208,7 @@ fn mono(text: String) -> Div {
 /// A request's messages after the first `skip`, with the system prompt
 /// unless `skip_system`: what is new since the last request sent.
 fn request_messages(
-    request: &jykre_assistant::ModelRequest,
+    request: &jovru_assistant::ModelRequest,
     skip: usize,
     skip_system: bool,
 ) -> Div {
@@ -2280,7 +2280,7 @@ fn answer_text(
                     .child(sql.clone()),
             );
         if block.closed {
-            let risk = jykre::guard::risk(&sql, None);
+            let risk = jovru::guard::risk(&sql, None);
             let insert = sql.clone();
             let copy = sql.clone();
             card = card

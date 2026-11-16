@@ -77,8 +77,8 @@ pub(crate) async fn install_job(
         "update_install",
         http.request.method = "GET",
         url.template = "/repos/{owner}/{repo}/releases/assets/{id}",
-        jykre.bytes = tracing::field::Empty,
-        jykre.files = tracing::field::Empty,
+        jovru.bytes = tracing::field::Empty,
+        jovru.files = tracing::field::Empty,
     );
     let id = uuid::Uuid::new_v4().simple().to_string();
     let staging = job.dir.dir.join(WORK_DIR).join(format!("staging-{id}"));
@@ -142,7 +142,7 @@ async fn run(
         ) => done.unwrap_or_else(|_| Err(error::timeout()))?,
         () = cancel.cancelled() => return Err(DriverError::cancelled()),
     };
-    span.record("jykre.bytes", crate::telemetry::attributes::count(bytes));
+    span.record("jovru.bytes", crate::telemetry::attributes::count(bytes));
 
     reports.phase.send_replace(Phase::Verify);
     let unpacked = staging.join("files");
@@ -183,7 +183,7 @@ async fn run(
     })
     .await
     .map_err(|_| error::internal())??;
-    span.record("jykre.files", crate::telemetry::attributes::count(swapped));
+    span.record("jovru.files", crate::telemetry::attributes::count(swapped));
     Ok(Installed {
         version: candidate.version.clone(),
         restart_path: dir.exe.clone(),

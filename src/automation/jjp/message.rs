@@ -5,8 +5,8 @@ use super::{
     MAX_STAGE_CHARS, MAX_VALUE_BYTES, NamedValues, PROTOCOL, RunShared,
 };
 use crate::automation::definition::OutputSpec;
-use jykre_core::automation::parameter_kind_str;
-use jykre_core::is_parameter_value;
+use jovru_core::automation::parameter_kind_str;
+use jovru_core::is_parameter_value;
 use serde_json::{Map, Value, json};
 use std::time::Instant;
 
@@ -281,7 +281,7 @@ pub(super) fn cancel() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jykre_core::ParameterKind;
+    use jovru_core::ParameterKind;
 
     fn outputs() -> Vec<OutputSpec> {
         vec![

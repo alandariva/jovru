@@ -1,6 +1,6 @@
 //! The Reports section of the rail and the report tabs
-//! ([ADR-0024](../../docs/adr/0024-reports.md),
-//! [ADR-0025](../../docs/adr/0025-report-panels.md)): the saved reports,
+//! ([D-0024](../../docs/decisions/results.md#d-0024),
+//! [D-0025](../../docs/decisions/results.md#d-0025)): the saved reports,
 //! their list, and the tabs that edit and run them.
 //!
 //! Report tabs are tracked apart from query tabs (`report_tabs`). A report's
@@ -12,7 +12,7 @@
 use super::report_panel::{ReportSource, Sources};
 use super::report_view::{ReportEvent, ReportMode, ReportView};
 use super::*;
-use jykre::reports::{ConnectionRef, Report, ReportLibrary};
+use jovru::reports::{ConnectionRef, Report, ReportLibrary};
 use std::rc::Rc;
 
 /// Changes are written once they settle.
@@ -102,7 +102,7 @@ impl AppView {
                     choices: connection
                         .namespaces
                         .iter()
-                        .map(jykre::ddl::namespace_context)
+                        .map(jovru::ddl::namespace_context)
                         .collect(),
                     names: connection
                         .profile
@@ -520,10 +520,10 @@ impl AppView {
                 .and_then(|panel| panel.chart.as_ref())
                 .map(|chart| chart.kind)
             {
-                Some(jykre::reports::ChartKind::Line) => I::ChartLine,
-                Some(jykre::reports::ChartKind::Pie) => I::ChartPie,
-                Some(jykre::reports::ChartKind::Bar) => I::ChartColumn,
-                Some(jykre::reports::ChartKind::Number) => I::Hash,
+                Some(jovru::reports::ChartKind::Line) => I::ChartLine,
+                Some(jovru::reports::ChartKind::Pie) => I::ChartPie,
+                Some(jovru::reports::ChartKind::Bar) => I::ChartColumn,
+                Some(jovru::reports::ChartKind::Number) => I::Hash,
                 None => I::FileChartColumn,
             }
         };
@@ -693,7 +693,7 @@ impl AppView {
 async fn write_reports(value: serde_json::Value) -> DriverResult<()> {
     let dir = connection_store::data_dir();
     backend::run(async move {
-        connection_store::write_setting(&dir, jykre::reports::SETTINGS_KEY, &value, "reports").await
+        connection_store::write_setting(&dir, jovru::reports::SETTINGS_KEY, &value, "reports").await
     })
     .await
 }

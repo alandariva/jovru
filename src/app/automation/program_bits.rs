@@ -1,16 +1,16 @@
 //! Every name the Automation views take from the program executor's
-//! modules (`jykre::automation::process`, `jykre::automation::logs` and
-//! `jykre::automation::jjp`), in one place, so they can follow those
+//! modules (`jovru::automation::process`, `jovru::automation::logs` and
+//! `jovru::automation::jjp`), in one place, so they can follow those
 //! modules as they change. Nothing else in `src/app/automation/` names
 //! them.
 //!
 //! GPUI-free: what it gives back is plain data and sentences.
-use jykre::automation::command_line;
-pub use jykre::automation::command_line::{Command, SplitError};
-use jykre::automation::definition::EnvironmentSpec;
-use jykre::automation::{ProgramOutcome, RunId};
-use jykre::automation::{jjp, logs, process};
-use jykre::tr;
+use jovru::automation::command_line;
+pub use jovru::automation::command_line::{Command, SplitError};
+use jovru::automation::definition::EnvironmentSpec;
+use jovru::automation::{ProgramOutcome, RunId};
+use jovru::automation::{jjp, logs, process};
+use jovru::tr;
 use std::path::Path;
 
 /// The variables a program never inherits (specification, section 9.1.3),
@@ -19,7 +19,7 @@ pub fn denylist() -> &'static [&'static str] {
     process::ENV_DENYLIST
 }
 
-/// The variables of Jykre Studio's environment now that the program will
+/// The variables of Jovru's environment now that the program will
 /// not receive: the denylist's and the job's own unset names. Reads the
 /// environment's names, never its values.
 pub fn removed_variables(environment: &EnvironmentSpec) -> Vec<String> {
@@ -72,7 +72,7 @@ pub fn shell_syntax_note(word: &str) -> String {
     )
 }
 
-/// The most a log file keeps (ADR-0037).
+/// The most a log file keeps (D-0037).
 pub const LOG_LIMIT: u64 = logs::LOG_LIMIT;
 
 /// Why a program could not start, in words, and the file a run was refused
@@ -191,7 +191,7 @@ pub fn start_error(program: &ProgramOutcome) -> Option<String> {
             tr!("The program {0} does not exist.", named)
         }
         (process::StartError::NotFound, None) => tr!(
-            "The program {0} was not found: no folder of PATH holds an executable file of that name. Give its full path, or check that it is installed and that the PATH Jykre Studio started with reaches it.",
+            "The program {0} was not found: no folder of PATH holds an executable file of that name. Give its full path, or check that it is installed and that the PATH Jovru started with reaches it.",
             named
         ),
         (process::StartError::EntrypointNotFound, _) => tr!(
@@ -222,7 +222,7 @@ pub fn start_error(program: &ProgramOutcome) -> Option<String> {
     })
 }
 
-/// One of a program run's log files (ADR-0037).
+/// One of a program run's log files (D-0037).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stream {
     Stdout,

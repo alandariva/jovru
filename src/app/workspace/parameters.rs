@@ -1,13 +1,13 @@
 //! The `:name` parameters of a query tab: one field per marker of its SQL,
 //! above the editor, whose values the driver binds apart from the SQL
-//! ([ADR-0026](../../../docs/adr/0026-named-parameters-in-sql-tabs.md)).
+//! ([D-0026](../../../docs/decisions/drivers.md#d-0026)).
 //!
 //! Which names the SQL holds, how a value is checked and the requests that
-//! carry them live in `jykre::parameters`; this view keeps the fields and
+//! carry them live in `jovru::parameters`; this view keeps the fields and
 //! shows their problems.
 use super::super::report_view::{invalid_hint, kind_name, placeholder};
 use super::*;
-use jykre::parameters::{self, KINDS, KindChoice, ParameterError, ParameterProblem, TabParameter};
+use jovru::parameters::{self, KINDS, KindChoice, ParameterError, ParameterProblem, TabParameter};
 use std::collections::HashMap;
 
 /// Fields kept for names that left the SQL, so they come back with their
@@ -44,7 +44,7 @@ impl ParameterForm {
 
 impl Workspace {
     /// Takes the names of the SQL, read with its outline after it or its
-    /// dialect changed ([`jykre::script_outline::Outline`]); the fields
+    /// dialect changed ([`jovru::script_outline::Outline`]); the fields
     /// change only when the names did.
     pub(super) fn apply_parameter_names(&mut self, names: Vec<String>) {
         self.parameters.names = names;

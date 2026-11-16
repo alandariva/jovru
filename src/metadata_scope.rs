@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn a_saved_choice_shows_before_loading_and_flags_what_the_server_lost() {
-        let db = path(&[(Database, "jykre")]);
+        let db = path(&[(Database, "jovru")]);
         let sales = db.child(Schema, "sales");
         let mut tree = ScopeTree::new(
             vec![Database, Schema],
@@ -761,10 +761,10 @@ mod tests {
     fn a_single_database_opens_by_itself_and_an_open_one_is_listed() {
         let mut tree = ScopeTree::new(vec![Database, Schema], MetadataScope::default());
         let root = ObjectPath::default();
-        listed(&mut tree, &root, Database, &["jykre"]);
-        assert_eq!(tree.to_open(&root), [path(&[(Database, "jykre")])]);
+        listed(&mut tree, &root, Database, &["jovru"]);
+        assert_eq!(tree.to_open(&root), [path(&[(Database, "jovru")])]);
         // Asked again, it is open and loading already.
-        tree.begin_listing(&path(&[(Database, "jykre")]));
+        tree.begin_listing(&path(&[(Database, "jovru")]));
         assert!(tree.to_open(&root).is_empty());
         // A single level (MySQL databases) has nothing to open.
         let mut flat = ScopeTree::new(vec![Database], MetadataScope::default());

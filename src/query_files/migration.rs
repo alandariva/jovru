@@ -1,5 +1,5 @@
 //! Moving the saved queries kept in `config.db` (`workspace.state`) to
-//! `.sql` files ([ADR-0031](../../../docs/adr/0031-saved-queries-as-sql-files.md)).
+//! `.sql` files ([D-0031](../../docs/decisions/persistence.md#d-0031)).
 //!
 //! The application plans the files, writes the plan to `query_library`
 //! before creating any ([`super::library::QueryLibrary::migration`]), writes

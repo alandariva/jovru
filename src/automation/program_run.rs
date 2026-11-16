@@ -11,11 +11,11 @@ use super::{
     Cause, Phase, ProgramOutcome, Progress, Refusal, RunOutcome, RunState, RunStatus, UtcMillis,
     snapshot,
 };
-use jykre_core::CancellationToken;
-use jykre_core::automation::{JobKind, RunOrigin};
-use jykre_storage::{AutomationRepository, NewRun, OutputValue, RunFinish};
+use jovru_core::CancellationToken;
+use jovru_core::automation::{JobKind, RunOrigin};
+use jovru_storage::{AutomationRepository, NewRun, OutputValue, RunFinish};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{mpsc, watch};
 
 pub(super) async fn run(
@@ -117,7 +117,7 @@ pub(super) async fn run(
     });
     // The group is recorded while the program runs, so recovery finds it
     // after a crash (section 9.1.6).
-    let (started_sender, mut started_receiver) = mpsc::channel(1);
+    let (started_sender, mut started_receiver) = mpsc::channel(4);
     let on_started: process::StartedSink = Arc::new(move |group, leader_started| {
         drop(started_sender.try_send((group, leader_started)));
     });
@@ -133,11 +133,12 @@ pub(super) async fn run(
         started: Some(on_started),
         timings: engine.inner.timings,
     });
-    tokio::pin!(execution);
-    let report = loop {
-        tokio::select! {
-            report = &mut execution => break report,
-            Some((group, leader_started)) = started_receiver.recv() => {
+    // The group is written beside the run, in order, so a slow database
+    // never holds back Stop, the deadline or the program's exit.
+    let recorder = {
+        let repository = repository.clone();
+        tokio::spawn(async move {
+            while let Some((group, leader_started)) = started_receiver.recv().await {
                 if group.is_some()
                     && let Err(error) = repository
                         .set_process(id, group, leader_started.as_deref())
@@ -146,8 +147,12 @@ pub(super) async fn run(
                     tracing::warn!(run = %id, error_code = ?error.code, "program's group not recorded");
                 }
             }
-        }
+        })
     };
+    let report = execution.await;
+    // The run's end closes the channel; the last write finishes before the
+    // run is recorded as ended.
+    let _ = tokio::time::timeout(Duration::from_secs(5), recorder).await;
 
     let verdict = report.verdict();
     let (mut state, mut cause, mut effect_unknown) =
@@ -185,7 +190,7 @@ pub(super) async fn run(
             .iter()
             .map(|value| value.value.as_deref().map_or(0, str::len))
             .sum::<usize>()
-            <= jykre_storage::OUTPUT_QUOTA_BYTES
+            <= jovru_storage::OUTPUT_QUOTA_BYTES
     });
     let (exit_code, exit_signal) = match report.exit {
         Some(process::Exit::Code(code)) => (Some(i64::from(code)), None),

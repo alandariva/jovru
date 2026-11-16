@@ -1,15 +1,15 @@
-# Jykre Studio — Automation engine specification
+# Jovru — Automation engine specification
 
 **Version:** 1.2, decisions answered
 **Date:** November 8, 2026 (1.1: November 7, 2026)
 **Approval:** Approved for 0.3.0 by the maintainer on 2026-11-08: answers to
 Q-01…Q-32 ([section 12](#12-decisions-required-from-the-maintainer)),
-ADR-0034 to ADR-0038 accepted, `process-wrap` approved (Q-11), and the
+D-0034 to D-0038 accepted, `process-wrap` approved (Q-11), and the
 phase 3, 4 and 5 revisions (sections 9.1–9.3) approved
 **Implementation:** Implemented for 0.3.0 on Linux; schedules (sections 9.5.1–9.5.10, A13) are implemented and wait for the gate and the check in the application. Phases 1, 3, 4 and 5 are in `src/automation/`,
-`crates/storage` and `crates/core` (A2–A5 of [0.3.0](releases/0.3.0.md)), and phase 2, the
+`crates/storage` and `crates/core` (A2–A5 of 0.3.0), and phase 2, the
 interface, in `src/app/automation/` (A6). Windows is not validated yet
-([checklist](releases/0.3.0-windows-checklist.md)). Where the code differs from this text, see
+(checklist). Where the code differs from this text, see
 [Implementation notes (0.3.0)](#implementation-notes-030).
 **Audience:** product, UX, architecture, Rust engineering and testing
 **Codebase baseline:** `release/0.2.0`
@@ -28,17 +28,17 @@ design IDs (`Dxx`) and question IDs (`Q-xx`) refer to the review.
 > delivery is now **SQL → script** in version 0.3.0 (Q-01), built straight
 > through phases 1, 3, 4 and 5 with the interface at the end. Text that said
 > *pending Q-xx* now states the answer.
-> [ADR-0034](../adr/0034-automation-database-service-and-lock.md),
-> [ADR-0035](../adr/0035-persisted-declared-outputs.md) and the
-> [0.3.0 plan](releases/0.3.0.md) were accepted on 2026-11-08, and the
+> [D-0034](../decisions/automation.md#d-0034),
+> [D-0035](../decisions/automation.md#d-0035) and the
+> 0.3.0 plan were accepted on 2026-11-08, and the
 > process-supervision dependency was approved the same day (Q-11).
 
 > **Approved on 2026-11-08:** sections
 > [9.5.1–9.5.10](#951-schedules-while-the-application-is-open-approved-revision)
 > specify the scheduling part of phase 7 for milestone A13 of
-> [0.3.0](releases/0.3.0.md). The maintainer approved them with
-> [ADR-0041](../adr/0041-schedules-and-grants.md) and the
-> [`jiff` proposal](schedule-time-zone-dependency.md), taking every
+> 0.3.0. The maintainer approved them with
+> [D-0041](../decisions/automation.md#d-0041) and the
+> [`jiff` proposal](../decisions/stack-and-dependencies.md#d-0045), taking every
 > recommendation of [section 9.5.9](#959-decisions-for-the-maintainer)
 > except Q-34 and Q-35: missed times and overlap are a policy chosen per
 > schedule ([section 9.5.5](#955-missed-times-and-overlap)).
@@ -84,7 +84,7 @@ chains come later, through the same engine, states and history.
 - **The protocol is for external programs only**, and their stdout/stderr
   stay outside it.
 - **Integration permissions are not a sandbox.** A permission restricts what
-  a job may ask Jykre Studio to do; it never restricts what an operating
+  a job may ask Jovru to do; it never restricts what an operating
   system process can do on its own.
 - **Bind, never concatenate.** Input values reach the database as bound
   parameters.
@@ -105,8 +105,8 @@ chains come later, through the same engine, states and history.
 ### 1.4 Release placement
 
 Automation does **not** belong in 0.2.0, whose thesis is daily-use hardening
-without new capabilities (D02, [release plan](releases/0.2.0.md)). It is the
-thesis of [0.3.0](releases/0.3.0.md), which ships once SQL → script works
+without new capabilities (D02, release plan). It is the
+thesis of 0.3.0, which ships once SQL → script works
 end to end (decision R, 2026-11-08).
 
 ### 1.5 Architecture
@@ -119,7 +119,7 @@ flowchart TB
     OWNER --> SQLX[SQL executor]
   end
   SQLX -->|backend::run, own session| DRIVERS[Existing drivers]
-  OWNER --> REPO["jykre-storage: AutomationRepository"]
+  OWNER --> REPO["jovru-storage: AutomationRepository"]
   REPO --> DB[("automation.db")]
   ENGINE -.later phases.-> PROC[External process executor]
   PROC -.-> JOB[Node / Python / any executable]
@@ -138,8 +138,8 @@ ships when all of them are accepted. Phases 6 and 7 stay later.
 
 | Phase | Priority | Delivery | Blocked by |
 | --- | --- | --- | --- |
-| PoC | Optional | Headless SQL executor and engine without persistence or UI, to measure the open risks ([plan](automation-sql-job-poc.md)) | Nothing |
-| 0 — Decisions | P0 | Answers to Q-01…Q-14, ADR-0034 and ADR-0035 with the DDL (all done 2026-11-08) | — |
+| PoC | Optional | Headless SQL executor and engine without persistence or UI, to measure the open risks ([plan](../reference/automation.md#measurements)) | Nothing |
+| 0 — Decisions | P0 | Answers to Q-01…Q-14, D-0034 and D-0035 with the DDL (all done 2026-11-08) | — |
 | 1 — Durable SQL slice | P0 | Sections 4, 5 and 6 | Phase 0 |
 | 3 — External program | P0 | Section 9.1 | Phase 1 |
 | 4 — Minimal protocol `jjp/1` | P0 | Section 9.2 | Phase 3 |
@@ -235,7 +235,7 @@ SQL tab.
 | Field | Meaning |
 | --- | --- |
 | `schema_version` | Major and minor version of the definition format. An unsupported major is refused; unknown keys are preserved, as reports do. |
-| `id` | Stable identifier generated by Jykre Studio |
+| `id` | Stable identifier generated by Jovru |
 | `name`, `description` | Shown in the list and history |
 | `connection` | The `ConnectionId` of an existing profile, never its name |
 | `context` | The `SessionContext` (database, catalog, schema) the run's session uses, pinned in the definition (P-04) |
@@ -271,12 +271,12 @@ already use.
 ### 4.2 Parameters and binding
 
 - Inputs are `ParameterSpec` values with a `ParameterKind`, as in reports
-  (ADR-0023, ADR-0024). The run form is the reports' parameter form. There is
+  (D-0023, D-0024). The run form is the reports' parameter form. There is
   no JSON Schema in the SQL Job (P-20).
 - Markers are found and bound by `parameters::bind`, which already respects
   dialect literals, comments, quoted identifiers, PostgreSQL `::` and dollar
   quotes. Values reach the driver as bind parameters, including the classic
-  Databricks exceptions of ADR-0026.
+  Databricks exceptions of D-0026.
 - Identifiers (table and column names) cannot be bound; a job that needs a
   variable identifier is out of scope.
 
@@ -377,8 +377,8 @@ session after the run, which would discard a write's result still open.
 
 | Part | Location | Notes |
 | --- | --- | --- |
-| IDs, states, causes, run record DTOs | `jykre-core` | Minimal and pure; pending Q-04 |
-| `AutomationRepository`, migrations | `jykre-storage` | SQLite stays in storage (persistence rules) |
+| IDs, states, causes, run record DTOs | `jovru-core` | Minimal and pure; pending Q-04 |
+| `AutomationRepository`, migrations | `jovru-storage` | SQLite stays in storage (persistence rules) |
 | Engine: admission, run owner, deadlines, executors | `src/automation/` | GPUI-free, testable without a window, like `src/reports` |
 | Views | `src/app/automation/` | Thin; render state and capture intent |
 
@@ -393,7 +393,7 @@ The engine is an **application-root service**. Views subscribe to it; closing
 a view does not cancel its runs. Quitting the application with runs active
 asks the user, then cancels them and waits for the shutdown to finish before
 exiting. This deviates from the rule that dropping a view cancels its
-operations, and [ADR-0034](../adr/0034-automation-database-service-and-lock.md)
+operations, and [D-0034](../decisions/automation.md#d-0034)
 records the deviation (D07, P-27, Q-05).
 
 ### 5.3 Admission and concurrency
@@ -451,20 +451,20 @@ never a terminal state. Run lists are virtualized.
 ## 6. Persistence and recovery
 
 This section is decided by
-[ADR-0034](../adr/0034-automation-database-service-and-lock.md) (Q-02,
+[D-0034](../decisions/automation.md#d-0034) (Q-02,
 Q-06) and, for declared outputs,
-[ADR-0035](../adr/0035-persisted-declared-outputs.md) (Q-03), both accepted.
+[D-0035](../decisions/automation.md#d-0035) (Q-03), both accepted.
 Where they differ from the text below, the ADRs win.
 
 ### 6.1 `automation.db`
 
 - A new SQLite file in the current data directory (which respects
-  `JYKRE_CONFIG_DIR`), opened with `open_pool`, with its own forward-only
+  `JOVRU_CONFIG_DIR`), opened with `open_pool`, with its own forward-only
   migrations (D05).
 - Separate from `config.db` because history grows and is pruned, while
   `config.db` holds the only copy of the connection profiles and runs with
   `synchronous=FULL`.
-- No second data root: version 1.0's `Jykre Studio\jykre.db` and
+- No second data root: version 1.0's `Jovru\jovru.db` and
   per-OS directories are dropped (P-10).
 
 ### 6.2 Definitions
@@ -494,14 +494,14 @@ Persisted operational data: delivered row count, `rows_affected`,
 The history shows *what ran, when and how it ended*, not what it returned.
 
 The one exception is declared scalar outputs for chains (phase 5), under
-[ADR-0035](../adr/0035-persisted-declared-outputs.md): opt-in per job, at
+[D-0035](../decisions/automation.md#d-0035): opt-in per job, at
 most 4 KiB per run, values kept 7 days, metadata 90 days, and an extra
 confirmation for production jobs (D29, Q-03).
 
-### 6.5 Phase 1 schema (superseded by ADR-0034)
+### 6.5 Phase 1 schema (superseded by D-0034)
 
 The approved DDL is in
-[ADR-0034](../adr/0034-automation-database-service-and-lock.md#2-migration-1-jobs-and-runs);
+[D-0034](../decisions/automation.md#d-0034);
 the sketch below is kept as the 1.1 text.
 
 ```sql
@@ -561,11 +561,11 @@ never blocks admission. Nothing else is stored to retain in phase 1.
 
 ### 7.1 Credentials
 
-- Credentials stay in the operating system vault through `jykre-secrets`
-  (ADR-0004). Version 1.0's "explicit secure fallback" is removed (P-11):
+- Credentials stay in the operating system vault through `jovru-secrets`
+  (D-0004). Version 1.0's "explicit secure fallback" is removed (P-11):
   without a vault there are no persistent job secrets, and the UI explains
   why.
-- New secrets in later phases are new accounts in `jykre-secrets`, never a
+- New secrets in later phases are new accounts in `jovru-secrets`, never a
   second vault.
 - A run that needs a password the profile does not remember asks for it in a
   manual run; an unattended run (phase 7) fails with `Authentication` and
@@ -626,7 +626,7 @@ never blocks admission. Nothing else is stored to retain in phase 1.
   while it exists.
 - All text lives in `locales/`. Keyboard and focus follow the
   [UI guidelines](../standards/ui-guidelines.md); error messages follow
-  [UX](../reference/ux.md).
+  [UX](../reference/ux/README.md).
 
 #### 8.1.1 Rules the user must be able to see
 
@@ -651,13 +651,13 @@ outcome. The maintainer set this requirement on 2026-11-08.
 | Output row rules (9.3.2) | The output editor explains `exactly_one`, `at_most_one` and `first` with their zero/one/several cases |
 | One confirmation for the whole plan (9.3.4) | The dialog lists every step, connection, production risk and new external program; `PlanChanged` says which connection changed |
 | Steps after a failure do not run (9.3.5) | The chain run marks them **Not run**, with the step and cause that stopped the chain |
-| Persisted outputs (ADR-0035) | Turning it on states the 4 KiB, 7-day and 90-day limits; a run whose outputs were not stored says why |
+| Persisted outputs (D-0035) | Turning it on states the 4 KiB, 7-day and 90-day limits; a run whose outputs were not stored says why |
 | External code is trusted, not sandboxed (Q-10) | The warning on the first run of each version (there is no import, Q-19) |
 | Program logs are kept on disk for 7 days (Q-15) | The program editor and every run's log view say so, with the 1 MiB limit per stream and a reminder not to print secrets or personal data |
 | The program runs from its own file, checked by hash (Q-16) | A run refused because the file changed names the file and offers **Publish**; the version shows the path and hash it expects |
 | Stop on a program waits up to 5 s (Q-17) | **Stop** shows **Stopping…** and then whether the tree ended on its own or was killed |
 | The `jjp/1` token uses stdin (9.2) | The external-program editor says that stdin is reserved |
-| Programs inherit Studio's environment, minus a denylist (Q-27) | The program editor lists what is removed and warns that anything else in the environment, secrets included, reaches the program |
+| Programs inherit Jovru's environment, minus a denylist (Q-27) | The program editor lists what is removed and warns that anything else in the environment, secrets included, reaches the program |
 | Only `jjp/1` programs take inputs and return outputs (Q-25) | The editor offers inputs and outputs only with `jjp/1`; a chain cannot read a `none` step |
 | Programs left running after a crash (Q-29, Unix) | At the next start, a dialog lists them and asks whether to end them |
 
@@ -678,19 +678,19 @@ honour, not as finished designs.
 ### 9.1 Phase 3 — External program
 
 **Revision of 2026-11-08, approved by the maintainer the same day**
-together with [ADR-0038](../adr/0038-external-program-runs.md), which holds
+together with [D-0038](../decisions/automation.md#d-0038), which holds
 its schema. It folds in Q-10, Q-11, Q-15…Q-19 and Q-25…Q-29 and replaces the
 constraints version 1.1 listed here.
 
 #### 9.1.1 Supervision
 
 - Process trees are supervised with `process-wrap`, approved on 2026-11-08
-  ([proposal](process-supervision-dependency.md), Q-11): a Job Object with
+  ([proposal](../decisions/stack-and-dependencies.md#d-0044), Q-11): a Job Object with
   kill-on-close and `CREATE_NO_WINDOW` on Windows, a process group on Unix.
   `unsafe` stays forbidden in our crates, and `kill_on_drop` alone kills only
   the direct child (P-07).
-- On Windows the system kills the tree when Studio ends, crash included. On
-  Unix the group survives a crash of Studio; recovery handles it (9.1.6).
+- On Windows the system kills the tree when Jovru ends, crash included. On
+  Unix the group survives a crash of Jovru; recovery handles it (9.1.6).
 
 #### 9.1.2 Program job definition
 
@@ -730,15 +730,15 @@ constraints version 1.1 listed here.
 
 #### 9.1.3 Environment
 
-The program **inherits Studio's environment** (Q-27), minus:
+The program **inherits Jovru's environment** (Q-27), minus:
 
-- a fixed denylist: `JYKRE_*`, `OTEL_*` (the collector's headers may be
+- a fixed denylist: `JOVRU_*`, `OTEL_*` (the collector's headers may be
   there), `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP` and `PYTHONHOME`;
 - the job's `environment.unset` names;
 
 then `environment.set` is applied, and for `jjp/1` the host adds
-`JYKRE_JJP_ADDRESS` (9.2.1) after the denylist. Anything secret that is in
-Studio's environment (a cloud token, a CLI profile variable) reaches the
+`JOVRU_JJP_ADDRESS` (9.2.1) after the denylist. Anything secret that is in
+Jovru's environment (a cloud token, a CLI profile variable) reaches the
 program; the editor says so (section 8.1.1) and lists what will be removed.
 
 #### 9.1.4 Before the run: the version's file
@@ -755,8 +755,8 @@ runtime are neither copied nor checked, and the interface says so (P-24).
 - stdin: for `jjp/1`, the token line and then end of file (9.2.1); for
   `none`, end of file at once.
 - stdout and stderr are drained into the run's log files, at most 1 MiB per
-  stream, kept 7 days ([ADR-0037](../adr/0037-program-logs-on-disk.md),
-  Q-15). A full pipe never blocks the child or Studio (P-13).
+  stream, kept 7 days ([D-0037](../decisions/automation.md#d-0037),
+  Q-15). A full pipe never blocks the child or Jovru (P-13).
 - **Stop and the deadline** first ask the program to end (`cancel` under
   `jjp/1`; `SIGTERM` to the group on Unix or `CTRL_BREAK_EVENT` to the group
   on Windows without it), then kill the whole tree after **5 s** (Q-17).
@@ -776,9 +776,9 @@ runtime are neither copied nor checked, and the interface says so (P-24).
   start (not found, not executable, no permission) fails with `NotFound` or
   `PermissionDenied` and no `effect_unknown`.
 - `effect_unknown` is set for every program run that was started and did not
-  succeed: Studio cannot know what a program did.
+  succeed: Jovru cannot know what a program did.
 - The first run of each version warns that it runs with the user's
-  privileges and that grants protect Studio's APIs, not the machine (Q-10).
+  privileges and that grants protect Jovru's APIs, not the machine (Q-10).
   There is no import or export of jobs in 0.3.0 (Q-19).
 
 #### 9.1.6 Recovery of programs left running (Unix)
@@ -786,7 +786,7 @@ runtime are neither copied nor checked, and the interface says so (P-24).
 The run records its process group ID and the process's start time as the
 system reports it (`/proc/<pid>/stat` on Linux). At the next start, recovery
 marks the run `Interrupted` with `effect_unknown`, and for each such run
-whose group leader still exists **with the same start time**, Studio lists
+whose group leader still exists **with the same start time**, Jovru lists
 the programs left running by the previous session and asks whether to end
 them (Q-29). Ending sends `SIGKILL` to the group. A process whose start time
 differs is never touched: its ID was reused.
@@ -806,7 +806,7 @@ Q-13, Q-18 and Q-28.
   **1 MiB per line**, enforced before allocating. A longer line, invalid
   UTF-8 or invalid JSON closes the connection and fails the run with cause
   `Protocol`.
-- The program finds the listener in `JYKRE_JJP_ADDRESS` (`127.0.0.1:<port>`),
+- The program finds the listener in `JOVRU_JJP_ADDRESS` (`127.0.0.1:<port>`),
   which is not a secret. The token is the first line of its **stdin**,
   `{"jjp":"1","token":"<64 hex digits>"}`, followed by end of file (Q-12).
   The token is 256 random bits, valid for that run only, consumed atomically
@@ -829,14 +829,14 @@ Q-13, Q-18 and Q-28.
 
 - `hello` comes first and only once, within **30 s** of the start (Q-18);
   otherwise the run fails with cause `Protocol` and its tree is killed.
-- Values are the exact text of their kind (`jykre_core::is_parameter_value`)
+- Values are the exact text of their kind (`jovru_core::is_parameter_value`)
   or `null`; never JSON numbers, so nothing passes through floating point.
 - `complete` must carry every declared output and nothing else (section
   9.3.2); otherwise its error says which, and the program may send a correct
   `complete` or `fail`.
 - `fail`'s `code` is at most 64 characters of `A-Z a-z 0-9 _ . -` and is
   recorded; its `message`, at most 4 KiB, goes to the run's `jjp.log` only
-  (ADR-0037), since it may hold values.
+  (D-0037), since it may hold values.
 - After an accepted `complete` or `fail` the host accepts nothing else; the
   run ends with the process's exit (9.1.5).
 
@@ -852,7 +852,7 @@ Errors use JSON-RPC's codes (`-32700` parse error, `-32600` invalid request,
 
 #### 9.2.3 Quotas (Q-28)
 
-- `log` content shares the 1 MiB `jjp.log` limit of ADR-0037; beyond it,
+- `log` content shares the 1 MiB `jjp.log` limit of D-0037; beyond it,
   messages are dropped and counted, and the file ends with the count.
 - `progress` is coalesced to at most **10 per second**; extra ones replace
   the pending one.
@@ -869,7 +869,7 @@ tests; there is no published SDK until `jjp/1` is stable (D24, Q-13).
 ### 9.3 Phase 5 — Linear chain
 
 **Revision of 2026-11-08, approved by the maintainer the same day**
-together with [ADR-0036](../adr/0036-published-versions-and-chain-runs.md),
+together with [D-0036](../decisions/automation.md#d-0036),
 which holds its schema. This section is normative for phase 5; it replaces
 the constraints version 1.1 listed here.
 
@@ -887,7 +887,7 @@ the constraints version 1.1 listed here.
 #### 9.3.2 Declared outputs
 
 A job declares the outputs a chain may read, by name and `ParameterKind`
-([ADR-0035](../adr/0035-persisted-declared-outputs.md), decision 1):
+([D-0035](../decisions/automation.md#d-0035), decision 1):
 
 - **SQL Job:** each output names a result column **by position** (1-based;
   names may repeat, P-06), and the job states one row rule for all of them:
@@ -905,10 +905,10 @@ A job declares the outputs a chain may read, by name and `ParameterKind`
   (`jjp/1`). Every declared output must be present (a JSON `null` is NULL)
   and nothing undeclared may be; otherwise cause `Output`.
 - Each value keeps its exact text, NULL apart from the text `NULL`, and is
-  checked against its kind (`jykre_core::is_parameter_value`; `Text` takes
+  checked against its kind (`jovru_core::is_parameter_value`; `Text` takes
   any text). In memory one value takes at most **64 KiB** and one step's
   outputs at most **256 KiB**; beyond either, cause `Output`. Persistence
-  has its own, smaller limit (ADR-0035: 4 KiB per run, opt-in).
+  has its own, smaller limit (D-0035: 4 KiB per run, opt-in).
 
 #### 9.3.3 Chain definition
 
@@ -1012,7 +1012,7 @@ cause `PlanChanged`.
   the user runs the chain again, as a new run.
 - A step run again on its own from a chain run's history opens that job's
   form, prefilled from the outputs the earlier step stored, when its job
-  opted in and the values have not expired (ADR-0035). It never runs
+  opted in and the values have not expired (D-0035). It never runs
   without the form.
 
 #### 9.3.6 Queue
@@ -1045,7 +1045,7 @@ review's "8/4/60 s" is read as:
   the same bounded channel as a run (section 5.6), with the step index.
 - History records the chain run (state, cause, `failed_step`, timing,
   `effect_unknown`, plan fingerprint) and each step's run linked to it, never
-  input values; outputs only under ADR-0035.
+  input values; outputs only under D-0035.
 
 ### 9.4 Phase 6 — On-demand capabilities
 
@@ -1076,9 +1076,9 @@ schema or protocol becomes stable.
 **Revision of 2026-11-08: approved by the maintainer on 2026-11-08**, with
 Q-34 and Q-35 changed to per-schedule policies (section 9.5.9).
 This revision specifies the scheduling part of phase 7 for milestone A13 of
-[0.3.0](releases/0.3.0.md), as sections 9.1–9.3 did for phases 3–5.
-[ADR-0041](../adr/0041-schedules-and-grants.md) holds its schema, and the
-[`jiff` proposal](schedule-time-zone-dependency.md) holds its dependency.
+0.3.0, as sections 9.1–9.3 did for phases 3–5.
+[D-0041](../decisions/automation.md#d-0041) holds its schema, and the
+[`jiff` proposal](../decisions/stack-and-dependencies.md#d-0045) holds its dependency.
 The decisions are recorded in [section 9.5.9](#959-decisions-for-the-maintainer).
 The rest of phase 7 (cache, secret broker, HTTP, palette, SDK,
 transports) stays outside 0.3.0.
@@ -1086,7 +1086,7 @@ transports) stays outside 0.3.0.
 Scope:
 
 - A **schedule** runs one target by a rule, in a time zone, **only while
-  Jykre Studio is open and only in the instance that holds the automation
+  Jovru is open and only in the instance that holds the automation
   lock** (section 6.6). Nothing runs while the application is closed (Q-14).
   Times missed meanwhile follow the schedule's missed-time policy
   (section 9.5.5): by default they are not run. The interface and the
@@ -1103,7 +1103,7 @@ Scope:
 #### 9.5.2 The rule
 
 A rule is edited through a form, not typed: the form is the grammar
-(Q-33). It is stored as canonical JSON in the schedule (ADR-0041), and it is
+(Q-33). It is stored as canonical JSON in the schedule (D-0041), and it is
 one of two kinds.
 
 **Interval:** every *N* minutes or hours, from an anchor instant.
@@ -1192,7 +1192,7 @@ and the form shows the next three times.
   it was late.
 - A wall clock that moves backwards (a manual change, a correction) never
   repeats a time that was already handled: each schedule remembers its last
-  handled due time (ADR-0041) and only considers later ones. It never
+  handled due time (D-0041) and only considers later ones. It never
   considers a time before its consent either.
 - Quitting with scheduled runs active asks as for manual runs (section 5.2).
   The scheduler stops first, so nothing new starts while the application
@@ -1219,7 +1219,7 @@ chain. A time is missed because:
 Whatever the policy, the scheduler:
 
 - records the missed times on the schedule: how many and the last one
-  (ADR-0041);
+  (D-0041);
 - never considers a time before the consent (the grant) or before the last
   time it handled;
 - computes the next due time from now.
@@ -1227,15 +1227,14 @@ Whatever the policy, the scheduler:
 A **catch-up run is a new run.** It goes through the same admission, queue
 (8, 4 per connection, 60 s), limits and history as any other, recorded with
 origin `schedule`, the schedule, the missed time as its `due_at` and the
-**catch-up marker** (`catch_up`, ADR-0041). It never re-executes, resumes or
+**catch-up marker** (`catch_up`, D-0041). It never re-executes, resumes or
 changes a run that started: a run is never replayed, and a run left
 `Interrupted` by recovery stays as it is (section 6.6). Catch-ups not yet
 submitted live in memory only. Quitting, losing the lock, turning the
 schedule off, editing it or a suspension drops them, and they stay counted
 as missed; nothing about them is caught up at the next start.
 
-The Automation section says, for example, "Missed 3 times while Jykre
-Studio was closed (last: today 09:00 CET); next run tomorrow 09:00 CET",
+The Automation section says, for example, "Missed 3 times while Jovru was closed (last: today 09:00 CET); next run tomorrow 09:00 CET",
 and with a catch-up policy "1 catch-up run started for 09:00 CET".
 
 **Overlap** (Q-35) follows a second **policy chosen per schedule**. It
@@ -1273,7 +1272,7 @@ confirmed. The dialog shows:
 - the target: the job and version, or the chain with each step's job and
   version (as in section 9.3.4);
 - the rule's sentence, its zone and its next three times;
-- that it runs **only while Jykre Studio is open**, in this instance;
+- that it runs **only while Jovru is open**, in this instance;
 - its **missed-time policy** (with N) and its **overlap policy**, in words:
   whether a time missed while closed runs later, and whether a time can
   run beside, or wait for, a run still going. They are stated the same way
@@ -1290,7 +1289,7 @@ confirmed. The dialog shows:
   with other values, a chain step can bind them as constants (section
   9.3.3).
 
-On confirmation the grant records (ADR-0041):
+On confirmation the grant records (D-0041):
 
 - the target's **fingerprint**: the version's, or for a chain the plan's
   (the chain at its revision and every step's version fingerprint);
@@ -1356,7 +1355,7 @@ A scheduled run never opens a dialog (section 7.1):
   in section 9.3.6.
 - History: `runs` and `chain_runs` record `origin = 'schedule'`, the
   schedule's ID, the time it was due and, for a catch-up, the catch-up
-  marker (ADR-0041). The step runs of a scheduled chain carry the same
+  marker (D-0041). The step runs of a scheduled chain carry the same
   origin. The **Runs** lists show "Scheduled" (or "Scheduled, catch-up"),
   the due time in the schedule's zone and the outcome. Nothing else about
   values changes (section 6.4, CA-13).
@@ -1410,14 +1409,14 @@ The maintainer decided every question on 2026-11-08.
 
 | ID | Question | Options | Recommendation | Decision (2026-11-08) |
 | --- | --- | --- | --- | --- |
-| Q-33 | Grammar and time zones | (a) A structured rule from a form (9.5.2), evaluated with `jiff` ([proposal](schedule-time-zone-dependency.md)). (b) Cron strings through `croner` with its `jiff` feature. (c) `cron` or `jiff-cron`. (d) `rrule`. (e) `cronexpr` | **(a)**. `jiff` is already in `Cargo.lock`; the form shows every rule in words; no DST policy depends on a recently fixed cron crate | **(a)**, as recommended; the `jiff` proposal is approved |
+| Q-33 | Grammar and time zones | (a) A structured rule from a form (9.5.2), evaluated with `jiff` ([proposal](../decisions/stack-and-dependencies.md#d-0045)). (b) Cron strings through `croner` with its `jiff` feature. (c) `cron` or `jiff-cron`. (d) `rrule`. (e) `cronexpr` | **(a)**. `jiff` is already in `Cargo.lock`; the form shows every rule in words; no DST policy depends on a recently fixed cron crate | **(a)**, as recommended; the `jiff` proposal is approved |
 | Q-34 | Times missed while closed, asleep or without the lock | (a) Never run; counted and shown. (b) Run once at start or resume for the latest missed time, within a window. (c) Run every missed time | (a). A run at an unexpected moment, perhaps on Production, is worse than a missed one, and (b) is a catch-up the user did not schedule | **Changed: a policy per schedule** (section 9.5.5): (1) **ignore**, the default, as (a); (2) **run once**, one catch-up for all of them when the scheduler starts or resumes; (3) **queue up to N** most recent, N from 2 to 24. A catch-up is a new run marked as such, never a replay; the policy is under consent |
 | Q-35 | Overlap | (a) Skip and record. (b) Queue one run for when the active one ends (coalescing). (c) Allow concurrent runs, limited anyway to 1 per connection | (a) | **Changed: a policy per schedule** (section 9.5.5): (a) **skip and record**, the default; (b) **queue one**, coalescing, at most one waiting; (c) **allow concurrent runs**, under the queue and connection limits. Catch-ups go one at a time; a due time meanwhile follows this policy |
 | Q-36 | Inputs of scheduled runs | **(a) The version's defaults only.** (b) Values stored with the schedule, as a chain step's constants are stored in its definition | **(a)**. Section 6.4 keeps input values out of `automation.db`, and a chain already offers constants when needed | **(a)**, as recommended |
 | Q-37 | What "environment" in the consent binds | **(a) The connection's environment label** (Development, Staging, Production, none). (b) Also the external program's process environment. It changes between starts (`PATH`, variables), so it would suspend schedules at random | **(a)**. A program's environment stays as Q-27 decided | **(a)**, as recommended |
 | Q-38 | Turning a schedule off and on | **(a) Off revokes; on asks again.** (b) The grant survives while off | **(a)**. Consent is given at the moment it is used | **(a)**, as recommended |
 | Q-39 | Limits | Minimum interval **1 min**, maximum **24 h**; grace **60 s**; at most **24** times a day in a calendar rule; **one** schedule per job or chain | As listed. Revisit after measurement, as section 5.3 does | **As listed**; Q-34's N is bounded by the same 24 |
-| Q-40 | Notification beyond the history (A13's open decision) | (a), (b) or (c) of section 9.5.8 | **(c)**, through GPUI's existing API, with no new dependency. Windows delivery is to be verified by the [checklist](releases/0.3.0-windows-checklist.md) | **(c)**, as recommended |
+| Q-40 | Notification beyond the history (A13's open decision) | (a), (b) or (c) of section 9.5.8 | **(c)**, through GPUI's existing API, with no new dependency. Windows delivery is to be verified by the checklist | **(c)**, as recommended |
 
 #### 9.5.10 Tests and acceptance
 
@@ -1436,7 +1435,7 @@ use real zones from `jiff`'s database and synthetic SQLite files.
 | No dialogs | A connection without a remembered password: `Failed`/`Authentication`, effect known, nothing sent. A chain fails before its first step. A default that fails its kind: `Input` |
 | Instances | A second instance on the same folder runs no schedule. Quitting stops the scheduler before the runs |
 | History | `origin = 'schedule'`, the schedule's ID, the due time and the catch-up marker on runs, chain runs and their steps. No value in `automation.db`, logs or telemetry (CA-13) |
-| Storage | Migration 5 on an empty file and on a version-4 fixture with runs and chain runs keeps every row and passes `foreign_key_check` (ADR-0041). The policies' and the catch-up marker's `CHECK`s |
+| Storage | Migration 5 on an empty file and on a version-4 fixture with runs and chain runs keeps every row and passes `foreign_key_check` (D-0041). The policies' and the catch-up marker's `CHECK`s |
 
 Acceptance criterion, replacing CA-10's "non-normative until phase 7 is
 specified" (approved 2026-11-08):
@@ -1488,7 +1487,7 @@ and the measured budgets.
 | --- | --- |
 | 1 | Binding with `::`, comments, strings and dollar quotes; multi-statement refusal; untouched tab transaction (CA-02); duplicate column names; exact decimals; `UPDATE … RETURNING` above the limit on each driver; no replay after timeout or Stop; disk failure before and after the terminal commit; second-instance lock; no values in SQLite (CA-13); admission limits and refusal |
 | 2 | Create, run, cancel, error and navigation flows; keyboard and focus; stall and publication budgets |
-| 3 | Grandchildren killed on Stop and timeout; ignored signals and inherited pipes cannot trap Studio; a sentinel variable is not inherited; newline-free output spam cannot exhaust memory or disk |
+| 3 | Grandchildren killed on Stop and timeout; ignored signals and inherited pipes cannot trap Jovru; a sentinel variable is not inherited; newline-free output spam cannot exhaust memory or disk |
 | 4 | Framing across chunks and UTF-8 boundaries; preallocation cap; invalid and reused tokens; duplicate `hello`; conflicting terminals; disconnect; cancellation with a saturated queue; method allowlist; tokens absent from logs and OTLP |
 | 5 | SQL → SQL and SQL → process; each `row` rule with zero, one and several rows; output kinds and size limits; unbound, unknown and forward references refused at save and admission; a connection revision changed mid-chain (`PlanChanged`); cascading cancellation and failure; Stop on a queued step; no deadlock at limit 1; queue limits 8/4 and the 60 s wait; published versions immutable and protected from deletion; recovery of an interrupted chain without replay |
 | 6 | Artifact TOCTOU, quotas and crash between copy and index; questions never block cancellation; late answers ignored |
@@ -1498,20 +1497,20 @@ and the measured budgets.
 | ID | Question | Proposal | Blocks | Status |
 | --- | --- | --- | --- | --- |
 | Q-01 | First indispensable flow: reusable manual SQL, SQL → script, or an SFMC/HTTP connector? | Manual SQL Job (D01) | Phase 0 | **SQL → script**, built straight through phases 1, 3, 4 and 5 for 0.3.0 |
-| Q-02 | Approve the automation ADR: `automation.db`, minimal schema, recorded run data (D05, D14–D16)? | Approve as in section 6 | Phase 1 | **Approved**; ADR-0034 accepted |
-| Q-03 | Allow persisting declared scalar outputs by ADR, with which defaults? | D29; no values without an ADR | Phase 5 | **D29 defaults approved**; ADR-0035 accepted |
-| Q-04 | Approve minimal pure automation DTOs in `jykre-core`? | Approve | Phase 1 | **Approved** |
+| Q-02 | Approve the automation ADR: `automation.db`, minimal schema, recorded run data (D05, D14–D16)? | Approve as in section 6 | Phase 1 | **Approved**; D-0034 accepted |
+| Q-03 | Allow persisting declared scalar outputs by ADR, with which defaults? | D29; no values without an ADR | Phase 5 | **D29 defaults approved**; D-0035 accepted |
+| Q-04 | Approve minimal pure automation DTOs in `jovru-core`? | Approve | Phase 1 | **Approved** |
 | Q-05 | Application-root service and coordinated quit, deviating from view-owned cancellation? | Accept D07 | Phase 1 | **Accepted** |
 | Q-06 | A second instance on the same data directory cannot run automation? | Accept D17 | Phase 1 | **Accepted**, with an OS lock that the system releases when the process ends |
 | Q-07 | 2 global runs, 1 per connection, immediate refusal and a 300 s timeout? | Confirm, measure, revisit | Phase 1 | **Confirmed** |
 | Q-08 | Typed remote-completion metadata in `DriverOutcome`, or conservative uncertainty? | Conservative in phase 1; the PoC measures the need | Phase 1 (optional) | **Conservative**; no contract change |
 | Q-09 | Keep `native_flow`, or replace it with linear chaining? | Replace; if revived, compile it to the same plan | Roadmap | **Replace** |
-| Q-10 | Treat external code as explicitly trusted, with the UI explaining that grants protect Studio APIs, not the machine? | Yes; warn on import and first run | Phase 3 | **Yes** |
-| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | **`process-wrap` 10.0.1 approved** on 2026-11-08 after a formal [proposal](process-supervision-dependency.md) |
+| Q-10 | Treat external code as explicitly trusted, with the UI explaining that grants protect Jovru APIs, not the machine? | Yes; warn on import and first run | Phase 3 | **Yes** |
+| Q-11 | Evaluate and approve a process-supervision dependency (candidate `process-wrap`)? | Formal proposal per [Stack and dependencies](../standards/stack-and-dependencies.md) | Phase 3 | **`process-wrap` 10.0.1 approved** on 2026-11-08 after a formal [proposal](../decisions/stack-and-dependencies.md#d-0044) |
 | Q-12 | Accept per-run IPC tokens in the environment, visible to same-user processes during the run? | Accept, with `hello` consumption and documented risk | Phase 4 | **Token through stdin**, not the environment (section 9.2) |
 | Q-13 | Keep the SDK out of the repository until `jjp/1` stabilizes? | Yes (D24) | Phase 4 | **Yes** |
 | Q-14 | Durable scheduling consent and execution while the application is closed? | Design with scheduling | Phase 7 | **Only while the application is open**; execution while it is closed is excluded |
-| Q-15 | Where do program logs (stdout, stderr, `jjp/1` `log`) live? | Memory, disk opt-in per job | Phase 3 | **Always on disk**, 1 MiB per stream, deleted after 7 days, with a warning; [ADR-0037](../adr/0037-program-logs-on-disk.md) |
+| Q-15 | Where do program logs (stdout, stderr, `jjp/1` `log`) live? | Memory, disk opt-in per job | Phase 3 | **Always on disk**, 1 MiB per stream, deleted after 7 days, with a warning; [D-0037](../decisions/automation.md#d-0037) |
 | Q-16 | What of the program is frozen? | The entrypoint file, by hash | Phase 3 | **Nothing is copied**: it runs from its path; the version keeps its hash and a changed file blocks the run until published again |
 | Q-17 | How does Stop end a program? | Ask, then kill the tree after 5 s | Phase 3 | **As proposed** |
 | Q-18 | How long may a `jjp/1` program take to send `hello`? | 10 s | Phase 4 | **30 s**, then `Protocol` and the tree is killed |
@@ -1523,7 +1522,7 @@ and the measured budgets.
 | Q-24 | Windows validation (Job Objects, visual checks)? | A checklist the maintainer runs | Phases 3 and 2 | **As proposed**: a checklist the maintainer runs on Windows; results recorded from the report |
 | Q-25 | How do inputs reach a program? | Only through `jjp/1` | Phase 3 | **As proposed** |
 | Q-26 | The program's working directory? | The job's, default the entrypoint's folder | Phase 3 | **As proposed** |
-| Q-27 | The program's environment? | A minimal allowlist plus passthrough | Phase 3 | **Inherit Studio's environment minus a denylist** (9.1.3) |
+| Q-27 | The program's environment? | A minimal allowlist plus passthrough | Phase 3 | **Inherit Jovru's environment minus a denylist** (9.1.3) |
 | Q-28 | `jjp/1` quotas? | 1 MiB of logs, 10 progress/s, 10× ends the run | Phase 4 | **As proposed** |
 | Q-29 | Programs left running after a crash (Unix)? | Ask at the next start | Phase 3 | **As proposed** |
 | Q-30 | Where does the MySQL `CALL` fix land? | `release/0.2.0` first, then merged into automation | 0.2.0 | **As proposed** |
@@ -1532,7 +1531,7 @@ and the measured budgets.
 
 Answers to Q-15…Q-32 given by the maintainer on 2026-11-08, after the
 phase 5 revision. Answers to Q-01…Q-14 given the same day, together with the release
-decision R: automation is the thesis of [0.3.0](releases/0.3.0.md), which
+decision R: automation is the thesis of 0.3.0, which
 ships SQL → script.
 
 The review's design register (D01–D29) and its trade-offs remain in
@@ -1568,7 +1567,7 @@ section 12 are not rewritten.
 | A chain step whose published program file changed after the plan was confirmed | Blocks the run until published again (Q-16) | The step fails the chain with `PlanChanged` (`plan_changed`); a changed profile of a SQL step's connection does the same | The chain runs exactly the plan the user confirmed, so a changed file cannot be a silent refusal in the middle of a run |
 | A program that exits on its own | Not specified | Whatever is left in its process group or Job Object is killed with it | A descendant holding the pipes would keep the run open and the logs unfinished |
 | Stop under `jjp/1` | Ask to end, then kill after 5 s | Stop and the deadline send only `cancel` (no `SIGTERM`), then kill the tree after 5 s | The protocol is the program's channel to end cleanly; a signal would race it |
-| Asking a program to end on Windows | `CTRL_BREAK_EVENT` to the group (9.1.5) | Windows cannot be asked: the program gets the 5 s grace and is then killed with its Job Object | `CTRL_BREAK_EVENT` needs `unsafe` Win32 calls (`unsafe_code = "forbid"`) and a console the program does not have. Recorded in [Reliability](../standards/reliability.md#known-deviations); to be validated by the [Windows checklist](releases/0.3.0-windows-checklist.md) |
+| Asking a program to end on Windows | `CTRL_BREAK_EVENT` to the group (9.1.5) | Windows cannot be asked: the program gets the 5 s grace and is then killed with its Job Object | `CTRL_BREAK_EVENT` needs `unsafe` Win32 calls (`unsafe_code = "forbid"`) and a console the program does not have. Recorded in [Reliability](../standards/reliability.md#known-deviations); to be validated by the Windows checklist |
 | Stop before a program starts | The first event observed decides (5.5); `effect_unknown` for a program that started (9.1.5) | Stop while the program's file is being checked refuses the run (no history); Stop after admission but before the spawn ends it `Cancelled` with its effect known (`StartError::Stopped`) | Nothing ran, so nothing is unknown, and a program the user stopped never starts |
 | A SQL write confirmed while its session closes | Proof of concept 8.6: once Stop or the deadline is observed, a sent write is `effect_unknown` | When the driver confirmed the end of the result before the owner observed Stop or the deadline (the session was only checking its transaction or closing), the run ends as completed | The statement is known to have finished; the conservative rule still applies to every write not yet confirmed |
 | Version numbers | Versions are numbered 1, 2, … and never edited (9.3.1) | The next number is past both the versions kept and any version a run of the job still names, so deleting the newest version never lets its number name another definition while its history exists | Keeps the history and the first-run warning (Q-10) of each version apart, without a schema change |
@@ -1576,13 +1575,13 @@ section 12 are not rewritten.
 | A `jjp/1` disconnect without a terminal message | Ends without a terminal message: `Protocol` (9.1.5) | It decides at once: `Protocol`, and the tree is killed without waiting for the exit | A program that dropped the connection can no longer report; waiting only delays the run |
 | A `fail` message over 4 KiB | At most 4 KiB (9.2.2); beyond it is not said | The message is cut at 4 KiB in `jjp.log` rather than refused; the `fail` and its code are accepted | A program that fails with a long message still gets recorded as failed, with its code |
 | Limits of the host | 1 MiB lines, 10× quota (9.2.3) | Also: 4 MiB of responses a program may leave unread before its run fails with a quota error, 16 connections served at once (more are closed), and blank lines are ignored | A program that reads nothing, or opens many connections, must not grow memory or hold the listener |
-| A relative working directory | The job's folder, default the entrypoint's (Q-26) | A relative working directory is refused before the run (as is a relative entrypoint with no working directory) | Nothing should depend on the directory Studio was started in |
+| A relative working directory | The job's folder, default the entrypoint's (Q-26) | A relative working directory is refused before the run (as is a relative entrypoint with no working directory) | Nothing should depend on the directory Jovru was started in |
 | Recording the process group (9.1.6) | Recorded with the run | Recorded as soon as the program starts, through `set_process`, while it runs | A crash after the start but before the end still leaves the group for recovery |
 | The lock at the end of the process | Held for the life of the process | `Engine::shutdown` releases it once the runs have ended | Another instance can take over without waiting for the process to exit |
-| `automation.db` and `secure_delete` | Not specified | The file is opened with `secure_delete=ON` as well as `synchronous=FULL` | A value expired by ADR-0035 must not linger in the file's free pages |
-| Recovery of programs left running | Linux and other Unix systems (9.1.6) | Only Linux records a start time (`/proc`), so only Linux lists orphans; on Windows the Job Object ends the tree with Studio | A process ID without a start time cannot be told from a reused one |
-| `effect_unknown` after a failed `jjp/1` output check | Not specified | A program whose `complete` fails the declared outputs is `Failed` with `Output` and `effect_unknown` | Studio cannot know what a program that ran did |
-| Phase 2, the interface | Section 8 | In progress on the same branch (`src/app/automation/`); [User experience](../reference/ux.md) describes it | |
+| `automation.db` and `secure_delete` | Not specified | The file is opened with `secure_delete=ON` as well as `synchronous=FULL` | A value expired by D-0035 must not linger in the file's free pages |
+| Recovery of programs left running | Linux and other Unix systems (9.1.6) | Only Linux records a start time (`/proc`), so only Linux lists orphans; on Windows the Job Object ends the tree with Jovru | A process ID without a start time cannot be told from a reused one |
+| `effect_unknown` after a failed `jjp/1` output check | Not specified | A program whose `complete` fails the declared outputs is `Failed` with `Output` and `effect_unknown` | Jovru cannot know what a program that ran did |
+| Phase 2, the interface | Section 8 | In progress on the same branch (`src/app/automation/`); [User experience](../reference/ux/README.md) describes it | |
 | Schedules (A13) | Sections 9.5.1–9.5.10 | `src/automation/schedule/` (the scheduler, `rule` over `jiff`, `form`), migration 5 in `crates/storage`, the **Schedule** tab in `src/app/automation/job_view/schedule.rs`. Engine tests with a manual clock in `src/automation/schedule_tests.rs`, rules against real zones in `src/automation/schedule/rule_tests.rs` | |
 | A schedule's outcomes | Started, skipped, missed, refused, suspended (9.5.8) | Also `caught_up` (a catch-up run started) and `waiting` (a due time held by *queue one*); a due time coalesced into the waiting one is `skipped_running` with the reason `coalesced` | The two policies need words of their own in the schedule's line |
 | *Run once* when more times are missed before its catch-up was submitted | One run for all of them (9.5.5) | The catch-up still waiting is replaced by one for the latest missed time | Still one run for all of them |
@@ -1593,15 +1592,15 @@ section 12 are not rewritten.
 | A connection the application cannot read now | Not specified | A profile without a usable configuration is not handed to the scheduler, so a schedule that binds it is suspended with `connection_deleted` | The scheduler cannot tell it from a deleted one, and must not run on it |
 | Before the connections are known | Not specified | The scheduler does nothing until the application root has handed it the connections once (`Engine::set_connections`) | Otherwise every grant would look like it names deleted connections at start |
 | A suspended schedule's grant | Confirm again opens the consent with what changed (9.5.6) | The grant is kept while suspended, so the dialog names the connections whose revision or label changed; turning off or deleting deletes it | |
-| Notification (Q-40) | Opt-in per schedule | `schedules.notify`, not part of the revision (it changes nothing that runs); shown through GPUI's `show_system_notification` for a run that failed or did not run | Windows delivery is on the [checklist](releases/0.3.0-windows-checklist.md) (W-26) |
+| Notification (Q-40) | Opt-in per schedule | `schedules.notify`, not part of the revision (it changes nothing that runs); shown through GPUI's `show_system_notification` for a run that failed or did not run | Windows delivery is on the checklist (W-26) |
 
 Where the interface, once finished, differs from sections 8 and 8.1.1, it is
-recorded in [User experience](../reference/ux.md), not here.
+recorded in [User experience](../reference/ux/README.md), not here.
 
 Answers of section 12 that the code now implements: Q-02, Q-04, Q-05, Q-06
-and Q-07 (ADR-0034 and the engine), Q-03 (ADR-0035), Q-08 (conservative, no
+and Q-07 (D-0034 and the engine), Q-03 (D-0035), Q-08 (conservative, no
 contract change), Q-12 (token through stdin), Q-13 (the example is in
-`examples/jjp/`, no SDK), Q-15 (logs on disk, [ADR-0037](../adr/0037-program-logs-on-disk.md)),
+`examples/jjp/`, no SDK), Q-15 (logs on disk, [D-0037](../decisions/automation.md#d-0037)),
 Q-16, Q-17, Q-18, Q-25 to Q-29 (programs and `jjp/1`; the recovery of Q-29 is
 offered by the engine as `Recovery::orphans` and `Engine::end_orphans`, the
 question to the user belongs to the interface). Q-23 (Databricks not

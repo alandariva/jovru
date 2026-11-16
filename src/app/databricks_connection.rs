@@ -1,7 +1,7 @@
 //! Databricks form state; remote discovery runs on the backend runtime.
 use super::*;
 use gpui_kit::component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
-use jykre::drivers::databricks::{ComputeKind, ComputeResource, DatabricksConfig};
+use jovru::drivers::databricks::{ComputeKind, ComputeResource, DatabricksConfig};
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -323,7 +323,7 @@ impl DatabricksForm {
             Ok(options) => options,
             Err(error) => {
                 self.discovery = Discovery::Failed(
-                    jykre::error_report::ErrorReport::new(&error)
+                    jovru::error_report::ErrorReport::new(&error)
                         .with_databricks_auth()
                         .summary(),
                 );
@@ -366,7 +366,7 @@ impl DatabricksForm {
                     }
                     Err(error) => {
                         this.discovery = Discovery::Failed(
-                            jykre::error_report::ErrorReport::new(&error)
+                            jovru::error_report::ErrorReport::new(&error)
                                 .with_databricks_auth()
                                 .summary(),
                         )
@@ -488,7 +488,7 @@ impl DatabricksForm {
                     }
                     Err(error) => {
                         this.profile_discovery = Discovery::Failed(
-                            jykre::error_report::ErrorReport::new(&error)
+                            jovru::error_report::ErrorReport::new(&error)
                                 .with_databricks_auth()
                                 .summary(),
                         )

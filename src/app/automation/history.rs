@@ -17,12 +17,12 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::automation::definition::{JobBody, JobDefinition};
-use jykre::automation::{Engine, JobId, JobKind, RunId, RunState, UtcMillis};
-use jykre::drivers::*;
-use jykre::{backend, tr};
-use jykre_core::automation::{ChainRunRecord, RunOutput, RunRecord};
-use jykre_storage::{HistoryEntry, HistoryFilter};
+use jovru::automation::definition::{JobBody, JobDefinition};
+use jovru::automation::{Engine, JobId, JobKind, RunId, RunState, UtcMillis};
+use jovru::drivers::*;
+use jovru::{backend, tr};
+use jovru_core::automation::{ChainRunRecord, RunOutput, RunRecord};
+use jovru_storage::{HistoryEntry, HistoryFilter};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
@@ -37,7 +37,7 @@ const LOG_LINE_CHARS: usize = 2_000;
 #[derive(Clone)]
 pub enum HistoryEvent {
     /// A chain step run again on its own: its job's form, prefilled from
-    /// what the earlier steps stored (ADR-0035). It never runs by itself.
+    /// what the earlier steps stored (D-0035). It never runs by itself.
     OpenJob {
         job: JobId,
         values: HashMap<String, String>,
@@ -232,7 +232,7 @@ impl HistoryList {
                 if this.generation != generation {
                     return;
                 }
-                let _timer = jykre::logging::UiTimer::start("automation history page");
+                let _timer = jovru::logging::UiTimer::start("automation history page");
                 this.loading = false;
                 match read {
                     Ok(page) => {
@@ -264,7 +264,7 @@ impl HistoryList {
         let zone = job
             .and_then(|job| self.jobs.iter().find(|candidate| candidate.id == job))
             .and_then(|job| job.schedule.as_ref())
-            .and_then(|schedule| jykre::automation::schedule::rule::time_zone(&schedule.zone))
+            .and_then(|schedule| jovru::automation::schedule::rule::time_zone(&schedule.zone))
             .unwrap_or(jiff::tz::TimeZone::UTC);
         let label = if catch_up {
             tr!("Scheduled, catch-up")
@@ -402,7 +402,7 @@ impl HistoryList {
     }
 
     /// Opens one of a program run's logs, read from disk off the UI thread
-    /// only now (ADR-0037).
+    /// only now (D-0037).
     fn open_log(&mut self, run: RunId, stream: Stream, cx: &mut Context<Self>) {
         let dir = self.engine.data_dir().to_path_buf();
         self.log = Some(LogView {
@@ -539,7 +539,7 @@ impl HistoryList {
             .unwrap_or_else(|| tr!("Draft or deleted job").to_owned());
         let elapsed = finished.map(|end| end.since(started));
         let state_text = words::state_label(state, cause, elapsed);
-        let ago = jykre::explorer::format_age(UtcMillis::now().since(started));
+        let ago = jovru::explorer::format_age(UtcMillis::now().since(started));
         let detail = match &scheduled {
             Some((_, due)) => format!("{due} · "),
             None => String::new(),
@@ -548,7 +548,7 @@ impl HistoryList {
                 "{} · {} · {}",
                 words::kind_name(kind),
                 ago,
-                jykre::cell_format::duration(u64::try_from(elapsed.as_millis()).unwrap_or(0))
+                jovru::cell_format::duration(u64::try_from(elapsed.as_millis()).unwrap_or(0))
             ),
             None => format!("{} · {}", words::kind_name(kind), ago),
         };
@@ -722,7 +722,7 @@ impl HistoryList {
             timing.push(' ');
             timing.push_str(&tr!(
                 "Took {0}.",
-                jykre::cell_format::duration(u64::try_from(elapsed.as_millis()).unwrap_or(0))
+                jovru::cell_format::duration(u64::try_from(elapsed.as_millis()).unwrap_or(0))
             ));
         }
         let connection = record
@@ -785,7 +785,7 @@ impl HistoryList {
                                             format!(
                                                 "{} · {}",
                                                 stream.name(),
-                                                jykre::cell_format::size(bytes)
+                                                jovru::cell_format::size(bytes)
                                             ),
                                         )
                                         .aria_selected(open)
@@ -833,8 +833,8 @@ impl HistoryList {
             .when_some(log.dropped, |s, bytes| {
                 s.child(label(tr!(
                     "The file holds {0}; only its first {1} are shown.",
-                    jykre::cell_format::size(bytes),
-                    jykre::cell_format::size(program_bits::LOG_LIMIT)
+                    jovru::cell_format::size(bytes),
+                    jovru::cell_format::size(program_bits::LOG_LIMIT)
                 )))
             })
             .child(label(tr!(
@@ -945,7 +945,7 @@ pub(super) struct LogLines {
 }
 
 /// Reads one stream of a run's logs from disk and splits it into lines,
-/// off the UI thread (ADR-0037). `None` when the run has no such file.
+/// off the UI thread (D-0037). `None` when the run has no such file.
 pub(super) async fn read_log_lines(
     dir: std::path::PathBuf,
     run: RunId,

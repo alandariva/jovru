@@ -2,7 +2,7 @@
 
 use super::{HEADER_HEIGHT, ROW_HEIGHT, ROW_NUMBERS, ResultGrid, ResultGridEvent};
 use gpui_kit::*;
-use jykre::grid::{self, CellSelection, GridView, Jump, selection_block};
+use jovru::grid::{self, CellSelection, GridView, Jump, selection_block};
 use std::time::Duration;
 
 /// A mouse gesture in progress over the grid.

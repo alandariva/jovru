@@ -1,6 +1,6 @@
 use crate::PostgresConfig;
 use futures_util::TryStreamExt;
-use jykre_core::*;
+use jovru_core::*;
 use secrecy::ExposeSecret;
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgSslMode};
 use sqlx::{
@@ -533,10 +533,10 @@ fn parameter_type(kind: ParameterKind) -> &'static str {
 
 /// The session setting that holds parameter `index` for a run.
 fn parameter_setting(index: usize) -> String {
-    format!("jykre.p_{index}")
+    format!("jovru.p_{index}")
 }
 
-/// What a parameter's marker becomes (ADR-0023): a read of the setting
+/// What a parameter's marker becomes (D-0023): a read of the setting
 /// bound before the statement, or a typed NULL. Neither holds the value.
 fn parameter_reference(index: usize, parameter: &QueryParameter) -> String {
     let kind = parameter_type(parameter.kind);
@@ -2125,7 +2125,7 @@ mod tests {
         read_page, snapshot_effect,
     };
     use futures_util::Stream as _;
-    use jykre_core::{
+    use jovru_core::{
         CancellationToken, ErrorCode, ExecutionOptions, ParameterKind, QueryParameter, QueryRequest,
     };
     use sqlx::postgres::{PgQueryResult, PgRow};
@@ -2165,13 +2165,13 @@ mod tests {
         let bound = request.with_references(parameter_reference);
         assert_eq!(
             bound,
-            "SELECT * FROM t WHERE name = (current_setting('jykre.p_0')::text) \
-             AND total > CAST(NULL AS numeric) AND day = (current_setting('jykre.p_2')::date) \
-             AND (current_setting('jykre.p_0')::text) <> ''"
+            "SELECT * FROM t WHERE name = (current_setting('jovru.p_0')::text) \
+             AND total > CAST(NULL AS numeric) AND day = (current_setting('jovru.p_2')::date) \
+             AND (current_setting('jovru.p_0')::text) <> ''"
         );
         assert!(!bound.contains("DROP"));
         let (names, values) = parameter_settings(&request.parameters);
-        assert_eq!(names, ["jykre.p_0", "jykre.p_2"]);
+        assert_eq!(names, ["jovru.p_0", "jovru.p_2"]);
         assert_eq!(values, ["x'; DROP TABLE t; --", "2024-02-29"]);
     }
 

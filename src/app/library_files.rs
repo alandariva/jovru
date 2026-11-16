@@ -1,14 +1,14 @@
 //! The saved-query library as plain `.sql` files (0.2.0 M7,
-//! [ADR-0031](../../docs/adr/0031-saved-queries-as-sql-files.md)): opening,
+//! [D-0031](../../docs/decisions/persistence.md#d-0031)): opening,
 //! saving, closing with unsaved changes, the library list as a view of the
 //! files, renaming, and the migration of the saved queries `config.db`
-//! held. The file work itself is `jykre::query_files`, run on the runtime's
+//! held. The file work itself is `jovru::query_files`, run on the runtime's
 //! blocking pool; nothing here runs SQL.
 use super::*;
-use jykre::query_files::library::{self, QueryLibrary};
-use jykre::query_files::{self as files, FileError, Loaded, OnDisk, TextFormat, names, scan};
-use jykre::reports::ConnectionRef;
-use jykre::workspace_state::TabFile;
+use jovru::query_files::library::{self, QueryLibrary};
+use jovru::query_files::{self as files, FileError, Loaded, OnDisk, TextFormat, names, scan};
+use jovru::reports::ConnectionRef;
+use jovru::workspace_state::TabFile;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -922,7 +922,7 @@ impl AppView {
             Choice {
                 title: tr!("{0} is not there", file_label(&entry.path)),
                 description: tr!(
-                    "The file was moved, renamed or deleted outside Jykre Studio. Locate it to keep its tags and connection, or forget them."
+                    "The file was moved, renamed or deleted outside Jovru. Locate it to keep its tags and connection, or forget them."
                 )
                 .to_string(),
                 actions: vec![
@@ -1149,7 +1149,7 @@ impl AppView {
 
 impl AppView {
     /// Moves the saved queries `config.db` still holds to `.sql` files in
-    /// the library's directory (ADR-0031): the plan is written as a journal
+    /// the library's directory (D-0031): the plan is written as a journal
     /// first, the files are written and verified, the originals are backed
     /// up, and only then are the queries recorded as files and dropped from
     /// `workspace.state`. Queries that could not move stay listed and are
@@ -1174,7 +1174,7 @@ impl AppView {
             })
             .collect();
         let originals = {
-            let value = jykre::workspace_state::WorkspaceState {
+            let value = jovru::workspace_state::WorkspaceState {
                 saved_queries: saved.clone(),
                 next_id: self.next_saved_id,
                 ..Default::default()
@@ -1187,7 +1187,7 @@ impl AppView {
         };
         cx.spawn(async move |weak, cx| {
             let (plan_saved, plan_dir) = (saved.clone(), directory.clone());
-            let plan = blocking(move || Ok(jykre::query_files::migration::plan(&plan_saved, &plan_dir)))
+            let plan = blocking(move || Ok(jovru::query_files::migration::plan(&plan_saved, &plan_dir)))
                 .await
                 .unwrap_or_default();
             journal.migration = plan.clone();
@@ -1209,7 +1209,7 @@ impl AppView {
             }
             let (write_saved, write_dir) = (saved.clone(), directory.clone());
             let written = blocking(move || {
-                let (migrated, failed) = jykre::query_files::migration::write_files(
+                let (migrated, failed) = jovru::query_files::migration::write_files(
                     &write_saved,
                     &plan,
                     &journal,
@@ -1234,7 +1234,7 @@ impl AppView {
             } else {
                 let data = data_dir.clone();
                 Some(
-                    blocking(move || jykre::query_files::migration::backup(&data, &originals))
+                    blocking(move || jovru::query_files::migration::backup(&data, &originals))
                         .await,
                 )
             };
@@ -1252,7 +1252,7 @@ impl AppView {
                     cx.notify();
                     return;
                 }
-                jykre::query_files::migration::commit(
+                jovru::query_files::migration::commit(
                     &mut this.query_library,
                     &saved,
                     &migrated,

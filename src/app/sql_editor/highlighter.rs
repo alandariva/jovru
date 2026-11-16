@@ -1,9 +1,9 @@
-//! SQL highlighting for the editor. Tokens come from [`jykre::sql`] by the
+//! SQL highlighting for the editor. Tokens come from [`jovru::sql`] by the
 //! tab's dialect, so colours, statement splitting and formatting agree on
 //! where literals and comments end; the dialect's catalog tells keywords,
-//! functions and types apart ([`jykre_sql_language::highlight`]).
+//! functions and types apart ([`jovru_sql_language::highlight`]).
 //!
-//! An edit re-reads only the text around it ([`jykre::sql::relex_in_place`]), and a
+//! An edit re-reads only the text around it ([`jovru::sql::relex_in_place`]), and a
 //! frame classifies only the tokens on screen, so the cost of typing and of
 //! painting does not grow with the script.
 use super::super::ui::editor_colors;
@@ -11,10 +11,10 @@ use gpui_kit::component::input::{
     EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputHighlighter, Rope,
 };
 use gpui_kit::*;
-use jykre::drivers::SqlDialect;
-use jykre::sql::{Edit, TokenKind, relex_in_place, tokens};
-use jykre_sql_language::catalog::DialectCatalog;
-use jykre_sql_language::highlight::{Highlight, classify};
+use jovru::drivers::SqlDialect;
+use jovru::sql::{Edit, TokenKind, relex_in_place, tokens};
+use jovru_sql_language::catalog::DialectCatalog;
+use jovru_sql_language::highlight::{Highlight, classify};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -64,7 +64,7 @@ impl SqlHighlighter {
 
 /// The colour of each kind of token; quoted names and operators keep the
 /// text colour.
-fn color(highlight: Highlight, colors: &jykre::theme::Palette) -> u32 {
+fn color(highlight: Highlight, colors: &jovru::theme::Palette) -> u32 {
     match highlight {
         Highlight::Keyword => colors.sql_keyword,
         Highlight::Function => colors.sql_function,

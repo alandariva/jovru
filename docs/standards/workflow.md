@@ -36,7 +36,7 @@ Ask the maintainer first:
 
 - Adding or upgrading dependencies ([Stack and dependencies](stack-and-dependencies.md)).
 - Changing core contracts (`Driver`, `Session`, `RowSink`,
-  `IntrospectionSink`, `SecretStore`), the SQLite schema or an ADR.
+  `IntrospectionSink`, `SecretStore`), the SQLite schema or an accepted decision.
 - Committing, pushing, rewriting history or switching branches. The one
   exception is a release run through the `deploy-release` skill
   (`.claude/skills/deploy-release/SKILL.md`): the agent announces what it will
@@ -47,7 +47,7 @@ Never:
 - Make the gate pass around a problem: `#[allow(...)]` to silence a lint,
   `#[ignore]` or deleting a failing test, weakening an assertion, a
   "temporary" `unwrap()`.
-- Edit a released migration ([Persistence](../reference/persistence.md#migrations)).
+- Edit a released migration ([Persistence](../reference/persistence/files.md#migrations)).
 - Invent library APIs; check the documentation or the source of the version
   in `Cargo.lock` (`~/.cargo/registry`).
 - Use production databases, real credentials or real customer data
@@ -114,10 +114,12 @@ What an agent hands back, kept short:
   `sign` job needs the
   `ZIPSIGN_PRIVATE_KEY` secret and verifies the archives with
   `assets/update/release-key.pub` before the draft
-  ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)); a
+  ([D-0033](../decisions/security.md#d-0033)); a
   release without it fails rather than ship unsigned. Reviewing a draft
   includes opening the Windows zip in Explorer and 7-Zip, since the
   signature sits in front of the zip's data.
+- Before a release, the standing acceptance checks in
+  [Testing](manual-checks.md#before-a-release) apply in addition to the gate.
 - Group related changes as you see fit. Never commit with the gate failing.
 - Commit messages: a short imperative summary, a blank line, then a body in
   plain English describing the user-visible changes, usually as a bullet list
@@ -132,9 +134,13 @@ changed, and the maintainer reviewed the diff.
 
 ## Architecture decisions
 
-- Changing what an ADR or [Architecture](../reference/architecture.md) decides needs a new
-  ADR ([template](../adr/0000-template.md)).
-- Agents may **propose** an ADR; only the maintainer accepts it. Accepted ADRs
-  are not rewritten; a later one supersedes them.
-- A change needs an ADR when it affects more than one crate, a core contract,
-  the persistence schema or the stack.
+- Decisions are recorded in the `decisions/` file of their area and indexed in
+  the [decision index](../decisions/README.md). Changing what one
+  of them decides, or what [Architecture](../reference/architecture.md)
+  decides, updates that entry and the body it points to.
+- A change needs a written proposal (an ADR, from the
+  [template](../adr/0000-template.md)) when it affects more than one crate, a
+  core contract, the persistence schema or the stack. Agents may **propose**
+  one; only the maintainer accepts it. Once accepted, its substance moves into
+  the owning document and the proposal file is deleted
+  ([how](../adr/README.md)).

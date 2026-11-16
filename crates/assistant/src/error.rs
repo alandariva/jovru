@@ -2,7 +2,7 @@
 //! HTTP status at most: a provider's error body may echo the request, and
 //! the provider library's own `Display` includes bodies and payloads, so it
 //! is never used.
-use jykre_core::{DriverError, ErrorCode};
+use jovru_core::{DriverError, ErrorCode};
 
 /// The error for an HTTP status the provider answered with.
 pub fn classify_status(status: u16) -> DriverError {

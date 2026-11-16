@@ -1,9 +1,9 @@
-//! The AI assistant's application side (ADR-0028): its preferences, the
+//! The AI assistant's application side (D-0028): its preferences, the
 //! API key in the system vault, what may be told about a tab
 //! ([`facts`]), the tools over the metadata cache ([`tools`]), the texts
 //! the model is given ([`prompts`]), the agentic loop ([`run`]) and putting
 //! a suggestion into the editor ([`apply`]). The provider side is the
-//! `jykre-assistant` crate. No view decides anything here, and nothing here
+//! `jovru-assistant` crate. No view decides anything here, and nothing here
 //! opens a session. A query's values reach a request only through
 //! [`released`], after the user approved the query and its result.
 pub mod apply;
@@ -13,9 +13,9 @@ pub mod released;
 pub mod run;
 pub mod tools;
 
-use jykre_assistant::{Price, ProviderConfig, ProviderKind};
-use jykre_core::{DriverResult, SecretString};
-use jykre_secrets::{ApiKeyAccount, ApiKeyStore, SystemSecretStore};
+use jovru_assistant::{Price, ProviderConfig, ProviderKind};
+use jovru_core::{DriverResult, SecretString};
+use jovru_secrets::{ApiKeyAccount, ApiKeyStore, SystemSecretStore};
 use run::ReviewMode;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -128,7 +128,7 @@ pub static PREFERENCE_WRITES: crate::connection_store::LatestWrite =
 
 /// Reads the preferences kept in the data folder `dir`.
 pub async fn load_preferences(dir: &Path) -> DriverResult<AssistantPreferences> {
-    let repository = jykre_storage::ConfigRepository::open(dir).await?;
+    let repository = jovru_storage::ConfigRepository::open(dir).await?;
     let value = repository.setting(PREFERENCES_KEY).await;
     repository.close().await;
     Ok(AssistantPreferences::from_value(value?.as_ref()))
@@ -142,7 +142,7 @@ pub async fn save_preferences(
 ) -> DriverResult<()> {
     PREFERENCE_WRITES
         .run(ticket, async {
-            let repository = jykre_storage::ConfigRepository::open(dir).await?;
+            let repository = jovru_storage::ConfigRepository::open(dir).await?;
             let result = repository
                 .set_setting(PREFERENCES_KEY, &preferences.to_value())
                 .await;

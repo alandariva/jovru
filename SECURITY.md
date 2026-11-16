@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Jykre Studio is an early prototype. Only the latest commit on `main` and the
+Jovru is an early prototype. Only the latest commit on `main` and the
 latest release receive security fixes.
 
 ## Reporting a vulnerability
@@ -37,7 +37,7 @@ Areas that are especially relevant:
   the application install an archive that key did not sign is a
   vulnerability.
 
-The test fixture password `jykre-test` in `docker-compose.test.yml` is public on
+The test fixture password `jovru-test` in `docker-compose.test.yml` is public on
 purpose and only binds to `127.0.0.1`; it is not a vulnerability.
 
 ## Dependency audit

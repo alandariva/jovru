@@ -19,7 +19,7 @@ CREATE TRIGGER gate_fixture_touch BEFORE UPDATE ON gate_fixture FOR EACH ROW EXE
 CREATE SEQUENCE gate_counter START 10 INCREMENT 5;
 CREATE TYPE gate_mood AS ENUM ('calm', 'busy');
 -- A login that may not use one schema, for permission warnings.
-CREATE ROLE gate_reader LOGIN PASSWORD 'jykre-test';
+CREATE ROLE gate_reader LOGIN PASSWORD 'jovru-test';
 CREATE SCHEMA gate_private;
 CREATE TABLE gate_private.hidden (id INTEGER);
 REVOKE ALL ON SCHEMA gate_private FROM PUBLIC;

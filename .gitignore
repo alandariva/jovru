@@ -7,8 +7,8 @@
 /artifacts/
 *.log
 
-# Local app data when JYKRE_CONFIG_DIR is unset outside Windows
-/.jykre/
+# Local app data when JOVRU_CONFIG_DIR is unset outside Windows
+/.jovru/
 
 # Environment and credentials
 .env

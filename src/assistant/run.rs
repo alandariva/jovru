@@ -1,21 +1,24 @@
-//! The agentic loop, one round at a time (ADR-0028). The application drives
+//! The agentic loop, one round at a time (D-0028). The application drives
 //! it so each request can be shown before it leaves: a turn starts with the
 //! user's message, each round is prepared, reviewed when the mode asks for
 //! it, sent, and answered with tool results until the model gives a final
 //! answer or the round limit stops it. Everything is kept in the trace.
 use super::tools::CacheTools;
-use jykre_assistant::{
+use jovru_assistant::{
     Assistant, Message, ModelRequest, Price, RoundEvent, RoundResult, ToolCall, ToolSpec, Usage,
     estimate_tokens,
 };
-use jykre_core::{CancellationToken, DriverError, DriverResult, ErrorCode};
+use jovru_core::{CancellationToken, DriverError, DriverResult, ErrorCode};
 use serde::Serialize;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Rounds one request may take before the user is asked to continue.
-pub const MAX_ROUNDS: usize = 8;
-pub const MAX_OUTPUT_TOKENS: u32 = 2048;
+pub const MAX_ROUNDS: usize = 20;
+/// The output limit of each round. Reasoning models count their thinking
+/// in it, and a summary must fit in one answer, so it leaves room for both;
+/// the provider charges only the tokens it writes.
+pub const MAX_OUTPUT_TOKENS: u32 = 8192;
 /// Tool answers shorter than this are kept when results are pruned: they
 /// say little ("declined", an error) and cost almost nothing.
 pub const PRUNE_FROM_BYTES: usize = 256;
@@ -107,7 +110,7 @@ pub fn split_calls(calls: Vec<ToolCall>) -> (Vec<ToolCall>, Vec<ToolCall>) {
 /// model gets instead.
 pub fn query_sql(
     call: &ToolCall,
-    dialect: Option<jykre_core::SqlDialect>,
+    dialect: Option<jovru_core::SqlDialect>,
 ) -> Result<String, String> {
     let sql = call
         .arguments
@@ -477,21 +480,30 @@ impl Conversation {
 
     /// Puts the model's summary in place of the conversation: it becomes
     /// part of the system prompt and every message goes. An answer that
-    /// called tools or said nothing changes nothing.
+    /// called tools, said nothing or stopped at the output limit changes
+    /// nothing: a cut summary would lose what it did not reach.
     pub fn apply_summary(&mut self) -> Result<Compaction, String> {
         let Some(before) = self.summarizing.take() else {
             return Err("No summary was asked for.".into());
         };
+        let truncated = matches!(
+            self.rounds.last().map(|round| &round.state),
+            Some(RoundState::Answered { result, .. }) if result.truncated
+        );
         let summary = match self.messages.last() {
             Some(Message::Assistant { text, tool_calls })
-                if tool_calls.is_empty() && !text.trim().is_empty() =>
+                if !truncated && tool_calls.is_empty() && !text.trim().is_empty() =>
             {
                 text.trim().to_owned()
             }
             _ => {
                 self.messages.truncate(self.turn_start);
                 self.turn_rounds = 0;
-                return Err("The model did not answer with a summary.".into());
+                return Err(if truncated {
+                    "The summary stopped at the output limit.".into()
+                } else {
+                    "The model did not answer with a summary.".into()
+                });
             }
         };
         let count = self.turn_start;
@@ -620,7 +632,7 @@ pub async fn run_tools(tools: &CacheTools, calls: &[ToolCall]) -> Vec<ToolStep> 
                 .all(|byte| byte.is_ascii_lowercase() || byte == b'_');
         let span = tracing::info_span!(
             "assistant_tool",
-            jykre.assistant.tool = if plain { call.name.as_str() } else { "other" }
+            jovru.assistant.tool = if plain { call.name.as_str() } else { "other" }
         );
         let answer = tools.call(call).instrument(span).await;
         steps.push(ToolStep {
@@ -650,7 +662,7 @@ pub async fn send(
         gen_ai.request.model = config.model.as_str(),
         gen_ai.usage.input_tokens = tracing::field::Empty,
         gen_ai.usage.output_tokens = tracing::field::Empty,
-        jykre.assistant.tool_calls = tracing::field::Empty
+        jovru.assistant.tool_calls = tracing::field::Empty
     );
     let started = Instant::now();
     let result = assistant
@@ -672,7 +684,7 @@ pub async fn send(
                 );
             }
             span.record(
-                "jykre.assistant.tool_calls",
+                "jovru.assistant.tool_calls",
                 crate::telemetry::attributes::count(round.tool_calls.len()),
             );
         }
@@ -985,6 +997,29 @@ mod tests {
         conversation.record_error(&DriverError::new(ErrorCode::Connection, "down"));
         assert!(!conversation.summarizing());
         assert!(conversation.can_compact());
+    }
+
+    #[test]
+    fn a_summary_cut_at_the_output_limit_changes_nothing() {
+        let mut conversation = with_tool_answers();
+        let round = conversation.start_summary().unwrap();
+        assert_eq!(round.request.max_output_tokens, MAX_OUTPUT_TOKENS);
+        let cut = RoundResult {
+            truncated: true,
+            ..answered("Orders has id and", Vec::new())
+        };
+        assert_eq!(conversation.record(cut, 1), Next::Done);
+        assert_eq!(
+            conversation.apply_summary(),
+            Err("The summary stopped at the output limit.".into())
+        );
+        assert!(!conversation.summarizing());
+        assert!(conversation.compactions().is_empty());
+        // The conversation goes on whole, without the cut summary.
+        let round = conversation.start_turn("next".into());
+        assert_eq!(round.request.system, "base");
+        assert_eq!(texts(round).len(), 6);
+        assert!(!texts(round).contains(&"Orders has id and"));
     }
 
     #[test]

@@ -35,7 +35,7 @@ static ACTIVE: OnceLock<Active> = OnceLock::new();
 fn active() -> &'static Active {
     ACTIVE.get_or_init(|| {
         // Unit tests assert source text, so they ignore the machine's language.
-        let requested = std::env::var("JYKRE_LOCALE")
+        let requested = std::env::var("JOVRU_LOCALE")
             .ok()
             .filter(|tag| !tag.trim().is_empty())
             .or_else(sys_locale::get_locale)
@@ -71,7 +71,7 @@ pub fn locale() -> &'static str {
     active().tag
 }
 
-/// Locales that can be selected with `JYKRE_LOCALE`.
+/// Locales that can be selected with `JOVRU_LOCALE`.
 pub fn available_locales() -> impl Iterator<Item = &'static str> {
     std::iter::once(SOURCE_LOCALE).chain(CATALOGS.iter().map(|(tag, _)| *tag))
 }

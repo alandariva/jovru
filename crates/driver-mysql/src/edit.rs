@@ -1,22 +1,22 @@
-//! Writing a result's rows back to their table (ADR-0039): which table a
+//! Writing a result's rows back to their table (D-0039): which table a
 //! result's columns come from, read from `information_schema` in the
 //! session, and the statements that write each change with bound values.
 //!
 //! The catalog queries are listed in
-//! [Drivers](../../../docs/reference/drivers.md#editing-results).
+//! [Drivers](../../../docs/reference/drivers/editing-and-import.md#editing-results).
 use crate::MySqlDriver;
 use crate::runtime::map_error;
-use jykre_core::write::{
+use jovru_core::write::{
     CatalogTable, EditTarget, EditableColumn, ReadOnlyReason, ReferenceAction, SideEffect,
     WriteMode, WriteRequest, WriteValue, changed, insert_target, resolve, single_relation,
     statement, still_matches,
 };
-use jykre_core::*;
+use jovru_core::*;
 use sqlx::Row as _;
 use sqlx::mysql::MySqlConnection;
 
 /// The savepoint a write uses inside the session's open transaction.
-pub(crate) const SAVEPOINT: &str = "jykre_edit";
+pub(crate) const SAVEPOINT: &str = "jovru_edit";
 
 /// What the protocol says about a result column's source, with no I/O: the
 /// `schema.table` text and the physical column name.
@@ -430,7 +430,7 @@ pub(crate) async fn apply(
                     _ => query.bind(text.clone()),
                 },
                 (WriteValue::Bytes(bytes), true) => query.bind(bytes.clone()),
-                // MySQL's boolean is `TINYINT(1)`: 1 or 0 (ADR-0040).
+                // MySQL's boolean is `TINYINT(1)`: 1 or 0 (D-0040).
                 (WriteValue::Boolean(flag), false) => query.bind(i64::from(*flag)),
                 _ => {
                     return Err(DriverError::validation(

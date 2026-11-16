@@ -4079,19 +4079,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "js-sys"
-version = "0.3.107"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
-dependencies = [
- "cfg-if",
- "futures-util",
- "wasm-bindgen",
-]
-
-[[package]]
-name = "jykre"
-version = "0.4.0"
+name = "jovru"
+version = "0.5.0"
 dependencies = [
  "calamine",
  "criterion",
@@ -4103,16 +4092,16 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jiff",
- "jykre-assistant",
- "jykre-core",
- "jykre-driver-databricks",
- "jykre-driver-mysql",
- "jykre-driver-postgres",
- "jykre-driver-sqlite",
- "jykre-secrets",
- "jykre-sql",
- "jykre-sql-language",
- "jykre-storage",
+ "jovru-assistant",
+ "jovru-core",
+ "jovru-driver-databricks",
+ "jovru-driver-mysql",
+ "jovru-driver-postgres",
+ "jovru-driver-sqlite",
+ "jovru-secrets",
+ "jovru-sql",
+ "jovru-sql-language",
+ "jovru-storage",
  "lsp-types",
  "oem_cp",
  "opentelemetry",
@@ -4144,12 +4133,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "jykre-assistant"
-version = "0.4.0"
+name = "jovru-assistant"
+version = "0.5.0"
 dependencies = [
  "futures-util",
  "genai",
- "jykre-core",
+ "jovru-core",
  "reqwest 0.13.5",
  "rustls",
  "secrecy",
@@ -4160,8 +4149,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "jykre-core"
-version = "0.4.0"
+name = "jovru-core"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "secrecy",
@@ -4174,10 +4163,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "jykre-driver-databricks"
-version = "0.4.0"
+name = "jovru-driver-databricks"
+version = "0.5.0"
 dependencies = [
- "jykre-core",
+ "jovru-core",
  "reqwest 0.12.28",
  "secrecy",
  "serde",
@@ -4187,11 +4176,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "jykre-driver-mysql"
-version = "0.4.0"
+name = "jovru-driver-mysql"
+version = "0.5.0"
 dependencies = [
  "futures-util",
- "jykre-core",
+ "jovru-core",
  "secrecy",
  "serde",
  "serde_json",
@@ -4200,11 +4189,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "jykre-driver-postgres"
-version = "0.4.0"
+name = "jovru-driver-postgres"
+version = "0.5.0"
 dependencies = [
  "futures-util",
- "jykre-core",
+ "jovru-core",
  "secrecy",
  "serde",
  "serde_json",
@@ -4213,11 +4202,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "jykre-driver-sqlite"
-version = "0.4.0"
+name = "jovru-driver-sqlite"
+version = "0.5.0"
 dependencies = [
  "futures-util",
- "jykre-core",
+ "jovru-core",
  "serde",
  "serde_json",
  "sqlx",
@@ -4225,42 +4214,53 @@ dependencies = [
 ]
 
 [[package]]
-name = "jykre-secrets"
-version = "0.4.0"
+name = "jovru-secrets"
+version = "0.5.0"
 dependencies = [
- "jykre-core",
+ "jovru-core",
  "keyring",
  "secrecy",
  "tokio",
 ]
 
 [[package]]
-name = "jykre-sql"
-version = "0.4.0"
+name = "jovru-sql"
+version = "0.5.0"
 dependencies = [
- "jykre-core",
+ "jovru-core",
 ]
 
 [[package]]
-name = "jykre-sql-language"
-version = "0.4.0"
+name = "jovru-sql-language"
+version = "0.5.0"
 dependencies = [
- "jykre-core",
- "jykre-sql",
+ "jovru-core",
+ "jovru-sql",
  "serde",
  "serde_json",
  "sqruff-lib",
 ]
 
 [[package]]
-name = "jykre-storage"
-version = "0.4.0"
+name = "jovru-storage"
+version = "0.5.0"
 dependencies = [
- "jykre-core",
+ "jovru-core",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
  "tokio",
+]
+
+[[package]]
+name = "js-sys"
+version = "0.3.107"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8dc09d2154098bbf4ef54eab6b117a3c24cbbffe94046b16ee6d6d4510584d3a"
+dependencies = [
+ "cfg-if",
+ "futures-util",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -10284,7 +10284,7 @@ checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
 
 [[package]]
 name = "xtask"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde_json",
 ]

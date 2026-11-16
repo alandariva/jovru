@@ -1,8 +1,8 @@
 //! Embeds the product icon and the file's version details in the Windows
 //! executable. GPUI loads icon resource 1 for its windows, so the window,
-//! the taskbar and Explorer show `assets/icon/jykre.ico`.
+//! the taskbar and Explorer show `assets/icon/jovru.ico`.
 
-const ICON: &str = "assets/icon/jykre.ico";
+const ICON: &str = "assets/icon/jovru.ico";
 
 fn main() -> std::io::Result<()> {
     println!("cargo:rerun-if-changed=build.rs");
@@ -14,8 +14,8 @@ fn main() -> std::io::Result<()> {
     winresource::WindowsResource::new()
         .set_icon(ICON)
         // Task Manager and the file's properties show these.
-        .set("ProductName", "Jykre Studio")
-        .set("FileDescription", "Jykre Studio")
+        .set("ProductName", "Jovru")
+        .set("FileDescription", "Jovru")
         // Only the application: tests and examples keep no icon.
-        .compile_for("jykre")
+        .compile_for("jovru")
 }

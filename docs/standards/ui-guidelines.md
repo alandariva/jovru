@@ -1,5 +1,7 @@
 # UI guidelines (GPUI)
 
+These guidelines cover how GPUI code is written; what the user sees and does is specified in the [user experience reference](../reference/ux/README.md).
+
 Views are **presentation**. They do not know which database is on the other
 side, do not parse SQL and do not decide anything that a second interface (a
 CLI, a test) would have to repeat.
@@ -20,8 +22,17 @@ GPUI keeps no retained element tree. When an entity is notified
 (`cx.notify()`), or a hover or focus change happens inside it, GPUI runs that
 entity's `render()` again and lays out and paints the elements it returns. An
 idle window costs nothing, but every frame rebuilds the notified view
-completely. A view embedded with `.cached(style)` reuses its previous frame
-while it has not been notified. Therefore:
+completely, **with all its ancestors**: GPUI marks every ancestor of a
+notified view dirty, and the window root is not cached, so it renders on
+every frame. A view embedded with `.cached(style)` reuses its previous frame
+only while neither it nor a view inside it has been notified, and only when
+the frame is not a refresh: showing or hiding a tooltip, and the mouse down
+and up of a clickable element, call `window.refresh()`, which turns off every
+cache for that frame. There is no paint-only redraw (a `.hover(...)` style, a
+scroll offset change and `request_animation_frame` all notify the view that
+painted them). So a hover, scroll or selection in the result grid also
+renders `AppView`, `GroupedTabs` and `Workspace`, while typing in the editor
+does not render the grid (D-0013). Therefore:
 
 1. **Virtualize long collections.** Anything that grows with data (result
    rows, metadata nodes, history, search results) renders through
@@ -46,11 +57,37 @@ while it has not been notified. Therefore:
 5. **Keep per-element work small.** Use scoped element IDs (`("cell", col)`
    inside a row with its own ID) instead of formatting a unique string per
    element; build tooltips in their closure, not up front.
+6. **Views on the path to a frequently notified view stay thin.** The
+   `render`, layout and paint of `AppView`, `GroupedTabs` and `Workspace` do
+   no work that grows with data or with content off screen: result rows, the
+   editor's text, metadata. What they show from such data is derived when the
+   data changes and kept on the entity. The editor gutter is the reference:
+   statement lines and the line count are computed when the SQL changes
+   (`jovru_sql::statement_lines`), and only statements on screen get a run
+   button. A change to `AppView`, `GroupedTabs` or `Workspace` that could
+   grow a frame is measured with the [frame
+   probe](performance.md#how-to-measure) during grid interactions, and
+   `a_long_script_maps_its_statements_to_lines_within_budget` keeps the
+   statement-line mapping linear.
 
 See [Performance](performance.md) for budgets and how to measure.
 
 ## Structure
 
+- Logic that needs no GPUI lives in the library, in modules the views call,
+  so it is tested without a window and a second interface does not repeat
+  it (D-0007). SQL text handling (splitting, normalisation, preview checks)
+  is `sql` (from `jovru-sql`): pure and synchronous. A run's state is
+  `jovru::query::QueryRun`, with `RunState` (`Idle | Running | Cancelling |
+  Done | Failed | Cancelled`), the statement statuses and the batch of
+  results, driven by `backend`; one state value drives the footer, the gutter
+  and the buttons. `Cancelling` waits for the driver's outcome and no new run
+  starts until it arrives, because the stopping run may still change data on
+  the server. Identifier quoting for previews belongs to the driver
+  (`Driver::quote_identifier`, `Driver::relation_name`), not to a `match` on
+  `DriverKind`.
+- The views are `src/app/`; demo data is `src/app/demo/`, behind
+  `JOVRU_DEMO=1`.
 - One module per area of the window (explorer and connection dialog,
   workspace, result grid, assistant). A component with no application
   knowledge (like `grouped_tabs`) lives in the library and has an example
@@ -66,7 +103,7 @@ See [Performance](performance.md) for budgets and how to measure.
 - Guard against stale results with a generation counter, as `Workspace` does
   with `execution_id`.
 - Show progress for anything that may exceed 300 ms and offer cancellation for
-  anything that may exceed 2 s ([User experience](../reference/ux.md#always-visible-states)).
+  anything that may exceed 2 s ([User experience](../reference/ux/states.md#always-visible-states)).
 - Never hold a `RefCell` borrow of shared UI data across `.await`.
 - Work that must finish before the application exits is not registered with
   a view's `cx.on_app_quit`: closing the last window releases the window's
@@ -89,11 +126,11 @@ See [Performance](performance.md) for budgets and how to measure.
   so **Preferences › Shortcuts** offers it; a test checks that every listed
   action of the application has a key and that the defaults do not collide.
   The rules (keys, scopes, collisions, the stored choices) are in
-  `jykre::keymap`, outside the views.
+  `jovru::keymap`, outside the views.
 - A view that names a key reads it from the keymap
   (`shortcuts::label::<Action>(cx)`), never a fixed string, so it shows the
   key in use.
-- Bindings are listed in [User experience](../reference/ux.md#keyboard-shortcuts). A new
+- Bindings are listed in [User experience](../reference/ux/shortcuts.md#keyboard-shortcuts). A new
   shortcut updates that table with the change.
 - Raw `on_key_down` handlers are only for text-like navigation inside a single
   focused control when an action would not fit: typing and moving in a text
@@ -115,9 +152,9 @@ See [Performance](performance.md) for budgets and how to measure.
   `locales/<tag>.json`, and add
   `("<tag>", include_str!("../locales/<tag>.json"))` to `CATALOGS` in
   `src/i18n.rs`. A unit test checks that each catalog parses and keeps its
-  placeholders. Error text from `jykre-storage` and `jykre-secrets` is not
+  placeholders. Error text from `jovru-storage` and `jovru-secrets` is not
   passed through `tr!`.
-- Terminology is fixed; see [User experience](../reference/ux.md#text-and-terminology).
+- Terminology is fixed; see [User experience](../reference/ux/feedback.md#text-and-terminology).
 - Fonts come from roles, `ui::fonts()`: `ui` for the interface, `code` for
   SQL (ligatures allowed), `mono` for values and messages, shown as typed.
   Views never name a family. `fonts::resolve` picks each role once at
@@ -132,9 +169,9 @@ See [Performance](performance.md) for budgets and how to measure.
 - Colour comes from one JSON theme system
   ([Themes](../reference/themes.md)). The user chooses **System** (the
   default, following the operating system), **Light**, **Dark**, or a theme
-  file's id in Preferences (`jykre::theme::ThemeChoice`, kept as
+  file's id in Preferences (`jovru::theme::ThemeChoice`, kept as
   `appearance.theme`). **Light** and **Dark** are the bundled
-  `jykre-light` and `jykre-dark` files. A file dropped in a themes directory
+  `jovru-light` and `jovru-dark` files. A file dropped in a themes directory
   is listed with them after Preferences is opened again.
 - Views read the named tokens of the theme on screen, `ui::colors()`
   (`bg`, `panel`, `text`, `mint`, `red`, ...), fields of the resolved
@@ -156,7 +193,7 @@ See [Performance](performance.md) for budgets and how to measure.
 - Exceptions that stay hardcoded are listed in
   [Themes](../reference/themes.md#known-exceptions).
 - Value colours by type family are defined once in
-  [Results](../reference/results.md#value-presentation).
+  [Results](../reference/results/model.md#value-presentation).
 
 ## Accessibility and keyboard
 
@@ -187,9 +224,13 @@ See [Performance](performance.md) for budgets and how to measure.
 - GPUI's headless test support is not enabled; enabling it is a dependency
   decision.
 
+## Decisions
+
+The reasoning behind this area's structural choices is in [Decisions: UI guidelines (GPUI)](../decisions/ui-guidelines.md).
+
 ## Known deviations
 
 | Standard | Current code |
 | --- | --- |
-| Frequently changing regions are their own cached entities | The result grid is its own cached entity (`src/app/result_grid.rs`, [ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md)); so is the assistant panel (`src/app/assistant_panel.rs`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)). The editor still renders inside `Workspace` |
-| Long collections are virtualized | The result grid, the explorer tree and its favorites, Messages and the saved queries and history are. The command palette builds its rows without a virtual list, but lists at most 10 without text and 50 for a search (`jykre::palette::limit`). Preferences caches theme previews but still builds all theme cards, so its element count grows with the catalog |
+| Frequently changing regions are their own cached entities | The editor and the explorer still render inside `Workspace` and `AppView`; they are split when the measured cost of the ancestors (about 1.5 ms p50 per grid frame on 2026-11-02) justifies it (D-0013) |
+| Long collections are virtualized | The command palette builds its rows without a virtual list, capped at 10 without text and 50 for a search (`jovru::palette::limit`). Preferences builds every theme card, so its element count grows with the catalog |

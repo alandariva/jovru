@@ -2,7 +2,7 @@
 
 use gpui_kit::component::{ActiveTheme, button::Button};
 use gpui_kit::*;
-use jykre::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId};
+use jovru::grouped_tabs::{GroupedTabs, GroupedTabsEvent, TabGroupId};
 
 struct CounterPanel {
     title: SharedString,

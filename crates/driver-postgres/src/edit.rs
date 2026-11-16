@@ -1,23 +1,23 @@
-//! Writing a result's rows back to their table (ADR-0039): which table a
+//! Writing a result's rows back to their table (D-0039): which table a
 //! result's columns come from, read from the catalog in the session, and
 //! the statements that write each change with bound values.
 //!
 //! The catalog queries are listed in
-//! [Drivers](../../../docs/reference/drivers.md#editing-results).
+//! [Drivers](../../../docs/reference/drivers/editing-and-import.md#editing-results).
 use crate::PostgresDriver;
 use crate::runtime::map_error;
-use jykre_core::write::{
+use jovru_core::write::{
     CatalogTable, EditTarget, EditableColumn, ReadOnlyReason, ReferenceAction, SideEffect,
     WriteMode, WriteRequest, WriteValue, changed, insert_target, resolve, single_relation,
     statement, still_matches,
 };
-use jykre_core::*;
+use jovru_core::*;
 use sqlx::postgres::PgConnection;
 use sqlx::postgres::types::Oid;
 
 /// The savepoint a write (or a catalog read) uses inside the session's open
 /// transaction, so a failure there leaves that transaction as it was.
-pub(crate) const SAVEPOINT: &str = "jykre_edit";
+pub(crate) const SAVEPOINT: &str = "jovru_edit";
 
 /// What the protocol says about a result column's source, with no I/O: the
 /// relation's OID and the attribute number, as decimal text.
@@ -298,7 +298,7 @@ pub(crate) async fn apply(
                 WriteValue::Null => query.bind(None::<String>),
                 WriteValue::Text(text) => query.bind(text.clone()),
                 // Read as the column's type from `boolean`, as `CAST`
-                // allows (ADR-0040).
+                // allows (D-0040).
                 WriteValue::Boolean(flag) => query.bind(*flag),
                 // PostgreSQL reads `bytea` as its `\x` text.
                 WriteValue::Bytes(_) => {

@@ -4,17 +4,17 @@ use super::{ResultGrid, ResultGridEvent};
 use crate::app::ui::*;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
-use jykre::grid::CellSelection;
-use jykre::grid_edit::{self, EditSession, EditValue};
-use jykre::result::ResultData;
-use jykre::result_tabs::ResultId;
-use jykre::tr;
-use jykre_core::write;
+use jovru::grid::CellSelection;
+use jovru::grid_edit::{self, EditSession, EditValue};
+use jovru::result::ResultData;
+use jovru::result_tabs::ResultId;
+use jovru::tr;
+use jovru_core::write;
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Default)]
 pub(super) struct EditingState {
-    /// Editing, by result tab: kept while the tab is open (ADR-0039).
+    /// Editing, by result tab: kept while the tab is open (D-0039).
     by_result: HashMap<ResultId, Editing>,
     /// The key that asked for a table still being read, done once it is.
     deferred_action: Option<EditAction>,
@@ -22,7 +22,7 @@ pub(super) struct EditingState {
     pub(super) editor: Option<CellEditor>,
 }
 
-/// Where editing a result tab stands (ADR-0039).
+/// Where editing a result tab stands (D-0039).
 pub enum Editing {
     /// Its table is being read from the session.
     Resolving,

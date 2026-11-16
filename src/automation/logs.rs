@@ -1,25 +1,25 @@
 //! External programs' logs on disk
-//! ([ADR-0037](../../docs/adr/0037-program-logs-on-disk.md)): up to three
+//! ([D-0037](../../docs/decisions/automation.md#d-0037)): up to three
 //! files per run in `automation/logs/<run-id>/` under the data folder —
 //! `stdout.log`, `stderr.log` and, under `jjp/1`, `jjp.log` — each at most
 //! [`LOG_LIMIT`] bytes, marker included.
 //!
-//! What a program prints is not under Studio's control and may hold values,
+//! What a program prints is not under Jovru's control and may hold values,
 //! rows or tokens. It is written as received and read back only when the
 //! user opens a run's log: it never reaches `tracing`, the application's log
 //! files, telemetry, error reports or `automation.db`. Only sizes leave this
 //! module, and no type here prints content in its `Debug` output.
-use jykre_core::automation::RunId;
+use jovru_core::automation::RunId;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
 
-/// The most a log file holds, its final marker line included (ADR-0037).
+/// The most a log file holds, its final marker line included (D-0037).
 pub const LOG_LIMIT: u64 = 1024 * 1024;
 
 /// Room kept at the end of every file for the marker line, so the file never
-/// exceeds [`LOG_LIMIT`]: a newline, `[jykre] `, a 20-digit count and the
+/// exceeds [`LOG_LIMIT`]: a newline, `[jovru] `, a 20-digit count and the
 /// longest wording take 68 bytes.
 const MARKER_ROOM: u64 = 96;
 
@@ -148,8 +148,8 @@ pub async fn read_log(data_dir: &Path, run: RunId, stream: Stream) -> io::Result
     }))
 }
 
-/// Decodes a log for display (ADR-0037, amended 2026-11-09). Bytes on disk
-/// are never changed. `jjp.log` is Studio's own UTF-8. A program's stdout or
+/// Decodes a log for display (D-0037, amended 2026-11-09). Bytes on disk
+/// are never changed. `jjp.log` is Jovru's own UTF-8. A program's stdout or
 /// stderr is read as UTF-8 when it is valid UTF-8 (a character cut by the
 /// 1 MiB limit at the very end included); otherwise `legacy` decodes it in
 /// the console's code page (on Windows, the OEM code page: CP437, CP850…),
@@ -337,12 +337,12 @@ impl LogWriter {
     pub async fn finish(mut self) -> LogSize {
         let marker = if self.dropped_messages > 0 {
             Some(format!(
-                "[jykre] {} messages dropped past the 1 MiB limit\n",
+                "[jovru] {} messages dropped past the 1 MiB limit\n",
                 self.dropped_messages
             ))
         } else if self.dropped_bytes > 0 {
             Some(format!(
-                "[jykre] {} bytes dropped past the 1 MiB limit\n",
+                "[jovru] {} bytes dropped past the 1 MiB limit\n",
                 self.dropped_bytes
             ))
         } else {
@@ -412,7 +412,7 @@ mod tests {
         assert_eq!(decode(bytes, Stream::Stdout, latin1), "Média");
         // Without a code page, UTF-8 with replacement stays.
         assert_eq!(decode(bytes, Stream::Stdout, no_legacy), "M\u{fffd}dia");
-        // Studio's own jjp.log is always UTF-8.
+        // Jovru's own jjp.log is always UTF-8.
         assert_eq!(decode(bytes, Stream::Jjp, latin1), "M\u{fffd}dia");
     }
 
@@ -429,7 +429,7 @@ mod tests {
     }
 
     pub(crate) fn temp_data_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jykre-automation-{label}-{}", RunId::new()));
+        let dir = std::env::temp_dir().join(format!("jovru-automation-{label}-{}", RunId::new()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -452,7 +452,7 @@ mod tests {
         assert_eq!(size.dropped_bytes, total - kept);
         let text = String::from_utf8(on_disk).unwrap();
         let marker = format!(
-            "\n[jykre] {} bytes dropped past the 1 MiB limit\n",
+            "\n[jovru] {} bytes dropped past the 1 MiB limit\n",
             total - kept
         );
         assert!(text.ends_with(&marker), "marker missing");
@@ -509,7 +509,7 @@ mod tests {
         assert!(kept.bytes().all(|byte| byte == b'm'));
         assert_eq!(
             rest,
-            "[fail x] last words\n[jykre] 2 messages dropped past the 1 MiB limit\n"
+            "[fail x] last words\n[jovru] 2 messages dropped past the 1 MiB limit\n"
         );
         std::fs::remove_dir_all(&data).unwrap();
     }

@@ -1,4 +1,4 @@
-use jykre_core::{DriverError, DriverResult};
+use jovru_core::{DriverError, DriverResult};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -54,7 +54,7 @@ mod tests {
 
     fn absolute() -> String {
         std::env::temp_dir()
-            .join("jykre.sqlite")
+            .join("jovru.sqlite")
             .to_string_lossy()
             .into_owned()
     }
@@ -90,7 +90,7 @@ mod tests {
             json!({ "host": "localhost" }),
         ] {
             let error = SqliteConfig::parse(&options).unwrap_err();
-            assert_eq!(error.code, jykre_core::ErrorCode::Validation, "{options}");
+            assert_eq!(error.code, jovru_core::ErrorCode::Validation, "{options}");
             assert!(!error.message.contains("secret"));
         }
     }

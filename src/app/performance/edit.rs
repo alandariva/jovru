@@ -7,11 +7,11 @@
 use super::grid::TICK;
 use super::*;
 use crate::app::result_grid::Editing;
-use jykre::grid_edit::EditSession;
-use jykre::performance::budget::{GRID_FRAME_P95, GRID_VIEW_REBUILD, OTHER_FRAME_P95};
-use jykre::performance::data;
-use jykre::probe::Samples;
-use jykre::result_tabs::{Placement, ResultTabs};
+use jovru::grid_edit::EditSession;
+use jovru::performance::budget::{GRID_FRAME_P95, GRID_VIEW_REBUILD, OTHER_FRAME_P95};
+use jovru::performance::data;
+use jovru::probe::Samples;
+use jovru::result_tabs::{Placement, ResultTabs};
 
 const ROWS: usize = 100_000;
 const EDITS: usize = 400;

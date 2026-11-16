@@ -73,7 +73,7 @@ impl DriverError {
     }
 
     /// The same error, at change `index` (zero-based) of a write: what lets
-    /// an import name the file's line (ADR-0040). A write holds far fewer
+    /// an import name the file's line (D-0040). A write holds far fewer
     /// changes than `u32::MAX`; an index past it is not kept.
     pub fn at_change(mut self, index: usize) -> Self {
         self.change = u32::try_from(index)

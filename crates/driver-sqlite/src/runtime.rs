@@ -1,6 +1,6 @@
 use crate::{MAIN_SCHEMA, SqliteConfig};
 use futures_util::TryStreamExt;
-use jykre_core::*;
+use jovru_core::*;
 use sqlx::sqlite::{
     SqliteArguments, SqliteColumn, SqliteConnectOptions, SqliteConnection, SqliteQueryResult,
     SqliteRow,
@@ -1258,7 +1258,7 @@ fn decode(row: &SqliteRow) -> DriverResult<Row> {
     Ok(cells)
 }
 
-/// What a parameter's marker becomes (ADR-0023): SQLite's numbered
+/// What a parameter's marker becomes (D-0023): SQLite's numbered
 /// parameter `?N` for the parameter at `index`, bound by [`bound`]. Numbers
 /// are bound as their text and read with SQLite's own `NUMERIC` conversion
 /// (an integer when the value is one); neither holds the value.
@@ -1664,7 +1664,7 @@ pub async fn definition(
 mod tests {
     use super::{Limit, parameter_reference};
     use futures_util::FutureExt;
-    use jykre_core::{
+    use jovru_core::{
         CancellationToken, ErrorCode, ExecutionOptions, ParameterKind, QueryParameter, QueryRequest,
     };
     use std::time::Duration;

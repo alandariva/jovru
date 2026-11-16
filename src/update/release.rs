@@ -8,7 +8,7 @@ use self_update::version::{bump_is_greater, cmp_versions};
 
 /// The repository whose releases are read.
 pub const OWNER: &str = "alandariva";
-pub const REPOSITORY: &str = "jykre-studio";
+pub const REPOSITORY: &str = "jovru";
 
 /// A platform the release workflow builds an archive for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,17 +47,17 @@ impl Platform {
     /// The executable's file name inside the archive's folder.
     pub fn executable(self) -> &'static str {
         match self {
-            Self::LinuxX86_64 => "jykre",
-            Self::WindowsX86_64 => "jykre.exe",
+            Self::LinuxX86_64 => "jovru",
+            Self::WindowsX86_64 => "jovru.exe",
         }
     }
 }
 
 /// The archive of `version` for `platform`, as the release workflow names
-/// it: `jykre-studio-v0.2.1-linux-x86_64.tar.gz`.
+/// it: `jovru-v0.2.1-linux-x86_64.tar.gz`.
 pub fn asset_name(version: &str, platform: Platform) -> String {
     format!(
-        "jykre-studio-v{version}-{}-x86_64.{}",
+        "jovru-v{version}-{}-x86_64.{}",
         platform.os(),
         platform.extension()
     )
@@ -175,15 +175,15 @@ mod tests {
     fn names_follow_the_release_workflow() {
         assert_eq!(
             asset_name("0.2.0", Platform::LinuxX86_64),
-            "jykre-studio-v0.2.0-linux-x86_64.tar.gz"
+            "jovru-v0.2.0-linux-x86_64.tar.gz"
         );
         assert_eq!(
             asset_name("0.2.0-rc.1", Platform::WindowsX86_64),
-            "jykre-studio-v0.2.0-rc.1-windows-x86_64.zip"
+            "jovru-v0.2.0-rc.1-windows-x86_64.zip"
         );
         assert_eq!(
             release_page("0.2.1"),
-            "https://github.com/alandariva/jykre-studio/releases/tag/v0.2.1"
+            "https://github.com/alandariva/jovru/releases/tag/v0.2.1"
         );
     }
 
@@ -219,13 +219,13 @@ mod tests {
 
     #[test]
     fn the_archive_is_matched_by_its_exact_name() {
-        let name = "jykre-studio-v0.2.1-linux-x86_64.tar.gz";
+        let name = "jovru-v0.2.1-linux-x86_64.tar.gz";
         let releases = [entry(
             "0.2.1",
             &[
-                "jykre-studio-v0.2.1-linux-x86_64.tar.gz.sha256",
+                "jovru-v0.2.1-linux-x86_64.tar.gz.sha256",
                 name,
-                "jykre-studio-v0.2.1-windows-x86_64.zip",
+                "jovru-v0.2.1-windows-x86_64.zip",
             ],
         )];
         let candidate = select_update("0.2.0", &releases, Some(Platform::LinuxX86_64));
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn a_release_without_this_platform_is_offered_without_an_archive() {
-        let releases = [entry("0.2.1", &["jykre-studio-v0.2.1-windows-x86_64.zip"])];
+        let releases = [entry("0.2.1", &["jovru-v0.2.1-windows-x86_64.zip"])];
         let candidate = select_update("0.2.0", &releases, Some(Platform::LinuxX86_64));
         assert_eq!(
             candidate,

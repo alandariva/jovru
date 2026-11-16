@@ -1,11 +1,11 @@
 //! Native credential vault. There is deliberately no plaintext file fallback.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
-use jykre_core::{
+use jovru_core::{
     ConnectionId, Credentials, DriverError, DriverResult, ErrorCode, SecretString, async_trait,
 };
 use secrecy::ExposeSecret;
 
-const SERVICE: &str = "JykreStudio";
+const SERVICE: &str = "Jovru";
 
 fn unavailable() -> DriverError {
     DriverError::new(
@@ -90,13 +90,13 @@ impl ApiKeyAccount {
         Self("assistant:openai-compatible:api-key")
     }
 
-    /// The headers sent to the OpenTelemetry collector (ADR-0029), usually
+    /// The headers sent to the OpenTelemetry collector (D-0029), usually
     /// its authentication.
     pub const fn telemetry_headers() -> Self {
         Self("telemetry:otlp:headers")
     }
 
-    /// The account name under service `JykreStudio`.
+    /// The account name under service `Jovru`.
     pub const fn name(self) -> &'static str {
         self.0
     }
@@ -210,7 +210,7 @@ impl McpTokenAccount {
     }
 }
 
-/// Token secrets kept only in the OS vault, under service `JykreStudio`.
+/// Token secrets kept only in the OS vault, under service `Jovru`.
 ///
 /// `get` returns `Ok(None)` when the account has no entry. `delete` of a
 /// missing entry is `Ok(())`. A failure is a fixed message and does not
@@ -279,8 +279,8 @@ impl McpTokenStore for SystemSecretStore {
 mod tests {
     use super::*;
 
-    const SYNTHETIC_KEY: &str = "sk-jykre-synthetic-unit-fixture";
-    const SYNTHETIC_TOKEN: &str = "jykre-synthetic-mcp-unit-fixture";
+    const SYNTHETIC_KEY: &str = "sk-jovru-synthetic-unit-fixture";
+    const SYNTHETIC_TOKEN: &str = "jovru-synthetic-mcp-unit-fixture";
     // Lowercase RFC 4648 base32, without padding.
     const BASE32: &str = "abcdefghijklmnopqrstuvwxyz234567";
 

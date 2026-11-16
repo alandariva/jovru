@@ -1,5 +1,5 @@
 //! Reading a CSV or XLSX file for an import into a table
-//! ([ADR-0040](../../docs/adr/0040-importing-files-into-a-table.md)).
+//! ([D-0040](../../docs/decisions/drivers.md#d-0040)).
 //!
 //! This module knows no window and no session. It turns a file into rows of
 //! [`ImportValue`]s, one at a time, with bounded memory:
@@ -13,7 +13,7 @@
 //!   opens in a query tab;
 //! - [`pipeline`] cuts the mapped rows into batches, joins the reader to the
 //!   writer through a bounded channel and runs an import all or nothing
-//!   against a [`pipeline::BatchWriter`], the seam ADR-0039's write path
+//!   against a [`pipeline::BatchWriter`], the seam D-0039's write path
 //!   implements.
 //!
 //! Every function here blocks on file I/O or CPU work; callers run them on
@@ -64,7 +64,7 @@ impl ImportValue {
 /// XLSX's empty cell is always NULL.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum EmptyFields {
-    /// NULL, as `jykre::export` writes it.
+    /// NULL, as `jovru::export` writes it.
     #[default]
     Null,
     /// Empty text.

@@ -8,7 +8,7 @@
 //! over; this parses them and keeps the entries valid for one version.
 //! Without a catalog, [`DialectCatalog::builtin`] keeps the few words the
 //! editor always knew.
-use jykre_core::SqlDialect;
+use jovru_core::SqlDialect;
 use serde::Deserialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
@@ -345,7 +345,7 @@ impl SqlCatalogs {
 }
 
 /// Where to look for the catalog directory, in order: the
-/// `JYKRE_SQL_CATALOG_DIR` variable, a `catalog` directory next to the
+/// `JOVRU_SQL_CATALOG_DIR` variable, a `catalog` directory next to the
 /// executable and, in a development build, the repository's `catalog`.
 pub fn candidate_dirs(
     variable: Option<PathBuf>,
@@ -818,15 +818,15 @@ mod tests {
     fn the_catalog_directory_is_looked_for_in_order() {
         let dirs = candidate_dirs(
             Some(PathBuf::from("/data/catalogs")),
-            Some(Path::new("/opt/jykre")),
-            Some(Path::new("/src/jykre")),
+            Some(Path::new("/opt/jovru")),
+            Some(Path::new("/src/jovru")),
         );
         assert_eq!(
             dirs,
             [
                 PathBuf::from("/data/catalogs"),
-                Path::new("/opt/jykre").join("catalog"),
-                Path::new("/src/jykre").join("catalog"),
+                Path::new("/opt/jovru").join("catalog"),
+                Path::new("/src/jovru").join("catalog"),
             ]
         );
         assert_eq!(

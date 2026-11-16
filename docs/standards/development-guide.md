@@ -1,6 +1,6 @@
 # Development guide
 
-Keep changes local to the part of Jykre Studio that owns the behavior.
+Keep changes local to the part of Jovru that owns the behavior.
 A useful boundary lets a rule change without requiring edits to unrelated
 features. Use the same boundaries when adding a feature or refactoring an
 existing one.
@@ -11,10 +11,10 @@ existing one.
 | Responsibility | Where it belongs |
 | --- | --- |
 | Render state, manage focus and translate input into actions | GPUI views under `src/app/`. Keep view state with the interaction that owns it. [UI guidelines](ui-guidelines.md) |
-| Apply feature rules independent of GPUI and orchestrate operations | The relevant module of the `jykre` library. Follow `backend::run` for I/O and the existing feature's task ownership. [Architecture](../reference/architecture.md#layers-and-responsibilities) |
-| Execute database-specific SQL, interpret protocol errors or expose a database capability | The driver crate. Consumers use the existing descriptor, capabilities or dialect as appropriate. [Drivers](../reference/drivers.md) |
-| Store local state or access credentials | Use `jykre-storage` for SQLite repositories and `jykre-secrets` for the OS vault. [Persistence](../reference/persistence.md) · [Security](security.md#credentials) |
-| Define a shared driver contract or pure type that crosses crate boundaries | Follow the role of `jykre-core` and the dependency rules. Feature-local types belong with their feature. [Architecture](../reference/architecture.md#dependency-rules) |
+| Apply feature rules independent of GPUI and orchestrate operations | The relevant module of the `jovru` library. Follow `backend::run` for I/O and the existing feature's task ownership. [Architecture](../reference/architecture.md#layers-and-responsibilities) |
+| Execute database-specific SQL, interpret protocol errors or expose a database capability | The driver crate. Consumers use the existing descriptor, capabilities or dialect as appropriate. [Drivers](../reference/drivers/README.md) |
+| Store local state or access credentials | Use `jovru-storage` for SQLite repositories and `jovru-secrets` for the OS vault. [Persistence](../reference/persistence/README.md) · [Security](security.md#credentials) |
+| Define a shared driver contract or pure type that crosses crate boundaries | Follow the role of `jovru-core` and the dependency rules. Feature-local types belong with their feature. [Architecture](../reference/architecture.md#dependency-rules) |
 
 Keep a rule and the data it governs together. Give each mutable state one
 owner and derive counts, labels and flags from it. At a boundary, pass the
@@ -42,7 +42,7 @@ Follow the data through the feature. Keep I/O and work that grows with the
 input off the UI thread. Use the existing paging and memory limits when
 reading results, and share result data across consumers. Recompute derived
 data when its inputs change and let each frame render the visible portion.
-[Performance principles](performance.md#principles) · [Result limits](../reference/results.md#limits)
+[Performance principles](performance.md#principles) · [Result limits](../reference/results/model.md#limits)
 
 ## Design and build a new module
 
@@ -60,12 +60,12 @@ data when its inputs change and let each frame render the visible portion.
    boundaries. For work that can fail partway, decide when to publish
    state and what must be cleaned up. For features that read saved data,
    account for files and settings written by earlier versions.
-   [Concurrency](../reference/architecture.md#concurrency) · [Reliability](reliability.md#failure-isolation) · [Persistence](../reference/persistence.md)
+   [Concurrency](../reference/architecture.md#concurrency) · [Reliability](reliability.md#failure-isolation) · [Persistence](../reference/persistence/README.md)
 4. **Cover the contract.** Use unit tests for pure rules and isolated
    integration tests for interactions with storage, drivers or external
    services. Use synthetic data for the normal path and relevant failure
    cases. Exercise the real caller for behavior that depends on wiring,
-   focus or the lifecycle of a view. [Testing](testing.md) · [User experience](../reference/ux.md)
+   focus or the lifecycle of a view. [Testing](testing.md) · [User experience](../reference/ux/README.md)
 
 ### Example from the SQL editor
 
@@ -102,7 +102,7 @@ decisions and known deviations before proposing work on accepted debt.
    stale results.
    For persisted data, check older data and what remains visible after
    failure or cancellation. Use the documented approval and migration
-   process if a schema change is needed. [Concurrency](../reference/architecture.md#concurrency) · [Reliability](reliability.md#failure-isolation) · [Migrations](../reference/persistence.md#migrations)
+   process if a schema change is needed. [Concurrency](../reference/architecture.md#concurrency) · [Reliability](reliability.md#failure-isolation) · [Migrations](../reference/persistence/files.md#migrations)
 4. **Review the result of the split.** Confirm that a change to the extracted
    rule or interaction can now be made within its owning module. Check
    that callers use the intended interface and that the split has kept
@@ -116,26 +116,26 @@ editing and copy actions. It is also the shared view for results outside the
 query workspace. Keep `ResultGrid` as the cached GPUI entity, with its
 existing methods and events for callers. Split responsibilities inside it
 first. A new GPUI entity is useful when a region changes independently and
-can avoid redrawing expensive neighbors. [Result grid](../../src/app/result_grid.rs) · [ADR-0012](../adr/0012-result-grid-as-a-cached-entity.md) · [GPUI rendering](ui-guidelines.md#how-gpui-renders-and-what-follows-from-it)
+can avoid redrawing expensive neighbors. [Result grid](../../src/app/result_grid.rs) · [D-0012](../decisions/results.md#d-0012) · [GPUI rendering](ui-guidelines.md#how-gpui-renders-and-what-follows-from-it)
 
 1. **Isolate column search.** The private `result_grid/column_search.rs`
    module holds the dialog state, keyboard handling and match rendering.
-   It uses `jykre::column_search` for name matching and the column layout
+   It uses `jovru::column_search` for name matching and the column layout
    API to reveal the chosen column. Preserve recomputation on text,
    layout or result changes. In the app, open it with `Ctrl Shift F`,
    navigate with the arrows and choose a hidden column with `Enter`. Open
    it again and check that `Esc` returns focus to the grid. Run the
    `columns` performance scenario on the same fixture before and after.
-   [Grid behavior](../reference/results.md#grid) · [Keyboard shortcuts](../reference/ux.md#keyboard-shortcuts) · [Performance run](performance.md#automated-performance-run)
+   [Grid behavior](../reference/results/grid.md#grid) · [Keyboard shortcuts](../reference/ux/shortcuts.md#keyboard-shortcuts) · [Performance run](performance.md#automated-performance-run)
 2. **Separate other interactions as follow-up changes.** Keep selection
-   gestures, focus and scrolling in the view, using `jykre::grid` for
+   gestures, focus and scrolling in the view, using `jovru::grid` for
    selection calculations. Keep the cell editor and its input handling
    together and reuse `grid_edit::EditSession` for pending edits. Let grid
    copy actions build a request for the existing `app::copying` flow and
-   keep format rules in `jykre::copy_as`. Exercise drag and keyboard
+   keep format rules in `jovru::copy_as`. Exercise drag and keyboard
    selection after a filter or sort, pending edits when switching result
    tabs, and copying a selection through its normal entry point.
-   [Grid implementation](../../src/grid.rs) · [Editing](../reference/results.md#editing) · [Copying](../reference/results.md#copying)
+   [Grid implementation](../../src/grid.rs) · [Editing](../reference/results/editing.md#editing) · [Copying](../reference/results/transfer.md#copying)
 3. **Extract table rendering in its own step.** Preserve the cached grid
    boundary, visible-row and visible-column rendering, cache invalidation
    and targeted notifications. Use the `grid` and `edit` performance scenarios

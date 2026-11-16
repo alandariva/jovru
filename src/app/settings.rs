@@ -3,7 +3,7 @@
 //! `Ctrl ,` and from the assistant when it is not set up yet; `Esc` or the
 //! close button closes it.
 use super::*;
-use jykre::theme::ThemeChoice;
+use jovru::theme::ThemeChoice;
 
 /// A category of Preferences.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -93,17 +93,17 @@ impl AppView {
     /// Reads theme files again, off the UI thread, so a JSON dropped in
     /// `themes/` can be chosen without restarting. The font size is kept.
     fn reload_themes(&mut self, cx: &mut Context<Self>) {
-        let dir = jykre::connection_store::data_dir();
+        let dir = jovru::connection_store::data_dir();
         let chosen = theme::choice(cx);
         let overrides = cx
             .try_global::<theme::ThemeOverrides>()
             .cloned()
             .unwrap_or_default();
         self.theme_reload = Some(cx.spawn(async move |weak, cx| {
-            let loaded = jykre::backend::run(async move {
+            let loaded = jovru::backend::run(async move {
                 let catalog = tokio::task::spawn_blocking(move || {
                     let executable = std::env::current_exe().ok();
-                    let catalog = jykre::theme::load_catalog(&jykre::theme::theme_directories(
+                    let catalog = jovru::theme::load_catalog(&jovru::theme::theme_directories(
                         &dir,
                         executable.as_deref(),
                     ));
@@ -129,8 +129,8 @@ impl AppView {
                 })
                 .await
                 .map_err(|error| {
-                    jykre_core::DriverError::new(
-                        jykre_core::ErrorCode::Internal,
+                    jovru_core::DriverError::new(
+                        jovru_core::ErrorCode::Internal,
                         format!("Theme loading task failed: {error}"),
                     )
                 })?;
@@ -802,7 +802,7 @@ fn sql_preview() -> StyledText {
 
 fn about_page(mono: SharedString) -> Div {
     column().gap_4().child(
-        setting_section("Jykre Studio")
+        setting_section("Jovru")
             .child(setting_row(
                 tr!("Version"),
                 tr!("PostgreSQL, MySQL, Databricks and SQLite."),

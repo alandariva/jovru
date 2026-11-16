@@ -1,13 +1,13 @@
-//! The tools the model may call (ADR-0028). They read this computer's
+//! The tools the model may call (D-0028). They read this computer's
 //! metadata cache and nothing else: no session, no server, no result. Every
 //! answer is plain text with a bounded size, and a failure is an answer
 //! too, so the model can adjust instead of the turn failing. Callers tell
 //! a tool error by [`ToolAnswer::failed`], not by the `Error:` prefix.
 use super::facts::SchemaScope;
 use crate::backend::{self, PatternSearch};
-use jykre_assistant::{ToolCall, ToolSpec};
-use jykre_core::{MetadataObject, ObjectKind, ObjectPath};
-use jykre_storage::SearchCursor;
+use jovru_assistant::{ToolCall, ToolSpec};
+use jovru_core::{MetadataObject, ObjectKind, ObjectPath};
+use jovru_storage::SearchCursor;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::sync::Mutex;
@@ -585,7 +585,7 @@ pub fn describe(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jykre_core::PathSegment;
+    use jovru_core::PathSegment;
 
     fn path(parts: &[(ObjectKind, &str)]) -> ObjectPath {
         ObjectPath(

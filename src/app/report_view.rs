@@ -1,13 +1,13 @@
-//! A report's tab ([ADR-0024](../../docs/adr/0024-reports.md),
-//! [ADR-0025](../../docs/adr/0025-report-panels.md)): its definition (title,
+//! A report's tab ([D-0024](../../docs/decisions/results.md#d-0024),
+//! [D-0025](../../docs/decisions/results.md#d-0025)): its definition (title,
 //! description and the parameters its panels share), the parameter form,
 //! and its panels laid out in two columns.
 //!
 //! Each panel runs its SQL on its own connection and database. Panels of one
 //! connection and database share a session and run in turn; others run at
-//! the same time, at most four at once ([`jykre::reports::run`] decides;
+//! the same time, at most four at once ([`jovru::reports::run`] decides;
 //! this view only starts each group's loop). Parameter values are bound by
-//! the driver, never written into the SQL (ADR-0023). While the report is
+//! the driver, never written into the SQL (D-0023). While the report is
 //! edited, a panel dragged by its grip and dropped on another takes its
 //! place.
 use super::report_panel::{
@@ -22,17 +22,17 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::{prelude::FluentBuilder as _, *};
-use jykre::drivers::*;
-use jykre::parameters::KINDS;
-use jykre::reports::params::{self, ParameterProblem};
-use jykre::reports::run::{
+use jovru::drivers::*;
+use jovru::parameters::KINDS;
+use jovru::reports::params::{self, ParameterProblem};
+use jovru::reports::run::{
     self, PanelOutcome, PanelPhase, Plan, PlanPanel, RunScope, Scheduler, SessionKey, Sessions,
 };
-use jykre::reports::{
+use jovru::reports::{
     ConnectionRef, Direction, MAX_CHOICES, MAX_PANELS, Panel, PanelId, Report, Width, drop_index,
     export,
 };
-use jykre::{backend, connection_store, tr};
+use jovru::{backend, connection_store, tr};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -346,14 +346,14 @@ impl ReportView {
         context: SessionContext,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Result<(), jykre::reports::Full> {
+    ) -> Result<(), jovru::reports::Full> {
         if self.panels.len() >= MAX_PANELS {
             self.notice = Some(Feedback::new(
                 Tone::Warning,
                 tr!("A report holds at most {0} panels.", MAX_PANELS),
             ));
             cx.notify();
-            return Err(jykre::reports::Full);
+            return Err(jovru::reports::Full);
         }
         let panel = Panel::new(self.next_panel_id(cx), connection, sql, context);
         let id = panel.id;
@@ -701,7 +701,7 @@ impl ReportView {
         self.scheduler.is_busy()
     }
 
-    pub fn tab_status(&self) -> jykre::grouped_tabs::TabStatus {
+    pub fn tab_status(&self) -> jovru::grouped_tabs::TabStatus {
         self.scheduler.status()
     }
 
@@ -961,11 +961,11 @@ impl ReportView {
             else {
                 continue;
             };
-            if source.environment != Some(jykre::connection_appearance::Environment::Production) {
+            if source.environment != Some(jovru::connection_appearance::Environment::Production) {
                 continue;
             }
             let statements = plan.statements_on(connection);
-            let risks = jykre::guard::risks(&statements, source.dialect);
+            let risks = jovru::guard::risks(&statements, source.dialect);
             if !risks.is_empty() {
                 names.push(source.connection.name.clone());
                 descriptions.push(super::workspace::risk_description(&risks, statements.len()));
@@ -1645,7 +1645,7 @@ impl ReportView {
     fn choice_menu(
         &self,
         index: usize,
-        spec: &jykre::reports::ParameterSpec,
+        spec: &jovru::reports::ParameterSpec,
         field: &ValueField,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {

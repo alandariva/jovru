@@ -10,9 +10,9 @@ use super::runs_view::RunsView;
 use super::{FRAME, JobItem, JobSources, Jobs};
 use crate::app::report_panel::ReportSource;
 use gpui_kit::*;
-use jykre::automation::definition::JobDefinition;
-use jykre::automation::{Engine, RunState};
-use jykre::drivers::{ConnectionId, SqlDialect};
+use jovru::automation::definition::JobDefinition;
+use jovru::automation::{Engine, RunState};
+use jovru::drivers::{ConnectionId, SqlDialect};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -117,7 +117,7 @@ impl Bench {
                 cx.background_executor().timer(FRAME).await;
                 changes.borrow_and_update();
                 let alive = cx.update(|cx| {
-                    let _timer = jykre::logging::UiTimer::start("automation changes");
+                    let _timer = jovru::logging::UiTimer::start("automation changes");
                     for view in &watched {
                         let _ = view.update(cx, |view, cx| view.engine_changed(cx));
                     }

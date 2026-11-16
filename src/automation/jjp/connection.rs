@@ -10,7 +10,7 @@ use super::{
     Claim, FAIL_ROOM, HostShared, JjpEvent, Link, MAX_MESSAGE_BYTES, ProtocolProblem, Terminal,
     error_code,
 };
-use jykre_core::CancellationToken;
+use jovru_core::CancellationToken;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

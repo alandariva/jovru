@@ -48,10 +48,14 @@ pub const QUERY_BUSY: &str = concat!(
 );
 
 /// Error result while the section is paused. No card is added.
-pub const NOT_ACCEPTING: &str = "Jykre Studio is not accepting requests now.";
+pub const NOT_ACCEPTING: &str = "Jovru is not accepting requests now.";
 
 /// Error result when a card is closed because the application is quitting.
-pub const QUITTING: &str = "Jykre Studio is quitting; nothing was sent.";
+pub const QUITTING: &str = "Jovru is quitting; nothing was sent.";
+
+/// Error result when a card is closed because its token was revoked, expired,
+/// suspended or rotated while the card was open.
+pub const TOKEN_ENDED: &str = "This token is no longer valid; nothing was sent.";
 
 /// Shown in [`Debug`] in place of an answer, arguments, SQL, or a purpose.
 const REDACTED: &str = "<redacted>";
@@ -179,6 +183,9 @@ pub enum CardEnd {
     NotAnswered,
     CancelledByClient,
     CancelledQuitting,
+    /// The token that owned the card was revoked, expired, suspended or
+    /// rotated. The outcome is [`Outcome::Cancelled`].
+    TokenEnded,
 }
 
 /// Returned by [`Broker::approve_statement`]. [`Broker::finish_running`]
@@ -743,6 +750,30 @@ impl Broker {
         settled_cards
     }
 
+    /// Close every open card of `token` as [`CardEnd::TokenEnded`]. A client
+    /// whose token stopped being valid gets the error result [`TOKEN_ENDED`],
+    /// and the user can no longer approve what it asked for.
+    #[must_use]
+    pub fn close_token(&mut self, token: McpTokenId, now: Instant) -> Vec<Settled> {
+        let mut ids: Vec<CardId> = self
+            .by_id
+            .iter()
+            .filter(|(_, owner)| **owner == token)
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        let mut settled_cards = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(one) = self.close_cancelled(id, now, TOKEN_ENDED, CardEnd::TokenEnded) {
+                settled_cards.push(one);
+            }
+        }
+        if !settled_cards.is_empty() {
+            self.changed();
+        }
+        settled_cards
+    }
+
     /// Column names hidden for `token` since this broker was created.
     pub fn hidden_names(&self, token: McpTokenId) -> BTreeSet<String> {
         self.tokens
@@ -1031,8 +1062,18 @@ impl Broker {
     }
 
     fn close_quitting(&mut self, id: CardId, now: Instant) -> Option<Settled> {
+        self.close_cancelled(id, now, QUITTING, CardEnd::CancelledQuitting)
+    }
+
+    fn close_cancelled(
+        &mut self,
+        id: CardId,
+        now: Instant,
+        text: &str,
+        end: CardEnd,
+    ) -> Option<Settled> {
         let (token, card) = self.take_card(id, now)?;
-        let answer = kept(&card, QUITTING);
+        let answer = kept(&card, text);
         self.record(Record {
             token,
             tool: card.tool,
@@ -1040,14 +1081,14 @@ impl Broker {
             arguments: card.logged_arguments(),
             purpose: card.purpose.as_str(),
             answer,
-            response: Some(QUITTING),
+            response: Some(text),
             at: now,
         });
         Some(settled(
             token,
             &card,
-            CardEnd::CancelledQuitting,
-            error_result(Outcome::Cancelled, QUITTING),
+            end,
+            error_result(Outcome::Cancelled, text),
         ))
     }
 
@@ -1777,6 +1818,32 @@ mod tests {
         assert_eq!(response(&later).text, QUITTING);
         assert!(response(&later).is_error);
         assert!(broker.cards().is_empty());
+    }
+
+    #[test]
+    fn a_token_that_ended_loses_its_open_cards_and_nobody_else_does() {
+        let mut broker = Broker::new();
+        let now = Instant::now();
+        let ended = token_id("abcdefghij");
+        let other = token_id("klmnopqrst");
+        let running = held(broker.submit_query(ended, "delete from t", "why", now));
+        let permit = broker.approve_statement(running).unwrap();
+        let kept = held(broker.submit_query(other, "select 1", "why", now));
+
+        let closed = broker.close_token(ended, now);
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].card, running);
+        assert_eq!(closed[0].end, CardEnd::TokenEnded);
+        assert_eq!(closed[0].result.outcome, Outcome::Cancelled);
+        assert_eq!(response(&closed[0].result).text, TOKEN_ENDED);
+        assert!(response(&closed[0].result).is_error);
+        // The statement that was running cannot be finished or approved again.
+        assert!(!broker.finish_running(permit, "x", 1, Vec::<String>::new(), now));
+        assert!(broker.approve_statement(running).is_none());
+        // The other token's card stays, and a second close finds nothing.
+        assert_eq!(broker.cards().len(), 1);
+        assert_eq!(broker.cards()[0].id, kept);
+        assert!(broker.close_token(ended, now).is_empty());
     }
 
     #[test]

@@ -122,7 +122,7 @@ pub const CANCEL_SHOWN: Budget = Budget {
 pub const ROWS_LEFT_BY_CANCEL: Budget = Budget {
     limit: 0.0,
     text: "0 rows (all or nothing)",
-    source: "ADR-0040: a cancellation rolls the import back",
+    source: "D-0040: a cancellation rolls the import back",
 };
 
 /// One measured number of a path.

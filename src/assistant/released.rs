@@ -1,4 +1,4 @@
-//! The one way a query's values reach the model (ADR-0028). When the model
+//! The one way a query's values reach the model (D-0028). When the model
 //! asks for `run_query`, the user approves the statement, the workspace
 //! runs it in the assistant's own session and hands its result here as a
 //! bounded [`QueryPreview`]; the user then sends it, with the columns they
@@ -10,8 +10,8 @@ use super::prompts;
 use super::run::{QueryDecision, QueryRecord, ToolStep};
 use crate::backend::QueryBatch;
 use crate::error_report::ErrorReport;
-use jykre_assistant::ToolCall;
-use jykre_core::DriverError;
+use jovru_assistant::ToolCall;
+use jovru_core::DriverError;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
@@ -351,7 +351,7 @@ mod tests {
     use super::*;
     use crate::backend::QueryResult;
     use crate::result::{ResultColumn, ResultData};
-    use jykre_core::{DriverOutcome, ErrorCode};
+    use jovru_core::{DriverOutcome, ErrorCode};
     use serde_json::json;
 
     fn batch(rows: usize, cell: &str) -> QueryBatch {

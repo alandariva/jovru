@@ -3,8 +3,8 @@
 //! providers ask this module what the SQL around the cursor means, and read
 //! the names it needs from a [`NameIndex`] built off the UI thread.
 use crate::catalog::DialectCatalog;
-use jykre_core::{MetadataObject, ObjectKind, ObjectPath, PathSegment, SessionContext, SqlDialect};
-use jykre_sql::names::{Name, Part, name_at, parts, stored};
+use jovru_core::{MetadataObject, ObjectKind, ObjectPath, PathSegment, SessionContext, SqlDialect};
+use jovru_sql::names::{Name, Part, name_at, parts, stored};
 use scopes::{Binding, Output, Read, Scopes};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -464,7 +464,7 @@ impl Lookup<'_> {
 /// `dialect`. A cursor after the last word of a statement that no `;` ended,
 /// with only spaces in between (`WHERE |`), still continues that statement.
 fn statement_at(sql: &str, offset: usize, dialect: Option<SqlDialect>) -> Option<(usize, &str)> {
-    let ranges = jykre_sql::statements(sql, dialect);
+    let ranges = jovru_sql::statements(sql, dialect);
     if let Some(range) = ranges
         .iter()
         .find(|range| range.start <= offset && offset <= range.end)
@@ -536,10 +536,10 @@ pub fn request(
     }
     let (before, prefix, prefix_start) = before_cursor(statement, local, index.dialect);
     // Inside a literal or comment there is nothing to suggest.
-    if let Some(last) = jykre_sql::tokens(&statement[..local], index.dialect).last()
+    if let Some(last) = jovru_sql::tokens(&statement[..local], index.dialect).last()
         && matches!(
             last.1,
-            jykre_sql::TokenKind::String | jykre_sql::TokenKind::Comment
+            jovru_sql::TokenKind::String | jovru_sql::TokenKind::Comment
         )
         && last.0.end >= local
     {
@@ -906,16 +906,16 @@ pub fn function_at(
     let offset = offset.min(sql.len());
     let (start, statement) = statement_at(sql, offset, dialect)?;
     let local = offset - start;
-    let tokens: Vec<_> = jykre_sql::tokens(statement, dialect)
+    let tokens: Vec<_> = jovru_sql::tokens(statement, dialect)
         .into_iter()
-        .filter(|(_, kind)| *kind != jykre_sql::TokenKind::Comment)
+        .filter(|(_, kind)| *kind != jovru_sql::TokenKind::Comment)
         .collect();
     let at = tokens
         .iter()
         .position(|(range, _)| range.start <= local && local <= range.end)?;
     let (range, kind) = &tokens[at];
     let next = tokens.get(at + 1).map(|(next, _)| &statement[next.clone()]);
-    if *kind != jykre_sql::TokenKind::Word || next != Some("(") {
+    if *kind != jovru_sql::TokenKind::Word || next != Some("(") {
         return None;
     }
     let name = statement[range.clone()].to_lowercase();
@@ -971,9 +971,9 @@ pub fn symbol_at(
     let local = offset - start;
     let all = parts(statement, index.dialect);
     // The dotted name around the cursor, from the token ranges.
-    let tokens: Vec<_> = jykre_sql::tokens(statement, index.dialect)
+    let tokens: Vec<_> = jovru_sql::tokens(statement, index.dialect)
         .into_iter()
-        .filter(|(_, kind)| *kind != jykre_sql::TokenKind::Comment)
+        .filter(|(_, kind)| *kind != jovru_sql::TokenKind::Comment)
         .collect();
     let at = tokens
         .iter()

@@ -1,10 +1,10 @@
 #!/bin/sh
-# Adds Jykre Studio to the desktop's applications, with its icon, for the
-# current user. Run it from the extracted release folder, next to `jykre`;
+# Adds Jovru to the desktop's applications, with its icon, for the
+# current user. Run it from the extracted release folder, next to `jovru`;
 # run it again after moving the folder. `--uninstall` removes the entry.
 set -eu
 
-APP_ID=io.github.alandariva.JykreStudio
+APP_ID=io.github.alandariva.Jovru
 here=$(cd "$(dirname "$0")" && pwd)
 data=${XDG_DATA_HOME:-$HOME/.local/share}
 applications="$data/applications"
@@ -25,7 +25,7 @@ case "${1-}" in
 --uninstall)
     rm -f "$entry" "$icon"
     refresh
-    echo "Removed Jykre Studio from the applications."
+    echo "Removed Jovru from the applications."
     exit 0
     ;;
 "") ;;
@@ -35,9 +35,9 @@ case "${1-}" in
     ;;
 esac
 
-binary="$here/jykre"
+binary="$here/jovru"
 if [ ! -x "$binary" ]; then
-    echo "jykre was not found next to this script ($binary)." >&2
+    echo "jovru was not found next to this script ($binary)." >&2
     exit 1
 fi
 # The entry quotes the path; these characters would need escaping in it.
@@ -53,4 +53,4 @@ cp "$here/$APP_ID.svg" "$icon"
 EXEC="\"$binary\"" awk '/^Exec=/ { print "Exec=" ENVIRON["EXEC"]; next } { print }' \
     "$here/$APP_ID.desktop" >"$entry"
 refresh
-echo "Added Jykre Studio to the applications ($entry)."
+echo "Added Jovru to the applications ($entry)."

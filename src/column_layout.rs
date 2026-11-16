@@ -5,7 +5,7 @@
 //! It belongs to one result tab and lives in memory only. Copying,
 //! exporting, the records view and the statistics read the visible columns
 //! in display order through it; the values, their types and NULLs are never
-//! touched ([Results](../docs/reference/results.md#grid)).
+//! touched ([Results](../docs/reference/results/grid.md#grid)).
 use std::ops::Range;
 
 /// The columns of a result as the grid lays them out: every column in

@@ -2,11 +2,15 @@
 
 ## Overview
 
-Jykre Studio is a single native process. The interface is drawn by
-[GPUI](https://www.gpui.rs/) through `gpui-kit` ([ADR-0001](../adr/0001-native-ui-with-gpui.md));
-there is no WebView and no IPC layer. Database access, local persistence and
-credentials live in UI-independent crates
-([ADR-0006](../adr/0006-layered-crates-independent-of-the-ui.md)).
+Jovru is a single native process. The interface is drawn by
+[GPUI](https://www.gpui.rs/) through `gpui-kit` (D-0001);
+there is no WebView, no IPC layer and no frontend language besides Rust.
+`gpui-kit` pins a matching set of GPUI crates (`gpui-pre-*`) and provides the
+components (`gpui-component`); it and the crates it pins are upgraded together,
+followed by a check of the whole application
+([Stack and dependencies](../standards/stack-and-dependencies.md)). Database
+access, local persistence and credentials live in UI-independent crates
+(D-0006).
 
 ```mermaid
 flowchart TB
@@ -16,11 +20,11 @@ flowchart TB
         SqlEditor[sql_editor: editor language features adapter]
     end
 
-    subgraph Lib["jykre library (src/lib.rs)"]
+    subgraph Lib["jovru library (src/lib.rs)"]
         Backend[backend: operations on Tokio]
         Store[connection_store]
         Format[cell_format]
-        Sql[sql: re-export of jykre-sql]
+        Sql[sql: re-export of jovru-sql]
         Query[query: run state machine]
         Results[result_tabs: result tabs and pages]
         State[workspace_state: tabs, saved queries, history]
@@ -31,16 +35,16 @@ flowchart TB
     end
 
     subgraph Crates["UI-independent crates (crates/)"]
-        Core[jykre-core: contracts and types]
-        Storage[jykre-storage: SQLite]
-        Secrets[jykre-secrets: OS vault]
-        PG[jykre-driver-postgres]
-        MY[jykre-driver-mysql]
-        DBX[jykre-driver-databricks]
-        LITE[jykre-driver-sqlite]
-        SqlCrate[jykre-sql: tokens, splitting]
-        Language[jykre-sql-language: completion, format]
-        Assistant[jykre-assistant: AI providers]
+        Core[jovru-core: contracts and types]
+        Storage[jovru-storage: SQLite]
+        Secrets[jovru-secrets: OS vault]
+        PG[jovru-driver-postgres]
+        MY[jovru-driver-mysql]
+        DBX[jovru-driver-databricks]
+        LITE[jovru-driver-sqlite]
+        SqlCrate[jovru-sql: tokens, splitting]
+        Language[jovru-sql-language: completion, format]
+        Assistant[jovru-assistant: AI providers]
     end
 
     Bin --> Lib
@@ -73,16 +77,16 @@ flowchart TB
 
 | Layer | Location | Does | Does not |
 | --- | --- | --- | --- |
-| **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JYKRE_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
-| **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread, draws the **Go to line** prompt (`GoToLine`) and reports through events ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)) | Hold language rules; be used by anything but the views |
-| **Application library** | `src/*.rs` (`jykre` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jykre-sql`), run states (`query`), value presentation rules (`cell_format`), a result's pending edits and the write request they become (`grid_edit`, [ADR-0039](../adr/0039-editing-result-data-through-the-driver.md)), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), reading a CSV or `.xlsx` for an import into a table, its column mapping, the draft `CREATE TABLE` and the batches joined to a writer all or nothing (`import`, [ADR-0040](../adr/0040-importing-files-into-a-table.md); its dialog is `src/app/import/`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the colour theme loaded from JSON (`theme`, [Themes](themes.md)), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), what **Go to line** reads and where it leads (`go_to_line`), the keys the user chooses for the keymap's actions: how a key reads, where it collides and how the choices are stored (`keymap`, applied to GPUI's keymap by `src/app/shortcuts.rs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine: SQL Jobs, external programs, `jjp/1`, linear chains and schedules while the application is open, run by an application-root service that records what ran in `automation.db` (`automation`, with its scheduler and rules in `automation::schedule` over `jiff`, [specification](../plans/automation-engine-specification.md), [ADR-0034](../adr/0034-automation-database-service-and-lock.md) to [ADR-0038](../adr/0038-external-program-runs.md) and [ADR-0041](../adr/0041-schedules-and-grants.md); its interface is `src/app/automation/`, see [User experience](ux.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, [ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, [ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, [ADR-0033](../adr/0033-update-check-and-signed-self-install.md)) | Depend on a specific view; use the editor's language features |
+| **Views** | `src/app/` (demo data in `src/app/demo/`, used with `JOVRU_DEMO=1`) | Render state, capture input, hold UI state (open tabs, selection, expanded nodes, panel sizes), start operations and show their outcome | Network or disk I/O, SQL parsing, formatting rules, decisions by database type |
+| **Editor adapter** | `src/app/sql_editor/` | The only bridge between the editor (gpui-kit) and the language features: installs the highlighter and the providers, reads columns from the cache, formats off the UI thread, draws the **Go to line** prompt (`GoToLine`) and reports through events (D-0020) | Hold language rules; be used by anything but the views |
+| **Application library** | `src/*.rs` (`jovru` crate) | Orchestrates operations (`backend`), `:name` parameters shared by reports and query tabs (`parameters`), connection profiles (`connection_store`), SQL text handling (`sql`, re-exported from `jovru-sql`), run states (`query`), value presentation rules (`cell_format`), a result's pending edits and the write request they become (`grid_edit`, D-0039), exact decimal arithmetic (`decimal`), selection and column statistics (`stats`), the copy formats of a selection and their options (`copy_as`), writing a result to a file the user chose (`export`, run by `backend::export`), reading a CSV or `.xlsx` for an import into a table, its column mapping, the draft `CREATE TABLE` and the batches joined to a writer all or nothing (`import`, D-0040; its dialog is `src/app/import/`), the production check before risky statements (`guard`), a connection's colour and environment (`connection_appearance`), the colour theme loaded from JSON (`theme`, [Themes](themes.md)), translations (`i18n`), reusable components (`grouped_tabs`), the query tabs closed in this session for reopening (`closed_tabs`), what **Go to line** reads and where it leads (`go_to_line`), the keys the user chooses for the keymap's actions: how a key reads, where it collides and how the choices are stored (`keymap`, applied to GPUI's keymap by `src/app/shortcuts.rs`), the explorer's favorites (`favorites`), saved queries as `.sql` files with their local state, recovery files and migration (`query_files`), driver composition (`drivers`), the automation engine: SQL Jobs, external programs, `jjp/1`, linear chains and schedules while the application is open, run by an application-root service that records what ran in `automation.db` (`automation`, with its scheduler and rules in `automation::schedule` over `jiff`, [specification](../plans/automation-engine-specification.md), D-0034 to D-0038 and D-0041; its interface is `src/app/automation/`, see [User experience](ux/README.md)), the AI assistant's side of the work: what a request may tell, the tools over the metadata cache, the prompts and the agentic loop (`assistant`, D-0028), structured logs (`logging`) and their optional export with traces over OTLP, its preferences, filters and the attributes that may leave (`telemetry`, D-0029), the update check and the signed self-install: which release is newer, the requests to GitHub, the signature, the folder swap and its preferences (`update`, D-0033) | Depend on a specific view; use the editor's language features |
 | **Core** | `crates/core` | Driver and session contracts, configuration, credentials, errors, result and metadata types, registry, and automation's pure types (`automation`: IDs, `RunState`, `Cause`, run records, the schedule policies and outcomes) | I/O of any kind; depend on any other internal crate, SQLx or reqwest |
-| **Storage** | `crates/storage` | SQLite repositories for configuration, preferences, per-connection metadata and automation (`AutomationRepository` and `AutomationLock` own `automation.db` and `automation.lock`, [Persistence](persistence.md#automation-automationdb)) | Store secrets; know drivers or the UI |
+| **Storage** | `crates/storage` | SQLite repositories for configuration, preferences, per-connection metadata and automation (`AutomationRepository` and `AutomationLock` own `automation.db` and `automation.lock`, [Persistence](persistence/automation-db.md#automation-automationdb)) | Store secrets; know drivers or the UI |
 | **Secrets** | `crates/secrets` | Read, write and delete credentials in the OS vault | Anything else; fall back to a file |
 | **Drivers** | `crates/driver-*` | Validate configuration, connect, execute, cancel, introspect and classify errors for one database | Persist; talk to the UI; know another driver |
-| **AI providers** | `crates/assistant` (`jykre-assistant`) | The canonical request of a round, one streamed round against Anthropic, OpenAI, OpenAI-compatible servers or Ollama (through `genai`, private to its transport), error classification, prices and the SQL blocks of an answer ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)) | Know the cache, the vault, sessions or the UI; decide what a request contains |
-| **SQL text** | `crates/sql` (`jykre-sql`) | Tokens by dialect, statement splitting, `EXPLAIN`, position mapping and qualified names: what execution and the editor share | I/O; depend on an editor engine |
-| **Language features** | `crates/sql-language` (`jykre-sql-language`) | What the editor suggests and explains (`completion`, which reads each statement's queries and the relations they bind from its tokens), Format (`format`, sqruff-lib behind the `sqruff` feature) and the line comments **Ctrl+/** toggles (`comment`) | I/O, GPUI, `lsp-types` or translations; be used by the library |
+| **AI providers** | `crates/assistant` (`jovru-assistant`) | The canonical request of a round, one streamed round against Anthropic, OpenAI, OpenAI-compatible servers or Ollama (through `genai`, private to its transport), error classification, prices and the SQL blocks of an answer (D-0028) | Know the cache, the vault, sessions or the UI; decide what a request contains |
+| **SQL text** | `crates/sql` (`jovru-sql`) | Tokens by dialect, statement splitting, `EXPLAIN`, position mapping and qualified names: what execution and the editor share | I/O; depend on an editor engine |
+| **Language features** | `crates/sql-language` (`jovru-sql-language`) | What the editor suggests and explains (`completion`, which reads each statement's queries and the relations they bind from its tokens), Format (`format`, sqruff-lib behind the `sqruff` feature) and the line comments **Ctrl+/** toggles (`comment`) | I/O, GPUI, `lsp-types` or translations; be used by the library |
 | **Tooling** | `xtask` | Local gate, architecture check, translation catalogs | Ship in the application |
 
 ## Dependency rules
@@ -90,21 +94,22 @@ flowchart TB
 `cargo xtask check` reads `cargo metadata` and fails on a forbidden direct
 edge, including dev and build dependencies:
 
-1. `jykre-core` depends on no internal crate and on none of `sqlx`,
+1. `jovru-core` depends on no internal crate and on none of `sqlx`,
    `reqwest` and `genai`.
-2. Drivers, `jykre-storage`, `jykre-secrets` and `jykre-assistant` depend on
-   no internal crate other than `jykre-core`. **A driver never depends on another driver.**
+2. Drivers, `jovru-storage`, `jovru-secrets` and `jovru-assistant` depend on
+   no internal crate other than `jovru-core`. **A driver never depends on another driver.**
 3. No crate under `crates/` depends on GPUI (`gpui*`) or Tauri.
-4. Only the `jykre` crate composes the drivers, in
-   `drivers::builtin_registry()`. Adding a database means a new crate plus one
-   registration line (see [Drivers](drivers.md#adding-a-driver)).
-5. `jykre-sql` depends on no internal crate other than `jykre-core` and on no
-   editor engine (`sqruff-lib`, `tree-sitter*`); `jykre-sql-language` depends
-   only on `jykre-core` and `jykre-sql`; neither depends on `lsp-types`
-   ([ADR-0020](../adr/0020-editor-language-features-in-their-own-crates.md)).
-6. No file of the `jykre` library (`src/` outside `src/app/` and
-   `src/main.rs`) uses `jykre_sql_language`, so the editor's features can be
-   removed without touching what runs queries. `jykre-sql-language` is also
+4. Only the `jovru` crate composes the drivers, statically, in
+   `drivers::builtin_registry()`; there are no dynamic plugins. Adding a
+   database means a new crate plus one registration line (see
+   [Drivers](drivers/contract.md#adding-a-driver)).
+5. `jovru-sql` depends on no internal crate other than `jovru-core` and on no
+   editor engine (`sqruff-lib`, `tree-sitter*`); `jovru-sql-language` depends
+   only on `jovru-core` and `jovru-sql`; neither depends on `lsp-types`
+   (D-0020).
+6. No file of the `jovru` library (`src/` outside `src/app/` and
+   `src/main.rs`) uses `jovru_sql_language`, so the editor's features can be
+   removed without touching what runs queries. `jovru-sql-language` is also
    linted and tested without its default features.
 7. The assistant's code (`src/assistant/`, `src/app/assistant_panel.rs`,
    `src/app/assistant_settings.rs`; tests aside) names no result data,
@@ -112,29 +117,29 @@ edge, including dev and build dependencies:
    may tell comes from `assistant::facts` and the metadata cache, and a
    query's result only through `src/assistant/released.rs`, the one file
    allowed to name a result
-   ([ADR-0028](../adr/0028-agentic-ai-assistant-over-the-metadata-cache.md)).
+   (D-0028).
 8. The saved-query files' code (`src/query_files/`) names no session, driver,
    request or query run, so opening, discovering, migrating or recovering
    files can never run SQL
-   ([ADR-0031](../adr/0031-saved-queries-as-sql-files.md)).
+   (D-0031).
 
-Transitive dependencies and where logic lives inside the `jykre` crate are
+Transitive dependencies and where logic lives inside the `jovru` crate are
 checked in review.
 
 ## Repository layout
 
 ```text
 .
-├── Cargo.toml              # workspace, shared dependency versions, the jykre crate
+├── Cargo.toml              # workspace, shared dependency versions, the jovru crate
 ├── build.rs                # embeds the icon and version details in the Windows executable
-├── assets/icon/            # the official icon: jykre.svg (title bar), jykre.ico (executable)
+├── assets/icon/            # the official icon: jovru.svg (title bar), jovru.ico (executable)
 ├── assets/linux/           # desktop entry and its install.sh, shipped in the Linux release
-├── assets/update/          # release-key.pub: the public key updates must be signed with (ADR-0033)
+├── assets/update/          # release-key.pub: the public key updates must be signed with (D-0033)
 ├── src/
 │   ├── main.rs             # binary entry point
-│   ├── lib.rs              # jykre library: backend, cell_format, connection_store,
+│   ├── lib.rs              # jovru library: backend, cell_format, connection_store,
 │   │                       # drivers, grouped_tabs, i18n, parameters, query, reports (definitions,
-│   │                       # parameters, charts, runs, print), sql (jykre-sql)
+│   │                       # parameters, charts, runs, print), sql (jovru-sql)
 │   ├── automation/         # the automation engine (GPUI-free): engine, queue, SQL and
 │   │                       # chain runs, external programs (process/), jjp/1 (jjp/), logs
 │   ├── import/             # reading CSV and XLSX for an import (GPUI-free): readers,
@@ -143,30 +148,30 @@ checked in review.
 │                           # sql_editor/ the editor's language features adapter,
 │                           # automation/ the automation interface, import/ the import dialog
 ├── crates/
-│   ├── core/               # jykre-core
-│   ├── driver-postgres/    # jykre-driver-postgres
-│   ├── driver-mysql/       # jykre-driver-mysql
-│   ├── driver-databricks/  # jykre-driver-databricks
-│   ├── driver-sqlite/      # jykre-driver-sqlite
-│   ├── storage/            # jykre-storage
-│   ├── secrets/            # jykre-secrets
-│   ├── assistant/          # jykre-assistant
-│   ├── sql/                # jykre-sql
-│   └── sql-language/       # jykre-sql-language
-├── catalog/                # SQL dialect catalogs read at run time (ADR-0021)
+│   ├── core/               # jovru-core
+│   ├── driver-postgres/    # jovru-driver-postgres
+│   ├── driver-mysql/       # jovru-driver-mysql
+│   ├── driver-databricks/  # jovru-driver-databricks
+│   ├── driver-sqlite/      # jovru-driver-sqlite
+│   ├── storage/            # jovru-storage
+│   ├── secrets/            # jovru-secrets
+│   ├── assistant/          # jovru-assistant
+│   ├── sql/                # jovru-sql
+│   └── sql-language/       # jovru-sql-language
+├── catalog/                # SQL dialect catalogs read at run time (D-0021)
 ├── examples/               # runnable examples (connect, drivers, grouped_tabs, automation_drain);
 │                           # jjp/ is a Node.js program that speaks jjp/1
 ├── locales/                # translation catalogs (pt-BR.json)
 ├── tests/fixtures/         # seeds for the gate's disposable databases
 ├── dev/seed/               # seeds for the local manual-testing databases
 ├── xtask/                  # cargo xtask check / i18n / catalogs
-├── docs/                   # this documentation and the ADRs
+├── docs/                   # this documentation
 └── docker-compose.*.yml    # test (gate) and dev (manual) databases
 ```
 
 Conventions:
 
-- Crates are named `jykre-<area>` and live in `crates/<area>`; the `crates/*`
+- Crates are named `jovru-<area>` and live in `crates/<area>`; the `crates/*`
   pattern adds them to the workspace.
 - Unit tests live in `#[cfg(test)] mod tests` in the same file, or in a sibling
   `tests.rs`/`*_tests.rs` file for large suites; integration tests live in each
@@ -176,7 +181,7 @@ Conventions:
 
 ## Domain model
 
-The full types live in `jykre-core`.
+The full types live in `jovru-core`.
 
 | Type | Description |
 | --- | --- |
@@ -187,9 +192,9 @@ The full types live in `jykre-core`.
 | `DriverDescriptor`, `DriverStatus` | What a driver is and supports. Consumers check status and capabilities, not the kind. |
 | `QueryRequest`, `ExecutionOptions` | SQL as written plus row limit, timeout and session context. |
 | `ColumnInfo`, `Cell`, `Row`, `RowSink` | Streaming result model; NULL and exact decimals are preserved. A column says where its values come from (`ColumnOrigin`). |
-| `write::EditTarget`, `WriteRequest`, `WriteOutcome` | What a result can be written back to and the changes written to it ([ADR-0039](../adr/0039-editing-result-data-through-the-driver.md)). |
+| `write::EditTarget`, `WriteRequest`, `WriteOutcome` | What a result can be written back to and the changes written to it (D-0039). |
 | `MetadataObject`, `ObjectPath` | Database, catalog, schema, table, view, materialized view, column, foreign key and partition nodes addressed by structural paths, with types, defaults, comments and keys. |
-| `MetadataScope` (`jykre::metadata_scope`) | What the user chose to introspect: everything, whole namespaces (including what is created in them later) or last-level namespaces. Pending until chosen. |
+| `MetadataScope` (`jovru::metadata_scope`) | What the user chose to introspect: everything, whole namespaces (including what is created in them later) or last-level namespaces. Pending until chosen. |
 | `DriverError`, `ErrorCode`, `ServerDiagnostic` | Classified errors; messages never contain secrets, SQL or raw configuration. A database error keeps the server's own message, SQLSTATE, vendor code and position. |
 
 ## Main flows
@@ -224,7 +229,7 @@ sequenceDiagram
   and keeps each tab's pages; the next page is read with `backend::fetch`
   from the result the session keeps open.
 - Splitting and highlighting share one tokenizer whose rules follow the
-  connection's `SqlDialect` (`jykre::sql`): MySQL backslash escapes, `#`
+  connection's `SqlDialect` (`jovru::sql`): MySQL backslash escapes, `#`
   comments, `DELIMITER` and routine bodies; PostgreSQL `E''` strings, dollar
   quotes and `BEGIN ATOMIC`; Databricks compound statements; SQLite `[x]`
   names, strings without backslash escapes and trigger bodies. It also tells
@@ -233,7 +238,7 @@ sequenceDiagram
   rules.
 - The tokenizer only knows words; whether a word is a keyword, a function or
   a type comes from the dialect's catalog
-  (`jykre_sql_language::highlight`). The highlighter re-reads only the text
+  (`jovru_sql_language::highlight`). The highlighter re-reads only the text
   around each edit (`sql::relex`) and classifies only the tokens on screen,
   so neither typing nor painting costs more in a longer script.
 - Completion runs off the UI thread: the provider takes a snapshot (the
@@ -241,7 +246,7 @@ sequenceDiagram
   editor drops a response for a text that changed meanwhile; columns not read
   yet are then read from the cache (`src/app/sql_editor`).
 - **Format** parses with `sqruff-lib` in the same dialect (ANSI without a
-  connection), off the UI thread (`jykre_sql_language::format`, run by
+  connection), off the UI thread (`jovru_sql_language::format`, run by
   `src/app/sql_editor`). Only whitespace and keyword case may
   change: a result that changes anything else is refused, and what does not
   parse is left as it was. Each statement is formatted on its own and the
@@ -256,42 +261,46 @@ sequenceDiagram
   session. Only a statement the editor holds runs, so the SQL is always on
   screen.
 - **Ctrl+/** comments or uncomments the lines of the selection with `--`
-  (`jykre_sql_language::comment`, applied by `src/app/sql_editor`),
+  (`jovru_sql_language::comment`, applied by `src/app/sql_editor`),
   replacing only those lines in one undo step.
 - **Explain** runs `EXPLAIN` followed by the statement at the cursor (or the
   one selected) into a new result tab (`sql::explain`, by the connection's
   `SqlDialect`). Only queries and data changes are explained, so the
   statement itself never runs and its words are never read as `EXPLAIN`
   options such as `ANALYZE`.
-- `:name` markers of the SQL (`jykre::parameters::names`, read again when
+- `:name` markers of the SQL (`jovru::parameters::names`, read again when
   the SQL or its dialect changes) get one field each above the editor
   (`src/app/workspace/parameters.rs`). Before a run, each statement it runs
   becomes a request with the parameters its markers use
-  (`jykre::parameters::tab_request`); a missing or malformed value stops the
+  (`jovru::parameters::tab_request`); a missing or malformed value stops the
   run before anything is sent. The drivers bind the values as for a report
-  ([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)), and the result tab
+  (D-0026), and the result tab
   keeps them for an export that runs the statement again.
-- Each tab keeps one session between runs ([ADR-0014](../adr/0014-a-session-per-tab.md)).
+- Each tab keeps one session between runs (D-0014). It opens on the tab's
+  first run and closes when the tab closes, its connection changes or the
+  session is lost. The workspace hands it to the run and takes it back with
+  the result; a session that comes back from a superseded run, or after the
+  connection changed, is closed. A database error, a cancellation or a limit
+  does not end it (how a driver recovers it: [Drivers](drivers/README.md) and
+  [Reliability](../standards/reliability.md)). A kept session that no longer
+  answers its ping is replaced and the tab says that session settings started
+  over; a statement is never retried. If the tab holds an open transaction in
+  that session (`backend::TabSession`), nothing runs
+  (`SessionRun::transaction_lost`), since the statements meant for that
+  transaction would commit one by one in a new session.
   Databricks warehouses keep logical catalog/schema state; classic clusters keep
   a server SQL context. CLI authentication and HTTP pools are shared across
-  sessions by authentication identity ([ADR-0005](../adr/0005-databricks-through-cli-and-rest.md)).
-  The workspace hands it to the run and takes it back with the result; a
-  session that comes back from a superseded run, or after the connection
-  changed, is closed. A kept session that no longer answers its ping is
-  replaced, unless the tab holds an open transaction in it
-  (`backend::TabSession`): then nothing runs (`SessionRun::transaction_lost`),
-  since the statements meant for that transaction would commit one by one in
-  a new session.
+  sessions by authentication identity (D-0005).
 - Statements run in order and stop at the first failure. Whether earlier
   statements are committed depends on the session's transaction, which the
   driver reports after the run (`Session::transaction`) and the workspace
   completes from the statements it ran where the driver cannot tell
-  (`jykre::transaction`), then shows in the toolbar; the failure message
+  (`jovru::transaction`), then shows in the toolbar; the failure message
   claims nothing about it.
 - Every statement that ends is logged in the tab's `run_log::RunLog`, shown
   in Messages, independently of the result tabs.
 - A tab without a connection runs nothing outside the demo
-  (`JYKRE_DEMO`). A connection without a remembered password asks for it
+  (`JOVRU_DEMO`). A connection without a remembered password asks for it
   before the session opens (`connection_store::needs_password`).
 - Cancelling fires the run's `CancellationToken`; the driver interrupts the
   server-side work and keeps the session when it can bring it back to a known
@@ -306,22 +315,22 @@ a data-sized UI-thread clone. `src/app/copying.rs` runs every one of them
 (`copying::start`, for any view that implements `CopyHost`): estimation and
 encoding run on the runtime's blocking pool, with cancellation and bounded
 progress notifications, and the view publishes a complete string only while
-its request is still the window's latest. See [Results](results.md#copying).
+its request is still the window's latest. See [Results](results/transfer.md#copying).
 
 ### Export a result
 
 1. The export bar (`src/app/workspace/export.rs`) asks the result tab where
    its rows are (`result_tabs::ResultTab::export_source`): all held, held
    then still open in the session, or partly gone. A partly gone result runs
-   its statement again only when `jykre::sql::reads_only` allows it and the
+   its statement again only when `jovru::sql::reads_only` allows it and the
    user confirms; otherwise only the rows held are written.
 2. The system's save dialog (`App::prompt_for_new_path`) picks the file. The
    view hands `backend::export` the held pages (shared as
-   `Arc<ResultData>`, [ADR-0022](../adr/0022-result-pages-shared-across-threads.md)),
+   `Arc<ResultData>`, D-0022),
    and the tab's session when the rest is read from it or the statement runs
    again; the session is leased as for a page read, so nothing else uses it
    meanwhile.
-3. On the runtime, `jykre::export::ExportFile` creates a temporary file next
+3. On the runtime, `jovru::export::ExportFile` creates a temporary file next
    to the chosen one. Each held page, then each part read with
    `Session::fetch` (about 16 MB, sized from the rows read so far), is
    encoded row by row and written on the blocking pool, with progress sent
@@ -336,8 +345,8 @@ its request is still the window's latest. See [Results](results.md#copying).
 ### Edit a result
 
 A query tab's result is written back to its table through the driver
-([ADR-0039](../adr/0039-editing-result-data-through-the-driver.md),
-[Results](results.md#editing)):
+(D-0039,
+[Results](results/editing.md#editing)):
 
 1. The drivers report each column's origin with its result
    (`ColumnInfo::origin`, kept in `ResultColumn`), at no cost to a run.
@@ -347,7 +356,7 @@ A query tab's result is written back to its table through the driver
    read from the catalog in that session, and the session comes back as
    after a run. The answer is kept per result tab in the grid
    (`result_grid::Editing`).
-3. `jykre::grid_edit::EditSession` holds the pending edits; the grid draws
+3. `jovru::grid_edit::EditSession` holds the pending edits; the grid draws
    them over its cached view, keyed by their version.
 4. **Write…** builds the `WriteRequest` (`EditSession::request`), shows one
    confirmation and runs `backend::write` with the tab's session:
@@ -359,8 +368,8 @@ A query tab's result is written back to its table through the driver
 
 ### Import a file into a table
 
-[ADR-0040](../adr/0040-importing-files-into-a-table.md), on ADR-0039's
-write path ([Drivers](drivers.md#importing-rows)).
+D-0040, on D-0039's
+write path ([Drivers](drivers/editing-and-import.md#importing-rows)).
 
 1. **Import from file…** in the explorer's menu of a table (or of a
    last-level namespace) opens `src/app/import/`'s dialog on that
@@ -398,22 +407,22 @@ write path ([Drivers](drivers.md#importing-rows)).
 
 A report is a set of panels, each with its connection, its SQL, its context
 (the database, schema or catalog of that connection) and its chart
-([ADR-0025](../adr/0025-report-panels.md)). The host gives the report view one
+(D-0025). The host gives the report view one
 `ReportSource` per connection (what runs it, its row limit, environment,
 dialect, databases and name index) whenever a connection, a password or the
 metadata changes; a connection whose settings changed, or that is gone, stops
 its panels and closes its sessions.
 
 1. `ReportView` (`src/app/report_view.rs`) resolves each panel's source,
-   reads the form and asks `jykre::reports::run::plan` for the panels to run
+   reads the form and asks `jovru::reports::run::plan` for the panels to run
    (all, or the one whose editor has the keyboard): one `QueryRequest` per
    statement, in the dialect and within the row limit of the panel's
    connection, built with
-   `jykre::reports::params::requests`, which finds the `:name` markers with
-   `jykre_sql::named_markers`, checks only the values the panel's SQL uses
+   `jovru::reports::params::requests`, which finds the `:name` markers with
+   `jovru_sql::named_markers`, checks only the values the panel's SQL uses
    (a list parameter takes one of its choices) and puts them in the request
    with the byte ranges of their markers. The values never go into the SQL
-   text ([ADR-0023](../adr/0023-named-parameters-bound-by-drivers.md)). The jobs
+   text (D-0023). The jobs
    are grouped by `run::SessionKey` (connection and context), in the report's
    order. A panel whose connection is gone or cannot run fails alone, saying
    why.
@@ -436,10 +445,10 @@ its panels and closes its sessions.
    `parameters`) and replaces each marker with a fixed reference to its value
    (`QueryRequest::with_references`). Classic Databricks clusters, which
    cannot bind, replace each marker with a typed literal that never holds
-   the value's text ([ADR-0026](../adr/0026-named-parameters-in-sql-tabs.md)).
+   the value's text (D-0026).
 4. Inside the same runtime task, `run::settle` keeps the last statement's
    result, drops the others, and computes the number columns, the suggested
-   chart and what the panel draws (`jykre::reports::chart::visual`), so the
+   chart and what the panel draws (`jovru::reports::chart::visual`), so the
    UI thread only publishes. An outcome of a run stopped, removed or voided
    meanwhile is dropped. The panel's `ResultGrid` and `ReportChart` entities
    show it; a chart change is derived again off the UI thread.
@@ -448,7 +457,7 @@ its panels and closes its sessions.
 
 A job is a SQL Job (one statement) or an external program. `automation::Engine`
 is a service of the application root, not of a view
-([ADR-0034](../adr/0034-automation-database-service-and-lock.md)); the view
+(D-0034); the view
 resolves the connection, its password and the production confirmation, then
 submits a `JobRequest` and watches the `RunHandle` it gets back.
 
@@ -492,7 +501,7 @@ sequenceDiagram
    refused (`Refusal::History`) and nothing is sent.
 5. **Execution.** A SQL Job runs on a new session opened in its context and
    always closed afterwards, never on a tab's session; a write's result is
-   read to its end ([Reliability](../standards/reliability.md#automation)). A
+   read to its end ([Automation](automation.md#automation-1)). A
    program starts without a shell in a process group (Unix) or a Job Object
    (Windows); its group is recorded as soon as it starts.
 6. **Arbitration and the terminal write.** The first event the owner
@@ -509,7 +518,7 @@ sequenceDiagram
 ### Run a chain
 
 A chain is a linear sequence of published versions of jobs
-([ADR-0036](../adr/0036-published-versions-and-chain-runs.md)).
+(D-0036).
 
 1. `Engine::plan` reads the versions the chain names and checks the
    definition against them (`Plan`, with its `problems`); the view asks the
@@ -527,7 +536,7 @@ A chain is a linear sequence of published versions of jobs
    (alone over the memory ceiling) fails the step with `output`, never
    reads as empty text. The values stay in memory unless the job
    opted in to persist its outputs
-   ([ADR-0035](../adr/0035-persisted-declared-outputs.md)).
+   (D-0035).
 4. The first step that does not succeed stops the chain: later steps never
    start. Stop reaches the active or queued step; the chain's own deadline
    cancels it and fails the chain with `timeout`. A connection whose profile
@@ -539,7 +548,7 @@ A chain is a linear sequence of published versions of jobs
 ### Refresh metadata
 
 A connection introspects only what the user chose in the connection dialog
-(`jykre::metadata_scope::MetadataScope`, [ADR-0015](../adr/0015-introspect-only-what-the-user-chooses.md)).
+(`jovru::metadata_scope::MetadataScope`, D-0015).
 The dialog lists namespaces with `Driver::discover_namespaces`, one level at
 a time; until something is chosen, nothing is introspected.
 
@@ -547,7 +556,7 @@ a time; until something is chosen, nothing is introspected.
    choice (or only what a change added); refreshing a node starts
    `backend::refresh_metadata` for that node. A connection runs one refresh
    at a time: one asked for meanwhile waits in its queue
-   (`jykre::refresh_queue::RefreshQueue`), which skips a node already covered
+   (`jovru::refresh_queue::RefreshQueue`), which skips a node already covered
    by a waiting one and lets a broader node replace the waiting nodes inside
    it. Saving the connection stops its refreshes only after the save
    succeeded.
@@ -561,7 +570,7 @@ a time; until something is chosen, nothing is introspected.
    connection's metadata file. On success the pending objects replace that
    scope in one transaction; on failure or cancellation they are discarded
    and the last good read stays. See
-   [Persistence](persistence.md#atomic-metadata-refresh).
+   [Persistence](persistence/metadata-db.md#atomic-metadata-refresh).
 4. After a complete read, what the choice no longer covers leaves the cache
    (`MetadataRepository::retain`).
 
@@ -569,15 +578,15 @@ a time; until something is chosen, nothing is introspected.
 
 What each dialect has built in (keywords and whether they are reserved,
 functions with their signatures, types) comes from `catalog/`, read at run
-time as if it came from outside ([ADR-0021](../adr/0021-sql-catalogs-read-at-run-time.md),
+time as if it came from outside (D-0021,
 [catalog reference](sql-catalogs.md),
 [format proposal](../plans/sql-catalog-proposal.md)).
 
-1. At start, `sql_editor::load_catalogs` looks in `JYKRE_SQL_CATALOG_DIR`,
+1. At start, `sql_editor::load_catalogs` looks in `JOVRU_SQL_CATALOG_DIR`,
    then `catalog` next to the executable and, in a development build, the
    repository's `catalog`. `backend::read_text_files` reads the first
    directory that holds a catalog on the runtime, at most 32 MB per file, and
-   `jykre_sql_language::catalog::parse` keeps the entries valid for the
+   `jovru_sql_language::catalog::parse` keeps the entries valid for the
    latest version each dialect tracks.
 2. `AppView` hands the result to every tab, and to those opened later;
    Settings shows which catalogs were read.
@@ -587,16 +596,16 @@ time as if it came from outside ([ADR-0021](../adr/0021-sql-catalogs-read-at-run
 ### Telemetry
 
 Logs and spans go through `tracing`. When the user turns them on in
-Preferences, `jykre::telemetry` also sends them to an OpenTelemetry
-collector ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)):
+Preferences, `jovru::telemetry` also sends them to an OpenTelemetry
+collector (D-0029):
 
 1. `logging::init` adds two bridges behind per-layer filters: spans of
-   Jykre's crates become traces, log events become OTLP logs. Until the
+   Jovru's crates become traces, log events become OTLP logs. Until the
    preferences are read, what they capture is held in memory, bounded.
 2. `AppView::new` reads the preferences (and the headers from the vault)
    and calls `telemetry::apply`, which builds a batch processor per signal
    and sends or drops what was held. **Save** in Preferences applies again.
-3. Every external call runs inside a `client` span (`jykre::client_span!`
+3. Every external call runs inside a `client` span (`jovru::client_span!`
    in the library, `tracing::info_span!` with the same fields in a backend
    crate). The processor removes every attribute outside
    `telemetry::attributes::ALLOWED` before export.
@@ -606,8 +615,8 @@ collector ([ADR-0029](../adr/0029-otlp-export-of-logs-and-traces.md)):
 
 ### Update
 
-GitHub's releases are checked and installed by `jykre::update`, driven by
-`src/app/updates.rs` ([ADR-0033](../adr/0033-update-check-and-signed-self-install.md)):
+GitHub's releases are checked and installed by `jovru::update`, driven by
+`src/app/updates.rs` (D-0033):
 
 1. At start, `updates::Updater` reads `update.preferences` and
    `update.state` and removes what an earlier update left next to the
@@ -621,7 +630,7 @@ GitHub's releases are checked and installed by `jykre::update`, driven by
    the blocking pool, `layout::detect` decides whether this copy can replace
    itself.
 3. **Download and install** runs `update::install` on the runtime: the
-   archive is downloaded into `.jykre-update/staging-<id>/` under the name
+   archive is downloaded into `.jovru-update/staging-<id>/` under the name
    the application computes (`download`), its signature verified against
    `keys::RELEASE_KEYS`, then it is unpacked and checked (`swap::validate_staged`)
    on the blocking pool. Progress and the phase come back through `watch`
@@ -649,7 +658,7 @@ GitHub's releases are checked and installed by `jykre::update`, driven by
 - **Cancellation.** Every long operation takes a `CancellationToken`
   (`tokio-util`). Dropping a view cancels its operations. **One documented
   exception:** the automation engine is a service of the application root
-  ([ADR-0034](../adr/0034-automation-database-service-and-lock.md)); a run
+  (D-0034); a run
   belongs to the engine, not to the view that started it, so closing a tab
   or the screen never stops it. Runs end through **Stop**, their deadline or
   the coordinated quit.
@@ -662,7 +671,7 @@ GitHub's releases are checked and installed by `jykre::update`, driven by
   `Engine::shutdown`, which refuses new runs, empties the queue, stops every
   run, waits until each has closed its session or its program and written its
   terminal state, and releases the data folder's lock.
-- **The scheduler** (`automation::schedule`, [ADR-0041](../adr/0041-schedules-and-grants.md))
+- **The scheduler** (`automation::schedule`, D-0041)
   is one more engine task, started when the engine takes the lock and
   stopped first by the shutdown. It sleeps until the earliest due time and
   at most 30 s, then reads the **wall clock** through an injected `Clock`
@@ -684,18 +693,18 @@ Operation states are explicit enums, never combinations of booleans. A view
 holds one value per operation, for example:
 
 - Query run: `Idle | Running { started_at } | Cancelling | Done | Failed { error } | Cancelled`
-  (`jykre::query::RunState`, owned by `QueryRun` together with the status of
+  (`jovru::query::RunState`, owned by `QueryRun` together with the status of
   each statement).
 - Report panel: `Idle | Queued | Running | Succeeded | Failed | Cancelled`
-  (`jykre::reports::run::PanelPhase`, owned by the report's `Scheduler`; the
+  (`jovru::reports::run::PanelPhase`, owned by the report's `Scheduler`; the
   tab's status is derived from the panels').
 - Metadata scope: `Idle { last_success_at } | Refreshing | Failed { error, last_success_at }`
   (stored as `RefreshStatus` in the metadata file, its state read as
-  `jykre_storage::RefreshState`).
+  `jovru_storage::RefreshState`).
 
 - Automation run: the persisted `RunState`
   (`Running | Succeeded | Failed | Cancelled | Interrupted`, with a `Cause`
-  when `Failed`; `jykre_core::automation`) and, in memory only, the
+  when `Failed`; `jovru_core::automation`) and, in memory only, the
   `RunStatus` the engine publishes: `Queued { position, leaves_at, blocked }
   | Active(Progress) | Finished | Refused`. `Progress` carries a `Phase`
   (`Admitted | Opening | Executing | Completing | Starting | Running |
@@ -716,7 +725,7 @@ value, so they cannot disagree.
 ## Extension points
 
 - **New database:** a `crates/driver-<database>` crate implementing `Driver`
-  and `Session`, registered in `builtin_registry()`. See [Drivers](drivers.md).
+  and `Session`, registered in `builtin_registry()`. See [Drivers](drivers/README.md).
 - **New metadata object kind:** a new `ObjectKind` value plus introspection in
   the drivers. The metadata schema stores kinds as text, so no migration is
   needed.
@@ -725,14 +734,16 @@ value, so they cannot disagree.
 - **New language:** a catalog in `locales/`, registered in `src/i18n.rs`
   ([UI guidelines](../standards/ui-guidelines.md#text)).
 - **New SQL dialect for the editor:** a directory in `catalog/` (generated by
-  `cargo xtask catalogs`), its entry in `jykre_sql_language::catalog::DIALECTS`
-  and the dialect's lexical rules in `jykre-sql`.
+  `cargo xtask catalogs`), its entry in `jovru_sql_language::catalog::DIALECTS`
+  and the dialect's lexical rules in `jovru-sql`.
+
+## Decisions
+
+The reasoning behind this area's structural choices is in [Decisions: Architecture](../decisions/architecture.md).
 
 ## Known deviations
 
-Technical debt the maintainer accepted for now:
-
 | Standard | Current code |
 | --- | --- |
-| Statements are split as the database splits them | `sql::statements` follows each dialect's rules in the application, not a splitter provided by the driver. Blocks are recognised by their keywords (`CREATE PROCEDURE/FUNCTION/TRIGGER/EVENT … BEGIN … END`, `BEGIN ATOMIC`, a Databricks `BEGIN … END`); other constructs that hold semicolons are split on them |
-| The UI shows the server's transaction state, read from the protocol | PostgreSQL, MySQL and SQLite read it from the protocol or the connection through a pinned SQLx fork until a release exposes it ([ADR-0030](../adr/0030-transaction-state-through-a-pinned-sqlx-fork.md)). PostgreSQL still queries whether an open transaction with a snapshot wrote; whether a MySQL or SQLite transaction wrote, and everything under Databricks, is inferred from the statements a tab ran (`jykre::transaction`) ([TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)) |
+| Statements are split as the database splits them | The application splits them with each dialect's rules and recognises blocks by keyword ([TD-003](../plans/technical-debt.md#td-003--statements-are-split-in-the-application)) |
+| The UI shows the server's transaction state, read from the protocol | Not for what a transaction wrote, nor under Databricks; the rest comes through a pinned SQLx fork ([TD-001](../plans/technical-debt.md#td-001--transaction-state-is-not-read-from-the-protocol)) |

@@ -2,7 +2,7 @@
 //! without a window and off the UI thread.
 //!
 //! [`block`] reads a block of a result in place: the pages are shared across
-//! threads ([ADR-0022](../docs/adr/0022-result-pages-shared-across-threads.md)),
+//! threads ([D-0022](../docs/decisions/results.md#d-0022)),
 //! so the grid hands it the page and the positions to read. For a column the
 //! grid copies the values into a [`Sample`] a few cells at a time, and
 //! [`column`] summarizes it on another thread. Numbers are added, averaged

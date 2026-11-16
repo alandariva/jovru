@@ -1,5 +1,5 @@
 //! Writing changes to a result's rows back to their table
-//! ([ADR-0039](../../../docs/adr/0039-editing-result-data-through-the-driver.md)).
+//! ([D-0039](../../../docs/decisions/results.md#d-0039)).
 //!
 //! A driver with [`crate::DriverCapabilities::row_writes`] tells what a
 //! result can be written back to ([`crate::Session::edit_target`]) and
@@ -37,7 +37,7 @@ pub enum WriteMode {
     /// [`crate::Session::write`] writes them, atomically.
     Direct,
     /// [`crate::Session::write_script`] generates the statements, which the
-    /// user reviews and runs in a new query tab (ADR-0039, section 9).
+    /// user reviews and runs in a new query tab (D-0039, section 9).
     Script,
 }
 
@@ -156,7 +156,7 @@ pub enum ReadOnlyReason {
     /// This key column's text does not identify one value.
     KeyType { column: String },
     /// The statement is not a SELECT from one table whose columns are plain
-    /// references or `*` (ADR-0039, section 9).
+    /// references or `*` (D-0039, section 9).
     NotASingleTableSelect,
     /// The catalog has no table by the name the SQL gives.
     TableNotFound { name: String },
@@ -172,19 +172,19 @@ pub struct WriteRequest {
     /// The tab's statement timeout, for the whole write.
     pub timeout: Option<Duration>,
     /// Whether the write is atomic on its own or joins the transaction
-    /// [`crate::Session::begin_writes`] opened (ADR-0040).
+    /// [`crate::Session::begin_writes`] opened (D-0040).
     pub scope: WriteScope,
 }
 
 /// Which transaction a write runs in.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum WriteScope {
-    /// ADR-0039: the request is atomic on its own (its own transaction, or a
+    /// D-0039: the request is atomic on its own (its own transaction, or a
     /// savepoint inside an open one).
     #[default]
     Atomic,
     /// Inside the transaction [`crate::Session::begin_writes`] opened
-    /// (ADR-0040): nothing is committed, and a change that fails, affects
+    /// (D-0040): nothing is committed, and a change that fails, affects
     /// another number of rows than one or (MySQL) has a value adjusted fails
     /// the write with that change's index ([`DriverError::change`]),
     /// leaving the transaction for [`crate::Session::end_writes`] to end.
@@ -217,7 +217,7 @@ pub enum WriteValue {
     /// database converts it to the column's type.
     Text(String),
     Bytes(Vec<u8>),
-    /// An XLSX boolean (ADR-0040), bound as the database's boolean:
+    /// An XLSX boolean (D-0040), bound as the database's boolean:
     /// PostgreSQL's `boolean`, `1` or `0` in MySQL and SQLite.
     Boolean(bool),
 }
@@ -265,7 +265,7 @@ impl WriteRequest {
                 "A write may hold at most {MAX_CHANGES} changed rows"
             )));
         }
-        // An insert needs no key: an import's target has none (ADR-0040).
+        // An insert needs no key: an import's target has none (D-0040).
         let keyed = self
             .changes
             .iter()
@@ -557,7 +557,7 @@ pub fn resolve(catalog: CatalogTable, sources: &[Option<String>], writes: WriteM
     })
 }
 
-/// The target an import inserts into (ADR-0040, [`crate::Session::table_target`]):
+/// The target an import inserts into (D-0040, [`crate::Session::table_target`]):
 /// every column of `catalog`'s table, in table order, and no key, since an
 /// import only inserts.
 pub fn insert_target(catalog: CatalogTable) -> EditTarget {
@@ -623,7 +623,8 @@ pub fn hex_bytes(text: &str) -> Option<Vec<u8>> {
     let digits = text
         .strip_prefix("0x")
         .or_else(|| text.strip_prefix("0X"))?;
-    if digits.len() % 2 != 0 {
+    // `from_str_radix` takes a leading `+`, which is not a hexadecimal digit.
+    if digits.len() % 2 != 0 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     (0..digits.len())
@@ -927,5 +928,7 @@ mod tests {
         assert_eq!(hex_bytes("0xabc"), None);
         assert_eq!(hex_bytes("abcd"), None);
         assert_eq!(hex_bytes("0xzz"), None);
+        assert_eq!(hex_bytes("0x+1"), None);
+        assert_eq!(hex_bytes("0x-1"), None);
     }
 }
