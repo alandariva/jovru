@@ -87,7 +87,7 @@ process-wrap = { version = "10.0.1", default-features = false, features = ["toki
 jiff = "0.2.39"
 # SHA-256 fingerprints of automation snapshots (D-0034, approved
 # 2026-11-08): a direct dependency of jovru-storage only.
-sha2 = "0.10"
+sha2 = "0.11"
 # SQL formatting by dialect (N010), behind jovru-sql-language's `sqruff`
 # feature; it has no default features to turn off.
 sqruff-lib = "0.44.0"
