@@ -136,9 +136,12 @@ approvals are required in every review mode.
 
 The application drives the loop, round by round. A request starts with one
 message. When the model asks for tools, the application answers them from the
-cache and prepares the next round. A turn stops after 8 rounds
-(`MAX_ROUNDS`) until the user continues it. The output is capped at 2048
-tokens per round.
+cache and prepares the next round. A turn stops after 20 rounds
+(`MAX_ROUNDS`) until the user continues it. The output is capped at 8192
+tokens per round (`MAX_OUTPUT_TOKENS`), sent to the provider as its
+`max_tokens` (`max_completion_tokens` for OpenAI's reasoning models, whose
+thinking counts in it). Only the tokens written are charged. An answer cut at
+the limit is marked in the panel.
 
 **Every request can be reviewed before it leaves.** Each round's canonical
 request (system prompt, messages, tool results, tool definitions and limits)
@@ -172,8 +175,8 @@ compactions, each shown with its sizes before and after:
   make again. It costs nothing.
 - **Summarize with the model:** a request of its own, reviewed like any
   other. The summary joins the system prompt (a newer one replaces it) and
-  every message goes. An answer that calls tools or says nothing changes
-  nothing.
+  every message goes. An answer that calls tools, says nothing or stopped
+  at the output limit changes nothing.
 
 A request the provider rejects, such as one past the model's context,
 suggests compacting.
@@ -196,7 +199,7 @@ transport.
 - **TLS** uses rustls with `ring` (installed as the process's crypto
   provider) and the system's trust store, so `aws-lc-rs` is not built.
 - **Limits:** connection 15 s, first byte 120 s, silence between pieces 60 s,
-  a round 300 s, **Test** 30 s, a tool 10 s.
+  a round 900 s, **Test** 30 s, a tool 10 s.
 - **Failures** are classified by status only. The provider's body is never
   shown, logged or kept, and a round is never retried automatically.
 - **Logs** record per round the provider, time, token counts and code; never

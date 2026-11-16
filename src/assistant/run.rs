@@ -14,8 +14,11 @@ use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
 
 /// Rounds one request may take before the user is asked to continue.
-pub const MAX_ROUNDS: usize = 8;
-pub const MAX_OUTPUT_TOKENS: u32 = 2048;
+pub const MAX_ROUNDS: usize = 20;
+/// The output limit of each round. Reasoning models count their thinking
+/// in it, and a summary must fit in one answer, so it leaves room for both;
+/// the provider charges only the tokens it writes.
+pub const MAX_OUTPUT_TOKENS: u32 = 8192;
 /// Tool answers shorter than this are kept when results are pruned: they
 /// say little ("declined", an error) and cost almost nothing.
 pub const PRUNE_FROM_BYTES: usize = 256;
@@ -477,21 +480,30 @@ impl Conversation {
 
     /// Puts the model's summary in place of the conversation: it becomes
     /// part of the system prompt and every message goes. An answer that
-    /// called tools or said nothing changes nothing.
+    /// called tools, said nothing or stopped at the output limit changes
+    /// nothing: a cut summary would lose what it did not reach.
     pub fn apply_summary(&mut self) -> Result<Compaction, String> {
         let Some(before) = self.summarizing.take() else {
             return Err("No summary was asked for.".into());
         };
+        let truncated = matches!(
+            self.rounds.last().map(|round| &round.state),
+            Some(RoundState::Answered { result, .. }) if result.truncated
+        );
         let summary = match self.messages.last() {
             Some(Message::Assistant { text, tool_calls })
-                if tool_calls.is_empty() && !text.trim().is_empty() =>
+                if !truncated && tool_calls.is_empty() && !text.trim().is_empty() =>
             {
                 text.trim().to_owned()
             }
             _ => {
                 self.messages.truncate(self.turn_start);
                 self.turn_rounds = 0;
-                return Err("The model did not answer with a summary.".into());
+                return Err(if truncated {
+                    "The summary stopped at the output limit.".into()
+                } else {
+                    "The model did not answer with a summary.".into()
+                });
             }
         };
         let count = self.turn_start;
@@ -985,6 +997,29 @@ mod tests {
         conversation.record_error(&DriverError::new(ErrorCode::Connection, "down"));
         assert!(!conversation.summarizing());
         assert!(conversation.can_compact());
+    }
+
+    #[test]
+    fn a_summary_cut_at_the_output_limit_changes_nothing() {
+        let mut conversation = with_tool_answers();
+        let round = conversation.start_summary().unwrap();
+        assert_eq!(round.request.max_output_tokens, MAX_OUTPUT_TOKENS);
+        let cut = RoundResult {
+            truncated: true,
+            ..answered("Orders has id and", Vec::new())
+        };
+        assert_eq!(conversation.record(cut, 1), Next::Done);
+        assert_eq!(
+            conversation.apply_summary(),
+            Err("The summary stopped at the output limit.".into())
+        );
+        assert!(!conversation.summarizing());
+        assert!(conversation.compactions().is_empty());
+        // The conversation goes on whole, without the cut summary.
+        let round = conversation.start_turn("next".into());
+        assert_eq!(round.request.system, "base");
+        assert_eq!(texts(round).len(), 6);
+        assert!(!texts(round).contains(&"Orders has id and"));
     }
 
     #[test]

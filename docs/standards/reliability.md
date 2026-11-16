@@ -82,7 +82,7 @@
 | AI assistant: connecting to the provider | 15 s |
 | AI assistant: first byte of an answer | 120 s |
 | AI assistant: silence between pieces of a streamed answer | 60 s |
-| AI assistant: a whole round | 300 s; cancellable at any time (**Stop**), which closes the connection |
+| AI assistant: a whole round | 900 s, room for an 8,192-token answer from a slow local model; cancellable at any time (**Stop**), which closes the connection |
 | AI assistant: **Test** in Preferences | 30 s, cancellable |
 | AI assistant: one tool reading the metadata cache | 10 s; past it the model is told so and the round goes on |
 | AI assistant: a query the user approved (`run_query`) | The tab's statement time limit; **Stop** cancels it and ends the turn. It runs in the assistant's own session, kept between queries and closed when the tab's connection changes or the tab closes; it reads at most 4 MB |

@@ -293,7 +293,7 @@ right of the query area ([D-0028](../../decisions/assistant.md#d-0028)):
   Each tool the model calls is a step showing its arguments and the answer
   the next request carries. After 300 ms a round shows **Thinking…**, after
   2 s its elapsed time, and **Stop** (or the composer's stop button)
-  cancels it. After 8 rounds the request stops until **Continue**.
+  cancels it. After 20 rounds the request stops until **Continue**.
 - When the model asks to run a query, a card says why (its purpose), shows
   the statement, marks one that changes or deletes data and a production
   connection, and says where it runs: **Decline** or **Run** (**Run on
